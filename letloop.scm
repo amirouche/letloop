@@ -145,12 +145,13 @@
    ((char=? (string-ref filepath 0) #\/) filepath)
    (else (string-append (current-directory) "/" filepath))))
 
-(define (ref alist key default)
-  (if (null? alist)
-      default
-      (if (eq? (caar alist) key)
-          (cdar alist)
-          (ref (cdr alist) key default))))
+(define ref
+  (lambda (alist key default)
+    (if (null? alist)
+        default
+        (if (equal? (caar alist) key)
+            (cdar alist)
+            (ref (cdr alist) key default)))))
 
 (define stdlib (load-shared-object #f))
 
@@ -165,23 +166,25 @@
   (unless (fxzero? (system command))
     (error 'letloop "System command failed" command)))
 
-(define (display-errors-then-exit errors)
-  (display "* Ooops :|")
-  (newline)
-  (for-each (lambda (x) (display "** ") (display x) (newline)) (reverse errors))
-  (exit 1))
+(define (maybe-display-errors-then-exit errors)
+  (let ((errors (errors (eof-object))))
+    (unless (null? errors)
+      (display "* Ooops :|")
+      (newline)
+      (for-each (lambda (x) (display "** ") (display x) (newline)) (reverse errors))
+      (exit 1))))
 
 (define (guess string)
   (cond
    ((file-directory? string) (values 'directory (make-filepath string)))
-   ;; the first char is a dot, the file does not exists, hence it is
-   ;; prolly an extension... might break in some case.
-   ((and (char=? (string-ref string 0) #\.)
-         (not (file-exists? string)))
-    (values 'extension string))
    ((file-exists? string)
     (values 'file (make-filepath string)))
-   (else (values 'unknown (make-filepath string)))))
+   ;; the first char is a dot, the associated path is neither a file
+   ;; or directory, hence it is prolly an extension... breaks when the
+   ;; user made a typo in a file or directory name.
+   ((char=? (string-ref string 0) #\.)
+    (values 'extension string))
+   (else (values 'unknown string))))
 
 (define letloop-compile
   (lambda (arguments)
@@ -233,7 +236,7 @@
               (set! dev? #t))
              ((and (eq? (car keyword) '--optimize-level)
                    (string->number (cdr keyword))
-                   (<= 0 (string->number (cdr keyword) 3)))
+                   (<= 0 (string->number (cdr keyword)) 3))
               (set! optimize-level* (string->number (cdr keyword))))
              (else (errors (format #f "Dubious keyword: ~a" (car keyword))))))
           (massage-keywords! (cdr keywords)))))
@@ -261,9 +264,7 @@
     (unless a.out
       (errors "You need to provide one target file A.OUT that will be created, and stuffed with bits."))
 
-    (let ((errors (errors (eof-object))))
-      (unless (null? errors)
-        (display-errors-then-exit errors)))
+    (maybe-display-errors-then-exit errors)
 
     ;; All is well, proceed with compilation.
     (let ((temporary-directory (make-temporary-directory "/tmp/letloop-compile")))
@@ -391,9 +392,7 @@
       (massage-keywords! keywords)
       (set! extra extra*)))
 
-  (let ((errors (errors (eof-object))))
-    (unless (null? errors)
-      (display-errors-then-exit errors)))
+  (maybe-display-errors-then-exit errors)
 
   (unless (null? directories)
     (library-directories directories)
@@ -464,9 +463,7 @@
   (unless (null? extra)
     (errors (format #f "No support for extra arguments: ~a" extra)))
 
-  (let ((errors (errors (eof-object))))
-    (unless (null? errors)
-      (display-errors-then-exit errors)))
+  (maybe-display-errors-then-exit errors)
 
   (unless (null? directories)
     (library-directories directories)
@@ -519,19 +516,6 @@
   (lambda (proc objs)
     (apply append (map proc objs))))
 
-(define build-check-program
-  (lambda (files)
-    (define library (file->library (car files)))
-
-    `((import (chezscheme) ,(car library))
-
-      (let loopy ((thunks (list ,@(cdr library))))
-        (unless (null? thunks)
-          (format #t "* Checking `~a`:\n\n" (car thunks))
-          ((car thunks))
-          (newline)
-          (loopy (cdr thunks)))))))
-
 (define letloop-check
   (lambda (arguments)
     (define errors (make-accumulator))
@@ -539,7 +523,12 @@
     (define fail-fast? #f)
     (define extensions '())
     (define directories '())
-    (define files '())
+    (define alloweds '())
+
+
+    (define timestamp
+      (lambda ()
+        (number->string (time-second (current-time)))))
 
     (define massage-keywords!
       (lambda (keywords)
@@ -556,57 +545,159 @@
               (case type
                 (directory (set! directories (cons string* directories)))
                 (extension (set! extensions (cons string* extensions)))
-                (file (set! files (cons string* files)))
-                (unknown (errors (format #f "Unknown file: ~a" (car standalone)))))))
+                (file (errors (format #f "Invalid standalone argument, expected a directory or extension, got a file: ~a" (car standalone))))
+                (unknown (errors (format #f "Unknown flying object: ~a" (car standalone)))))))
           (massage-standalone! (cdr standalone)))))
+
+    (define (maybe-library-exports library-name)
+      (guard (ex (else #f))
+        (eval `(library-exports ',library-name) (environment '(chezscheme) library-name))))
+
+    (define maybe-read-library
+      (lambda (file)
+        (let ((sexp (guard (ex (else #f))
+                      (call-with-input-file file read))))
+          (if (not sexp)
+              '()
+              (if (and (pair? sexp)
+                       (eq? (car sexp) 'library)
+                       (pair? (cdr sexp))
+                       (pair? (cadr sexp)))
+                  (let ((exports (maybe-library-exports (cadr sexp))))
+                    (if exports
+                        (begin
+                          (pk 'read-library file)
+                          (reverse (map (lambda (x) (cons (cadr sexp) x)) exports)))
+                        '()))
+                  ;; Oops!
+                  '())))))
+
+    (define discover
+      (lambda (directories)
+
+        (define ftw
+          (lambda (directory)
+            (let loop ((paths (map (lambda (x) (string-append directory "/" x)) (directory-list directory)))
+                       (out '()))
+              (if (null? paths)
+                  out
+                  (if (file-directory? (car paths))
+                      (loop (append (ftw (car paths)) (cdr paths))
+                            out)
+                      (loop (cdr paths) (cons (car paths) out)))))))
+
+        (define string-prefix?
+          (lambda (x y)
+            (let ([n (string-length x)])
+              (and (fx<= n (string-length y))
+                   (let prefix? ([i 0])
+                     (or (fx= i n)
+                         (and (char=? (string-ref x i) (string-ref y i))
+                              (prefix? (fx+ i 1)))))))))
+
+        (define allow?
+          (lambda (x)
+            ;; Does it look like a check procedure
+            (and (string-prefix? "check~" (symbol->string (cdr x)))
+                 (or (null? alloweds)
+                     (member (cdr x) alloweds)
+                     (member (car x) alloweds)))))
+
+        (define files (apply append (map ftw directories)))
+
+        (filter allow? (apply append (map maybe-read-library files)))))
+
+    (define uniquify
+      (lambda (objects)
+        (let loop ((objects objects)
+                   (out '()))
+          (if (null? objects)
+              (map car out)
+              (if (ref out (car objects) #f)
+                  (loop (cdr objects) out)
+                  (loop (cdr objects)
+                        (cons (cons (car objects) #t) out)))))))
+
+    (define build-check-program
+      (lambda (spec fail-fast?)
+        ;; TODO: add prefix to import, and rename procedures
+        (define libraries (pk 'libraries (reverse (uniquify (map car spec)))))
+        (define procedures (map cdr spec))
+
+        (pk 'program `((import (chezscheme) ,@libraries)
+
+          (define errored? #f)
+
+          (display "* Will run tests from the following libraries:\n")
+          (for-each
+           (lambda (x)
+             (format #t "** ~a\n" x)) ',libraries)
+
+          (newline)
+          (let loop ((thunks (list ,@procedures)))
+            (unless (null? thunks)
+              (format #t "* Checking `~a`:\n" (car thunks))
+              (guard (ex (else
+                          (display "** FAILED!\n")
+                          (if (condition? ex)
+                              (display-condition ex)
+                              (write ex))
+                          (if ,fail-fast?
+                              (begin (newline)
+                                     (exit 1))
+                              (begin (newline)
+                                     (set! errored? #t)))))
+                ((car thunks))
+                (display "** SUCCESS\n"))
+              (loop (cdr thunks))))
+          (newline)
+          (when errored? (exit 1))))))
 
     (call-with-values (lambda () (command-line-parse arguments))
       (lambda (keywords standalone extra)
         (massage-keywords! keywords)
-        (massage-standalone! standalone)))
+        (massage-standalone! standalone)
+        ;; TODO: Moar error handling
+        (set! alloweds (map (lambda (x) (read (open-input-string x))) extra))))
 
     (compile-profile 'source)
 
-    ;; TODO: support discovery
-    (when (null? files)
-      (errors "Discovery is not supported yet, you need to provide one file with tests"))
+    (maybe-display-errors-then-exit errors)
 
-    (unless (and (not (null? files)) (null? (cdr files)))
-      (errors "At this time, only one file can be checked at once"))
-
-    (let ((errors (errors (eof-object))))
-      (unless (null? errors)
-        (display-errors-then-exit errors)))
-
-    (unless (null? directories)
-      (library-directories directories)
-      (source-directories directories))
+    (library-directories directories)
+    (source-directories directories)
 
     (unless (null? extensions)
       (library-extensions extensions))
 
-    (let* ((temporary-directory (make-temporary-directory "/tmp/letloop-check"))
+    ;; TODO: discover libraries based on the variable directories
+
+    (let* ((temporary-directory (make-temporary-directory (string-append "/tmp/letloop-check-"
+                                                                         (timestamp))))
            (check (string-append temporary-directory "/check.scm"))
-           (program (build-check-program files)))
+           (program (build-check-program (discover directories) fail-fast?)))
       (call-with-output-file check
         (lambda (port)
           (let loop ((program program))
             (unless (null? program)
               (pretty-print (car program) port)
               (loop (cdr program))))))
+      ;; TODO: why change the current-directory?
       (current-directory temporary-directory)
       (letloop-exec (list "--dev" "." check))
-      (format (current-output-port) "* profile can be found at: ~a/profile.html\n" temporary-directory))))
+      (format (current-output-port) "* Coverage profile can be found at: ~a/profile.html\n" temporary-directory))))
+
 
 ;; (self-evaluating-vectors #t)
 
+(pk (command-line))
+
 (when (null? (cdr (command-line)))
-  (letloop-usage)
-  (exit #f))
+  (letloop-usage))
 
 (case (string->symbol (cadr (command-line)))
   (check (letloop-check (cddr (command-line))))
   (compile (letloop-compile (cddr (command-line))))
   (exec (letloop-exec (cddr (command-line))))
   (repl (letloop-repl (cddr (command-line))))
-  (else (letloop-usage) (exit #f)))
+  (else (letloop-usage)))
