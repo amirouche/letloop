@@ -77,7 +77,7 @@
   (newline)
   (write `(tag ,git-describe))
   (newline)
-  (write `(homepage "http://letloop.xyz/"))
+  (write `(homepage "https://hyper.dev/"))
   (newline))
 
 (define letloop-usage
