@@ -11,7 +11,6 @@ jobs:
         os:
           - ubuntu-21.04
           - ubuntu-22.04
-    runs-on:  ${{ matrix.os }}
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     steps:
