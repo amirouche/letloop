@@ -16,4 +16,5 @@ jobs:
       - run: |
           ./letloop compile /usr/lib/csv9.5.4/ta6le/ example.scm example
           ./example
-      - run: ./letloop check tests/check-success.scm
+      - run: ./letloop check tests/check/check-success.scm -- "(check-success)"
+      - run: echo '! ./letloop check tests/check/ -- "(check-failure)"' | $SHELL
