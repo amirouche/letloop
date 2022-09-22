@@ -11,7 +11,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v2
       - run: sudo apt install chezscheme chezscheme-dev
-      - run: sudo apt build-dep chezscheme
       - run: scheme --program letloop.scm compile /usr/lib/csv9.5.4/ta6le/ letloop.scm letloop
       - run: letloop exec example.scm
       - run: |
