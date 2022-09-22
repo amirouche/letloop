@@ -9,7 +9,6 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-21.04
           - ubuntu-22.04
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
