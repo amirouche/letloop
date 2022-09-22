@@ -6,7 +6,7 @@ on:
 jobs:
   checks:
     runs-on: ubuntu-latest
-    name: ubuntu-latest
+    name: ubuntu-20.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v2
