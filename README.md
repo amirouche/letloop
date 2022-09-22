@@ -1,5 +1,7 @@
 # [`letloop`](https://github.com/amirouche/letloop)
 
+[![Continuous Integration](https://github.com/amirouche/letloop/actions/workflows/continuous-integration.yaml/badge.svg)](https://github.com/amirouche/letloop/actions/workflows/continuous-integration.yaml)
+
 See `letloop.md`:
 
 ## Getting started
