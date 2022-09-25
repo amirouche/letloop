@@ -73,6 +73,10 @@
             (set! out (cons object out)))))))
 
 (define (display-usage usage)
+  (newline)
+  (display letloop.nfo)
+  (newline)
+  (newline)
   (display usage)
   (newline)
   (write `(tag ,git-describe))
