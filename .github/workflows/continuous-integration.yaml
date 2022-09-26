@@ -16,11 +16,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v2
       - run: sudo apt install chezscheme chezscheme-dev uuid-dev liblz4-dev
-      - run: scheme --program letloop.scm compile /usr/lib/csv9.5.4/ta6le/ letloop.scm letloop-ci
-      - run: ./letloop-ci exec example.scm
-      - run: |
-          ./letloop-ci compile /usr/lib/csv9.5.4/ta6le/ example.scm example
-          ./example
-      - run: ./letloop-ci check checks/check/ -- "(check-success)"
-      - run: echo '! ./letloop-ci check checks/check/ -- "(check-failure)"' | $SHELL
-      - run: ./letloop-ci check .
+      - run: ./venv
+      - run: scheme --program letloop.scm compile /usr/lib/csv9.5.4/ta6le/ letloop.scm letloop-ci && mv letloop-ci ./local/bin/letloop
+      - run: ./venv $(pwd)/local/ letloop exec example.scm
+      - run: ./venv $(pwd)/local/ letloop compile /usr/lib/csv9.5.4/ta6le/ example.scm example
+      - run: ./example
+      - run: ./venv $(pwd)/local/ letloop check checks/check/ -- "(check-success)"
+      - run: echo '! ./venv letloop check checks/check/ -- "(check-failure)"' | $SHELL
+      - run: ./venv $(pwd)/local/ letloop-hack-init.sh
+      - run: ./venv $(pwd)/local/ letloop check .
