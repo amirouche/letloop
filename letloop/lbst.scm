@@ -4,7 +4,7 @@
           lbst-set
           lbst-ref
           lbst-delete
-          lbst-size
+          lbst-length
           lbst-start
           lbst-end
           lbst-search
@@ -35,15 +35,14 @@
   (import (chezscheme) (letloop r999))
 
   (define-record-type* <lbst>
-    (make-lbst* key value size left right stack)
+    (make-lbst* key value length left right stack)
     lbst?
     (key lbst-key)
     (value lbst-value)
-    (size lbst-size)
+    (length lbst-length)
     (left lbst-left)
     (right lbst-right)
-    ;; Keep around the top-down path of lbst in the stack in order to
-    ;; be later able to "backtrack".
+    ;; Keep around the top-down path inside stack to backtrack.
     (stack lbst-stack))
 
   (define lbst-null (make-lbst* #vu8() #f 0 #f #f '()))
@@ -68,13 +67,13 @@
   (define lbst-join
     (lambda (key value left right)
       (make-lbst* key
-                 value
-                 (fx+ (lbst-size left)
-                      (lbst-size right)
-                      1)
-                 left
-                 right
-                 '())))
+                  value
+                  (fx+ (lbst-length left)
+                       (lbst-length right)
+                       1)
+                  left
+                  right
+                  '())))
 
   (define lbst-single-left-rotation
     (lambda (key value left right)
@@ -122,16 +121,16 @@
 
   (define lbst-rebalance
     (lambda (key value left right)
-      (if (too-big? (lbst-size left) (lbst-size right))
-          (if (not (lbst<? (lbst-size (lbst-right right))
-                           (lbst-size (lbst-left right))))
+      (if (too-big? (lbst-length left) (lbst-length right))
+          (if (not (lbst<? (lbst-length (lbst-right right))
+                           (lbst-length (lbst-left right))))
               (lbst-single-left-rotation key value left right)
               (lbst-double-left-rotation key value left right))
-          (if (too-big? (lbst-size right) (lbst-size left))
-              (if (not (lbst<? (lbst-size (lbst-left left))
-                               (lbst-size (lbst-right left))))
+          (if (too-big? (lbst-length right) (lbst-length left))
+              (if (not (lbst<? (lbst-length (lbst-left left))
+                               (lbst-length (lbst-right left))))
                   (lbst-single-right-rotation key value left right)
-                                      (lbst-double-right-rotation key value left right))
+                  (lbst-double-right-rotation key value left right))
               ;; otherwise join both trees with a top level node
               (lbst-join key value left right)))))
 
@@ -183,8 +182,8 @@
     (lambda (lbst)
       (if (lbst-null? lbst)
           #t
-          (and (not (too-big? (lbst-size (lbst-left lbst)) (lbst-size (lbst-right lbst))))
-               (not (too-big? (lbst-size (lbst-right lbst)) (lbst-size (lbst-left lbst))))
+          (and (not (too-big? (lbst-length (lbst-left lbst)) (lbst-length (lbst-right lbst))))
+               (not (too-big? (lbst-length (lbst-right lbst)) (lbst-length (lbst-left lbst))))
                (lbst-balanced? (lbst-left lbst))
                (lbst-balanced? (lbst-right lbst))))))
 
@@ -197,7 +196,7 @@
                   (cons lbst stack))
             (make-lbst* (lbst-key lbst)
                         (lbst-value lbst)
-                        (lbst-size lbst)
+                        (lbst-length lbst)
                         (lbst-left lbst)
                         (lbst-right lbst)
                         stack)))))
@@ -211,7 +210,7 @@
                   (cons lbst stack))
             (make-lbst* (lbst-key lbst)
                         (lbst-value lbst)
-                        (lbst-size lbst)
+                        (lbst-length lbst)
                         (lbst-left lbst)
                         (lbst-right lbst)
                         stack)))))
@@ -227,7 +226,7 @@
                   (if (bytevector=? (lbst-key (lbst-left parent)) (lbst-key lbst))
                       (make-lbst* (lbst-key parent)
                                   (lbst-value parent)
-                                  (lbst-size parent)
+                                  (lbst-length parent)
                                   (lbst-left parent)
                                   (lbst-right parent)
                                   (cdr stack))
@@ -237,7 +236,7 @@
             (if (lbst-null? (lbst-left lbst))
                 (make-lbst* (lbst-key lbst)
                             (lbst-value lbst)
-                            (lbst-size lbst)
+                            (lbst-length lbst)
                             (lbst-left lbst)
                             (lbst-right lbst)
                             stack)
@@ -254,7 +253,7 @@
                   (if (bytevector=? (lbst-key (lbst-right parent)) (lbst-key lbst))
                       (make-lbst* (lbst-key parent)
                                   (lbst-value parent)
-                                  (lbst-size parent)
+                                  (lbst-length parent)
                                   (lbst-left parent)
                                   (lbst-right parent)
                                   (cdr stack))
@@ -264,7 +263,7 @@
             (if (lbst-null? (lbst-right lbst))
                 (make-lbst* (lbst-key lbst)
                             (lbst-value lbst)
-                            (lbst-size lbst)
+                            (lbst-length lbst)
                             (lbst-left lbst)
                             (lbst-right lbst)
                             stack)
@@ -281,7 +280,7 @@
   (define (make-lbst** lbst stack)
     (make-lbst* (lbst-key lbst)
                 (lbst-value lbst)
-                (lbst-size lbst)
+                (lbst-length lbst)
                 (lbst-left lbst)
                 (lbst-right lbst)
                 stack))
@@ -354,7 +353,7 @@
               (if (lbst-null? (lbst-right left))
                   (lbst-set left key value)
                   (cond
-                   ((too-big? (lbst-size left) (lbst-size right))
+                   ((too-big? (lbst-length left) (lbst-length right))
                     (lbst-rebalance (lbst-key right)
                                     (lbst-value right)
                                     left
@@ -362,7 +361,7 @@
                                                   value
                                                   (lbst-left right)
                                                   (lbst-right right))))
-                   ((too-big? (lbst-size right) (lbst-size left))
+                   ((too-big? (lbst-length right) (lbst-length left))
                     (lbst-rebalance (lbst-key left)
                                     (lbst-value left)
                                     (lbst-concat3 key
@@ -398,8 +397,6 @@
                                      (lbst-delete (lbst-left lbst) key)
                                      (lbst-right lbst)))
             (else (lbst-concat2 (lbst-left lbst) (lbst-right lbst)))))))
-
-
 
   (define pk
     (lambda args
@@ -473,8 +470,9 @@
              (lbst (lbst-set lbst #vu8(101) 101)))
         (assert (fx=? (lbst-value (lbst-end lbst)) 101)))))
 
-  ;; same as lbst->alist but we start from the first key until
-  ;; the end.
+  ;; same as lbst->alist but we start from the first key until the
+  ;; end, and accumulate key-value pairs in a list, and return that
+  ;; without the need to call reverse.
   (define lbst->alist/reversed
     (lambda (lbst)
       (let loop ((lbst (lbst-start lbst))
@@ -584,7 +582,7 @@
               (assert (equal? (lbst->alist lbst) (sort (lambda (a b) (bytevector<? (car a) (car b))) out))))
             (let ((key (make-bytevector 8))
                   (value (random (expt 2 64))))
-              (bytevector-u64-set! key 0 value 'little)
+              (bytevector-u64-set! key 0 value 'big)
               (loop (lbst-set lbst key value) (cons (cons key value) out) (fx- count 1)))))))
 
   (define check~lbst-015
@@ -597,7 +595,7 @@
               (assert (equal? (lbst->alist/reversed lbst) (reverse (sort (lambda (a b) (bytevector<? (car a) (car b))) out)))))
             (let ((key (make-bytevector 8))
                   (value (random (expt 2 64))))
-              (bytevector-u64-set! key 0 value 'little)
+              (bytevector-u64-set! key 0 value 'big)
               (loop (lbst-set lbst key value) (cons (cons key value) out) (fx- count 1)))))))
 
   )
