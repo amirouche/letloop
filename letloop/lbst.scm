@@ -28,24 +28,26 @@
           check~lbst-011
           check~lbst-012
           check~lbst-013
-          check~lbst-014
-          check~lbst-015
+          check~lbst-014/random
+          check~lbst-015/random
           )
 
   (import (chezscheme) (letloop r999))
 
   (define-record-type* <lbst>
-    (make-lbst* key value length left right stack)
+    (make-lbst* key key-bytes value value-bytes length left right stack)
     lbst?
     (key lbst-key)
+    (key-bytes lbst-key-bytes)
     (value lbst-value)
+    (value-bytes lbst-value-bytes)
     (length lbst-length)
     (left lbst-left)
     (right lbst-right)
     ;; Keep around the top-down path inside stack to backtrack.
     (stack lbst-stack))
 
-  (define lbst-null (make-lbst* #vu8() #f 0 #f #f '()))
+  (define lbst-null (make-lbst* #vu8() 0 #vu8() 0 0 #f #f '()))
 
   (define (make-lbst)
     lbst-null)
@@ -67,7 +69,13 @@
   (define lbst-join
     (lambda (key value left right)
       (make-lbst* key
+                  (+ (bytevector-length key)
+                     (lbst-key-bytes left)
+                     (lbst-key-bytes right))
                   value
+                  (+ (bytevector-length value)
+                     (lbst-value-bytes left)
+                     (lbst-value-bytes right))
                   (fx+ (lbst-length left)
                        (lbst-length right)
                        1)
@@ -165,7 +173,14 @@
       ;; XXX: the empty bytevector aka. #vu8 is forbidden as key, guess why.
       (assert (not (bytevector=? key #vu8())))
       (if (lbst-null? lbst)
-          (make-lbst* key value 1 lbst-null lbst-null '())
+          (make-lbst* key
+                      (bytevector-length key)
+                      value
+                      (bytevector-length value)
+                      1
+                      lbst-null
+                      lbst-null
+                      '())
           (case (bytevector-compare key (lbst-key lbst))
             (smaller (lbst-rebalance (lbst-key lbst)
                                      (lbst-value lbst)
@@ -195,7 +210,9 @@
             (loop (lbst-left lbst)
                   (cons lbst stack))
             (make-lbst* (lbst-key lbst)
+                        (lbst-key-bytes lbst)
                         (lbst-value lbst)
+                        (lbst-value-bytes lbst)
                         (lbst-length lbst)
                         (lbst-left lbst)
                         (lbst-right lbst)
@@ -209,7 +226,9 @@
             (loop (lbst-right lbst)
                   (cons lbst stack))
             (make-lbst* (lbst-key lbst)
+                        (lbst-key-bytes lbst)
                         (lbst-value lbst)
+                        (lbst-value-bytes lbst)
                         (lbst-length lbst)
                         (lbst-left lbst)
                         (lbst-right lbst)
@@ -225,7 +244,9 @@
                 (let ((parent (car stack)))
                   (if (bytevector=? (lbst-key (lbst-left parent)) (lbst-key lbst))
                       (make-lbst* (lbst-key parent)
+                                  (lbst-key-bytes parent)
                                   (lbst-value parent)
+                                  (lbst-value-bytes parent)
                                   (lbst-length parent)
                                   (lbst-left parent)
                                   (lbst-right parent)
@@ -235,7 +256,9 @@
                      (stack (cons lbst (lbst-stack lbst))))
             (if (lbst-null? (lbst-left lbst))
                 (make-lbst* (lbst-key lbst)
+                            (lbst-key-bytes lbst)
                             (lbst-value lbst)
+                            (lbst-value-bytes lbst)
                             (lbst-length lbst)
                             (lbst-left lbst)
                             (lbst-right lbst)
@@ -252,7 +275,9 @@
                 (let ((parent (car stack)))
                   (if (bytevector=? (lbst-key (lbst-right parent)) (lbst-key lbst))
                       (make-lbst* (lbst-key parent)
+                                  (lbst-key-bytes parent)
                                   (lbst-value parent)
+                                  (lbst-value-bytes parent)
                                   (lbst-length parent)
                                   (lbst-left parent)
                                   (lbst-right parent)
@@ -262,7 +287,9 @@
                      (stack (cons lbst (lbst-stack lbst))))
             (if (lbst-null? (lbst-right lbst))
                 (make-lbst* (lbst-key lbst)
+                            (lbst-key-bytes lbst)
                             (lbst-value lbst)
+                            (lbst-value-bytes lbst)
                             (lbst-length lbst)
                             (lbst-left lbst)
                             (lbst-right lbst)
@@ -279,7 +306,9 @@
 
   (define (make-lbst** lbst stack)
     (make-lbst* (lbst-key lbst)
+                (lbst-key-bytes lbst)
                 (lbst-value lbst)
+                (lbst-value-bytes lbst)
                 (lbst-length lbst)
                 (lbst-left lbst)
                 (lbst-right lbst)
@@ -410,65 +439,65 @@
   (define check~lbst-002
     (lambda ()
       (let* ((lbst (make-lbst))
-             (lbst (lbst-set lbst #vu8(42) 42))
-             (lbst (lbst-set lbst #vu8(13) 13))
-             (lbst (lbst-set lbst #vu8(14) 14))
-             (lbst (lbst-set lbst #vu8(101) 101))
+             (lbst (lbst-set lbst #vu8(42) #vu8(42)))
+             (lbst (lbst-set lbst #vu8(13) #vu8(13)))
+             (lbst (lbst-set lbst #vu8(14) #vu8(14)))
+             (lbst (lbst-set lbst #vu8(101) #vu8(101)))
              )
         (assert (equal? (lbst->alist lbst)
-                        '((#vu8(13) . 13)
-                          (#vu8(14) . 14)
-                          (#vu8(42) . 42)
-                          (#vu8(101) . 101)))))))
+                        '((#vu8(13) . #vu8(13))
+                          (#vu8(14) . #vu8(14))
+                          (#vu8(42) . #vu8(42))
+                          (#vu8(101) . #vu8(101))))))))
 
   (define check~lbst-003
     (lambda ()
       (let* ((lbst (make-lbst))
-             (lbst (lbst-set lbst #vu8(42) 42))
-             (lbst (lbst-set lbst #vu8(13) 13))
-             (lbst (lbst-set lbst #vu8(14) 14))
-             (lbst (lbst-set lbst #vu8(101) 101)))
-        (assert (fx<? (lbst-value lbst) (lbst-value (lbst-next lbst)))))))
+             (lbst (lbst-set lbst #vu8(42) #vu8(42)))
+             (lbst (lbst-set lbst #vu8(13) #vu8(13)))
+             (lbst (lbst-set lbst #vu8(14) #vu8(14)))
+             (lbst (lbst-set lbst #vu8(101) #vu8(101))))
+        (assert (fx<? (bytevector-u8-ref (lbst-value lbst) 0) (bytevector-u8-ref (lbst-value (lbst-next lbst)) 0))))))
 
   (define check~lbst-004
     (lambda ()
       (let* ((lbst (make-lbst))
-             (lbst (lbst-set lbst #vu8(42) 42))
-             (lbst (lbst-set lbst #vu8(13) 13))
-             (lbst (lbst-set lbst #vu8(14) 14))
-             (lbst (lbst-set lbst #vu8(101) 101)))
-        (assert (fx<? (lbst-value lbst) (lbst-value (lbst-next lbst)))))))
+             (lbst (lbst-set lbst #vu8(42) #vu8(42)))
+             (lbst (lbst-set lbst #vu8(13) #vu8(13)))
+             (lbst (lbst-set lbst #vu8(14) #vu8(14)))
+             (lbst (lbst-set lbst #vu8(101) #vu8(101))))
+        (assert (fx<? (bytevector-u8-ref (lbst-value lbst) 0) (bytevector-u8-ref (lbst-value (lbst-next lbst)) 0))))))
 
   (define check~lbst-005
     (lambda ()
       (let* ((lbst (make-lbst))
-             (lbst (lbst-set lbst #vu8(42) 42))
-             (lbst (lbst-set lbst #vu8(13) 13))
-             (lbst (lbst-set lbst #vu8(14) 14))
-             (lbst (lbst-set lbst #vu8(101) 101)))
+             (lbst (lbst-set lbst #vu8(42) #vu8(42)))
+             (lbst (lbst-set lbst #vu8(13) #vu8(13)))
+             (lbst (lbst-set lbst #vu8(14) #vu8(14)))
+             (lbst (lbst-set lbst #vu8(101) #vu8(101))))
         (let* ((a (lbst-value (lbst-previous lbst)))
                (b (lbst-value (lbst-next (lbst-previous lbst))))
                (c (lbst-value (lbst-previous (lbst-next lbst))))
                (d (lbst-value (lbst-next lbst))))
-          (assert (fx<=? a b c d))))))
+          (assert (apply fx<=? (map (lambda (x) (bytevector-u8-ref x 0)) (list a b c d))))))))
 
   (define check~lbst-006
     (lambda ()
       (let* ((lbst (make-lbst))
-             (lbst (lbst-set lbst #vu8(42) 42))
-             (lbst (lbst-set lbst #vu8(13) 13))
-             (lbst (lbst-set lbst #vu8(14) 14))
-             (lbst (lbst-set lbst #vu8(101) 101)))
-        (assert (fx=? (lbst-value (lbst-start lbst)) 13)))))
+             (lbst (lbst-set lbst #vu8(42) #vu8(42)))
+             (lbst (lbst-set lbst #vu8(13) #vu8(13)))
+             (lbst (lbst-set lbst #vu8(14) #vu8(14)))
+             (lbst (lbst-set lbst #vu8(101) #vu8(101))))
+        (assert (bytevector=? (lbst-value (lbst-start lbst)) #vu8(13))))))
 
   (define check~lbst-007
     (lambda ()
       (let* ((lbst (make-lbst))
-             (lbst (lbst-set lbst #vu8(42) 42))
-             (lbst (lbst-set lbst #vu8(13) 13))
-             (lbst (lbst-set lbst #vu8(14) 14))
-             (lbst (lbst-set lbst #vu8(101) 101)))
-        (assert (fx=? (lbst-value (lbst-end lbst)) 101)))))
+             (lbst (lbst-set lbst #vu8(42) #vu8(42)))
+             (lbst (lbst-set lbst #vu8(13) #vu8(13)))
+             (lbst (lbst-set lbst #vu8(14) #vu8(14)))
+             (lbst (lbst-set lbst #vu8(101) #vu8(101))))
+        (assert (bytevector=? (lbst-value (lbst-end lbst)) #vu8(101))))))
 
   ;; same as lbst->alist but we start from the first key until the
   ;; end, and accumulate key-value pairs in a list, and return that
@@ -484,10 +513,10 @@
   (define check~lbst-008
     (lambda ()
       (let* ((lbst (make-lbst))
-             (lbst (lbst-set lbst #vu8(42) 42))
-             (lbst (lbst-set lbst #vu8(13) 13))
-             (lbst (lbst-set lbst #vu8(14) 14))
-             (lbst (lbst-set lbst #vu8(101) 101)))
+             (lbst (lbst-set lbst #vu8(42) #vu8(42)))
+             (lbst (lbst-set lbst #vu8(13) #vu8(13)))
+             (lbst (lbst-set lbst #vu8(14) #vu8(14)))
+             (lbst (lbst-set lbst #vu8(101) #vu8(101))))
 
         (assert (equal? (reverse (lbst->alist/reversed lbst)) (lbst->alist lbst))))))
 
@@ -495,27 +524,27 @@
     (lambda ()
 
       (let* ((lbst (make-lbst))
-             (lbst (lbst-set lbst #vu8(42) 42))
-             (lbst (lbst-set lbst #vu8(13) 13))
-             (lbst (lbst-set lbst #vu8(14) 14))
-             (lbst (lbst-set lbst #vu8(101) 101)))
+             (lbst (lbst-set lbst #vu8(42) #vu8(42)))
+             (lbst (lbst-set lbst #vu8(13) #vu8(13)))
+             (lbst (lbst-set lbst #vu8(14) #vu8(14)))
+             (lbst (lbst-set lbst #vu8(101) #vu8(101))))
 
         (let loop ((vs (list 13 14 42 101)))
           (unless (null? vs)
             (call-with-values (lambda () (lbst-search lbst (bytevector (car vs))))
               (lambda (position lbst)
                 (assert (eq? position 'equal))
-                (assert (= (lbst-value lbst) (car vs)))
+                (assert (= (bytevector-u8-ref (lbst-value lbst) 0) (car vs)))
                 (loop (cdr vs)))))))))
 
   (define check~lbst-010
     (lambda ()
 
       (let* ((lbst (make-lbst))
-             (lbst (lbst-set lbst #vu8(42) 42))
-             (lbst (lbst-set lbst #vu8(13) 13))
-             (lbst (lbst-set lbst #vu8(14) 14))
-             (lbst (lbst-set lbst #vu8(101) 101)))
+             (lbst (lbst-set lbst #vu8(42) #vu8(42)))
+             (lbst (lbst-set lbst #vu8(13) #vu8(13)))
+             (lbst (lbst-set lbst #vu8(14) #vu8(14)))
+             (lbst (lbst-set lbst #vu8(101) #vu8(101))))
 
         (let loop ((vs (list (list 7 'bigger 13)
                              (list 15 'bigger 42)
@@ -525,29 +554,29 @@
             (call-with-values (lambda () (lbst-search lbst (bytevector (list-ref (car vs) 0))))
               (lambda (position lbst)
                 (assert (eq? (list-ref (car vs) 1) position))
-                (assert (= (lbst-value lbst) (list-ref (car vs) 2)))
+                (assert (= (bytevector-u8-ref (lbst-value lbst) 0) (list-ref (car vs) 2)))
                 (loop (cdr vs)))))))))
 
   (define check~lbst-011
     (lambda ()
       (let* ((lbst (make-lbst))
-             (lbst (lbst-set lbst #vu8(42) 42))
-             (lbst (lbst-set lbst #vu8(13) 13))
-             (lbst (lbst-set lbst #vu8(14) 14))
-             (lbst (lbst-set lbst #vu8(101) 101)))
+             (lbst (lbst-set lbst #vu8(42) #vu8(42)))
+             (lbst (lbst-set lbst #vu8(13) #vu8(13)))
+             (lbst (lbst-set lbst #vu8(14) #vu8(14)))
+             (lbst (lbst-set lbst #vu8(101) #vu8(101))))
 
         (let loop ((vs (list 42 13 14 101)))
           (unless (null? vs)
-            (assert (equal? (car vs) (lbst-value (lbst-ref lbst (bytevector (car vs))))))
+            (assert (= (car vs) (bytevector-u8-ref (lbst-value (lbst-ref lbst (bytevector (car vs)))) 0)))
             (loop (cdr vs)))))))
 
   (define check~lbst-012
     (lambda ()
       (let* ((lbst (make-lbst))
-             (lbst (lbst-set lbst #vu8(42) 42))
-             (lbst (lbst-set lbst #vu8(13) 13))
-             (lbst (lbst-set lbst #vu8(14) 14))
-             (lbst (lbst-set lbst #vu8(101) 101)))
+             (lbst (lbst-set lbst #vu8(42) #vu8(42)))
+             (lbst (lbst-set lbst #vu8(13) #vu8(13)))
+             (lbst (lbst-set lbst #vu8(14) #vu8(14)))
+             (lbst (lbst-set lbst #vu8(101) #vu8(101))))
 
         (let loop ((vs (list 41 0 7 9 255)))
           (unless (null? vs)
@@ -557,14 +586,14 @@
   (define check~lbst-013
     (lambda ()
       (let* ((lbst (make-lbst))
-             (lbst (lbst-set lbst #vu8(42) 42))
-             (lbst (lbst-set lbst #vu8(13) 13))
-             (lbst (lbst-set lbst #vu8(14) 14))
-             (lbst (lbst-set lbst #vu8(101) 101)))
+             (lbst (lbst-set lbst #vu8(42) #vu8(42)))
+             (lbst (lbst-set lbst #vu8(13) #vu8(13)))
+             (lbst (lbst-set lbst #vu8(14) #vu8(14)))
+             (lbst (lbst-set lbst #vu8(101) #vu8(101))))
 
         (let ((new (lbst-delete lbst #vu8(42))))
           (assert (equal? (lbst->alist new)
-                          '((#vu8(13) . 13) (#vu8(14) . 14) (#vu8(101) . 101))))))))
+                          '((#vu8(13) . #vu8(13)) (#vu8(14) . #vu8(14)) (#vu8(101) . #vu8(101)))))))))
 
   (define bytevector<?
     (lambda (a b)
@@ -572,7 +601,7 @@
         (smaller #t)
         (else #f))))
 
-  (define check~lbst-014
+  (define check~lbst-014/random
     (lambda ()
       (let loop ((lbst (make-lbst))
                  (out '())
@@ -583,9 +612,9 @@
             (let ((key (make-bytevector 8))
                   (value (random (expt 2 64))))
               (bytevector-u64-set! key 0 value 'big)
-              (loop (lbst-set lbst key value) (cons (cons key value) out) (fx- count 1)))))))
+              (loop (lbst-set lbst key key) (cons (cons key key) out) (fx- count 1)))))))
 
-  (define check~lbst-015
+  (define check~lbst-015/random
     (lambda ()
       (let loop ((lbst (make-lbst))
                  (out '())
@@ -596,6 +625,6 @@
             (let ((key (make-bytevector 8))
                   (value (random (expt 2 64))))
               (bytevector-u64-set! key 0 value 'big)
-              (loop (lbst-set lbst key value) (cons (cons key value) out) (fx- count 1)))))))
+              (loop (lbst-set lbst key key) (cons (cons key key) out) (fx- count 1)))))))
 
   )
