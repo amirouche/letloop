@@ -1,6 +1,7 @@
 (library (letloop byter)
 
-  (export byter-pack byter-unpack
+  (export byter-pack
+          byter-unpack
           check~byter-000
           check~byter-001
           check~byter-002
@@ -21,9 +22,7 @@
           check~byter-998/random
           check~byter-999/seed
           check~byter-999/random
-
-          byter-random-object
-          )
+          byter-random-object)
 
   (import (chezscheme))
 
@@ -481,7 +480,6 @@
     (lambda ()
       (assert (equal? (bytevector 0 0 0) (byter-unpack (byter-pack (bytevector 0 0 0)))))))
 
-
   (define check~byter-100
     (lambda ()
       (define expected (list 'symbolics
@@ -539,6 +537,7 @@
       (assert (equal? (byter-unpack (byter-pack expected)) expected))))
 
   (define random-object-max-complexity (expt 10 4))
+
   (define random-object-complexity (make-parameter random-object-max-complexity))
 
   (define random-object-exhaustion-singleton (cons 'exhaustion 'sentinel))
@@ -603,7 +602,7 @@
     (case-lambda
       (() (byter-random-object (make-seed)))
       ((seed)
-       (display (string-append "*** BYTER_SEED=" (number->string seed) "\n"))
+       (display (string-append "*** LETLOOP_BYTER_SEED=" (number->string seed) "\n"))
        (random-seed seed)
        (let loop ()
          (random-object-complexity random-object-max-complexity)
@@ -665,14 +664,14 @@
 
   (define check~byter-998/seed
     (lambda ()
-      (define seed (string->number (or (getenv "BYTER_SEED") "1")))
+      (define seed (string->number (or (getenv "LETLOOP_BYTER_SEED") "1")))
       (call-with-values (lambda () (byter-random-object seed))
         (lambda (seed object)
           (assert (equal? object (byter-unpack (byter-pack object))))))))
 
   (define check~byter-998/random
     (lambda ()
-      (let loop ((i (expt 2 (string->number (or (getenv "BYTER_N") "8")))))
+      (let loop ((i (expt 2 (string->number (or (getenv "LETLOOP_BYTER_N") "8")))))
         (unless (fxzero? i)
           (call-with-values (lambda () (byter-random-object))
             (lambda (seed object)
@@ -686,7 +685,7 @@
 
   (define check~byter-999/seed
     (lambda ()
-      (define seed (string->number (or (getenv "BYTER_SEED") "1")))
+      (define seed (string->number (or (getenv "LETLOOP_BYTER_SEED") "1")))
       (call-with-values (lambda () (byter-random-object seed))
         (lambda (seed object)
           (call-with-values (lambda () (byter-random-object seed))
@@ -696,7 +695,7 @@
 
   (define check~byter-999/random
     (lambda ()
-      (let loop ((i (expt 2 (string->number (or (getenv "BYTER_N") "8")))))
+      (let loop ((i (expt 2 (string->number (or (getenv "LETLOOP_BYTER_N") "8")))))
         (unless (fxzero? i)
           (let ((seed (make-seed)))
             (call-with-values (lambda () (byter-random-object seed))
