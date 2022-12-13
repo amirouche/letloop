@@ -31,7 +31,6 @@
           check~lbst-014/random
           check~lbst-015/random
           )
-
   (import (chezscheme) (letloop r999))
 
   (define-record-type* <lbst>
@@ -413,7 +412,6 @@
                                     lbst
                                     (lbst-delete-min other))))))))
 
-
       (if (lbst-null? lbst)
           #f
           (case (bytevector-compare key (lbst-key lbst))
@@ -429,7 +427,10 @@
 
   (define pk
     (lambda args
-      (display ";; ") (write args) (newline)
+      (display ";; " (current-error-port))
+      (write args (current-error-port))
+      (newline (current-error-port))
+      (flush-output-port (current-error-port))
       (car (reverse args))))
 
   (define check~lbst-001
