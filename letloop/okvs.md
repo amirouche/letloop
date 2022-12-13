@@ -57,7 +57,7 @@ Returns a handle for the database.
 Returns `#t` if `OBJ` is an instance of `<okvs>`. Otherwise, returns
 `#f`.
 
-### `(okvs-close! okvs)`
+### `(okvs-close okvs)`
 
 Close `okvs`.
 
@@ -104,7 +104,7 @@ In the following example, `okvs-in-transaction` will return `#f`:
 
 (define (proc tx)
   (display (read-only? tx)) ;; => #t
-  (okvs-set! tx #u8(42) #u8(13 37))
+  (okvs-set tx #u8(42) #u8(13 37))
   (read-only? tx #f)
   ...
   (read-only? tx))
@@ -120,7 +120,8 @@ Similar to `parametrize`.
 
 Returns SRFI-173 hook associated with the beginning of a transaction.
 This hook gives a chance to extension libraries to initialize their
-internal states.
+internal states. The procedures associated with this hook must execute
+just after the transaction is started.
 
 ### `(okvs-pre-commit-hook handle)`
 
@@ -182,7 +183,7 @@ a cursor positioned at the same position as `HANDLE`.
 
 The cursor is stable: the cursor will see a snapshot of keys of the
 database taken when `okvs-call-with-cursor` is called. During the
-extent of `PROC`, `okvs-set!` and `okvs-remove!`  will not
+extent of `PROC`, `okvs-set` and `okvs-remove`  will not
 change the position of the cursor, and the cursor will not see removed
 keys, and not see added keys. Keys which value was changed during
 cursor navigation, that exist when `okvs-call-with-cursor` is
@@ -223,11 +224,11 @@ consider `LIMIT` keys from the count.
 Rationale: That is useful in cases where the size of a transaction is
 limited.
 
-### `(okvs-set! handle key value)`
+### `(okvs-set handle key value)`
 
 Associate the bytevector `KEY`, with the bytevector `VALUE`.
 
-### `(okvs-remove! handle key)`
+### `(okvs-remove handle key)`
 
 Removes the bytevector `KEY`, and its associated value.
 
