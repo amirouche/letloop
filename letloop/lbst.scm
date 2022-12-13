@@ -30,6 +30,8 @@
           check~lbst-013
           check~lbst-014/random
           check~lbst-015/random
+          check~lbst-016/random
+          check~lbst-017/random
           )
   (import (chezscheme) (letloop r999))
 
@@ -54,6 +56,11 @@
   (define lbst-null?
     (lambda (lbst)
       (eq? lbst lbst-null)))
+
+  (define lbst-bytes
+    (lambda (lbst)
+      (+ (lbst-key-bytes lbst)
+         (lbst-value-bytes lbst))))
 
   (define bit-length fxlength)
 
@@ -627,5 +634,43 @@
                   (value (random (expt 2 64))))
               (bytevector-u64-set! key 0 value 'big)
               (loop (lbst-set lbst key key) (cons (cons key key) out) (fx- count 1)))))))
+
+  (define random-bytevector
+    (lambda (length)
+      (define bytevector (make-bytevector (fx+ (random length) 1)))
+      (let loop ((length (bytevector-length bytevector)))
+        (unless (fxzero? length)
+          (bytevector-u8-set! bytevector (fx- length 1) (random 256))
+          (loop (fx- length 1))))
+      bytevector))
+
+  (define check~lbst-016/random
+    (lambda ()
+      (let loop ((lbst (make-lbst))
+                 (count 1024)
+                 (bytes 0))
+        (if (fxzero? count)
+            (begin
+              (assert (= (lbst-bytes lbst) bytes))
+              (assert (= (lbst-length lbst) 1024)))
+            (let ((key (random-bytevector 1024))
+                  (value (random-bytevector 1024)))
+              (loop (lbst-set lbst key value)
+                    (fx- count 1)
+                    (fx+ (bytevector-length key)
+                         (bytevector-length value)
+                         bytes)))))))
+
+  (define check~lbst-017/random
+    (lambda ()
+      (define length (random 1024))
+      (let loop ((lbst (make-lbst))
+                 (count length))
+        (if (fxzero? count)
+            (assert (= (lbst-length lbst) length))
+            (let ((key (random-bytevector 1024))
+                  (value (random-bytevector 1024)))
+              (loop (lbst-set lbst key value)
+                    (fx- count 1)))))))
 
   )
