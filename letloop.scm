@@ -615,7 +615,7 @@
         (define allow?
           (lambda (x)
             ;; Does it look like a check procedure
-            (and (string-prefix? "check~" (symbol->string (cdr x)))
+            (and (string-prefix? "~check-" (symbol->string (cdr x)))
                  (or (null? alloweds)
                      (member (cdr x) alloweds)
                      (member (car x) alloweds)))))

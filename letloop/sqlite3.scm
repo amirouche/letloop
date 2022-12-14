@@ -23,7 +23,7 @@
    sqlite3-column-bytes
    sqlite3-column-int
 
-   check~sqlite3-000)
+   ~check-sqlite3-000)
 
   (import (chezscheme))
 
@@ -235,7 +235,7 @@
     (let ((input (string-append prefix "-XXXXXX")))
       (mkdtemp input)))
 
-  (define check~sqlite3-000
+  (define ~check-sqlite3-000
     (lambda ()
       (define sqlite3 (sqlite3-open
                        (string-append (make-temporary-directory "/tmp/letloop-sqlite3")

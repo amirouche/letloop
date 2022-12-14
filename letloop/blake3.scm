@@ -1,8 +1,8 @@
 #!chezscheme
 (library (letloop blake3)
   (export blake3 make-blake3 blake3-update! blake3-finalize
-          check~blake3-000
-          check~blake3-001)
+          ~check-blake3-000
+          ~check-blake3-001)
 
   (import (chezscheme))
 
@@ -51,12 +51,12 @@
       (blake3-update! hasher bytevector)
       (blake3-finalize hasher 32)))
 
-  (define check~blake3-000
+  (define ~check-blake3-000
     (lambda ()
       (assert (bytevector=? (blake3 (string->utf8 "azul dunith"))
                             (bytevector 147 96 202 209 250 91 234 79 148 175 155 40 42 42 163 180 23 60 5 78 248 205 93 236 132 217 22 253 234 98 73 27)))))
 
-  (define check~blake3-001
+  (define ~check-blake3-001
     (lambda ()
       (let ((blake3 (make-blake3)))
         (blake3-update! blake3 (string->utf8 "azul dunith"))

@@ -1,8 +1,8 @@
 (library (letloop r999)
 
   (export define-record-type*
-          check~define-record-type*-000
-          check~define-record-type*-001)
+          ~check-define-record-type*-000
+          ~check-define-record-type*-001)
 
   (import (chezscheme))
 
@@ -85,7 +85,7 @@
                                         (ctor field-tag ...))))
                           (fields field-clause ...)))))))
 
-  (define check~define-record-type*-000
+  (define ~check-define-record-type*-000
     (lambda ()
       (define-record-type* <mytest>
         (make-mytest value)
@@ -101,7 +101,7 @@
 
       (assert (= (mytest-value mytest) 101))))
 
-  (define check~define-record-type*-001
+  (define ~check-define-record-type*-001
     (lambda ()
       ;; given
       (define-record-type* <mytest>

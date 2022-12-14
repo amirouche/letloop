@@ -2,26 +2,26 @@
 
   (export byter-pack
           byter-unpack
-          check~byter-000
-          check~byter-001
-          check~byter-002
-          check~byter-003
-          check~byter-004
-          check~byter-005
-          check~byter-006/random
-          check~byter-007/random
-          check~byter-008
-          check~byter-009
-          check~byter-010
-          check~byter-011
-          check~byter-012
-          check~byter-100
-          check~byter-101
-          check~byter-102
-          check~byter-998/seed
-          check~byter-998/random
-          check~byter-999/seed
-          check~byter-999/random
+          ~check-byter-000
+          ~check-byter-001
+          ~check-byter-002
+          ~check-byter-003
+          ~check-byter-004
+          ~check-byter-005
+          ~check-byter-006/random
+          ~check-byter-007/random
+          ~check-byter-008
+          ~check-byter-009
+          ~check-byter-010
+          ~check-byter-011
+          ~check-byter-012
+          ~check-byter-100
+          ~check-byter-101
+          ~check-byter-102
+          ~check-byter-998/seed
+          ~check-byter-998/random
+          ~check-byter-999/seed
+          ~check-byter-999/random
           byter-random-object)
 
   (import (chezscheme))
@@ -412,23 +412,23 @@
 
   ;; tests
 
-  (define check~byter-000
+  (define ~check-byter-000
     (lambda ()
       (assert (eq? #f (byter-unpack (byter-pack #f))))))
 
-  (define check~byter-001
+  (define ~check-byter-001
     (lambda ()
       (assert (eq? #t (byter-unpack (byter-pack #t))))))
 
-  (define check~byter-002
+  (define ~check-byter-002
     (lambda ()
       (assert (null? (byter-unpack (byter-pack '()))))))
 
-  (define check~byter-003
+  (define ~check-byter-003
     (lambda ()
       (assert (equal? (bytevector 13 37) (byter-unpack (byter-pack (bytevector 13 37)))))))
 
-  (define check~byter-004
+  (define ~check-byter-004
     (lambda ()
       (let loop ((power 65))
         (unless (fxzero? power)
@@ -436,7 +436,7 @@
             (assert (= number (byter-unpack (byter-pack number))))
             (loop (fx- power 1)))))))
 
-  (define check~byter-005
+  (define ~check-byter-005
     (lambda ()
       (let loop ((power 65))
         (unless (fxzero? power)
@@ -444,7 +444,7 @@
             (assert (= number (byter-unpack (byter-pack number))))
             (loop (fx- power 1)))))))
 
-  (define check~byter-006/random
+  (define ~check-byter-006/random
     (lambda ()
       (let loop ((i 1000))
         (unless (fxzero? i)
@@ -452,7 +452,7 @@
             (assert (= number (byter-unpack (byter-pack number))))
             (loop (fx- i 1)))))))
 
-  (define check~byter-007/random
+  (define ~check-byter-007/random
     (lambda ()
       (let loop ((i 1000))
         (unless (fxzero? i)
@@ -460,27 +460,27 @@
             (assert (= number (byter-unpack (byter-pack number))))
             (loop (fx- i 1)))))))
 
-  (define check~byter-008
+  (define ~check-byter-008
     (lambda ()
       (assert (string=? "azul" (byter-unpack (byter-pack "azul"))))))
 
-  (define check~byter-009
+  (define ~check-byter-009
     (lambda ()
       (assert (eq? 'grenouille (byter-unpack (byter-pack 'grenouille))))))
 
-  (define check~byter-010
+  (define ~check-byter-010
     (lambda ()
       (assert (equal? (bytevector) (byter-unpack (byter-pack (bytevector)))))))
 
-  (define check~byter-011
+  (define ~check-byter-011
     (lambda ()
       (assert (equal? (bytevector 0) (byter-unpack (byter-pack (bytevector 0)))))))
 
-  (define check~byter-012
+  (define ~check-byter-012
     (lambda ()
       (assert (equal? (bytevector 0 0 0) (byter-unpack (byter-pack (bytevector 0 0 0)))))))
 
-  (define check~byter-100
+  (define ~check-byter-100
     (lambda ()
       (define expected (list 'symbolics
                              #t
@@ -498,7 +498,7 @@
                              (- (- (expt 2 64) 1))))
       (assert (equal? (byter-unpack (byter-pack expected)) expected))))
 
-  (define check~byter-101
+  (define ~check-byter-101
     (lambda ()
       (define base (list 'symbolics
                          #t
@@ -517,7 +517,7 @@
       (define expected (list->vector base))
       (assert (equal? (byter-unpack (byter-pack expected)) expected))))
 
-  (define check~byter-102
+  (define ~check-byter-102
     (lambda ()
       (define base (list 'symbolics
                          #t
@@ -662,14 +662,14 @@
                           ))))
             (generator)))))
 
-  (define check~byter-998/seed
+  (define ~check-byter-998/seed
     (lambda ()
       (define seed (string->number (or (getenv "LETLOOP_BYTER_SEED") "1")))
       (call-with-values (lambda () (byter-random-object seed))
         (lambda (seed object)
           (assert (equal? object (byter-unpack (byter-pack object))))))))
 
-  (define check~byter-998/random
+  (define ~check-byter-998/random
     (lambda ()
       (let loop ((i (expt 2 (string->number (or (getenv "LETLOOP_BYTER_N") "8")))))
         (unless (fxzero? i)
@@ -683,7 +683,7 @@
       (lambda (a b) (eq? (bytevector-compare a b)
                          (byter-compare object other)))))
 
-  (define check~byter-999/seed
+  (define ~check-byter-999/seed
     (lambda ()
       (define seed (string->number (or (getenv "LETLOOP_BYTER_SEED") "1")))
       (call-with-values (lambda () (byter-random-object seed))
@@ -693,7 +693,7 @@
               (let ((comparator (make-comparator object other)))
                 (assert (comparator (byter-pack object) (byter-pack other))))))))))
 
-  (define check~byter-999/random
+  (define ~check-byter-999/random
     (lambda ()
       (let loop ((i (expt 2 (string->number (or (getenv "LETLOOP_BYTER_N") "8")))))
         (unless (fxzero? i)

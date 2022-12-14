@@ -15,23 +15,23 @@
 
           lbst->alist
 
-          check~lbst-001
-          check~lbst-002
-          check~lbst-003
-          check~lbst-004
-          check~lbst-005
-          check~lbst-006
-          check~lbst-007
-          check~lbst-008
-          check~lbst-009
-          check~lbst-010
-          check~lbst-011
-          check~lbst-012
-          check~lbst-013
-          check~lbst-014/random
-          check~lbst-015/random
-          check~lbst-016/random
-          check~lbst-017/random
+          ~check-lbst-001
+          ~check-lbst-002
+          ~check-lbst-003
+          ~check-lbst-004
+          ~check-lbst-005
+          ~check-lbst-006
+          ~check-lbst-007
+          ~check-lbst-008
+          ~check-lbst-009
+          ~check-lbst-010
+          ~check-lbst-011
+          ~check-lbst-012
+          ~check-lbst-013
+          ~check-lbst-014/random
+          ~check-lbst-015/random
+          ~check-lbst-016/random
+          ~check-lbst-017/random
           )
   (import (chezscheme) (letloop r999))
 
@@ -440,11 +440,11 @@
       (flush-output-port (current-error-port))
       (car (reverse args))))
 
-  (define check~lbst-001
+  (define ~check-lbst-001
     (lambda ()
       (assert (lbst-null? lbst-null))))
 
-  (define check~lbst-002
+  (define ~check-lbst-002
     (lambda ()
       (let* ((lbst (make-lbst))
              (lbst (lbst-set lbst #vu8(42) #vu8(42)))
@@ -458,7 +458,7 @@
                           (#vu8(42) . #vu8(42))
                           (#vu8(101) . #vu8(101))))))))
 
-  (define check~lbst-003
+  (define ~check-lbst-003
     (lambda ()
       (let* ((lbst (make-lbst))
              (lbst (lbst-set lbst #vu8(42) #vu8(42)))
@@ -467,7 +467,7 @@
              (lbst (lbst-set lbst #vu8(101) #vu8(101))))
         (assert (fx<? (bytevector-u8-ref (lbst-value lbst) 0) (bytevector-u8-ref (lbst-value (lbst-next lbst)) 0))))))
 
-  (define check~lbst-004
+  (define ~check-lbst-004
     (lambda ()
       (let* ((lbst (make-lbst))
              (lbst (lbst-set lbst #vu8(42) #vu8(42)))
@@ -476,7 +476,7 @@
              (lbst (lbst-set lbst #vu8(101) #vu8(101))))
         (assert (fx<? (bytevector-u8-ref (lbst-value lbst) 0) (bytevector-u8-ref (lbst-value (lbst-next lbst)) 0))))))
 
-  (define check~lbst-005
+  (define ~check-lbst-005
     (lambda ()
       (let* ((lbst (make-lbst))
              (lbst (lbst-set lbst #vu8(42) #vu8(42)))
@@ -489,7 +489,7 @@
                (d (lbst-value (lbst-next lbst))))
           (assert (apply fx<=? (map (lambda (x) (bytevector-u8-ref x 0)) (list a b c d))))))))
 
-  (define check~lbst-006
+  (define ~check-lbst-006
     (lambda ()
       (let* ((lbst (make-lbst))
              (lbst (lbst-set lbst #vu8(42) #vu8(42)))
@@ -498,7 +498,7 @@
              (lbst (lbst-set lbst #vu8(101) #vu8(101))))
         (assert (bytevector=? (lbst-value (lbst-start lbst)) #vu8(13))))))
 
-  (define check~lbst-007
+  (define ~check-lbst-007
     (lambda ()
       (let* ((lbst (make-lbst))
              (lbst (lbst-set lbst #vu8(42) #vu8(42)))
@@ -518,7 +518,7 @@
             out
             (loop (lbst-next lbst) (cons (cons (lbst-key lbst) (lbst-value lbst)) out))))))
 
-  (define check~lbst-008
+  (define ~check-lbst-008
     (lambda ()
       (let* ((lbst (make-lbst))
              (lbst (lbst-set lbst #vu8(42) #vu8(42)))
@@ -528,7 +528,7 @@
 
         (assert (equal? (reverse (lbst->alist/reversed lbst)) (lbst->alist lbst))))))
 
-  (define check~lbst-009
+  (define ~check-lbst-009
     (lambda ()
 
       (let* ((lbst (make-lbst))
@@ -545,7 +545,7 @@
                 (assert (= (bytevector-u8-ref (lbst-value lbst) 0) (car vs)))
                 (loop (cdr vs)))))))))
 
-  (define check~lbst-010
+  (define ~check-lbst-010
     (lambda ()
 
       (let* ((lbst (make-lbst))
@@ -565,7 +565,7 @@
                 (assert (= (bytevector-u8-ref (lbst-value lbst) 0) (list-ref (car vs) 2)))
                 (loop (cdr vs)))))))))
 
-  (define check~lbst-011
+  (define ~check-lbst-011
     (lambda ()
       (let* ((lbst (make-lbst))
              (lbst (lbst-set lbst #vu8(42) #vu8(42)))
@@ -578,7 +578,7 @@
             (assert (= (car vs) (bytevector-u8-ref (lbst-value (lbst-ref lbst (bytevector (car vs)))) 0)))
             (loop (cdr vs)))))))
 
-  (define check~lbst-012
+  (define ~check-lbst-012
     (lambda ()
       (let* ((lbst (make-lbst))
              (lbst (lbst-set lbst #vu8(42) #vu8(42)))
@@ -591,7 +591,7 @@
             (assert (not (lbst-ref lbst (bytevector (car vs)))))
             (loop (cdr vs)))))))
 
-  (define check~lbst-013
+  (define ~check-lbst-013
     (lambda ()
       (let* ((lbst (make-lbst))
              (lbst (lbst-set lbst #vu8(42) #vu8(42)))
@@ -609,7 +609,7 @@
         (smaller #t)
         (else #f))))
 
-  (define check~lbst-014/random
+  (define ~check-lbst-014/random
     (lambda ()
       (let loop ((lbst (make-lbst))
                  (out '())
@@ -622,7 +622,7 @@
               (bytevector-u64-set! key 0 value 'big)
               (loop (lbst-set lbst key key) (cons (cons key key) out) (fx- count 1)))))))
 
-  (define check~lbst-015/random
+  (define ~check-lbst-015/random
     (lambda ()
       (let loop ((lbst (make-lbst))
                  (out '())
@@ -644,7 +644,7 @@
           (loop (fx- length 1))))
       bytevector))
 
-  (define check~lbst-016/random
+  (define ~check-lbst-016/random
     (lambda ()
       (let loop ((lbst (make-lbst))
                  (count 1024)
@@ -661,7 +661,7 @@
                          (bytevector-length value)
                          bytes)))))))
 
-  (define check~lbst-017/random
+  (define ~check-lbst-017/random
     (lambda ()
       (define length (random 1024))
       (let loop ((lbst (make-lbst))
