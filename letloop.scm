@@ -64,6 +64,17 @@
                            "dev"
                            (substring out 0 (fx- (string-length out) 1)))))
 
+(define-syntax include-date
+  (lambda (x)
+    (syntax-case x ()
+      [(k)
+       (let ([fn (datum filename)])
+         (with-syntax ([exp (run/output "date --iso=seconds")])
+                      #'exp))])))
+
+(define build-date (let ((date (include-date)))
+                     (substring date 0 (fx- (string-length date) 1))))
+
 (define make-accumulator
   (lambda ()
     (let ((out '()))
@@ -73,9 +84,15 @@
             (set! out (cons object out)))))))
 
 (define (display-usage usage)
+  (newline)
+  (display letloop.nfo)
+  (newline)
+  (newline)
   (display usage)
   (newline)
   (write `(tag ,git-describe))
+  (newline)
+  (write `(build-date ,build-date))
   (newline)
   (write `(homepage "https://hyper.dev/"))
   (newline))
@@ -598,7 +615,7 @@
         (define allow?
           (lambda (x)
             ;; Does it look like a check procedure
-            (and (string-prefix? "check~" (symbol->string (cdr x)))
+            (and (string-prefix? "~check-" (symbol->string (cdr x)))
                  (or (null? alloweds)
                      (member (cdr x) alloweds)
                      (member (car x) alloweds)))))

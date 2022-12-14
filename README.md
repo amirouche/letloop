@@ -10,8 +10,7 @@ See `letloop.md`:
 sudo apt install chezscheme
 git clone https://github.com/amirouche/letloop
 cd letloop
-scheme --program letloop.scm compile /usr/lib/csv9.5.4/ta6le/ letloop.scm letloop
-cp letloop $HOME/.local/bin/
+scheme --program letloop.scm compile /usr/lib/csv9.5.4/ta6le/ letloop.scm $HOME/.local/bin/letloop
 export PATH="$HOME/.local/bin/:$PATH"
 ```
 
