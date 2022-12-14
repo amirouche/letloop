@@ -8,7 +8,7 @@
 
 ## Issues
 
-None, at this time.
+None at this time.
 
 ## Abstract
 
@@ -20,15 +20,15 @@ the ability to estimate the count of keys, and the count of bytes.
 
 There is several existing databases that expose an interface similar
 to `okvs`, and even more that use an Ordered Key-Value Store (OKVS) as
-their backing storage.
+a backing storage.
 
-While `okvs` interface is lower-level than the mainstream SQL, it also
-has the advantage of having less moving pieces, and stems from a
-well-known datastructure, part of every software engineering
-curriculum, namely binary trees, it makes `okvs` a good teaching
-material that has immediate useful applications, including building
-your own SQL database. Last but not least, `okvs` pin the current
-practice of building databases on top of a similar tool.
+While `okvs` interface is lower-level than the mainstream database
+that rely on SQL query language, it also has the advantage of having
+less moving pieces, and stems from a well-known datastructure, part of
+every software engineering curriculum, namely binary trees. `okvs` is
+a good teaching material that has immediate useful applications. Last
+but not least, `okvs` pin the current practice of building databases
+on top of similar tools.
 
 `okvs` can be used to build many datastructures, called
 *extensions*. Possible extensions of `okvs` are counter, bag, set, and
@@ -76,14 +76,14 @@ returns `#f`.
 Returns `#t` if `OBJ` satisfy either `okvs?`, `okvs-transaction?`, or
 `okvs-cursor?`. Otherwise, returns `#f`.
 
-### `(okvs-key-max-size handle)`
+### `(okvs-key-max-length handle)`
 
-Returns the maximum size of a key for the database associated with
+Returns the maximum length of a key for the database associated with
 `HANDLE`.
 
 ### `(okvs-value-max-size handle)`
 
-Returns the maximum size of a value of the database associated with
+Returns the maximum length of a value of the database associated with
 `HANDLE`.
 
 ### `(make-okvs-transaction-variable init)`
@@ -100,19 +100,19 @@ and a new value for the associated transaction. It returns no values.
 In the following example, `okvs-in-transaction` will return `#f`:
 
 ```scheme
-(define read-only? (make-okvs-transaction-parameter #t))
+(define read-only (make-okvs-transaction-parameter #t))
 
 (define (proc tx)
-  (display (read-only? tx)) ;; => #t
+  (display (read-only tx)) ;; => #t
   (okvs-set tx #u8(42) #u8(13 37))
-  (read-only? tx #f)
+  (read-only tx #f)
   ...
-  (read-only? tx))
+  (read-only tx))
 
 (okvs-in-transaction okvs proc) ;; => #f
 ```
 
-### `(okvs-transaction-parametrize ((parameter value) ...) expr ...)`
+### `(okvs-transaction-parametrize ((variable value) ...) expr ...)`
 
 Similar to `parametrize`.
 
@@ -121,7 +121,8 @@ Similar to `parametrize`.
 Returns SRFI-173 hook associated with the beginning of a transaction.
 This hook gives a chance to extension libraries to initialize their
 internal states. The procedures associated with this hook must execute
-just after the transaction is started.
+just after the transaction is started, and before user procedure
+passed to `okvs-in-transaction` is called.
 
 ### `(okvs-pre-commit-hook handle)`
 
