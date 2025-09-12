@@ -1,0 +1,13 @@
+a.out
+local
+*.ss~
+*.ss#*
+.#*.ss
+
+*.scm~
+*.scm#*
+.#*.scm
+
+*.so
+*.wpo
+*~
