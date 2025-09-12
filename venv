@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+
+if [ ! "$BININK_VENV" ]; then
+    export BININK_ROOT=$(pwd)
+    export BININK_VENV=yes
+    if [ "x$1" != "x" ]; then
+        export BININK_PREFIX=$1
+        shift
+    else
+        export BININK_PREFIX=$(pwd)/local
+    fi
+    mkdir -p "$BININK_PREFIX/bin"
+    export SCHEME=$BININK_ROOT/local/bin/scheme
+    export LD_LIBRARY_PATH="$BININK_PREFIX/lib/"
+    export PATH="$BININK_PREFIX/bin:$HOME/.local/bin:$PATH"
+    if [ ! "$@" ]; then
+        echo "Entering binink... There is $(make todo | grep TODO | wc -l) TODOs..."
+        $SHELL
+    else
+        exec $@
+    fi
+else
+    echo "You are already in binink!"
+fi
