@@ -1,7 +1,7 @@
 #!chezscheme
 (library (binink base)
   (export binink-main binink-compile binink-exec binink-repl binink-check)
-  (import (chezscheme) (binink match base) (binink cli base))
+  (import (chezscheme) (binink match base) (binink cli base) (binink root))
 
   (define pk
     (lambda args
@@ -852,6 +852,7 @@
         ((compile) (binink-compile (cdr args)))
         ((exec) (binink-exec (cdr args)))
         ((repl) (binink-repl (cdr args)))
+        ((root) (binink-root (cdr args)))
         (else (binink-usage) (exit 1)))))
 
   (define ftw*
