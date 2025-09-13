@@ -4,6 +4,9 @@ Usage:
   binink compile [DIRECTORY ...] LIBRARY.SCM PROCEDURE
   binink exec [DIRECTORY ...] LIBRARY.SCM PROCEDURE [-- ARGUMENT ...]
   binink repl
+  binink root available
+  binink root create DISTRIBUTION VERSION MACHINE DIRECTORY
+  binink root exec DIRECTORY TARGET-DIRECTORY -- COMMAND ...
 
 The following flags are available:
 
