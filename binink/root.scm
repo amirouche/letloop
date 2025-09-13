@@ -3,10 +3,7 @@
   (export binink-root
           root-available-print
           root-create
-          root-chroot
-          root-exec
-          #;root-start
-          #;root-emulate)
+          root-exec)
 
   (import (chezscheme)
           (binink environment)
@@ -14,8 +11,7 @@
           (binink html base)          
           (binink root base)
           (binink sxpath)
-          (binink www)
-          )
+          (binink www))
 
    ;; helpers
 
@@ -216,41 +212,6 @@
              (loop (cons* delimiter (car strings) out)
                    (cdr strings))))))
 
-   (define root-chroot
-     (lambda (directory ignore . command)
-
-       (define setup
-         (lambda (directory)
-           (system* directory #f "cp /etc/resolv.conf ~a/etc/resolv.conf" directory)
-           (system* directory #f "mkdir -p ~a/mnt/host" directory)
-           (system* directory #f "mount --bind ~a ~a/mnt/host" (current-directory) directory)
-           (for-each (lambda (x) (system* directory #f "mkdir -pv ~a/~a" directory x))
-                     (list "dev" "proc" "sys" "run"))
-           (system* directory #f "mount -v --bind /dev ~a/dev" directory)
-           (system* directory #f "mount -vt devpts devpts -o gid=5,mode=0620 ~a/dev/pts" directory)
-           (system* directory #f "mount -vt proc proc ~a/proc" directory)
-           (system* directory #f "mount -vt tmpfs tmpfs ~a/run" directory)))
-
-       (define teardown
-         (lambda (directory)
-           (system* directory #f "umount -v ~a/mnt/host" directory)
-           (system* directory #f "umount -v ~a/dev/pts" directory)
-           (system* directory #f "umount -v ~a/proc" directory)
-           (system* directory #f "umount -v ~a/run" directory)
-           (system* directory #f "umount -v ~a/dev" directory)))
-
-       (setup directory)
-
-       (guard (ex (else (display-condition ex)(newline)(pk (void))))
-         (pk 'directory directory)
-         (pk 'command command)
-         (system* #f
-                  #f
-                  "chroot ~a ~a"
-                  directory
-                  (string-join command " ")))
-       (teardown directory)))
-
    (define root-exec
      (lambda (directory target-directory command . variables)
 
@@ -269,36 +230,6 @@
                 (basename directory)
                 (apply format #f command variables))))
 
-   (define qemu-9p-bare-command "qemu-system-x86_64 \
-    -enable-kvm \
-    -machine pc,accel=kvm,usb=off,dump-guest-core=off -m 2048 \
-    -smp 4,sockets=4,cores=1,threads=1 -rtc base=utc \
-    -boot strict=on -kernel ~a \
-    -initrd ~a \
-    -append 'init=/usr/lib/systemd/systemd root=fsRoot rw rootfstype=9p rootflags=trans=virtio,version=9p2000.L,msize=5000000,posixacl console=ttyS0' \
-    -fsdev local,security_model=none,multidevs=remap,id=fsRoot,path=~a \
-    -device virtio-9p-pci,id=fsRoot,fsdev=fsRoot,mount_tag=fsRoot \
-    -nographic")
-
-   (define root-emulate
-     (lambda (directory)
-       ;; TODO: support more machine architecture amd64, aarch64, etc...
-       ;;
-       ;; Install linux-image-amd64, add fsRoot /etc/fstab, and include 9p in initrd
-       ;;
-       ;; ref: https://superuser.com/a/536352/115319
-       (system* #f #f qemu-9p-bare-command
-                (string-append directory "/boot/vmlinuz*")
-                (string-append directory "/boot/initrd.img*")
-                directory)))
-
-   ;; (define tmp (make-temporary-directory "/tmp/binink-root/bookbook"))
-   ;; (root-init "debian" "bookworm" "amd64" tmp)
-   ;; (root-exec tmp #f #f "/bin/bash")
-   ;; (root-exec "/tmp/binink-root/bookbook-8TPZrc/" "/tmp" '() "/bin/bash")
-   ;; (root-spawn "/tmp/binink-root/bookbook-6Xwngr")
-   ;; (root-emulate "/tmp/binink-root/bookbook-8TPZrc/")
-
    (define binink-root
      (lambda (args)
        (if (null? args)
@@ -307,10 +238,7 @@
            (case (string->symbol (car args))
              ((available) (root-available-print))
              ((create) (apply root-create (cdr args)))
-             ((chroot) (apply root-chroot (cdr args)))
              ((exec) (root-exec (cadr args) (caddr args) (string-join (cddr (cddr args)) " ")))
-             ;; ((init) (root-start (cadr args)))
-             ;; ((emulate) (root-emulate (cadr args)))
              (else (display "A typo? Almost, try again...!\n")
                    (exit 1))))))
 
