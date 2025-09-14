@@ -291,6 +291,12 @@
       (any (lambda (x) (string-suffix? x filepath))
            (map car (library-extensions)))))
 
+  (define display-condition!
+    (lambda (procedure ex)
+      (format (current-error-port) "Procedure ~a: " procedure)
+      (display-condition ex)
+      (newline (current-error-port))))
+
   (define maybe-library-name
     (lambda (filename)
 
@@ -302,7 +308,8 @@
                                          ((library (,name ...) ,body ...) name)
                                          (,_ #f))
                                        (lambda (name)
-                                         (guard (ex (else #f))
+                                         (guard (ex (else (display-condition! 'maybe-library-name ex)
+                                                          #f))
                                                 (and (eval #t (environment name)) name)))))))))
   (define ftw
     (lambda (directory)
@@ -388,7 +395,7 @@
 
   (define maybe-compile-file*
     (lambda (f)
-      (guard (ex (else (void)))
+      (guard (ex (else (display-condition! 'maybe-compile-file* ex) (void)))
         (maybe-compile-file f))))
 
   (define (system* command)
@@ -397,7 +404,7 @@
 
   (define import-procedure?
     (lambda (library-name main)
-      (guard (ex (else #f))
+      (guard (ex (else (display-condition! 'import-procedure? ex) #f))
         (procedure? (eval main (environment library-name))))))
 
   (define binink-compile
@@ -516,11 +523,12 @@
 
       (for-each maybe-compile-file* (map cdr (binink-discover-libraries)))
 
-      (unless (and (pk main)
-                   (pk (maybe-library-name library.scm))
-                   (pk (import-procedure? (maybe-library-name library.scm)
+      (unless (and (pk 'main main)
+                   (pk 'library.scm (maybe-library-name library.scm))
+                   (pk 'import? (import-procedure? (maybe-library-name library.scm)
                                           (string->symbol main))))
-        (format #t "There is something wrong in the arguments!")
+        (format #t "There is something wrong!")
+        (flush-output-port)
         (exit 1))
 
       (call-with-output-file (string-append temporary-directory "/program.scm")
@@ -669,7 +677,7 @@
             (massage-standalone! (cdr standalone)))))
 
       (define (maybe-library-exports library-name)
-        (guard (ex (else #f))
+        (guard (ex (else (display-condition! 'maybe-library-exports ex) #f))
           (eval `(library-exports ',library-name) (environment '(chezscheme) library-name))))
 
       (define maybe-read-library
@@ -751,7 +759,7 @@
                      (format #t "* Checking `~a`:\n" (car thunks))
                      (guard (ex (else
                                  (if (condition? ex)
-                                     (display-condition ex)
+                                     (display-condition! 'check ex)
                                      (write ex))
                                  (display "\n** ERROR!\n")
                                  (if ,fail-fast?
@@ -834,6 +842,7 @@
                                                                     (reverse (uniquify (map car checks))))
                                                              #t)))
                   (lambda ()
+                    ;; profile-dump-html may fail if there is no temporary directory
                     (guard (ex (else (void)))
                       (profile-dump-html)
                       (format (current-output-port) "* Coverage profile can be found at: ~a/profile.html\n" temporary-directory)))))))))
@@ -968,7 +977,7 @@
                 (guard (ex
                         ((condition? ex)
                          (display "\033[31m;; raised condition:\033[m ")
-                         (display-condition ex)
+                         (display-condition! 'repl ex)
                          (newline))
                         (else
                          (display "\033[31m;; raised:\033[m ")
