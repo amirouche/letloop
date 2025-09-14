@@ -18,10 +18,10 @@ chezscheme: ## Compile latest chezscheme
 	cd $(PWD)/local/src/chezscheme && make -j$(shell nproc --ignore 1)
 	cd $(PWD)/local/src/chezscheme && make install
 
-binink: binink-program.c binink-usage.md binink/base.scm ## Produce a.out from binink/base.scm's procedure called binink-main
+binink: src/binink-program.c src/binink-usage.md src/binink/base.scm ## Produce a.out from binink/base.scm's procedure called binink-main
 	echo $(SCHEME)
 	$(SCHEME) --version
-	echo '(generate-wpo-files #t)(import (binink base)) (binink-compile (list "." "binink/base.scm" "binink-main"))' | $(SCHEME) --quiet --libdirs . --compile-imported-libraries
+	echo '(generate-wpo-files #t)(import (binink base)) (binink-compile (list "./src/" "src/binink/base.scm" "binink-main"))' | $(SCHEME) --quiet --libdirs ./src/ --compile-imported-libraries
 	@echo What is done is not to be done!
 
 todo: ## So say we all!

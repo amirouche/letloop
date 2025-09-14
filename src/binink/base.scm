@@ -119,7 +119,7 @@
           (apply string-append strings)
           (loop (cdr strings) (cons* " " string out)))))
 
-  (define binink-usage.md (include-filename-as-string "binink-usage.md"))
+  (define binink-usage.md (include-filename-as-string "./src/binink-usage.md"))
 
   ;; Include git commit
 
@@ -356,7 +356,7 @@
               out
               (set! out (cons object out)))))))
 
-  (define binink-program.c (include-filename-as-string "binink-program.c"))
+  (define binink-program.c (include-filename-as-string "./src/binink-program.c"))
   (define scheme.h (include-chez-file "scheme.h"))
   (define kernel.o (include-chez-file "kernel.o"))
 
@@ -371,7 +371,7 @@
     (lambda ()
       (define root+filepaths (apply append (map (lambda (root) (map (lambda (f) (cons (car root) f)) (ftw (car root))))
                                                 (library-directories))))
-      (filter (lambda (root+filepath) (maybe-library-name (cdr root+filepath))) root+filepaths)))
+      (filter (lambda (root+filepath) (maybe-library-name (pk 'discover (cdr root+filepath)))) root+filepaths)))
 
   (define (string-split char-delimiter? string)
     (define (maybe-add a b parts)
@@ -566,8 +566,9 @@
           (loop (cdr todo))))
 
       (system*
-       (format #f "cc -I ~a/ -march=native ~a/my-binink-program.c ~a/kernel.o -o a.out -ldl -lz -llz4 -lm -luuid -lpthread"
-               temporary-directory temporary-directory temporary-directory))
+       (pk
+        (format #f "cc -I ~a/ -march=native ~a/my-binink-program.c ~a/kernel.o -o a.out -ldl -lz -llz4 -lm -luuid -lpthread"
+                temporary-directory temporary-directory temporary-directory)))
       (display "Produced: ./a.out\n")))
 
   (define binink-compile* (lambda () (binink-compile (command-line-arguments))))
@@ -882,7 +883,7 @@
     (newline)
     (write `(tag ,binink-tag))
     (newline)
-    (write `(homepage "https://codeberg.org/amirouche/transderivational-search"))
+    (write `(homepage "https://codeberg.org/amirouche/binink"))
     (newline))
 
   (define binink-usage
