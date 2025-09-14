@@ -106,7 +106,7 @@
        (call-with-values (lambda () (www-request 'GET url '() (bytevector)))
          (lambda (code headers body)
            (if (= code 200)
-               ;; With cdr, remove ../
+               ;; cdr will remove parent directory aka. ../
                (cdr (sxpath-index-distributions (html-read (utf8->string body))))
                (begin
                  (format #t "There is a typo or upstream rootfs server is not responding?\n")
@@ -197,7 +197,8 @@
             (system* directory '() "wget ~a" SHA256SUMS)
             (system* directory '() "fgrep rootfs.tar.xz SHA256SUMS | sha256sum -c -")
             (system* directory '() "tar xf rootfs.tar.xz")
-            ;; TODO: why rm machine-id
+            ;; TODO: rm machine-id is a legacy trick inherited from
+            ;; systemd-nspawn, is it still useful?
             (system* directory '() "rm -f etc/resolv.conf etc/machine-id")
             (system* directory '() "echo ~a > etc/hostname" (basename directory))
             (format #t "echo root filesystem available @ ~a\n" directory))))
@@ -233,7 +234,7 @@
    (define binink-root
      (lambda (args)
        (if (null? args)
-           (begin (display "Choose: available / create / chroot / exec.\nYou can do it!\n")
+           (begin (display "Choose: available / create / exec.\nYou can do it!\n")
                   (exit 1))
            (case (string->symbol (car args))
              ((available) (root-available-print))
