@@ -25,10 +25,10 @@ binink: src/binink-program.c src/binink-usage.md src/binink/base.scm ## Produce 
 	@echo What is done is not to be done!
 
 todo: ## So say we all!
-	@grep -nR --color=always -B 2 -A 2 TODO binink/
+	@grep -nR --color=always -B 2 -A 2 TODO src/
 
 xxx: ## For those born under the eye of a wandering star...
-	@grep -nR --color=always -B 2 -A 2 XXX binink/
+	@grep -nR --color=always -B 2 -A 2 XXX src/
 
 check: binink-check.sh ## Hit the ground running!
 	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PWD)/local/lib/ BININK=$(BININK) sh binink-check.sh
