@@ -28,7 +28,7 @@
                 (close-port stderr)
                 out)))))
 
-      (guard (ex (else (format #f (condition-message ex) (condition-irritants ex)) (values #f #f #f)))
+      (guard (ex (else (error 'www-request (condition-message ex) (condition-irritants ex))))
         (define headers* (map (lambda (x) (format #f "~a: ~a" (car x) (cdr x))) headers))
         (call-with-values (lambda ()
                             (http-response-read
