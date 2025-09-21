@@ -10,7 +10,9 @@
  `Y8bod8P' o888o o888o o888o o888o o888o o888o o888o o888o 
 ```
 
-Getting started
+**Getting started**
+
+Requires zlib, lz4, and uuid headers for static compilation.
 
 ```shell
 ./venv
