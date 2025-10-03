@@ -3,6 +3,7 @@
                  (tab-width . 2)
                  (eval . (progn
                            (put 'with-lock 'scheme-indent-function 1)
+                           (put 'with-errno 'scheme-indent-function 0)
                            (put 'guard 'scheme-indent-function 1)
                            (put 'call-with-errno 'scheme-indent-function 1)
                            (put 'with-mutex 'scheme-indent-function 1)

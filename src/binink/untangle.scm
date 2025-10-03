@@ -28,6 +28,15 @@
   (define epoll-event-direction-in #x001)
   (define epoll-event-direction-out #x004)
 
+  ;; TODO: I think it is possible to merge epoll-type-data, into epoll-type-event
+  ;; given the fact that the code only ever assign fd hence type int hence,
+  ;; epoll-type-event will look like:
+  ;;
+  ;; (define-ftype epoll-fd-event
+  ;;   (struct (events unsigned 32)
+  ;;           (int fd)))
+  ;;
+  ;; less code less bug more honey
   (define-ftype epoll-type-data
     (union (ptr void*)
            (fd int)
@@ -43,11 +52,6 @@
     (make-ftype-pointer epoll-type-event
                         (foreign-alloc
                          (ftype-sizeof epoll-type-event))))
-
-  ;; TODO: IIRC epoll-type-event expire for some reason... and are
-  ;; replaced with new ones.  Instead of mutating existing in, out, or
-  ;; both both in and out, when necessary the expired event is
-  ;; replaced with a new event that is both.
 
   (define epoll-event-both-new
     (lambda (fd)
@@ -83,7 +87,8 @@
     (ftype-ref epoll-type-event (data fd) event))
 
   (define (epoll-event-in? event)
-    ;; smaller that (most-positive-fixnum)
+    ;; max unsigned-32 ie. 2^32 - 1 is smaller that
+    ;; (most-positive-fixnum)
     (fx=? (fxlogand (ftype-ref epoll-type-event (events) event)
                     epoll-event-direction-in)
           epoll-event-direction-in))
@@ -94,10 +99,16 @@
                     epoll-event-direction-out)
           epoll-event-direction-out))
 
-  (define epoll-create1
-    (let ((func (foreign-procedure "epoll_create1" (int) int)))
-      (lambda (flags)
-        (func flags))))
+  (define epoll-new
+    (let ((foreign-epoll-create1 (foreign-procedure "epoll_create1" (int) int)))
+      (lambda ()
+        ;; Flags can contain EPOLL_CLOEXEC, that would mean that
+        ;; during exec, or pexec, or popen and the likes... with chez
+        ;; the procedure `system` will use one of those, then the
+        ;; child process would inherit the open file descriptors such
+        ;; as those from sockets, and also the one from epoll.
+        ;; CLOEXEC is required to spawn (untrusted) process.
+        (foreign-epoll-create1 0))))
 
   (define epoll-ctl
     (let ((func (foreign-procedure "epoll_ctl" (int int int void*) int)))
@@ -393,7 +404,7 @@
           (untangle-nonblock! readable)
           (untangle-nonblock! writable)
           ;; zero just means no flag in particular.
-          (let ((epoll (epoll-create1 0))
+          (let ((epoll (epoll-create))
                 (events (make-hashtable equal-hash equal?)))
             (untangle-base-new (jiffy-current)
                                (sq-new)
@@ -405,68 +416,61 @@
                                readable
                                writable))))))
 
-  (define untangle-socket
-    (let ((untangle-socket-foreign (foreign-procedure "socket" (int int int) int)))
+  (define untangle-socket-new
+    (let ((socket-foreign (foreign-procedure "socket" (int int int) int)))
       (lambda (domain type protocol)
-        (define out (untangle-socket-foreign domain type protocol))
-        (untangle-nonblock! out)
-        out)))
-
-  (define untangle-accept-base
-    (let ((untangle-socket-accept4 (foreign-procedure "accept4" (int void* void* int) int))
-          ;; using the following flags value will save extra calls to
-          ;; fcntl to make the accepted fd non blocking.
-          (flags=SOCK_NONBLOCK 2048))
-      (lambda (fd)
-        (untangle-socket-accept4 fd 0 0 flags=SOCK_NONBLOCK))))
-
-  (define untangle-update-epoll
-    (let ((op=EPOLL_CTL_ADD 1)
-          (op=EPOLL_CTL_DEL 2)
-          (op=EPOLL_CTL_MOD 3))
-      ;; TODO: I think this code or the calling code is buggy
-      (lambda (untangle fd mode)
-        (if (hashtable-ref untangle
-                           (cons fd (if (eq? mode 'read) 'write 'read))
-                           #f)
-            (epoll-ctl untangle
-                       op=EPOLL_CTL_MOD
-                       fd
-                       (epoll-event-out-new fd))
-            (epoll-ctl untangle
-                       op=EPOLL_CTL_DEL
-                       fd
-                       (epoll-event-out-new fd))))))
+        (call-with-values (lambda () (with-errno (socket-foreign domain type protocol)))
+          (lambda (out errno)
+            (if (fx=? out -1)
+                (begin
+                  (untangle-log 'error
+                                (format #f "Untangle failed to create socket, message: ~a"
+                                        (strerror errno)))
+                  #f)
+                (begin
+                  (untangle-nonblock! out)
+                  out)))))))
 
   (define untangle-accept
-    (lambda (untangle fd)
+    (let ((accept4-foreign (foreign-procedure "accept4" (int void* void* int) int)))
+      (lambda (untangle fd)
+        
+        (define accept
+          (lambda (fd)
+            ;; using the following flag value will save extra calls to
+            ;; fcntl to make the accepted fd non blocking.
+            (define flags=SOCK_NONBLOCK 2048)
+            (with-errno
+              (accept4-foreign fd 0 0 flags=SOCK_NONBLOCK))))
 
-      (define handle-accept
-        (lambda (k)
-          (hashtable-set! (untangle-events untangle)
-                          (cons fd 'read)
-                          k)
-          (epoll-ctl (untangle-epoll untangle)
-                     1
-                     fd
-                     (epoll-event-in-new fd))))
+        (define handle-accept
+          (lambda (k)
+            ;; accept would block, wait for a new connection that is
+            ;; triggered by read event.
+            (hashtable-set! (untangle-events untangle)
+                            (cons fd 'read)
+                            k)
+            (epoll-ctl (untangle-epoll untangle)
+                       1
+                       fd
+                       (epoll-event-in-new fd))))
 
-      (let loop ()
-        (let-values (((out errno) (call-with-errno (lambda () (untangle-accept-base fd)) values)))
-          (cond
-           ;; it would block, then try again later thanks to epoll
-           ((and (fx=? out -1) (fx=? errno socket-error-would-block))
-            (untangle-abort untangle handle-accept)
-            (loop))
-           ;; some kind of error
-           ((fx=? out -1)
-            (untangle-log 'error
-                          (format #f "Procedure untangle-accept, errno: ~a @ ~a"
-                                  (strerror errno)
-                                  fd))
-            #f)
-           ;; success, out is a valid file description for a client connection
-           (else out))))))
+        (let loop ()
+          (let-values (((out errno) (accept fd)))
+            (cond
+             ;; it would block, then try again later thanks to epoll
+             ((and (fx=? out -1) (fx=? errno socket-error-would-block))
+              (untangle-abort untangle handle-accept)
+              (loop))
+             ;; some kind of error
+             ((fx=? out -1)
+              (untangle-log 'error
+                            (format #f "Procedure untangle-accept, errno: ~a @ ~a"
+                                    (strerror errno)
+                                    fd))
+              #f)
+             ;; success, out is a valid file description for a client connection
+             (else out)))))))
 
   (define untangle-close
     (let ((untangle-close-foreign (foreign-procedure "close" (int) int)))
@@ -711,7 +715,6 @@
 
       (define accept
         (lambda ()
-          (define debug (pk 'acccepting...))
           (define client (untangle-accept untangle fd))
           (if (not client)
               ;; XXX: TODO: here having a reason for the error, would be useful?

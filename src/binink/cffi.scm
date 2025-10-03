@@ -1,6 +1,6 @@
 #!chezscheme
 (library (binink cffi)
-  (export call-with-errno with-lock strerror bytevector-pointer)
+  (export call-with-errno with-errno with-lock strerror bytevector-pointer)
   (import (chezscheme))
 
   (define-syntax call-with-errno
@@ -17,6 +17,22 @@
          ;;
          (with-interrupts-disabled
           (set! out (thunk))
+          (set! errno (#%$errno)))
+         (proc out errno)))))
+  
+  (define-syntax with-errno
+    (syntax-rules ()
+      ((_ e)
+       (let ((out #f)
+             (errno #f))
+         ;; Chez GC must be disabled or it could stomp on errno.
+         ;;
+         ;; See:
+         ;;
+         ;;   https://github.com/cisco/ChezScheme/issues/550
+         ;;
+         (with-interrupts-disabled
+          (set! out e)
           (set! errno (#%$errno)))
          (proc out errno)))))
 
