@@ -12,10 +12,11 @@
 
 **Getting started**
 
-Requires zlib, lz4, and uuid headers for static compilation.
+Requires `zlib`, `lz4`, and `uuid` headers for using `binink compile`.
 
 ```shell
 ./venv
+make chezscheme
 make binink
 mv a.out local/bin/binink
 make check
