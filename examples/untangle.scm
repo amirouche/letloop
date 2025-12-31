@@ -1,5 +1,5 @@
 #!chezscheme
-(library (binink untangle)
+(library (untangle)
 
   (export untangle-new
           untangle-abort
@@ -419,7 +419,7 @@
   (define untangle-socket-new
     (let ((socket-foreign (foreign-procedure "socket" (int int int) int)))
       (lambda (domain type protocol)
-        (call-with-values (lambda () (with-errno (socket-foreign domain type protocol)))
+        (call-with-errno (lambda () (socket-foreign domain type protocol))
           (lambda (out errno)
             (if (fx=? out -1)
                 (begin
@@ -440,8 +440,7 @@
             ;; using the following flag value will save extra calls to
             ;; fcntl to make the accepted fd non blocking.
             (define flags=SOCK_NONBLOCK 2048)
-            (with-errno
-              (accept4-foreign fd 0 0 flags=SOCK_NONBLOCK))))
+            (call-with-errno (lambda () (accept4-foreign fd 0 0 flags=SOCK_NONBLOCK)) values)))
 
         (define handle-accept
           (lambda (k)
@@ -711,7 +710,7 @@
       (define DEBUG (pk 'DEBUG))
       (define SOCKET-DOMAIN=AF-INET 2)
       (define SOCKET-TYPE=STREAM 1)
-      (define fd (pk 'socket (untangle-socket SOCKET-DOMAIN=AF-INET SOCKET-TYPE=STREAM 0)))
+      (define fd (pk 'socket (untangle-socket-new SOCKET-DOMAIN=AF-INET SOCKET-TYPE=STREAM 0)))
 
       (define accept
         (lambda ()

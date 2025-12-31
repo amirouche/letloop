@@ -316,7 +316,7 @@
 
   (define maybe-library-name
     (lambda (filename)
-      (pk 'maybe-library-name filename)
+      (pk '*maybe-library-name filename)
       (if (not (maybe-library? filename))
           #f
           (and=> (guard (ex (else #f))
@@ -325,10 +325,10 @@
                                          ((library (,name ...) ,body ...) name)
                                          (,_ #f))
                                        (lambda (name)
-                                         (guard (ex (else (display-condition! 'maybe-library-name ex)
+                                         (guard (ex (else (display-condition! '**maybe-library-name ex)
                                                           #f))
-                                           (pk 'environmnet name)
-                                           (and (eval #t (environment name)) name)))))))))
+                                           (pk '***environmnet name)
+                                           (and (eval '#t (environment name)) name)))))))))
   (define ftw
     (lambda (directory)
       (let loop ((paths (map (lambda (x) (string-append directory "/" x)) (directory-list directory)))
@@ -535,9 +535,9 @@
       (for-each maybe-compile-file* (map cdr (binink-discover-libraries)))
 
       (unless (and (pk 'main main)
-                   (pk 'library.scm (maybe-library-name library.scm))
-                   (pk 'import? (import-procedure? (maybe-library-name library.scm)
-                                          (string->symbol main))))
+                   (pk 'library.scm (maybe-library-name (pk 'mylibrary library.scm)))
+                   (pk 'import? (import-procedure? (maybe-library-name (pk 'import library.scm))
+                                                   (string->symbol main))))
         (format #t "There is something wrong!")
         (flush-output-port)
         (exit 1))
@@ -655,7 +655,10 @@
 
     (dynamic-wind
         (lambda () (void))
-        (lambda () (eval (cons (string->symbol main) extra) (environment (maybe-library-name library.scm))))
+        (lambda () (let ((exp (cons (string->symbol main) extra))
+                         (env (environment (maybe-library-name library.scm))))
+                     (pk 'to 'exec exp env)
+                     (eval exp env)))
         (lambda ()
           (when dev?
             (profile-dump-html)))))
