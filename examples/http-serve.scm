@@ -4,9 +4,8 @@
 
   (define pk
     (lambda args
-      (when (getenv "DEBUG")
-        (display ";; ")(write args)(newline)
-        (flush-output-port))
+      (display ";; ")(write args)(newline)
+      (flush-output-port)
       (car (reverse args))))
 
   (define http-read-bytes
