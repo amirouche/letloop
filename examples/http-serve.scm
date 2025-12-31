@@ -1,6 +1,6 @@
 (library (http-serve)
   (export main)
-  (import (chezscheme) (binink http) (binink untangle))
+  (import (chezscheme) (binink http) (untangle))
 
   (define pk
     (lambda args
@@ -65,7 +65,6 @@
                                (handle read write close)
                                #t))))))
               (loop)))))))
-
 
   (define main
     (lambda (port)
