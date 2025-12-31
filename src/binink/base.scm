@@ -316,7 +316,7 @@
 
   (define maybe-library-name
     (lambda (filename)
-
+      (pk 'maybe-library-name filename)
       (if (not (maybe-library? filename))
           #f
           (and=> (guard (ex (else #f))
@@ -327,7 +327,8 @@
                                        (lambda (name)
                                          (guard (ex (else (display-condition! 'maybe-library-name ex)
                                                           #f))
-                                                (and (eval #t (environment name)) name)))))))))
+                                           (pk 'environmnet name)
+                                           (and (eval #t (environment name)) name)))))))))
   (define ftw
     (lambda (directory)
       (let loop ((paths (map (lambda (x) (string-append directory "/" x)) (directory-list directory)))

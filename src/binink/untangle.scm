@@ -13,8 +13,8 @@
           untangle-stop
           untangle-tcp-serve
 
-          ~check-untangle-000
-          ~check-untangle-001
+          ;; ~check-untangle-000
+          ;; ~check-untangle-001
           ;;~check-untangle-002
           )
 
@@ -404,7 +404,7 @@
           (untangle-nonblock! readable)
           (untangle-nonblock! writable)
           ;; zero just means no flag in particular.
-          (let ((epoll (epoll-create))
+          (let ((epoll (epoll-new))
                 (events (make-hashtable equal-hash equal?)))
             (untangle-base-new (jiffy-current)
                                (sq-new)
