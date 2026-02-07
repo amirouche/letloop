@@ -4,7 +4,7 @@
           www-form-urlencoded-read
           ~check-www-000 ~check-www-001 ~check-www-002 ~check-www-002-bis
           ~check-www-003)
-  (import (chezscheme) (binink http) (binink match base) (binink generator))
+  (import (chezscheme) (binink http) (binink match) (binink generator))
 
   (define pk
     (lambda args
