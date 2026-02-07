@@ -1,7 +1,7 @@
 #!chezscheme
 (library (binink base)
   (export binink-main binink-compile binink-exec binink-repl binink-check)
-  (import (chezscheme) (binink match base) (binink cli base) (binink root))
+  (import (chezscheme) (binink match) (binink cli base) (binink root))
 
   (define pk
     (lambda args

@@ -1,6 +1,6 @@
 (library (example)
   (export main)
-  (import (chezscheme) (binink match base))
+  (import (chezscheme) (binink match))
 
   (define pk
     (lambda args

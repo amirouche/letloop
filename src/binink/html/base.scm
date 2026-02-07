@@ -8,7 +8,7 @@
    ~check-letloop-html-write-2
    ~check-letloop-html-write-3
   )
-  (import (chezscheme) (binink match base) (binink html htmlprag))
+  (import (chezscheme) (binink match) (binink html htmlprag))
 
   ;; ref: https://html.spec.whatwg.org/
 
