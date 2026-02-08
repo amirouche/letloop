@@ -21,3 +21,18 @@ make binink
 mv a.out local/bin/binink
 make check
 ```
+
+## Development Skills
+
+This project includes Claude Code skills for common development tasks:
+
+- **`/binink-build-chez`** - Build ChezScheme from source
+- **`/binink-build`** - Build the binink binary
+- **`/binink-install`** - Build and install binink to local/bin
+- **`/binink-full-setup`** - Complete setup from scratch
+- **`/binink-test`** - Run the complete test suite
+- **`/binink-clean`** - Clean temporary files
+
+Use these skills with Claude Code by invoking them with slash commands or natural language requests like "run the tests" or "build binink".
+
+See [.claude/SKILLS.md](.claude/SKILLS.md) for detailed documentation.
