@@ -257,6 +257,11 @@
       (generate-profile-forms active?)
       (debug-on-exception active?)))
 
+  (define disable-garbage-collector!
+    (lambda (active?)
+      (when active?
+        (collect-request-handler void))))
+
   (define (maybe-display-errors-then-exit errors)
     (let ((errors (errors (eof-object))))
       (unless (null? errors)
@@ -467,6 +472,7 @@
       (define main #f)
       (define library.scm #f)
       (define dev? #f)
+      (define disable-garbage-collector? #f)
       (define optimize-level* 0)
       (define program.scm #f)
 
@@ -491,6 +497,8 @@
               (cond
                ((and (eq? (car keyword) '--dev) (not (string? (cdr keyword))))
                 (set! dev? #t))
+               ((and (eq? (car keyword) '--disable-garbage-collector) (not (string? (cdr keyword))))
+                (set! disable-garbage-collector? #t))
                ((and (eq? (car keyword) '--optimize-level)
                      (string->number (cdr keyword))
                      (<= 0 (string->number (cdr keyword)) 3))
@@ -519,6 +527,7 @@
         (library-extensions (append extensions (library-extensions))))
 
       (dev! dev?)
+      (disable-garbage-collector! disable-garbage-collector?)
 
       (generate-wpo-files #t)
 
@@ -581,6 +590,7 @@
     (define extensions '())
     (define directories '())
     (define dev? #f)
+    (define disable-garbage-collector? #f)
     (define optimize-level* 0)
     (define extra '())
     (define program.scm #f)
@@ -612,6 +622,8 @@
             (cond
              ((and (eq? (car keyword) '--dev) (not (string? (cdr keyword))))
               (set! dev? #t))
+             ((and (eq? (car keyword) '--disable-garbage-collector) (not (string? (cdr keyword))))
+              (set! disable-garbage-collector? #t))
              ((and (eq? (car keyword) '--optimize-level)
                    (string->number (cdr keyword))
                    (<= 0 (string->number (cdr keyword) 3)))
@@ -638,6 +650,7 @@
       (library-extensions (append extensions (library-extensions))))
 
     (dev! dev?)
+    (disable-garbage-collector! disable-garbage-collector?)
 
     (dynamic-wind
         (lambda () (void))
@@ -653,6 +666,7 @@
 
       (define fail-fast? #f)
       (define dry-run? #f)
+      (define disable-garbage-collector? #f)
       (define extensions '())
       (define directories '())
       (define files '())
@@ -664,6 +678,7 @@
             (case (caar keywords)
               (--fail-fast (set! fail-fast? #t))
               (--dry-run (set! dry-run? #t))
+              (--disable-garbage-collector (set! disable-garbage-collector? #t))
               (else (errors (format #f "Unknown keywords: ~a" (caar keywords))))))))
 
       (define massage-standalone!
@@ -792,6 +807,7 @@
           (set! alloweds (map (lambda (x) (read (open-input-string x))) extra))))
 
       (compile-profile 'source)
+      (disable-garbage-collector! disable-garbage-collector?)
 
       (maybe-display-errors-then-exit errors)
 
@@ -916,6 +932,7 @@
     (define extensions '())
     (define directories '())
     (define dev? #f)
+    (define disable-garbage-collector? #f)
     (define optimize-level* 0)
     (define extra '())
 
@@ -940,6 +957,8 @@
             (cond
              ((and (eq? (car keyword) '--dev) (not (string? (cdr keyword))))
               (set! dev? #t))
+             ((and (eq? (car keyword) '--disable-garbage-collector) (not (string? (cdr keyword))))
+              (set! disable-garbage-collector? #t))
              ((and (eq? (car keyword) '--optimize-level)
                    (string->number (cdr keyword))
                    (<= 0 (string->number (cdr keyword) 3)))
@@ -969,6 +988,7 @@
       (library-extensions extensions))
 
     (dev! dev?)
+    (disable-garbage-collector! disable-garbage-collector?)
 
     (let loop ()
       (display "\033[32m#;binink #;\033[m ")
