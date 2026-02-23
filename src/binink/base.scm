@@ -127,8 +127,16 @@
     (lambda (x)
       (syntax-case x ()
         ((k)
-         (with-syntax ([exp (run/output "git describe --always --tags --dirty")])
+         (with-syntax ([exp (run/output "git describe --exact-match --tags 2>/dev/null || true")])
            #'exp)))))
+
+  (define-syntax include-git-dirty
+    (lambda (x)
+      (syntax-case x ()
+        [(k)
+         (let ([fn (datum filename)])
+           (with-syntax ([exp (run/output "git status --porcelain")])
+             #'exp))])))
 
   (define-syntax include-scheme-version
     (lambda (x)
@@ -160,18 +168,22 @@
 
   ;; Include some files
 
-  (define binink-tag (let ((describe (include-git-describe))
-                           (branch (include-git-branch)))
-                        (if (and (fxzero? (string-length describe))
-                                 (fxzero? (string-length branch)))
-                            (include-git-head)
-                            (string-append (if (string=? branch "")
-                                               ;; when the action checkout a tag,
-                                               ;; according to git there is no branch
-                                               "main"
-                                               (substring branch 0 (fx- (string-length branch) 1)))
-                                           "-"
-                                           (substring describe 0 (fx- (string-length describe) 1))))))
+  (define binink-tag
+    (let ((describe (include-git-describe))
+          (branch (include-git-branch))
+          (head (include-git-head))
+          (dirty (include-git-dirty)))
+      (let ((strip-newline (lambda (s) (substring s 0 (fx- (string-length s) 1)))))
+        (let ((base
+               (cond
+                 ((not (fxzero? (string-length describe)))
+                  (strip-newline describe))
+                 ((not (string=? branch ""))
+                  (string-append (strip-newline branch) "-" (strip-newline head)))
+                 (else (strip-newline head)))))
+          (if (fxzero? (string-length dirty))
+              base
+              (string-append base "-dirty"))))))
 
   (define-syntax include-date
     (lambda (x)
