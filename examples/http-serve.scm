@@ -8,36 +8,26 @@
       (flush-output-port)
       (car (reverse args))))
 
-  (define http-read-bytes
-    (lambda (read)
-      (define index 0)
-      (define bv (bytevector))
-
-      (lambda ()
-        (assert (bytevector? bv))
-        (when (fx=? (bytevector-length bv) index)
-          (set! bv (read))
-          (set! index 0))
-        (assert (bytevector? bv))
-        (if (and bv (< index (bytevector-length bv)))
-            (let ((byte (bytevector-u8-ref bv index)))
-              (set! index (fx+ index 1))
-              byte)
-            (error 'socket-closed bv index )))))
-
   (define message "Hello, World!")
 
   (define handle
     (lambda (read write close)
-      (define reader (http-read-bytes read))
+      (define reader (lambda ()
+                       (let ((r (read)))
+                         (if (bytevector? r) r (eof-object)))))
       (let loop ()
         (guard (ex (else (pk 'handle (apply format #f (condition-message ex)
                                             (condition-irritants ex)))))
           (call-with-values (lambda () (http-request-read reader))
             (lambda (method uri version headers body)
               (when method
-                (http-response-write write "HTTP/1.1" 200 "Found" '()
-                                     (string->utf8 message))
+                (let ((body-bv (string->utf8 message)))
+                  (http-response-write write "HTTP/1.1" 200 "Found" '()
+                                       (let ((done #f))
+                                         (lambda ()
+                                           (if done
+                                               (eof-object)
+                                               (begin (set! done #t) body-bv))))))
                 (loop))))))
       (close)))
 
