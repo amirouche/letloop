@@ -13,7 +13,7 @@ Clone and compile ChezScheme from source. This is required before building letlo
 
 **Command:**
 ```bash
-./venv && make chezscheme
+./venv ./local/ make chezscheme
 ```
 
 Build ChezScheme from source.

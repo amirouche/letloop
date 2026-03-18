@@ -35,15 +35,14 @@
           (lambda (method uri version headers body)
             (pk 'request method uri version headers body)
             (when method
-              (pk 'fuuu)
               (http-response-write write "HTTP/1.1" 200 "Found" '()
                                    (string->utf8 message))))))
       (close)))
 
   (define main*
-    (lambda (untangle port)
+    (lambda (port)
       (pk 'port port)
-      (call-with-values (lambda () (untangle-tcp-serve untangle "0.0.0.0" port))
+      (call-with-values (lambda () (untangle-tcp-serve "0.0.0.0" port))
         (lambda (accept close)
           (pk 'fu43)
           (format #t "HTTP server running at http://127.0.0.1:~a\n" port)
@@ -52,7 +51,7 @@
                               (pk 'accept (apply format #f
                                                  (condition-message ex)
                                                  (condition-irritants ex)))
-                              (untangle-stop untangle)
+                              (untangle-stop)
                         #f))
                     (call-with-values accept
                       (lambda (read write close)
@@ -60,7 +59,6 @@
                         (if (not (and read write close))
                             #f
                             (untangle-spawn
-                             untangle
                              (lambda ()
                                (handle read write close)
                                #t))))))
@@ -69,8 +67,8 @@
   (define main
     (lambda (port)
       (define port* (string->number port))
-      (define untangle (untangle-new))
-      (untangle-spawn untangle (lambda () (main* untangle port*)))
-      (untangle-run untangle)))
-  
+      (untangle-new)
+      (untangle-spawn (lambda () (main* port*)))
+      (untangle-run)))
+
   )

@@ -16,7 +16,7 @@
 
   (define sq-for-each
     (lambda (sq proc)
-      (for-each proc (sq-unbox sq))))
+      (for-each (lambda (kv) (proc (car kv) (cdr kv))) (sq-unbox sq))))
   
   (define sq-new
     (lambda ()
