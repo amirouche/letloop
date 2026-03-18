@@ -38,4 +38,6 @@ check: letloop-check.sh ## Hit the ground running!
 clean:
 	$(shell find src/ -name "*.so" | xargs rm -f)
 	$(shell find src/ -name "*.wpo" | xargs rm -f)
+	$(shell find examples/ -name "*.so" | xargs rm -f)
+	$(shell find examples/ -name "*.wpo" | xargs rm -f)
 	rm -rf /tmp/letloop/
