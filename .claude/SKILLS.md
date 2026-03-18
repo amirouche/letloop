@@ -1,13 +1,13 @@
-# Claude Code Skills for Binink
+# Claude Code Skills for Letloop
 
-This directory contains project-local Claude Code skills for binink development. These skills provide convenient shortcuts for common build, test, and development workflows.
+This directory contains project-local Claude Code skills for letloop development. These skills provide convenient shortcuts for common build, test, and development workflows.
 
 ## Available Skills
 
 ### Build & Installation
 
-#### `/binink-build-chez`
-Build ChezScheme from source (required before building binink).
+#### `/letloop-build-chez`
+Build ChezScheme from source (required before building letloop).
 
 **What it does:**
 - Clones ChezScheme from GitHub
@@ -20,11 +20,11 @@ Build ChezScheme from source (required before building binink).
 
 ---
 
-#### `/binink-build`
-Build the binink binary from source.
+#### `/letloop-build`
+Build the letloop binary from source.
 
 **What it does:**
-- Compiles `src/binink/base.scm` with whole-program optimization
+- Compiles `src/letloop/base.scm` with whole-program optimization
 - Generates `.so` and `.wpo` files
 - Creates `a.out` executable
 
@@ -34,29 +34,29 @@ Build the binink binary from source.
 
 ---
 
-#### `/binink-install`
-Build and install binink to `local/bin` in one step.
+#### `/letloop-install`
+Build and install letloop to `local/bin` in one step.
 
 **What it does:**
-- Runs `make binink`
-- Moves `a.out` to `local/bin/binink`
+- Runs `make letloop`
+- Moves `a.out` to `local/bin/letloop`
 
 **After installation:**
 ```bash
-./local/bin/binink repl              # Start REPL
+./local/bin/letloop repl              # Start REPL
 export PATH="$(pwd)/local/bin:$PATH" # Add to PATH
 ```
 
 ---
 
-#### `/binink-full-setup`
+#### `/letloop-full-setup`
 Complete setup workflow from scratch.
 
 **What it does:**
 1. Setup virtual environment (`./venv`)
 2. Build ChezScheme (5-15 minutes)
-3. Build binink binary
-4. Install to `local/bin/binink`
+3. Build letloop binary
+4. Install to `local/bin/letloop`
 5. Run complete test suite
 
 **When to use:**
@@ -76,8 +76,8 @@ Complete setup workflow from scratch.
 
 ### Testing & Cleanup
 
-#### `/binink-test`
-Run the complete binink test suite.
+#### `/letloop-test`
+Run the complete letloop test suite.
 
 **What it tests:**
 - REPL functionality
@@ -98,18 +98,18 @@ Run the complete binink test suite.
 
 ---
 
-#### `/binink-clean`
-Clean temporary binink files.
+#### `/letloop-clean`
+Clean temporary letloop files.
 
 **What it does:**
-- Removes `/tmp/binink/` directory and all temporary files
+- Removes `/tmp/letloop/` directory and all temporary files
 
 **Use cases:**
 - Free up disk space
 - Clear stale temporary files
 - Clean slate for testing
 
-**Safe:** Only removes files in `/tmp/binink/`, not source code or compiled binaries.
+**Safe:** Only removes files in `/tmp/letloop/`, not source code or compiled binaries.
 
 ---
 
@@ -120,9 +120,9 @@ Clean temporary binink files.
 Invoke skills directly with slash commands:
 
 ```
-/binink-test
-/binink-build
-/binink-install
+/letloop-test
+/letloop-build
+/letloop-install
 ```
 
 ### Natural Language
@@ -131,8 +131,8 @@ Or use natural language requests:
 
 ```
 "Run the tests"
-"Build binink"
-"Set up binink from scratch"
+"Build letloop"
+"Set up letloop from scratch"
 ```
 
 Claude Code will automatically invoke the appropriate skill based on your request.
@@ -144,22 +144,22 @@ Claude Code will automatically invoke the appropriate skill based on your reques
 ### First-Time Setup
 
 ```
-/binink-full-setup
+/letloop-full-setup
 ```
 
-This runs the complete workflow: venv → ChezScheme → binink → install → test
+This runs the complete workflow: venv → ChezScheme → letloop → install → test
 
 ### Development Cycle
 
 1. Make code changes
-2. `/binink-install` - Rebuild and install
-3. `/binink-test` - Verify tests pass
+2. `/letloop-install` - Rebuild and install
+3. `/letloop-test` - Verify tests pass
 
 ### After Pulling Changes
 
 ```
-/binink-install
-/binink-test
+/letloop-install
+/letloop-test
 ```
 
 Rebuild and verify everything works with the latest changes.
@@ -167,17 +167,17 @@ Rebuild and verify everything works with the latest changes.
 ### Troubleshooting Build Issues
 
 ```
-/binink-clean         # Clean temporary files
-/binink-build-chez    # Rebuild ChezScheme if needed
-/binink-install       # Rebuild binink
-/binink-test          # Verify tests pass
+/letloop-clean         # Clean temporary files
+/letloop-build-chez    # Rebuild ChezScheme if needed
+/letloop-install       # Rebuild letloop
+/letloop-test          # Verify tests pass
 ```
 
 ---
 
 ## Prerequisites
 
-All skills assume you're in the `/src/binink` project directory. Skills will execute relative to the project root.
+All skills assume you're in the `/src/letloop` project directory. Skills will execute relative to the project root.
 
 **System requirements:**
 - **Git**: For cloning ChezScheme
@@ -201,38 +201,38 @@ pacman -S base-devel git util-linux-libs zlib lz4
 
 ### "ChezScheme not found"
 
-Run `/binink-build-chez` to build ChezScheme first.
+Run `/letloop-build-chez` to build ChezScheme first.
 
-### "Cannot find local/bin/binink"
+### "Cannot find local/bin/letloop"
 
-Run `/binink-install` to build and install the binary.
+Run `/letloop-install` to build and install the binary.
 
 ### Test failures
 
-1. Check that binink is installed: `ls -lh local/bin/binink`
+1. Check that letloop is installed: `ls -lh local/bin/letloop`
 2. Verify ChezScheme libraries are accessible
 3. Review test output for specific failures
-4. Try a clean rebuild: `/binink-clean` then `/binink-install`
+4. Try a clean rebuild: `/letloop-clean` then `/letloop-install`
 
 ### Build errors
 
 1. Ensure all system dependencies are installed
 2. Check that `local/` directory is writable
-3. Try a clean ChezScheme rebuild: `rm -rf local/ && /binink-build-chez`
+3. Try a clean ChezScheme rebuild: `rm -rf local/ && /letloop-build-chez`
 
 ---
 
 ## Additional Skills
 
-This project also has 9 global skills for working with the **installed** binink binary (not covered here):
+This project also has 9 global skills for working with the **installed** letloop binary (not covered here):
 
-- `/binink-exec` - Execute Scheme procedures
-- `/binink-repl` - Start interactive REPL
-- `/binink-check` - Run tests in Scheme libraries
-- `/binink-compile` - Compile libraries to executables
+- `/letloop-exec` - Execute Scheme procedures
+- `/letloop-repl` - Start interactive REPL
+- `/letloop-check` - Run tests in Scheme libraries
+- `/letloop-compile` - Compile libraries to executables
 - And more...
 
-These remain global because they're generic wrappers around the binink binary and don't depend on the project's makefile.
+These remain global because they're generic wrappers around the letloop binary and don't depend on the project's makefile.
 
 ---
 

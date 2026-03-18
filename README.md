@@ -1,4 +1,4 @@
-# binink
+# letloop
 
 ```
  .o8        o8o               o8o              oooo        
@@ -12,13 +12,13 @@
 
 **Getting started**
 
-Requires `zlib`, `lz4`, and `uuid` headers for using `binink compile`.
+Requires `zlib`, `lz4`, and `uuid` headers for using `letloop compile`.
 
 ```shell
 ./venv
 make chezscheme
-make binink
-mv a.out local/bin/binink
+make letloop
+mv a.out local/bin/letloop
 make check
 ```
 
@@ -26,13 +26,13 @@ make check
 
 This project includes Claude Code skills for common development tasks:
 
-- **`/binink-build-chez`** - Build ChezScheme from source
-- **`/binink-build`** - Build the binink binary
-- **`/binink-install`** - Build and install binink to local/bin
-- **`/binink-full-setup`** - Complete setup from scratch
-- **`/binink-test`** - Run the complete test suite
-- **`/binink-clean`** - Clean temporary files
+- **`/letloop-build-chez`** - Build ChezScheme from source
+- **`/letloop-build`** - Build the letloop binary
+- **`/letloop-install`** - Build and install letloop to local/bin
+- **`/letloop-full-setup`** - Complete setup from scratch
+- **`/letloop-test`** - Run the complete test suite
+- **`/letloop-clean`** - Clean temporary files
 
-Use these skills with Claude Code by invoking them with slash commands or natural language requests like "run the tests" or "build binink".
+Use these skills with Claude Code by invoking them with slash commands or natural language requests like "run the tests" or "build letloop".
 
 See [.claude/SKILLS.md](.claude/SKILLS.md) for detailed documentation.

@@ -1,8 +1,8 @@
-.PHONY: help binink
+.PHONY: help letloop
 
 SCHEME=$(shell which scheme)
 PWD=$(shell pwd)
-BININK=$(shell which binink)
+LETLOOP=$(shell which letloop)
 SHELL=/bin/bash
 
 help: ## Help!...
@@ -19,11 +19,11 @@ chezscheme: ## Compile latest chezscheme
 	cd $(PWD)/local/src/chezscheme && make -j$(shell nproc --ignore 1)
 	cd $(PWD)/local/src/chezscheme && make install
 
-binink: clean src/binink-program.c src/binink-usage.md src/binink/base.scm ## Produce a.out from binink/base.scm's procedure called binink-main
+letloop: clean src/letloop-program.c src/letloop-usage.md src/letloop/base.scm ## Produce a.out from letloop/base.scm's procedure called letloop-main
 	echo $(SCHEME)
 	$(SCHEME) --version
-	echo '(generate-wpo-files #t)(import (binink base)) (binink-compile (list "./src/" "src/binink/base.scm" "binink-main"))' | $(SCHEME) --quiet --libdirs ./src/ --compile-imported-libraries
-	cp a.out local/bin/binink
+	echo '(generate-wpo-files #t)(import (letloop base)) (letloop-compile (list "./src/" "src/letloop/base.scm" "letloop-main"))' | $(SCHEME) --quiet --libdirs ./src/ --compile-imported-libraries
+	cp a.out local/bin/letloop
 	@echo What is done is not to be done!
 
 todo: ## So say we all!
@@ -32,10 +32,10 @@ todo: ## So say we all!
 xxx: ## For those born under the eye of a wandering star...
 	@grep -nR --color=always -B 2 -A 2 XXX src/
 
-check: binink-check.sh ## Hit the ground running!
-	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PWD)/local/lib/ BININK=$(BININK) sh binink-check.sh
+check: letloop-check.sh ## Hit the ground running!
+	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PWD)/local/lib/ LETLOOP=$(LETLOOP) sh letloop-check.sh
 
 clean:
 	$(shell find src/ -name "*.so" | xargs rm -f)
 	$(shell find src/ -name "*.wpo" | xargs rm -f)
-	rm -rf /tmp/binink/
+	rm -rf /tmp/letloop/

@@ -14,22 +14,22 @@ Successfully migrated 6 makefile-dependent Claude Code skills from global (`~/.c
 ├── SKILLS.md                               # Comprehensive documentation
 ├── settings.local.json                     # User settings (not tracked)
 └── skills/
-    ├── binink-build-chez/SKILL.md         # Build ChezScheme
-    ├── binink-build/SKILL.md              # Build binink binary
-    ├── binink-install/SKILL.md            # Build and install
-    ├── binink-full-setup/SKILL.md         # Complete setup workflow
-    ├── binink-test/SKILL.md               # Run test suite
-    └── binink-clean/SKILL.md              # Clean temp files
+    ├── letloop-build-chez/SKILL.md         # Build ChezScheme
+    ├── letloop-build/SKILL.md              # Build letloop binary
+    ├── letloop-install/SKILL.md            # Build and install
+    ├── letloop-full-setup/SKILL.md         # Complete setup workflow
+    ├── letloop-test/SKILL.md               # Run test suite
+    └── letloop-clean/SKILL.md              # Clean temp files
 ```
 
 ### 2. Updated All Skills
 
-**Key change:** Removed `cd /src/binink &&` prefix from all commands since project-local skills automatically execute from the project root.
+**Key change:** Removed `cd /src/letloop &&` prefix from all commands since project-local skills automatically execute from the project root.
 
 **Examples:**
-- `cd /src/binink && make check` → `make check`
-- `cd /src/binink && make binink` → `make binink`
-- `cd /src/binink && ./venv && make chezscheme` → `./venv && make chezscheme`
+- `cd /src/letloop && make check` → `make check`
+- `cd /src/letloop && make letloop` → `make letloop`
+- `cd /src/letloop && ./venv && make chezscheme` → `./venv && make chezscheme`
 
 ### 3. Created Documentation
 
@@ -45,12 +45,12 @@ All files staged and ready for commit:
 Changes to be committed:
   new file:   .claude/.gitignore
   new file:   .claude/SKILLS.md
-  new file:   .claude/skills/binink-build-chez/SKILL.md
-  new file:   .claude/skills/binink-build/SKILL.md
-  new file:   .claude/skills/binink-clean/SKILL.md
-  new file:   .claude/skills/binink-full-setup/SKILL.md
-  new file:   .claude/skills/binink-install/SKILL.md
-  new file:   .claude/skills/binink-test/SKILL.md
+  new file:   .claude/skills/letloop-build-chez/SKILL.md
+  new file:   .claude/skills/letloop-build/SKILL.md
+  new file:   .claude/skills/letloop-clean/SKILL.md
+  new file:   .claude/skills/letloop-full-setup/SKILL.md
+  new file:   .claude/skills/letloop-install/SKILL.md
+  new file:   .claude/skills/letloop-test/SKILL.md
   modified:   README.md
 ```
 
@@ -60,9 +60,9 @@ To verify the migration:
 
 1. **Skill Discovery**: Skills should appear in Claude Code's suggestions
 2. **Individual Execution**: Test each skill:
-   - `/binink-clean` - Clean temp files
-   - `/binink-build` - Build binink (if ChezScheme exists)
-   - `/binink-test` - Run tests (if binink is installed)
+   - `/letloop-clean` - Clean temp files
+   - `/letloop-build` - Build letloop (if ChezScheme exists)
+   - `/letloop-test` - Run tests (if letloop is installed)
 3. **Path Validation**: No "directory not found" errors
 4. **Git Tracking**: Verify `.claude/skills/` is tracked, `settings.local.json` is not
 
@@ -74,8 +74,8 @@ If desired, remove the global copies to avoid confusion:
 
 ```bash
 cd ~/.claude/skills
-rm -rf binink-build-chez binink-build binink-install \
-       binink-full-setup binink-test binink-clean
+rm -rf letloop-build-chez letloop-build letloop-install \
+       letloop-full-setup letloop-test letloop-clean
 ```
 
 **Note:** Claude Code automatically prioritizes project-local skills over global ones, so this cleanup is optional.
@@ -84,31 +84,31 @@ rm -rf binink-build-chez binink-build binink-install \
 
 **Slash commands:**
 ```
-/binink-test
-/binink-build
-/binink-full-setup
+/letloop-test
+/letloop-build
+/letloop-full-setup
 ```
 
 **Natural language:**
 ```
 "Run the tests"
-"Build binink"
-"Set up binink from scratch"
+"Build letloop"
+"Set up letloop from scratch"
 ```
 
 ## Skills Remaining Global
 
-These 9 skills remain global because they wrap the installed binink binary and don't depend on the makefile:
+These 9 skills remain global because they wrap the installed letloop binary and don't depend on the makefile:
 
-- binink-exec
-- binink-exec-dev
-- binink-repl
-- binink-repl-dev
-- binink-repl-rlwrap
-- binink-check
-- binink-check-fast
-- binink-compile
-- binink-compile-optimized
+- letloop-exec
+- letloop-exec-dev
+- letloop-repl
+- letloop-repl-dev
+- letloop-repl-rlwrap
+- letloop-check
+- letloop-check-fast
+- letloop-compile
+- letloop-compile-optimized
 
 ## Benefits
 

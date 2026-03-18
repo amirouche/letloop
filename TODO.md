@@ -2,7 +2,7 @@
 
 References:
 - https://bun.com/reference
-- https://codeberg.org/amirouche/binink
+- https://codeberg.org/amirouche/letloop
 
 ## Builtin Core Features
 
