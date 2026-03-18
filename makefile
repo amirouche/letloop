@@ -14,7 +14,7 @@ chezscheme: ## Compile latest chezscheme
 	rm -rf $(PWD)/local/src/chezscheme
 	mkdir -p $(PWD)/local/src
 	cd $(PWD)/local/src && git clone https://github.com/cisco/chezscheme
-	cd $(PWD)/local/src/chezscheme && git checkout v10.3.0
+	cd $(PWD)/local/src/chezscheme && git checkout main
 	cd $(PWD)/local/src/chezscheme && ./configure --threads  --disable-x11 --disable-curses --kernelobj --installprefix=$(PWD)/local/
 	cd $(PWD)/local/src/chezscheme && make -j$(shell nproc --ignore 1)
 	cd $(PWD)/local/src/chezscheme && make install
