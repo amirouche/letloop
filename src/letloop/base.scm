@@ -234,7 +234,9 @@
   (define dev!
     (lambda (active?)
       (when active?
-        (compile-profile 'source))
+        (compile-profile 'source)
+        (optimize-level 0)
+        (debug-level 3))
       (import-notify active?)
       (generate-allocation-counts active?)
       (generate-covin-files active?)
