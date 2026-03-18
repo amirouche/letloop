@@ -12,7 +12,7 @@ Build the letloop binary from source by compiling `src/letloop/base.scm`.
 
 **Command:**
 ```bash
-make letloop
+./venv ./local/ make letloop
 ```
 
 Build letloop from source.
