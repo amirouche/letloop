@@ -10,7 +10,7 @@ Remove temporary letloop files to clean up disk space.
 
 **Command:**
 ```bash
-make clean
+./venv ./local/ make clean
 ```
 
 Clean temporary letloop files.

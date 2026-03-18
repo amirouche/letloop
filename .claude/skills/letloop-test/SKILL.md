@@ -15,7 +15,7 @@ Run the letloop test suite to verify all functionality works correctly.
 
 **Command:**
 ```bash
-make check
+./venv ./local/ make check
 ```
 
 Run the letloop test suite.

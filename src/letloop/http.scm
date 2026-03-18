@@ -262,16 +262,16 @@
                   (apply bytevector-append (reverse out))
                   (loop (cons bytevector out)))))))
 
-      (define tranfer-encoding-chunked?
+      (define transfer-encoding-chunked?
         (lambda (pair)
-          (and (eq? (car pair) 'tranfer-encoding)
+          (and (eq? (car pair) 'transfer-encoding)
                (string=? (cdr pair) "chunked"))))
 
       (define massage**
         (lambda (headers content-length)
           (cond
            ((null? headers) (list (cons 'content-length content-length)))
-           ((tranfer-encoding-chunked? (car headers)) (cons (cons 'content-length content-length) (cdr headers)))
+           ((transfer-encoding-chunked? (car headers)) (cons (cons 'content-length content-length) (cdr headers)))
            (else (cons (car headers) (massage** (cdr headers) content-length))))))
 
       (define massage
