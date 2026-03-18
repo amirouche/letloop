@@ -13,8 +13,8 @@ help: ## Help!...
 chezscheme: ## Compile latest chezscheme
 	rm -rf $(PWD)/local/src/chezscheme
 	mkdir -p $(PWD)/local/src
-	cd $(PWD)/local/src && git clone --filter=blob:none https://github.com/cisco/chezscheme
-	cd $(PWD)/local/src/chezscheme && git checkout v10.2.0
+	cd $(PWD)/local/src && git clone https://github.com/cisco/chezscheme
+	cd $(PWD)/local/src/chezscheme && git checkout v10.3.0
 	cd $(PWD)/local/src/chezscheme && ./configure --threads  --disable-x11 --disable-curses --kernelobj --installprefix=$(PWD)/local/
 	cd $(PWD)/local/src/chezscheme && make -j$(shell nproc --ignore 1)
 	cd $(PWD)/local/src/chezscheme && make install
@@ -23,6 +23,7 @@ binink: clean src/binink-program.c src/binink-usage.md src/binink/base.scm ## Pr
 	echo $(SCHEME)
 	$(SCHEME) --version
 	echo '(generate-wpo-files #t)(import (binink base)) (binink-compile (list "./src/" "src/binink/base.scm" "binink-main"))' | $(SCHEME) --quiet --libdirs ./src/ --compile-imported-libraries
+	cp a.out local/bin/binink
 	@echo What is done is not to be done!
 
 todo: ## So say we all!
