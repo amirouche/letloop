@@ -14,7 +14,7 @@ Run the complete letloop setup workflow from scratch. Use this for initial setup
 
 **Command:**
 ```bash
-./venv && make chezscheme && make letloop && mv a.out local/bin/letloop && make check
+./venv ./local/ make chezscheme && ./venv ./local/ make letloop && mv a.out local/bin/letloop && ./venv ./local/ make check
 ```
 
 Run complete setup workflow.
@@ -28,11 +28,10 @@ Run complete setup workflow.
 - Development libraries: zlib-dev, lz4-dev, uuid-dev
 
 **Steps executed:**
-1. `./venv` - Setup environment
-2. `make chezscheme` - Build ChezScheme
-3. `make letloop` - Build letloop
-4. `mv a.out local/bin/letloop` - Install
-5. `make check` - Run tests
+1. `./venv ./local/ make chezscheme` - Build ChezScheme
+2. `./venv ./local/ make letloop` - Build letloop
+3. `mv a.out local/bin/letloop` - Install
+4. `./venv ./local/ make check` - Run tests
 
 **Output:** Fully installed and tested letloop at `local/bin/letloop`
 

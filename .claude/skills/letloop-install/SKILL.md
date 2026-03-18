@@ -12,7 +12,7 @@ Build the letloop binary and install it to `local/bin/letloop` for local develop
 
 **Command:**
 ```bash
-make letloop && mv a.out local/bin/letloop
+./venv ./local/ make letloop && mv a.out local/bin/letloop
 ```
 
 Build and install letloop to local/bin.
