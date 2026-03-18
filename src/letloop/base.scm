@@ -635,7 +635,7 @@
 
       (system*
        (pk
-        (format #f "cc -I ~a/ -march=native ~a/my-letloop-program.c ~a/kernel.o -o a.out -ldl -lz -llz4 -lm -luuid -lpthread"
+        (format #f "cc -I ~a/ -march=native ~a/my-letloop-program.c ~a/kernel.o -o a.out -ldl -lm -luuid -lpthread"
                 temporary-directory temporary-directory temporary-directory)))
       (display "Produced: ./a.out\n")))
 
