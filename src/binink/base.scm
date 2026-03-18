@@ -400,6 +400,10 @@
     (lambda (x)
       (string-append (basename-without-extension x) ".so")))
 
+  (define .wpo
+    (lambda (x)
+      (string-append (basename-without-extension x) ".wpo")))
+
   (define maybe-compile-file*
     (lambda (f)
       (guard (ex (else (display-condition! 'maybe-compile-file* ex) (void)))
@@ -531,8 +535,7 @@
       (disable-garbage-collector! disable-garbage-collector?)
 
       (generate-wpo-files #t)
-
-      (for-each maybe-compile-file* (map cdr (binink-discover-libraries)))
+      (compile-imported-libraries #t)
 
       (unless (and (pk 'main main)
                    (pk 'library.scm (maybe-library-name (pk 'mylibrary library.scm)))
@@ -542,19 +545,32 @@
         (flush-output-port)
         (exit 1))
 
+      ;; Write a Chez Scheme top-level program that imports and calls main.
+      ;; #!chezscheme enables Chez-specific forms (scheme-start) while
+      ;; keeping it processable by compile-program.
       (call-with-output-file (string-append temporary-directory "/program.scm")
         (lambda (port)
-          (write '(suppress-greeting #t) port)
-          (write `(import ,(pk library.scm (maybe-library-name library.scm))) port)
-          (write `(scheme-start ,(string->symbol main)) port)) 'truncate)
+          (display "#!chezscheme\n" port)
+          (pretty-print `(import (chezscheme)
+                                 ,(maybe-library-name library.scm))
+                        port)
+          (pretty-print '(suppress-greeting #t) port)
+          (pretty-print `(scheme-start ,(string->symbol main)) port))
+        'truncate)
       (set! program.scm (string-append temporary-directory "/program.scm"))
-      (maybe-compile-file program.scm)
 
-      (apply make-boot-file
-             (string-append temporary-directory "/program.boot")
-             (list "scheme" "petite")
-             (append (filter file-exists? (map .so (map cdr (binink-discover-libraries))))
-                     (list (.so program.scm))))
+      ;; compile-program (not compile-file) produces a program WPO
+      ;; that compile-whole-program can process
+      (compile-program program.scm)
+
+      ;; compile-whole-program merges all WPO files into a single .so,
+      ;; eliminating compilation instance conflicts between libraries
+      (let ((whole.so (string-append temporary-directory "/whole.so")))
+        (pk 'whole-program-libs
+            (compile-whole-program (.wpo program.scm) whole.so))
+        (make-boot-file (string-append temporary-directory "/program.boot")
+                        '("scheme" "petite")
+                        whole.so))
 
       (let ((program.boot (bytevector->u8-list
                            (get-bytevector-all
@@ -768,6 +784,12 @@
           (pk 'program
               `(begin
                  (define errored? #f)
+
+                 (define display-condition!
+                   (lambda (procedure ex)
+                     (format (current-error-port) "Procedure ~a: " procedure)
+                     (display-condition ex)
+                     (newline (current-error-port))))
 
                  (display "* Will run tests from the following libraries:\n")
                  (for-each
