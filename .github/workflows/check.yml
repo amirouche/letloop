@@ -2,9 +2,9 @@ name: Check
 
 on:
   push:
-    branches: [main, dev]
+    branches: [hello-schemer, dev]
   pull_request:
-    branches: [main, dev]
+    branches: [hello-schemer, dev]
 
 jobs:
   check:
