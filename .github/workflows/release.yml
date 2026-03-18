@@ -6,11 +6,17 @@ on:
       - 'v*'
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
     permissions:
-      contents: write
-      packages: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -36,15 +42,40 @@ jobs:
 
       - name: Package release
         run: |
-          mkdir -p letloop-linux-amd64
-          cp local/bin/letloop letloop-linux-amd64/
-          cp local/lib/*.boot letloop-linux-amd64/ 2>/dev/null || true
-          tar czf letloop-linux-amd64.tar.gz letloop-linux-amd64
+          cp local/bin/letloop letloop-linux-${{ matrix.arch }}
+          sha256sum letloop-linux-${{ matrix.arch }} > letloop-linux-${{ matrix.arch }}.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: letloop-linux-${{ matrix.arch }}
+          path: |
+            letloop-linux-${{ matrix.arch }}
+            letloop-linux-${{ matrix.arch }}.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          merge-multiple: true
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: letloop-linux-amd64.tar.gz
+          files: |
+            artifacts/letloop-linux-amd64
+            artifacts/letloop-linux-amd64.sha256
+            artifacts/letloop-linux-aarch64
+            artifacts/letloop-linux-aarch64.sha256
           generate_release_notes: true
 
       - name: Log in to GitHub Container Registry
