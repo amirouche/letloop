@@ -1,0 +1,25 @@
+name: Check
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y uuid-dev libncurses-dev
+
+      - name: Build ChezScheme
+        run: ./venv make chezscheme
+
+      - name: Build binink
+        run: ./venv make binink
+
+      - name: Run tests
+        run: ./venv make check
