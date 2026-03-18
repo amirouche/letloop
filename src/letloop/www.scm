@@ -4,7 +4,7 @@
           www-form-urlencoded-read
           ~check-www-000 ~check-www-001 ~check-www-002 ~check-www-002-bis
           ~check-www-003)
-  (import (chezscheme) (letloop http) (letloop match) (letloop generator))
+  (import (chezscheme) (letloop http) (letloop match))
 
   (define pk
     (lambda args
@@ -30,13 +30,17 @@
 
       (guard (ex (else (error 'www-request (condition-message ex) (condition-irritants ex))))
         (define headers* (map (lambda (x) (format #f "~a: ~a" (car x) (cdr x))) headers))
-        (call-with-values (lambda ()
-                            (http-response-read
-                             (bytevector->generator
-                              (command-run (format #f "curl --raw --http1.1 -X ~s -i ~a ~{-H ~s ~}" method url headers*)
-                                           body))))
-          (lambda (version code reason headers body)
-            (values code headers (body)))))))
+        (let ((response-bv (command-run (format #f "curl --raw --http1.1 -X ~s -i ~a ~{-H ~s ~}" method url headers*)
+                                        body)))
+          (let ((done #f))
+            (call-with-values (lambda ()
+                                (http-response-read
+                                 (lambda ()
+                                   (if done
+                                       (eof-object)
+                                       (begin (set! done #t) response-bv)))))
+              (lambda (version code reason headers body)
+                (values code headers body))))))))
 
   (define ~check-www-000
     (lambda ()
