@@ -88,11 +88,10 @@
     (syntax-rules ()
       ((_ objects body ...)
        (let ((objects* objects))
-         (for-each lock-object objects*)
-         (call-with-values (lambda () body ...)
-           (lambda out
-             (for-each unlock-object objects*)
-             (apply values out)))))))
+         (dynamic-wind
+           (lambda () (for-each lock-object objects*))
+           (lambda () body ...)
+           (lambda () (for-each unlock-object objects*)))))))
 
   (define (bytevector-pointer bv)
     (#%$object-address bv (+ (foreign-sizeof 'void*) 1)))
@@ -483,13 +482,6 @@
                e1 ... e2))]
         [_ (syntax-violation who "invalid syntax" x)])))
 
-  (define-syntax/who define-extended-quasiquote
-    (lambda (x)
-      (syntax-case x ()
-        [(_ qq)
-         (identifier? #'qq)
-         #'(define-syntax qq quasiquote-transformer)])))
-
   (meta define quasiquote-transformer
     (lambda (stx)
       (define who 'quasiquote)
@@ -718,24 +710,7 @@
                             arg*)))))))
 
   ;; ============================================================
-  ;; Section 5: Debug logging
-  ;; ============================================================
-
-  (define pk
-    (lambda args
-      (when (getenv "LETLOOP_DEBUG_UNTANGLE")
-        (display "#;(transparent) " (current-error-port))
-        (write args (current-error-port))
-        (newline (current-error-port))
-        (flush-output-port (current-error-port)))
-      (car (reverse args))))
-
-  (define untangle-log
-    (lambda (level message . objects)
-      (pk 'untangle-log level message objects)))
-
-  ;; ============================================================
-  ;; Section 6: Event loop (from new-untangle)
+  ;; Section 6: Event loop (from new-loop)
   ;; ============================================================
 
   (define epoll-event-direction-in #x001)
@@ -756,11 +731,6 @@
   (define-ftype epoll-events-array
     (array 64 epoll-type-event))
 
-  (define (epoll-event-new)
-    (make-ftype-pointer epoll-type-event
-                        (foreign-alloc
-                         (ftype-sizeof epoll-type-event))))
-
   (define (epoll-events-array-new)
     (make-ftype-pointer epoll-events-array
                         (foreign-alloc
@@ -768,17 +738,6 @@
 
   (define (epoll-events-array-ref events i)
     (ftype-&ref epoll-events-array (i) events))
-
-  (define epoll-event-both-new
-    (lambda (fd)
-      (define fptr
-        (make-ftype-pointer epoll-type-event
-                            (foreign-alloc
-                             (ftype-sizeof epoll-type-event))))
-      (ftype-set! epoll-type-event (events) fptr
-                  (logior epoll-event-direction-in epoll-event-direction-out))
-      (ftype-set! epoll-type-event (data fd) fptr fd)
-      fptr))
 
   (define epoll-event-in-new
     (lambda (fd)
@@ -823,7 +782,6 @@
         (func epoll op fd (ftype-pointer-address event)))))
 
   (define epoll-ctl-op=add 1)
-  (define epoll-ctl-op=delete 2)
   (define epoll-ctl-op=modify 3)
 
   (define epoll-wait
@@ -831,75 +789,50 @@
       (lambda (epoll events max-events timeout)
         (func epoll (ftype-pointer-address events) max-events timeout))))
 
-  (define mutex (make-mutex))
+  (define %loop #f)
 
-  (define %untangle #f)
-
-  (define untangle-current (lambda () %untangle))
-
-  (define untangle-prompt-current #f)
+  (define loop-prompt-current #f)
 
   (define socket-error-would-block 11)
-  (define socket-error-try-again)
 
-  (define untangle-prompt-singleton '(untangle-prompt-singleton))
+  (define loop-prompt-singleton '(loop-prompt-singleton))
 
-  (define-record-type* <untangle>
-    (untangle-base-new jiffy sleeping running epoll events thunks others readable writable epoll-buf)
-    untangle?
-    (jiffy %untangle-jiffy %untangle-jiffy!)
-    (sleeping untangle-sleeping untangle-sleeping!)
-    (running untangle-running? untangle-running!)
-    (epoll untangle-epoll)
-    (events untangle-events)
-    (thunks untangle-thunks untangle-thunks!)
-    (others untangle-others untangle-others!)
-    (readable untangle-readable)
-    (writable untangle-writable)
-    (epoll-buf untangle-epoll-buf))
+  (define-record-type* <loop>
+    (loop-base-new jiffy sleeping running epoll events thunks epoll-buf)
+    loop?
+    (jiffy %loop-jiffy %loop-jiffy!)
+    (sleeping loop-sleeping loop-sleeping!)
+    (running loop-running? loop-running!)
+    (epoll loop-epoll)
+    (events loop-events)
+    (thunks loop-thunks loop-thunks!)
+    (epoll-buf loop-epoll-buf))
 
-  (define untangle-jiffy
-    (lambda () (%untangle-jiffy %untangle)))
-
-  (define call-with-untangle-prompt
+  (define call-with-loop-prompt
     (lambda (thunk handlery)
       (call-with-values (lambda ()
                           (call/1cc
                            (lambda (k)
-                             (set! untangle-prompt-current k)
+                             (set! loop-prompt-current k)
                              (thunk))))
         (lambda out
           (cond
-           ((and (pair? out) (eq? (car out) untangle-prompt-singleton))
-            (pk 'handlery out)
+           ((and (pair? out) (eq? (car out) loop-prompt-singleton))
             (apply handlery (cdr out)))
            (else (apply values out)))))))
 
-  (define untangle-abort
+  (define loop-abort
     (lambda args
       (call/cc
        (lambda (k)
-         (let ((prompt untangle-prompt-current))
-           (set! untangle-prompt-current #f)
-           (pk 'prompt 'oops prompt)
-           (apply prompt (cons untangle-prompt-singleton (cons k args))))))))
+         (let ((prompt loop-prompt-current))
+           (set! loop-prompt-current #f)
+           (apply prompt (cons loop-prompt-singleton (cons k args))))))))
 
-  (define untangle-event-new cons)
-  (define untangle-event-continuation car)
-  (define untangle-event-mode cdr)
-
-  (define untangle-apply
+  (define loop-apply
     (lambda (thunk)
-      (pk 'untangle-apply 'input thunk)
-      (guard (ex (else (pk 'untangle-apply thunk
-                           (apply format #f
-                                  (condition-message ex)
-                                  (condition-irritants ex)))))
-        (call-with-untangle-prompt thunk (lambda (k handler) (handler k))))))
-
-  (define hashtable-empty?
-    (lambda (h)
-      (fx=? (hashtable-size h) 0)))
+      (guard (ex (else (void)))
+        (call-with-loop-prompt thunk (lambda (k handler) (handler k))))))
 
   (define jiffy-current
     (lambda ()
@@ -908,109 +841,60 @@
              (nanoseconds (time-nanosecond time)))
         (+ (* seconds (expt 10 9)) nanoseconds))))
 
-  (define untangle-run-once
+  (define loop-run-once
     (lambda ()
-      (pk 'run-once)
-      (let ((thunks (untangle-thunks %untangle)))
-        (untangle-thunks! %untangle '())
-        (for-each (lambda (thunk) (untangle-apply thunk)) thunks))
+      (let ((thunks (loop-thunks %loop)))
+        (loop-thunks! %loop '())
+        (for-each (lambda (thunk) (loop-apply thunk)) thunks))
 
-      (pk 'a)
-
-      (%untangle-jiffy! %untangle (jiffy-current))
+      (%loop-jiffy! %loop (jiffy-current))
 
       (call-with-values (lambda ()
-                          (sq-split (untangle-sleeping %untangle)
-                                    (%untangle-jiffy %untangle)))
+                          (sq-split (loop-sleeping %loop)
+                                    (%loop-jiffy %loop)))
         (lambda (before after)
           (unless (sq-empty? before)
-            (untangle-sleeping! %untangle after)
-            (sq-for-each before (lambda (jiffy thunk) (untangle-apply thunk))))))
+            (loop-sleeping! %loop after)
+            (sq-for-each before (lambda (jiffy thunk) (loop-apply thunk))))))
 
-      (pk 'b)
-
-      (let ((timeout (if (sq-empty? (untangle-sleeping %untangle))
+      (let ((timeout (if (sq-empty? (loop-sleeping %loop))
                          -1
-                         (- (car (sq-min (untangle-sleeping %untangle)))
-                            (%untangle-jiffy %untangle)))))
-        (pk 'timeout timeout)
-        (let* ((buf (untangle-epoll-buf %untangle))
-               (count (epoll-wait (untangle-epoll %untangle)
+                         (max 0 (- (car (sq-min (loop-sleeping %loop)))
+                                   (%loop-jiffy %loop))))))
+        (let* ((buf (loop-epoll-buf %loop))
+               (count (epoll-wait (loop-epoll %loop)
                                   (make-ftype-pointer epoll-type-event
                                                       (ftype-pointer-address buf))
                                   epoll-max-events
                                   timeout)))
-          (pk 'count count)
           (let loop ((i 0))
             (when (fx<? i count)
               (let* ((event (epoll-events-array-ref buf i))
-                     (mode (if (epoll-event-in? event) 'read 'write))
-                     (key (cons (epoll-event-fd event) mode))
-                     (k (hashtable-ref (untangle-events %untangle) key #f)))
-                (hashtable-delete! (untangle-events %untangle) key)
-                (when k (untangle-apply k)))
+                     (fd (epoll-event-fd event)))
+                (when (epoll-event-in? event)
+                  (let* ((key (cons fd 'read))
+                         (k (hashtable-ref (loop-events %loop) key #f)))
+                    (hashtable-delete! (loop-events %loop) key)
+                    (when k (loop-apply k))))
+                (when (epoll-event-out? event)
+                  (let* ((key (cons fd 'write))
+                         (k (hashtable-ref (loop-events %loop) key #f)))
+                    (hashtable-delete! (loop-events %loop) key)
+                    (when k (loop-apply k)))))
               (loop (fx+ i 1))))))))
 
-  (define untangle-watcher
+  (define loop-run
     (lambda ()
-      (when (pk 'watch 'running (untangle-running? %untangle))
-        (untangle-read (pk 'readable (untangle-readable %untangle)))
-
-        (let ((new (with-mutex mutex
-                     (let ((new (untangle-others %untangle)))
-                       (untangle-others! %untangle '())
-                       new))))
-          (untangle-thunks! %untangle
-                            (append new
-                                    (untangle-thunks %untangle))))
-        (untangle-watcher))))
-
-  (define untangle-stop
-    (lambda ()
-      (untangle-running! %untangle #f)))
-
-  (define untangle-run
-    (lambda ()
-      (pk 'fuuu)
-      (untangle-spawn (lambda () (untangle-watcher)))
       (let loop ()
-        (when (untangle-running? %untangle)
-          (guard (ex (else (untangle-log 'error
-                                         (format #f "Procedure untangle-run, exception: ~a" (condition-message ex))
-                                         (condition-irritants ex))
-                           (untangle-running! %untangle #f)))
-            (untangle-run-once))
+        (when (loop-running? %loop)
+          (guard (ex (else (loop-running! %loop #f)))
+            (loop-run-once))
           (loop)))))
 
-  (define untangle-spawn
+  (define loop-spawn
     (lambda (thunk)
-      (untangle-thunks! %untangle
-                        (cons thunk (untangle-thunks %untangle)))))
-
-  (define untangle-sleep-nanoseconds
-    (lambda (nanoseconds)
-      (untangle-abort
-       (lambda (k)
-         (sq-add! (untangle-sleeping %untangle)
-                  (fx+ (%untangle-jiffy %untangle) nanoseconds)
-                  k)))))
-
-  (define untangle-spawn-threadsafe
-    (lambda (thunk)
-      (with-mutex mutex
-        (untangle-others! %untangle
-                          (cons thunk (untangle-others %untangle))))
-      (untangle-write (untangle-writable %untangle)
-                      (bytevector 26 00))))
-
-  (define untangle-parallel
-    (lambda (thunk)
-      (untangle-abort
-       (lambda (k)
-         (fork-thread (lambda () (call-with-values thunk
-                                   (lambda args
-                                     (untangle-spawn-threadsafe
-                                      (lambda () (apply k args)))))))))))
+      (loop-thunks! %loop
+                        (cons thunk (loop-thunks %loop)))))
 
   (define fcntl!
     (let ((func (foreign-procedure __atomic "fcntl" (int int int) int)))
@@ -1020,73 +904,44 @@
   (define fcntl
     (let ((func (foreign-procedure __atomic "fcntl" (int int) int)))
       (lambda (fd)
-        (func fd untangle-get-flag))))
+        (func fd loop-get-flag))))
 
-  (define-ftype <pipe>
-    (array 2 int))
+  (define loop-get-flag 3)
+  (define loop-set-flag 4)
+  (define loop-nonblock 2048)
 
-  (define untangle-get-flag 3)
-  (define untangle-set-flag 4)
-  (define untangle-nonblock 2048)
-
-  (define untangle-nonblock!
+  (define loop-nonblock!
     (lambda (fd)
-      (fcntl! fd untangle-set-flag
-              (fxlogior untangle-nonblock
+      (fcntl! fd loop-set-flag
+              (fxlogior loop-nonblock
                         (fcntl fd)))))
 
-  (define make-pipe
-    (let ((func (foreign-procedure __atomic __disable_interrupts __errno "pipe" (void* int) int)))
-      (lambda ()
-        (define pointer (foreign-alloc (ftype-sizeof <pipe>)))
-        (call-with-values (lambda () (func pointer 0))
-          (lambda (out errno)
-            (when (fx=? out -1)
-              (error 'transparent-make-pipe (strerror errno)))))
-        (let ((pipe (make-ftype-pointer <pipe> pointer)))
-          (let ((readable (ftype-ref <pipe> (0) pipe))
-                (writable (ftype-ref <pipe> (1) pipe)))
-            (foreign-free pointer)
-            (values readable writable))))))
-
-  (define untangle-new
+  (define loop-new
     (lambda ()
-      (untangle-log 'notice "Making an untanglement...")
-      (call-with-values make-pipe
-        (lambda (readable writable)
-          (untangle-nonblock! readable)
-          (untangle-nonblock! writable)
-          (let ((epoll (epoll-new))
-                (events (make-hashtable equal-hash equal?)))
-            (set! %untangle
-              (untangle-base-new (jiffy-current)
-                                 (sq-new)
-                                 #t
-                                 epoll
-                                 events
-                                 '()
-                                 '()
-                                 readable
-                                 writable
-                                 (epoll-events-array-new)))
-            %untangle)))))
+      (let ((epoll (epoll-new))
+            (events (make-hashtable equal-hash equal?)))
+        (set! %loop
+          (loop-base-new (jiffy-current)
+                             (sq-new)
+                             #t
+                             epoll
+                             events
+                             '()
+                             (epoll-events-array-new)))
+        %loop)))
 
-  (define untangle-socket-new
+  (define loop-socket-new
     (let ((socket-foreign (foreign-procedure __atomic __disable_interrupts __errno "socket" (int int int) int)))
       (lambda (domain type protocol)
         (call-with-values (lambda () (socket-foreign domain type protocol))
           (lambda (out errno)
             (if (fx=? out -1)
+                #f
                 (begin
-                  (untangle-log 'error
-                                (format #f "Failed to create socket: ~a"
-                                        (strerror errno)))
-                  #f)
-                (begin
-                  (untangle-nonblock! out)
+                  (loop-nonblock! out)
                   out)))))))
 
-  (define untangle-accept
+  (define loop-accept
     (let ((accept4-foreign (foreign-procedure __atomic __disable_interrupts __errno "accept4" (int void* void* int) int)))
       (lambda (fd)
 
@@ -1097,44 +952,42 @@
 
         (define handle-accept
           (lambda (k)
-            (hashtable-set! (untangle-events %untangle)
+            (hashtable-set! (loop-events %loop)
                             (cons fd 'read)
                             k)
-            (epoll-ctl (untangle-epoll %untangle)
-                       1
-                       fd
-                       (epoll-event-in-new fd))))
+            (let ((ev (epoll-event-in-new fd)))
+              (epoll-ctl (loop-epoll %loop)
+                         epoll-ctl-op=add
+                         fd
+                         ev)
+              (foreign-free (ftype-pointer-address ev)))))
 
         (let loop ()
           (let-values (((out errno) (accept fd)))
             (cond
              ((and (fx=? out -1) (fx=? errno socket-error-would-block))
-              (untangle-abort handle-accept)
+              (loop-abort handle-accept)
               (loop))
              ((fx=? out -1)
-              (untangle-log 'error
-                            (format #f "Procedure untangle-accept, errno: ~a @ ~a"
-                                    (strerror errno)
-                                    fd))
               #f)
              (else
-              (untangle-socket-option! out 6 'tcp-option/nodelay #t)
+              (loop-socket-option! out 6 'tcp-option/nodelay #t)
               out)))))))
 
-  (define untangle-close
-    (let ((untangle-close-foreign (foreign-procedure __atomic "close" (int) int)))
+  (define loop-close
+    (let ((loop-close-foreign (foreign-procedure __atomic "close" (int) int)))
       (lambda (fd)
-        (untangle-close-foreign fd))))
+        (loop-close-foreign fd))))
 
-  (define untangle-socket-option!
-    (let ((untangle-socket-option-foreign! (foreign-procedure __atomic __disable_interrupts __errno "setsockopt" (int int int void* int) int)))
+  (define loop-socket-option!
+    (let ((loop-socket-option-foreign! (foreign-procedure __atomic __disable_interrupts __errno "setsockopt" (int int int void* int) int)))
       (lambda (fd level optname optval)
 
         (define (doit opt-int)
           (let* ((size (ftype-sizeof int))
                  (pointer (foreign-alloc size)))
             (foreign-set! 'int pointer 0 (if optval 1 0))
-            (call-with-values (lambda () (untangle-socket-option-foreign! fd level opt-int pointer size))
+            (call-with-values (lambda () (loop-socket-option-foreign! fd level opt-int pointer size))
               (lambda (out errno)
                 (foreign-free pointer)
                 (if (fxzero? out)
@@ -1154,8 +1007,8 @@
           ((tcp-option/nodelay) (doit 1))
           (else (error 'transparent "Unknown socket option" fd level optname optval))))))
 
-  (define untangle-bind
-    (let ((untangle-bind-foreign (foreign-procedure __atomic __disable_interrupts __errno "bind" (int void* size_t) int)))
+  (define loop-bind
+    (let ((loop-bind-foreign (foreign-procedure __atomic __disable_interrupts __errno "bind" (int void* size_t) int)))
       (lambda (fd ip port)
 
         (define string->ipv4
@@ -1201,13 +1054,13 @@
             (ftype-set! <socket-address-in> (address) address (string->ipv4 ip))
             (values pointer address)))
 
-        (untangle-socket-option! fd 1 'socket-option/reuseaddr #t)
-        (untangle-socket-option! fd 1 'socket-option/reuseport #t)
+        (loop-socket-option! fd 1 'socket-option/reuseaddr #t)
+        (loop-socket-option! fd 1 'socket-option/reuseport #t)
 
         (call-with-values (lambda () (socket-address-in-new ip port))
           (lambda (pointer address)
             (call-with-values (lambda ()
-                               (untangle-bind-foreign fd
+                               (loop-bind-foreign fd
                                                       pointer
                                                       (ftype-sizeof <socket-address-in>)))
               (lambda (out errno)
@@ -1215,10 +1068,10 @@
                 (unless (fxzero? out)
                   (error 'transparent (format #f "bind errno ~a" (strerror errno)))))))))))
 
-  (define untangle-listen
-    (let ((untangle-listen-foreign (foreign-procedure __atomic __disable_interrupts __errno "listen" (int int) int)))
+  (define loop-listen
+    (let ((loop-listen-foreign (foreign-procedure __atomic __disable_interrupts __errno "listen" (int int) int)))
       (lambda (fd backlog)
-        (call-with-values (lambda () (untangle-listen-foreign fd backlog))
+        (call-with-values (lambda () (loop-listen-foreign fd backlog))
           (lambda (out errno)
             (unless (fxzero? out)
               (error 'transparent (format #f "listen errno ~a" (strerror errno)))))))))
@@ -1239,8 +1092,8 @@
      ((bv start)
       (subbytevector bv start (bytevector-length bv)))))
 
-  (define untangle-read
-    (let ((untangle-read-foreign
+  (define loop-read
+    (let ((loop-read-foreign
            (foreign-procedure __atomic __disable_interrupts __errno "read" (int void* size_t) ssize_t)))
       (lambda (fd)
 
@@ -1249,7 +1102,7 @@
             (with-lock (list bv)
               (call-with-values
                   (lambda ()
-                    (untangle-read-foreign fd
+                    (loop-read-foreign fd
                                            (bytevector-pointer bv)
                                            (bytevector-length bv)))
                 values))))
@@ -1258,99 +1111,83 @@
 
         (define handle-read
           (lambda (k)
-            (pk 'hr 1)
-            (hashtable-set! (untangle-events %untangle)
+            (hashtable-set! (loop-events %loop)
                             (cons fd 'read)
                             k)
-            (pk 'hr 2)
-            (pk 'hr 3)
-            (epoll-ctl (untangle-epoll %untangle)
-                       epoll-ctl-op=add
-                       fd
-                       (epoll-event-in-new fd))))
+            (let ((ev (epoll-event-in-new fd)))
+              (epoll-ctl (loop-epoll %loop)
+                         epoll-ctl-op=add
+                         fd
+                         ev)
+              (foreign-free (ftype-pointer-address ev)))))
 
         (let loop ()
           (let-values (((out errno) (func fd bv)))
-            (pk 'read out errno)
             (cond
              ((and (fx=? out -1) (fx=? errno socket-error-would-block))
-              (untangle-abort handle-read)
+              (loop-abort handle-read)
               (loop))
              ((fx=? out -1)
-              (untangle-log 'error
-                            (format #f "Procedure untangle-read, errno: ~a @ ~a"
-                                    (strerror errno)
-                                    fd))
               #f)
              ((fxzero? out) #t)
              (else (subbytevector bv 0 out))))))))
 
-  (define untangle-write
-    (let ((untangle-write-foreign
+  (define loop-write
+    (let ((loop-write-foreign
            (foreign-procedure __atomic __disable_interrupts __errno "write" (int void* size_t) ssize_t)))
       (lambda (fd bv)
-        (define debug (pk 'untangle-write))
-
         (define func
           (lambda (fd bv)
             (with-lock (list bv)
               (call-with-values (lambda ()
-                                 (untangle-write-foreign fd
+                                 (loop-write-foreign fd
                                                          (bytevector-pointer bv)
                                                          (bytevector-length bv)))
                 values))))
 
         (define handle-write
           (lambda (k)
-            (hashtable-set! (untangle-events %untangle)
+            (hashtable-set! (loop-events %loop)
                             (cons fd 'write)
                             k)
-            (epoll-ctl (untangle-epoll %untangle)
-                       epoll-ctl-op=modify
-                       fd
-                       (epoll-event-out-new fd))))
+            (let ((ev (epoll-event-out-new fd)))
+              (epoll-ctl (loop-epoll %loop)
+                         epoll-ctl-op=modify
+                         fd
+                         ev)
+              (foreign-free (ftype-pointer-address ev)))))
 
-        (let loop ((bv bv)
-                   (remaining (bytevector-length bv)))
+        (let loop ((bv bv))
           (let-values (((out errno) (func fd bv)))
-
             (cond
              ((and (fx=? out -1) (fx=? errno socket-error-would-block))
-              (untangle-abort handle-write)
-              (loop bv remaining))
+              (loop-abort handle-write)
+              (loop bv))
              ((fx=? out -1)
-              (untangle-log 'error
-                            (format #f "Procedure untangle-write, error: ~a @ ~a"
-                                    (strerror errno)
-                                    fd))
               #f)
              (else (if (fx=? out (bytevector-length bv))
                        #t
-                       (let ((rest (subbytevector bv
-                                                  out
-                                                  (bytevector-length bv))))
-                         (loop rest (bytevector-length rest)))))))))))
+                       (loop (subbytevector bv out (bytevector-length bv)))))))))))
 
-  (define untangle-tcp-serve
+  (define loop-tcp-serve
     (lambda (ip port)
-      (define DEBUG (pk 'DEBUG))
       (define SOCKET-DOMAIN=AF-INET 2)
       (define SOCKET-TYPE=STREAM 1)
-      (define fd (pk 'socket (untangle-socket-new SOCKET-DOMAIN=AF-INET SOCKET-TYPE=STREAM 0)))
+      (define fd (loop-socket-new SOCKET-DOMAIN=AF-INET SOCKET-TYPE=STREAM 0))
 
       (define accept
         (lambda ()
-          (define client (untangle-accept fd))
+          (define client (loop-accept fd))
           (if (not client)
               (values #f #f #f)
-              (values (lambda () (untangle-read client))
-                      (lambda (bv) (untangle-write client bv))
-                      (lambda () (untangle-close client))))))
+              (values (lambda () (loop-read client))
+                      (lambda (bv) (loop-write client bv))
+                      (lambda () (loop-close client))))))
 
-      (pk 'bind (untangle-bind fd ip port))
-      (pk 'listen (untangle-listen fd 128))
+      (loop-bind fd ip port)
+      (loop-listen fd 128)
 
-      (values accept (lambda () (untangle-close fd)))))
+      (values accept (lambda () (loop-close fd)))))
 
   ;; ============================================================
   ;; Section 7: HTTP parser/writer (from letloop http)
@@ -1438,9 +1275,7 @@
         (let ((byte (read-byte!)))
           (cond
            ((eof-object? byte)
-            (if (null? out)
-                (error 'http "Unexpected end of file")
-                (error 'http "Unexpected end of file")))
+            (error 'http "Unexpected end of file"))
            ((and (fx=? byte byte-linefeed) (not (null? out)) (fx=? (car out) byte-carriage-return))
             (u8-list->bytevector (reverse (cdr out))))
            ((and (fx=? byte byte-linefeed) (or (null? out) (not (fx=? (car out) byte-carriage-return))))
@@ -1468,7 +1303,7 @@
                 (let ((char (car chars)))
                   (if (char=? char #\:)
                       (cons (string->symbol (string-downcase (list->string (reverse (massage* key)))))
-                            (string-downcase (list->string (massage* (reverse (massage* (reverse (cdr chars))))))))
+                            (list->string (massage* (reverse (massage* (reverse (cdr chars)))))))
                       (loopx (cdr chars) (cons (car chars) key))))))))
 
       (let loopy ((out '()))
@@ -1500,7 +1335,7 @@
                 (bytevector)
                 (read-bytes! content-length))
             (let ((chunked? (let ((value (assq 'transfer-encoding headers)))
-                              (and value (string=? (cdr value) "chunked")))))
+                              (and value (string-ci=? (cdr value) "chunked")))))
               (if chunked?
                   (http-chunked-read read-byte! read-bytes!)
                   (bytevector)))))))
@@ -1538,7 +1373,7 @@
   (define transfer-encoding-chunked?
     (lambda (pair)
       (and (eq? (car pair) 'transfer-encoding)
-           (string=? (cdr pair) "chunked"))))
+           (string-ci=? (cdr pair) "chunked"))))
 
   (define massage-headers-content-length
     (lambda (headers content-length)
@@ -1693,10 +1528,11 @@
       ((#\x20 #\x09 #\x0A #\x0D #\x1E) #t)
       (else #f)))
 
-  (define (json-expect value other)
+  (define (json-expect value expected)
     (when (eof-object? value)
       (raise (make-json-error "Unexpected end-of-file.")))
-    (void))
+    (unless (char=? value expected)
+      (raise (make-json-error "Unexpected character."))))
 
   (define (port->generator port)
     (lambda ()
@@ -2180,7 +2016,7 @@
        (lambda (attribute)
          (accumulator (format #f " ~a=\"~a\""
                               (car attribute)
-                              (cadr attribute))))
+                              (string->html-string (format #f "~a" (cadr attribute))))))
        attributes)
       (if (html-element-no-end-tag? tag)
           (accumulator "/>")
@@ -2238,7 +2074,7 @@
            (accumulator (format #f "<~a" tag))
            (for-each
             (lambda (attribute)
-              (accumulator (format #f " ~a=\"~a\"" (car attribute) (cadr attribute))))
+              (accumulator (format #f " ~a=\"~a\"" (car attribute) (string->html-string (format #f "~a" (cadr attribute))))))
             attributes)
            (accumulator ">")
            (for-each (lambda (element) (xml-write element accumulator)) elements)
@@ -2332,7 +2168,7 @@
                               (if (and (bytevector? body)
                                        (fx>? (bytevector-length body) 0)
                                        (let ((ct (assq 'content-type headers)))
-                                         (and ct (string-contains? (cdr ct) "json"))))
+                                         (and ct (string-contains? (string-downcase (cdr ct)) "json"))))
                                   (guard (ex (else (eof-object)))
                                     (unjson (utf8->string body)))
                                   (eof-object))))
@@ -2346,11 +2182,11 @@
 
   (define transparent
     (lambda (port-number app init handler)
-      (untangle-new)
-      (untangle-spawn
+      (loop-new)
+      (loop-spawn
         (lambda ()
           (define app-state (app))
-          (call-with-values (lambda () (untangle-tcp-serve "0.0.0.0" port-number))
+          (call-with-values (lambda () (loop-tcp-serve "0.0.0.0" port-number))
             (lambda (accept close)
               (format #t "transparent server at http://127.0.0.1:~a/\n" port-number)
               (flush-output-port)
@@ -2358,9 +2194,9 @@
                 (call-with-values accept
                   (lambda (read write close)
                     (when (and read write close)
-                      (untangle-spawn
+                      (loop-spawn
                         (lambda () (handle-connection app-state init handler read write close))))))
                 (loop))))))
-      (untangle-run)))
+      (loop-run)))
 
 )
