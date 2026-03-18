@@ -127,16 +127,8 @@
     (lambda (x)
       (syntax-case x ()
         ((k)
-         (with-syntax ([exp (run/output "git describe --exact-match --tags 2>/dev/null || true")])
+         (with-syntax ([exp (run/output "git describe --always --tags --dirty")])
            #'exp)))))
-
-  (define-syntax include-git-dirty
-    (lambda (x)
-      (syntax-case x ()
-        [(k)
-         (let ([fn (datum filename)])
-           (with-syntax ([exp (run/output "git status --porcelain")])
-             #'exp))])))
 
   (define-syntax include-scheme-version
     (lambda (x)
@@ -168,22 +160,18 @@
 
   ;; Include some files
 
-  (define binink-tag
-    (let ((describe (include-git-describe))
-          (branch (include-git-branch))
-          (head (include-git-head))
-          (dirty (include-git-dirty)))
-      (let ((strip-newline (lambda (s) (substring s 0 (fx- (string-length s) 1)))))
-        (let ((base
-               (cond
-                 ((not (fxzero? (string-length describe)))
-                  (strip-newline describe))
-                 ((not (string=? branch ""))
-                  (string-append (strip-newline branch) "-" (strip-newline head)))
-                 (else (strip-newline head)))))
-          (if (fxzero? (string-length dirty))
-              base
-              (string-append base "-dirty"))))))
+  (define binink-tag (let ((describe (include-git-describe))
+                           (branch (include-git-branch)))
+                        (if (and (fxzero? (string-length describe))
+                                 (fxzero? (string-length branch)))
+                            (include-git-head)
+                            (string-append (if (string=? branch "")
+                                               ;; when the action checkout a tag,
+                                               ;; according to git there is no branch
+                                               "main"
+                                               (substring branch 0 (fx- (string-length branch) 1)))
+                                           "-"
+                                           (substring describe 0 (fx- (string-length describe) 1))))))
 
   (define-syntax include-date
     (lambda (x)
@@ -329,6 +317,72 @@
                                                           #f))
                                            (pk '***environmnet name)
                                            (and (eval '#t (environment name)) name)))))))))
+
+  (define extract-library-name
+    (lambda (import-spec)
+      (match import-spec
+        ((for ,lib-ref ,_ ...) (extract-library-name lib-ref))
+        ((only ,lib-ref ,_ ...) (extract-library-name lib-ref))
+        ((except ,lib-ref ,_ ...) (extract-library-name lib-ref))
+        ((prefix ,lib-ref ,_) (extract-library-name lib-ref))
+        ((rename ,lib-ref ,_ ...) (extract-library-name lib-ref))
+        ((,name ...) name)
+        (,_ #f))))
+
+  (define library-imports
+    (lambda (filename)
+      (guard (ex (else '()))
+        (call-with-input-file filename
+          (lambda (port)
+            (let ((sexp (read port)))
+              (match sexp
+                ((library (,_ ...) (export ,_ ...) (import ,imports ...) ,_ ...)
+                 (filter pair? (map extract-library-name imports)))
+                (,_ '()))))))))
+
+  (define topological-sort-libraries
+    (lambda (discovered)
+      ;; discovered: list of (root . filepath) pairs
+      ;; Returns list sorted in dependency-first order (leaves first)
+      (let* ((entries
+              (let loop ((disc discovered) (out '()))
+                (if (null? disc)
+                    (reverse out)
+                    (let ((name (maybe-library-name (cdr (car disc)))))
+                      (if name
+                          (loop (cdr disc) (cons (cons name (car disc)) out))
+                          (loop (cdr disc) out))))))
+             ;; entries: list of (library-name root . filepath)
+             (known-names (map car entries))
+             ;; Build deps map: for each entry, compute local deps
+             (deps-map
+              (map (lambda (entry)
+                     (let* ((name (car entry))
+                            (filepath (cddr entry))
+                            (imports (library-imports filepath))
+                            (local-deps (filter (lambda (imp)
+                                                  (member imp known-names))
+                                                imports)))
+                       (cons name local-deps)))
+                   entries)))
+        ;; DFS topological sort
+        (let ((visited '())
+              (result '()))
+          (define visit
+            (lambda (name)
+              (unless (member name visited)
+                (set! visited (cons name visited))
+                (let ((dep-entry (assoc name deps-map)))
+                  (when dep-entry
+                    (for-each visit (cdr dep-entry))))
+                (set! result (cons name result)))))
+          (for-each (lambda (entry) (visit (car entry))) entries)
+          ;; result has last-visited first; reverse for dependency-first order
+          (let ((sorted-names (reverse result)))
+            (map (lambda (name)
+                   (cdr (assoc name entries)))
+                 sorted-names))))))
+
   (define ftw
     (lambda (directory)
       (let loop ((paths (map (lambda (x) (string-append directory "/" x)) (directory-list directory)))
@@ -399,10 +453,6 @@
   (define .so
     (lambda (x)
       (string-append (basename-without-extension x) ".so")))
-
-  (define .wpo
-    (lambda (x)
-      (string-append (basename-without-extension x) ".wpo")))
 
   (define maybe-compile-file*
     (lambda (f)
@@ -480,6 +530,7 @@
       (define disable-garbage-collector? #f)
       (define optimize-level* 0)
       (define program.scm #f)
+      (define sorted-discovered #f)
 
       (define errors (make-accumulator))
 
@@ -535,7 +586,10 @@
       (disable-garbage-collector! disable-garbage-collector?)
 
       (generate-wpo-files #t)
-      (compile-imported-libraries #t)
+      (compile-imported-libraries #f)
+
+      (set! sorted-discovered (topological-sort-libraries (binink-discover-libraries)))
+      (for-each maybe-compile-file* (map cdr sorted-discovered))
 
       (unless (and (pk 'main main)
                    (pk 'library.scm (maybe-library-name (pk 'mylibrary library.scm)))
@@ -545,32 +599,19 @@
         (flush-output-port)
         (exit 1))
 
-      ;; Write a Chez Scheme top-level program that imports and calls main.
-      ;; #!chezscheme enables Chez-specific forms (scheme-start) while
-      ;; keeping it processable by compile-program.
       (call-with-output-file (string-append temporary-directory "/program.scm")
         (lambda (port)
-          (display "#!chezscheme\n" port)
-          (pretty-print `(import (chezscheme)
-                                 ,(maybe-library-name library.scm))
-                        port)
-          (pretty-print '(suppress-greeting #t) port)
-          (pretty-print `(scheme-start ,(string->symbol main)) port))
-        'truncate)
+          (write '(suppress-greeting #t) port)
+          (write `(import ,(pk library.scm (maybe-library-name library.scm))) port)
+          (write `(scheme-start ,(string->symbol main)) port)) 'truncate)
       (set! program.scm (string-append temporary-directory "/program.scm"))
+      (maybe-compile-file program.scm)
 
-      ;; compile-program (not compile-file) produces a program WPO
-      ;; that compile-whole-program can process
-      (compile-program program.scm)
-
-      ;; compile-whole-program merges all WPO files into a single .so,
-      ;; eliminating compilation instance conflicts between libraries
-      (let ((whole.so (string-append temporary-directory "/whole.so")))
-        (pk 'whole-program-libs
-            (compile-whole-program (.wpo program.scm) whole.so))
-        (make-boot-file (string-append temporary-directory "/program.boot")
-                        '("scheme" "petite")
-                        whole.so))
+      (apply make-boot-file
+             (string-append temporary-directory "/program.boot")
+             (list "scheme" "petite")
+             (append (filter file-exists? (map .so (map cdr sorted-discovered)))
+                     (list (.so program.scm))))
 
       (let ((program.boot (bytevector->u8-list
                            (get-bytevector-all
@@ -790,7 +831,7 @@
                      (format (current-error-port) "Procedure ~a: " procedure)
                      (display-condition ex)
                      (newline (current-error-port))))
-
+                 
                  (display "* Will run tests from the following libraries:\n")
                  (for-each
                   (lambda (x)
