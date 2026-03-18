@@ -13,7 +13,7 @@ if [ ! "$BININK_VENV" ]; then
     export SCHEME=$BININK_ROOT/local/bin/scheme
     export LD_LIBRARY_PATH="$BININK_PREFIX/lib/"
     export PATH="$BININK_PREFIX/bin:$HOME/.local/bin:$PATH"
-    if [ ! "$@" ]; then
+    if [ $# -eq 0 ]; then
         echo "Entering binink... There is $(make todo | grep TODO | wc -l) TODOs..."
         $SHELL
     else
