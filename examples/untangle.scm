@@ -48,11 +48,24 @@
     (struct (events unsigned-32)
             (data epoll-type-data)))
 
+  (define epoll-max-events 64)
+
+  (define-ftype epoll-events-array
+    (array 64 epoll-type-event))
+
   (define (epoll-event-new)
     ;; TODO: free
     (make-ftype-pointer epoll-type-event
                         (foreign-alloc
                          (ftype-sizeof epoll-type-event))))
+
+  (define (epoll-events-array-new)
+    (make-ftype-pointer epoll-events-array
+                        (foreign-alloc
+                         (ftype-sizeof epoll-events-array))))
+
+  (define (epoll-events-array-ref events i)
+    (ftype-&ref epoll-events-array (i) events))
 
   (define epoll-event-both-new
     (lambda (fd)
@@ -165,7 +178,7 @@
   (define untangle-prompt-singleton '(untangle-prompt-singleton))
 
   (define-record-type* <untangle>
-    (untangle-base-new jiffy sleeping running epoll events thunks others readable writable)
+    (untangle-base-new jiffy sleeping running epoll events thunks others readable writable epoll-buf)
     untangle?
     ;; current iteration jiffies
     (jiffy %untangle-jiffy %untangle-jiffy!)
@@ -182,7 +195,9 @@
     ;; readable pipe to notify main thread of new continuations
     (readable untangle-readable)
     ;; the other side of the pipe
-    (writable untangle-writable))
+    (writable untangle-writable)
+    ;; pre-allocated epoll events buffer
+    (epoll-buf untangle-epoll-buf))
 
   ;; Transparent accessor for the current untangle's jiffy
   (define untangle-jiffy
@@ -273,23 +288,22 @@
                          (- (car (sq-min (untangle-sleeping %untangle)))
                             (%untangle-jiffy %untangle)))))
         (pk 'timeout timeout)
-        ;; Wait for ONE event...
-        (let* ((event (epoll-event-new))
-               ;; TODO: increase max events from 1 to 1024?
-               (count (epoll-wait (untangle-epoll %untangle) event 1 timeout)))
-          (pk 'count)
-          (if (fxzero? count)
-              (foreign-free (ftype-pointer-address event))
-              (let* ((mode (if (epoll-event-in? event) 'read 'write))
-                     (k (hashtable-ref (untangle-events %untangle)
-                                       (cons (epoll-event-fd event) mode)
-                                       #f)))
-                (foreign-free (ftype-pointer-address event))
-                (hashtable-delete! (untangle-events %untangle) event)
-                ;; TODO: remove the associated event mode from epoll
-                ;; instance?  check man pages for details, it think
-                ;; the registred event auto-expired.
-                (untangle-apply k)))))))
+        (let* ((buf (untangle-epoll-buf %untangle))
+               (count (epoll-wait (untangle-epoll %untangle)
+                                  (make-ftype-pointer epoll-type-event
+                                                      (ftype-pointer-address buf))
+                                  epoll-max-events
+                                  timeout)))
+          (pk 'count count)
+          (let loop ((i 0))
+            (when (fx<? i count)
+              (let* ((event (epoll-events-array-ref buf i))
+                     (mode (if (epoll-event-in? event) 'read 'write))
+                     (key (cons (epoll-event-fd event) mode))
+                     (k (hashtable-ref (untangle-events %untangle) key #f)))
+                (hashtable-delete! (untangle-events %untangle) key)
+                (when k (untangle-apply k)))
+              (loop (fx+ i 1))))))))
 
   (define untangle-watcher
     ;; that will watch for a readable byte in a pipe, the pipe is
@@ -421,7 +435,8 @@
                                  '()
                                  '()
                                  readable
-                                 writable))
+                                 writable
+                                 (epoll-events-array-new)))
             %untangle)))))
 
   (define untangle-socket-new
@@ -477,7 +492,10 @@
                                     fd))
               #f)
              ;; success, out is a valid file description for a client connection
-             (else out)))))))
+             (else
+              ;; IPPROTO_TCP = 6
+              (untangle-socket-option! out 6 'tcp-option/nodelay #t)
+              out)))))))
 
   (define untangle-close
     (let ((untangle-close-foreign (foreign-procedure "close" (int) int)))
@@ -515,6 +533,8 @@
           ((socket-option/reuseport) (doit 15))
           ;;((socket-option/rcvlowat) (int 18))
           ;;((socket-option/sndlowat) (int 19))
+          ;; based on /usr/include/linux/tcp.h (IPPROTO_TCP = 6)
+          ((tcp-option/nodelay) (doit 1))
           (else (error 'untangle "Procedure untangle-socket-option! unknown socket option" fd level optname optval))))))
 
   (define untangle-bind
