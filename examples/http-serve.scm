@@ -29,14 +29,16 @@
 
   (define handle
     (lambda (read write close)
-      (guard (ex (else (pk 'handle (apply format #f (condition-message ex)
-                                          (condition-irritants ex)))))
-        (call-with-values (lambda () (http-request-read (http-read-bytes read)))
-          (lambda (method uri version headers body)
-            (pk 'request method uri version headers body)
-            (when method
-              (http-response-write write "HTTP/1.1" 200 "Found" '()
-                                   (string->utf8 message))))))
+      (define reader (http-read-bytes read))
+      (let loop ()
+        (guard (ex (else (pk 'handle (apply format #f (condition-message ex)
+                                            (condition-irritants ex)))))
+          (call-with-values (lambda () (http-request-read reader))
+            (lambda (method uri version headers body)
+              (when method
+                (http-response-write write "HTTP/1.1" 200 "Found" '()
+                                     (string->utf8 message))
+                (loop))))))
       (close)))
 
   (define main*
