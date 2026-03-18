@@ -18,8 +18,8 @@ jobs:
       - name: Build ChezScheme
         run: ./venv make chezscheme
 
-      - name: Build binink
-        run: ./venv make binink
+      - name: Build letloop
+        run: ./venv make letloop
 
       - name: Run tests
         run: ./venv make check

@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 
-if [ ! "$BININK_VENV" ]; then
-    export BININK_ROOT=$(pwd)
-    export BININK_VENV=yes
+if [ ! "$LETLOOP_VENV" ]; then
+    export LETLOOP_ROOT=$(pwd)
+    export LETLOOP_VENV=yes
     if [ "x$1" != "x" ]; then
-        export BININK_PREFIX=$1
+        export LETLOOP_PREFIX=$1
         shift
     else
-        export BININK_PREFIX=$(pwd)/local
+        export LETLOOP_PREFIX=$(pwd)/local
     fi
-    mkdir -p "$BININK_PREFIX/bin"
-    export SCHEME=$BININK_ROOT/local/bin/scheme
-    export LD_LIBRARY_PATH="$BININK_PREFIX/lib/"
-    export PATH="$BININK_PREFIX/bin:$HOME/.local/bin:$PATH"
+    mkdir -p "$LETLOOP_PREFIX/bin"
+    export SCHEME=$LETLOOP_ROOT/local/bin/scheme
+    export LD_LIBRARY_PATH="$LETLOOP_PREFIX/lib/"
+    export PATH="$LETLOOP_PREFIX/bin:$HOME/.local/bin:$PATH"
     if [ $# -eq 0 ]; then
-        echo "Entering binink... There is $(make todo | grep TODO | wc -l) TODOs..."
+        echo "Entering letloop... There is $(make todo | grep TODO | wc -l) TODOs..."
         $SHELL
     else
         exec $@
     fi
 else
-    echo "You are already in binink!"
+    echo "You are already in letloop!"
 fi

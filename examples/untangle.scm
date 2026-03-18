@@ -19,9 +19,9 @@
           )
 
   (import (chezscheme)
-          (binink r999)
-          (binink cffi)
-          (binink sq))
+          (letloop r999)
+          (letloop cffi)
+          (letloop sq))
 
   (define stdlib (load-shared-object #f))
 
@@ -139,8 +139,8 @@
   (define pk
     (lambda args
       ;; TODO: replace this with logging
-      (when (getenv "BININK_DEBUG_UNTANGLE")
-        (display "#;(binink untangle) " (current-error-port))
+      (when (getenv "LETLOOP_DEBUG_UNTANGLE")
+        (display "#;(letloop untangle) " (current-error-port))
         (write args (current-error-port))
         (newline (current-error-port))
         (flush-output-port (current-error-port)))

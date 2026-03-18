@@ -19,21 +19,21 @@ jobs:
       - name: Build ChezScheme
         run: ./venv make chezscheme
 
-      - name: Build binink
-        run: ./venv make binink
+      - name: Build letloop
+        run: ./venv make letloop
 
       - name: Run tests
         run: ./venv make check
 
       - name: Package release
         run: |
-          mkdir -p binink-linux-amd64
-          cp local/bin/binink binink-linux-amd64/
-          cp local/lib/*.boot binink-linux-amd64/ 2>/dev/null || true
-          tar czf binink-linux-amd64.tar.gz binink-linux-amd64
+          mkdir -p letloop-linux-amd64
+          cp local/bin/letloop letloop-linux-amd64/
+          cp local/lib/*.boot letloop-linux-amd64/ 2>/dev/null || true
+          tar czf letloop-linux-amd64.tar.gz letloop-linux-amd64
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          files: binink-linux-amd64.tar.gz
+          files: letloop-linux-amd64.tar.gz
           generate_release_notes: true
