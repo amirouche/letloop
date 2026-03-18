@@ -3,6 +3,8 @@ name: Check
 on:
   push:
     branches: [hello-schemer, dev]
+  pull_request:
+    branches: [hello-schemer, dev]
   workflow_dispatch:
 
 jobs:
