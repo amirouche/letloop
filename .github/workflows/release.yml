@@ -17,13 +17,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y uuid-dev libncurses-dev
 
       - name: Build ChezScheme
-        run: ./venv make chezscheme
+        run: ./venv local/  make chezscheme
 
       - name: Build letloop
-        run: ./venv make letloop
+        run: ./venv local/  make letloop
 
       - name: Run tests
-        run: ./venv make check
+        run: ./venv local/  make check
 
       - name: Package release
         run: |
