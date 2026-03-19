@@ -26,12 +26,6 @@
   ;; TODO: Use unicode NFKD normalization to avoid problems because of
   ;; the input method
 
-  (define pk
-    (lambda args
-      (display ";; ") (write args)(newline)
-      (flush-output-port)
-      (car (reverse args))))
-
   (define ->bytevector integer->bytevector-little-endian)
   (define ->integer bytevector-little-endian->integer)
 
@@ -136,8 +130,7 @@
       (define identity (bytevector->unknown 'identity identity~))
       (define password (bytevector->unknown 'password password~))
 
-      ;; TODO: what is 256?
-      (define verifier (make-unknown 'verifier 256))
+      (define verifier (make-unknown 'verifier (unknown-parameter-byte-count parameter)))
       (unknown-integer! verifier
                         (expt-mod
                          (unknown-integer
@@ -166,7 +159,8 @@
       (define generator (unknown-parameter-generator parameter))
       (define N (unknown-parameter-N parameter))
       (define B (make-unknown 'B 256))
-      (unknown-integer! B (modulo (+ (unknown-integer v)
+      (unknown-integer! B (modulo (+ (* (unknown-integer k)
+                                      (unknown-integer v))
                                      (expt-mod (unknown-integer generator)
                                                (unknown-integer b)
                                                (unknown-integer N)))
@@ -196,7 +190,7 @@
       u))
 
   (define unknown-client-compute-S
-    (lambda (parameter x a B u)
+    (lambda (parameter k x a B u)
       (define N (unknown-parameter-N parameter))
       (define g (unknown-parameter-generator parameter))
       (define client-S (make-unknown 'S 256))
@@ -207,10 +201,12 @@
         (error 'letloop "B must be between 1 and N - 1" B))
 
       (unknown-integer! client-S
-                        (expt-mod (- (unknown-integer B)
-                                     (expt-mod (unknown-integer g)
-                                               (unknown-integer x)
-                                               (unknown-integer N)))
+                        (expt-mod (mod (- (unknown-integer B)
+                                          (* (unknown-integer k)
+                                             (expt-mod (unknown-integer g)
+                                                       (unknown-integer x)
+                                                       (unknown-integer N))))
+                                       (unknown-integer N))
                                   (+ (unknown-integer a)
                                      (* (unknown-integer u)
                                         (unknown-integer x)))
@@ -278,21 +274,18 @@
 
   (define unknown-bytevector=?
     (lambda (bytevector other)
-      ;; XXX: TODO: wanna be constant-time comparison. A drop in the
-      ;; ocean compared to our non-constant-time modexp operations,
-      ;; but still good practice.
+      ;; constant-time comparison
       (if (not (fx=? (bytevector-length bytevector)
                      (bytevector-length other)))
           #f
-          (let loop ((index (bytevector-length bytevector))
-                     (out #t))
-            (if (fxzero? index)
-                out
-                (let ((index (fx- index 1)))
-                  (loop (fx- index 1)
-                        (and out
-                             (fx=? (bytevector-u8-ref bytevector index)
-                                   (bytevector-u8-ref other index))))))))))
+          (let loop ((index 0)
+                     (acc 0))
+            (if (fx=? index (bytevector-length bytevector))
+                (fxzero? acc)
+                (loop (fx+ index 1)
+                      (fxior acc
+                             (fxxor (bytevector-u8-ref bytevector index)
+                                    (bytevector-u8-ref other index)))))))))
 
   (define-record-type* <unknown-client>
     (make-unknown-client~ parameter salt identity k x a A B K M1 M2)
@@ -351,17 +344,18 @@
       (define B (bytevector->unknown 'client-B B~))
 
       ;; safeguard, assert B mod N is not zero
-      (define i (assert (not (= 0
-                                (mod (unknown-integer B)
-                                     (unknown-integer
-                                      (unknown-parameter-N
-                                       (unknown-client-parameter client))))))))
+      (assert (not (= 0
+                      (mod (unknown-integer B)
+                           (unknown-integer
+                            (unknown-parameter-N
+                             (unknown-client-parameter client)))))))
 
       (define parameter (unknown-client-parameter client))
 
       (define S
         (unknown-client-compute-S
          (unknown-client-parameter client)
+         (unknown-client-k client)
          (unknown-client-x client)
          (unknown-client-a client)
          B
@@ -446,11 +440,11 @@
     (lambda (server A~)
       (define A (bytevector->unknown 'A A~))
 
-      (define i (assert (not (= 0
-                                (mod (unknown-integer A)
-                                     (unknown-integer
-                                      (unknown-parameter-N
-                                       (unknown-server-parameter server))))))))
+      (assert (not (= 0
+                      (mod (unknown-integer A)
+                           (unknown-integer
+                            (unknown-parameter-N
+                             (unknown-server-parameter server)))))))
 
       (define parameter (unknown-server-parameter server))
       (define B (unknown-compute-B parameter
