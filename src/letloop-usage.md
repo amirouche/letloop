@@ -1,7 +1,7 @@
 Usage:
 
   letloop check [--fail-fast] [DIRECTORY ...] LIBRARY.SCM ...
-  letloop compile [DIRECTORY ...] LIBRARY.SCM PROCEDURE
+  letloop compile [DIRECTORY ...] LIBRARY.SCM PROCEDURE [-- CC-FLAGS ...]
   letloop exec [DIRECTORY ...] LIBRARY.SCM PROCEDURE [-- ARGUMENT ...]
   letloop repl
   letloop root available
