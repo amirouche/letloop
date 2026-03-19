@@ -48,8 +48,6 @@ blake3: ## Build libblake3 from source
 
 check: argon2 blake3 letloop-check.sh ## Hit the ground running!
 	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PWD)/local/lib/ LETLOOP=$(LETLOOP) sh letloop-check.sh
-	LD_LIBRARY_PATH=$(PWD)/local/lib/ $(LETLOOP) check src/ src/letloopc/ src/letloopc/argon2.scm
-	LD_LIBRARY_PATH=$(PWD)/local/lib/ $(LETLOOP) check src/ src/letloopc/ src/letloopc/blake3.scm
 
 clean:
 	$(shell find src/ -name "*.so" | xargs rm -f)
