@@ -1,7 +1,8 @@
 #!chezscheme
 (library (transparenturing)
 
-  (export transparent json html xml match)
+  (export transparent json html xml match
+          loop-sleep loop-spawn loop-close loop-stop)
 
   (import (chezscheme))
 
@@ -816,6 +817,68 @@
                  (make-ftype-pointer <cqe> cqe))))
 
   (define IORING-CQE-F-MORE 2)
+  (define IORING-CQE-F-BUFFER 1)
+  (define IOSQE-BUFFER-SELECT (bitwise-arithmetic-shift-left 1 5))
+
+  (define io-uring-sqe-set-flags
+    (let ((func (foreign-procedure "io_uring_sqe_set_flags"
+                                   (void* unsigned) void)))
+      (lambda (sqe flags)
+        (func sqe flags))))
+
+  (define io-uring-sqe-set-buf-group
+    (let ((func (foreign-procedure "io_uring_sqe_set_buf_group"
+                                   (void* int) void)))
+      (lambda (sqe bgid)
+        (func sqe bgid))))
+
+  (define io-uring-setup-buf-ring
+    (let ((func (foreign-procedure "io_uring_setup_buf_ring"
+                                   (void* unsigned int unsigned void*) void*)))
+      (lambda (ring nentries bgid flags err-ptr)
+        (func ring nentries bgid flags err-ptr))))
+
+  (define io-uring-buf-ring-add
+    (let ((func (foreign-procedure "io_uring_buf_ring_add"
+                                   (void* void* unsigned unsigned-16
+                                          int int) void)))
+      (lambda (br addr len bid mask buf-offset)
+        (func br addr len bid mask buf-offset))))
+
+  (define io-uring-buf-ring-advance
+    (let ((func (foreign-procedure "io_uring_buf_ring_advance"
+                                   (void* int) void)))
+      (lambda (br count)
+        (func br count))))
+
+  (define io-uring-buf-ring-mask
+    (let ((func (foreign-procedure "io_uring_buf_ring_mask"
+                                   (unsigned-32) int)))
+      (lambda (ring-entries)
+        (func ring-entries))))
+
+  (define io-uring-prep-timeout
+    (let ((func (foreign-procedure "io_uring_prep_timeout"
+                                   (void* void* unsigned unsigned) void)))
+      (lambda (sqe ts count flags)
+        (func sqe ts count flags))))
+
+  (define io-uring-prep-close
+    (let ((func (foreign-procedure "io_uring_prep_close"
+                                   (void* int) void)))
+      (lambda (sqe fd)
+        (func sqe fd))))
+
+  (define io-uring-prep-cancel64
+    (let ((func (foreign-procedure "io_uring_prep_cancel64"
+                                   (void* unsigned-64 int) void)))
+      (lambda (sqe user-data flags)
+        (func sqe user-data flags))))
+
+  (define memcpy
+    (let ((func (foreign-procedure "memcpy" (void* void* size_t) void*)))
+      (lambda (dest src n)
+        (func dest src n))))
 
   (define io-uring-prep-accept
     (let ((func (foreign-procedure "io_uring_prep_accept"
@@ -858,6 +921,15 @@
   ;; Multishot accept tracking (fd → id, id → fd)
   (define %multishots (make-eqv-hashtable))
   (define %multishot-ids (make-eqv-hashtable))
+
+  ;; Buffer ring state
+  (define %buf-ring-nentries 256)
+  (define %buf-ring-buf-size 4096)
+  (define %buf-ring-bgid 0)
+  (define %buf-ring #f)        ;; pointer to buffer ring struct
+  (define %buf-ring-base 0)    ;; base address of buffer memory
+  (define %buf-ring-mask 0)    ;; ring mask
+  (define %buf-data (make-eqv-hashtable))  ;; id → bytevector (extracted buffer data)
 
   (define loop-prompt-current #f)
 
@@ -921,44 +993,22 @@
         (loop-thunks! %loop '())
         (for-each (lambda (thunk) (loop-apply thunk)) thunks))
 
-      ;; 2. Update jiffy
-      (%loop-jiffy! %loop (jiffy-current))
-
-      ;; 3. Wake expired timers
-      (call-with-values (lambda ()
-                          (sq-split (loop-sleeping %loop)
-                                    (%loop-jiffy %loop)))
-        (lambda (before after)
-          (unless (sq-empty? before)
-            (loop-sleeping! %loop after)
-            (sq-for-each before (lambda (jiffy thunk) (loop-apply thunk))))))
-
-      ;; 4. Submit pending SQEs + wait for CQEs
+      ;; 2. Submit pending SQEs + wait for CQEs
+      ;;    Timeouts are now io_uring SQEs (no sleep queue), so always infinite wait
       (let ((ring (loop-ring %loop))
             (cqe-ptr (loop-cqe-ptr %loop)))
         (let ((has-handlers? (not (fxzero? (hashtable-size (loop-handlers %loop)))))
-              (has-sleepers? (not (sq-empty? (loop-sleeping %loop))))
               (has-pending? (not (fxzero? (io-uring-sq-ready ring)))))
           (cond
-           ;; Have handlers: submit-and-wait (batches submit + wait into one syscall)
+           ;; Have handlers: submit-and-wait (infinite wait, ts=NULL)
            (has-handlers?
-            (if has-sleepers?
-                (let* ((timeout-ns (max 0 (- (car (sq-min (loop-sleeping %loop)))
-                                             (%loop-jiffy %loop))))
-                       (timeout-s (div timeout-ns 1000000000))
-                       (timeout-rem-ns (mod timeout-ns 1000000000))
-                       (ts (make-timespec timeout-s timeout-rem-ns)))
-                  (io-uring-submit-and-wait-timeout ring cqe-ptr 1
-                    (ftype-pointer-address ts) 0)
-                  (foreign-free (ftype-pointer-address ts)))
-                ;; No sleepers: submit + wait forever (ts=NULL)
-                (io-uring-submit-and-wait-timeout ring cqe-ptr 1 0 0)))
+            (io-uring-submit-and-wait-timeout ring cqe-ptr 1 0 0))
            ;; No handlers but pending SQEs: submit without waiting
            (has-pending?
             (io-uring-submit ring))
            (else (void))))
 
-        ;; 5. Drain all available CQEs (resumed coroutines may prep new SQEs)
+        ;; 3. Drain all available CQEs (resumed coroutines may prep new SQEs)
         (let drain ()
           (when (fxzero? (io-uring-peek-cqe ring cqe-ptr))
             (let* ((cqe (foreign-ref 'void* cqe-ptr 0))
@@ -972,13 +1022,27 @@
                   (when ms-fd
                     (hashtable-delete! %multishot-ids id)
                     (hashtable-delete! %multishots ms-fd))))
+              ;; If buffer was selected, extract data and return buffer to ring
+              (when (and (fx>? res 0)
+                         (not (fxzero? (fxlogand flags IORING-CQE-F-BUFFER))))
+                (let* ((bid (fxsrl (fxlogand flags #xFFFF0000) 16))
+                       (buf-addr (+ %buf-ring-base (* bid %buf-ring-buf-size)))
+                       (bv (make-bytevector res)))
+                  (with-lock (list bv)
+                    (memcpy (bytevector-pointer bv) buf-addr res))
+                  ;; Return buffer to ring for reuse
+                  (io-uring-buf-ring-add %buf-ring buf-addr %buf-ring-buf-size
+                                         bid %buf-ring-mask 0)
+                  (io-uring-buf-ring-advance %buf-ring 1)
+                  ;; Stash for loop-read to retrieve
+                  (hashtable-set! %buf-data id bv)))
               (let ((handler (hashtable-ref (loop-handlers %loop) id #f)))
                 (hashtable-delete! (loop-handlers %loop) id)
                 (when handler
                   (loop-apply (lambda () (handler res))))))
             (drain)))
 
-        ;; 6. Flush SQEs prepped during drain (avoids extra loop iteration latency)
+        ;; 4. Flush SQEs prepped during drain (avoids extra loop iteration latency)
         (when (not (fxzero? (io-uring-sq-ready ring)))
           (io-uring-submit ring)))))
 
@@ -1015,6 +1079,30 @@
                          '()))
         (set! %multishots (make-eqv-hashtable))
         (set! %multishot-ids (make-eqv-hashtable))
+        (set! %buf-data (make-eqv-hashtable))
+        ;; Set up provided buffer ring
+        (let ((err-ptr (foreign-alloc 4)))
+          (foreign-set! 'integer-32 err-ptr 0 0)
+          (let ((br (io-uring-setup-buf-ring ring %buf-ring-nentries
+                                             %buf-ring-bgid 0 err-ptr)))
+            (let ((err (foreign-ref 'integer-32 err-ptr 0)))
+              (foreign-free err-ptr)
+              (when (eqv? br 0)
+                (error 'transparenturing
+                       (format #f "io_uring_setup_buf_ring failed: ~a"
+                               (strerror (fx- 0 err))))))
+            (let ((base (foreign-alloc (* %buf-ring-nentries %buf-ring-buf-size)))
+                  (mask (io-uring-buf-ring-mask %buf-ring-nentries)))
+              ;; Fill ring with buffers
+              (let fill ((i 0))
+                (when (fx<? i %buf-ring-nentries)
+                  (io-uring-buf-ring-add br (+ base (* i %buf-ring-buf-size))
+                                         %buf-ring-buf-size i mask i)
+                  (fill (fx+ i 1))))
+              (io-uring-buf-ring-advance br %buf-ring-nentries)
+              (set! %buf-ring br)
+              (set! %buf-ring-base base)
+              (set! %buf-ring-mask mask))))
         %loop)))
 
   (define loop-socket-new
@@ -1055,9 +1143,15 @@
                 res))))))
 
   (define loop-close
-    (let ((loop-close-foreign (foreign-procedure __atomic "close" (int) int)))
-      (lambda (fd)
-        (loop-close-foreign fd))))
+    (lambda (fd)
+      (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+             (id (loop-alloc-id!)))
+        (io-uring-prep-close sqe fd)
+        (io-uring-sqe-set-data64 sqe id)
+        (let ((res (loop-abort
+                     (lambda (k)
+                       (hashtable-set! (loop-handlers %loop) id k)))))
+          res))))
 
   (define loop-socket-option!
     (let ((loop-socket-option-foreign! (foreign-procedure __atomic __disable_interrupts __errno "setsockopt" (int int int void* int) int)))
@@ -1174,20 +1268,24 @@
 
   (define loop-read
     (lambda (fd)
-      (let ((bv (make-bytevector 1024)))
-        (lock-object bv)
-        (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
-               (id (loop-alloc-id!)))
-          (io-uring-prep-recv sqe fd (bytevector-pointer bv) 1024 0)
-          (io-uring-sqe-set-data64 sqe id)
-          (let ((res (loop-abort
-                       (lambda (k)
-                         (hashtable-set! (loop-handlers %loop) id k)))))
-            (unlock-object bv)
-            (cond
-              ((fx<? res 0) #f)
-              ((fxzero? res) #t)    ;; EOF
-              (else (subbytevector bv 0 res))))))))
+      (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+             (id (loop-alloc-id!)))
+        ;; Use provided buffer ring — no bytevector allocation or locking needed
+        (io-uring-prep-recv sqe fd 0 %buf-ring-buf-size 0)
+        (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
+        (io-uring-sqe-set-buf-group sqe %buf-ring-bgid)
+        (io-uring-sqe-set-data64 sqe id)
+        (let ((res (loop-abort
+                     (lambda (k)
+                       (hashtable-set! (loop-handlers %loop) id k)))))
+          (cond
+            ((fx<? res 0) #f)
+            ((fxzero? res) #t)    ;; EOF
+            (else
+             ;; Buffer data was extracted by drain loop
+             (let ((bv (hashtable-ref %buf-data id #f)))
+               (hashtable-delete! %buf-data id)
+               bv)))))))
 
   (define loop-write
     (lambda (fd bv)
@@ -1225,6 +1323,35 @@
       (loop-listen fd 128)
 
       (values accept (lambda () (loop-close fd)))))
+
+  (define loop-sleep
+    (lambda (nanoseconds)
+      (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+             (id (loop-alloc-id!))
+             (ts (make-timespec (div nanoseconds 1000000000)
+                                (mod nanoseconds 1000000000))))
+        (io-uring-prep-timeout sqe (ftype-pointer-address ts) 0 0)
+        (io-uring-sqe-set-data64 sqe id)
+        (let ((res (loop-abort
+                     (lambda (k)
+                       (hashtable-set! (loop-handlers %loop) id k)))))
+          (foreign-free (ftype-pointer-address ts))
+          res))))
+
+  (define loop-stop
+    (lambda ()
+      (loop-running! %loop #f)
+      ;; Cancel all pending multishot accepts
+      (let-values (((keys vals) (hashtable-entries %multishots)))
+        (vector-for-each
+          (lambda (fd id)
+            (let ((sqe (io-uring-get-sqe (loop-ring %loop))))
+              (io-uring-prep-cancel64 sqe id 0)
+              (io-uring-sqe-set-data64 sqe (loop-alloc-id!))))
+          keys vals))
+      ;; Submit cancellations
+      (when (not (fxzero? (io-uring-sq-ready (loop-ring %loop))))
+        (io-uring-submit (loop-ring %loop)))))
 
   ;; ============================================================
   ;; Section 7: HTTP parser/writer (from letloop http)
@@ -2220,6 +2347,19 @@
   (define transparent
     (lambda (port-number app init handler)
       (loop-new)
+      ;; SIGINT/SIGTERM → graceful shutdown
+      (register-signal-handler 2  ;; SIGINT
+        (lambda (sig)
+          (when (and %loop (loop-running? %loop))
+            (format #t "\nReceived SIGINT, shutting down...\n")
+            (flush-output-port)
+            (loop-stop))))
+      (register-signal-handler 15 ;; SIGTERM
+        (lambda (sig)
+          (when (and %loop (loop-running? %loop))
+            (format #t "\nReceived SIGTERM, shutting down...\n")
+            (flush-output-port)
+            (loop-stop))))
       (loop-spawn
         (lambda ()
           (define app-state (app))
@@ -2228,12 +2368,15 @@
               (format #t "transparent server at http://127.0.0.1:~a/\n" port-number)
               (flush-output-port)
               (let loop ()
-                (call-with-values accept
-                  (lambda (read write close)
-                    (when (and read write close)
-                      (loop-spawn
-                        (lambda () (handle-connection app-state init handler read write close))))))
-                (loop))))))
-      (loop-run)))
+                (when (loop-running? %loop)
+                  (call-with-values accept
+                    (lambda (read write close)
+                      (when (and read write close)
+                        (loop-spawn
+                          (lambda () (handle-connection app-state init handler read write close))))))
+                  (loop)))))))
+      (loop-run)
+      ;; Cleanup after loop exits
+      (io-uring-queue-exit (loop-ring %loop))))
 
 )
