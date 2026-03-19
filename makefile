@@ -61,7 +61,7 @@ oprf: sodium ## Build liboprf from source
 	rm -rf $(PWD)/local/src/liboprf
 	mkdir -p $(PWD)/local/src
 	cd $(PWD)/local/src && git clone --branch v0.9.4 https://github.com/stef/liboprf
-	cd $(PWD)/local/src/liboprf/src && make -C noise_xk all CFLAGS="-Wall -O2 -g -fpic -I$(PWD)/local/include"
+	cd $(PWD)/local/src/liboprf/src && make -C noise_xk all CFLAGS="-Wall -O2 -g -fpic -I$(PWD)/local/include" LDFLAGS="-L$(PWD)/local/lib"
 	cd $(PWD)/local/src/liboprf/src && $(CC) -Wall -O2 -g -fpic -DHAVE_SODIUM_HKDF=1 -I$(PWD)/local/include -Inoise_xk/include -Inoise_xk/include/karmel -Inoise_xk/include/karmel/minimal -c oprf.c toprf.c dkg.c dkg-vss.c utils.c tp-dkg.c mpmult.c stp-dkg.c toprf-update.c
 	cd $(PWD)/local/src/liboprf/src && $(LD) -r -o liboprf_merged.o oprf.o toprf.o dkg.o dkg-vss.o utils.o tp-dkg.o mpmult.o stp-dkg.o toprf-update.o
 	cd $(PWD)/local/src/liboprf/src && $(CC) -Wall -O2 -g -fpic -shared -Wl,-soname,liboprf.so.0 -o liboprf.so liboprf_merged.o -L$(PWD)/local/lib -lsodium -loprf-noiseXK -Lnoise_xk
