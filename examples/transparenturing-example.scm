@@ -12,8 +12,15 @@
        (values 200
                (html `(html (body
                  (h1 ,(format #f "Count: ~a" (unbox app-state)))
+                 (p "Press Ctrl-C for graceful shutdown")
                  (form (@ (method "POST") (action "/increment"))
                    (button (@ (type "submit")) "Increment")))))
+               '()))
+      ((GET "sleep")
+       ;; Demo: io_uring-based sleep (1 second)
+       (loop-sleep 1000000000)
+       (values 200
+               (html `(html (body (h1 "Slept 1 second (via io_uring timeout)"))))
                '()))
       ((POST "increment")
        (set-box! app-state (+ (unbox app-state) 1))
