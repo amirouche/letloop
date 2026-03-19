@@ -810,8 +810,21 @@
       (ftype-ref <cqe> (res)
                  (make-ftype-pointer <cqe> cqe))))
 
+  (define io-uring-cqe-get-flags
+    (lambda (cqe)
+      (ftype-ref <cqe> (flags)
+                 (make-ftype-pointer <cqe> cqe))))
+
+  (define IORING-CQE-F-MORE 2)
+
   (define io-uring-prep-accept
     (let ((func (foreign-procedure "io_uring_prep_accept"
+                                   (void* int void* void* int) void)))
+      (lambda (sqe fd addr addrlen flags)
+        (func sqe fd addr addrlen flags))))
+
+  (define io-uring-prep-multishot-accept
+    (let ((func (foreign-procedure "io_uring_prep_multishot_accept"
                                    (void* int void* void* int) void)))
       (lambda (sqe fd addr addrlen flags)
         (func sqe fd addr addrlen flags))))
@@ -841,6 +854,10 @@
         (func ring))))
 
   (define %loop #f)
+
+  ;; Multishot accept tracking (fd → id, id → fd)
+  (define %multishots (make-eqv-hashtable))
+  (define %multishot-ids (make-eqv-hashtable))
 
   (define loop-prompt-current #f)
 
@@ -946,8 +963,15 @@
           (when (fxzero? (io-uring-peek-cqe ring cqe-ptr))
             (let* ((cqe (foreign-ref 'void* cqe-ptr 0))
                    (id (io-uring-cqe-get-data64 cqe))
-                   (res (io-uring-cqe-get-res cqe)))
+                   (res (io-uring-cqe-get-res cqe))
+                   (flags (io-uring-cqe-get-flags cqe)))
               (io-uring-cqe-seen ring cqe)
+              ;; If multishot CQE without MORE flag, the multishot ended
+              (when (fxzero? (fxlogand flags IORING-CQE-F-MORE))
+                (let ((ms-fd (hashtable-ref %multishot-ids id #f)))
+                  (when ms-fd
+                    (hashtable-delete! %multishot-ids id)
+                    (hashtable-delete! %multishots ms-fd))))
               (let ((handler (hashtable-ref (loop-handlers %loop) id #f)))
                 (hashtable-delete! (loop-handlers %loop) id)
                 (when handler
@@ -989,6 +1013,8 @@
                          handlers
                          0
                          '()))
+        (set! %multishots (make-eqv-hashtable))
+        (set! %multishot-ids (make-eqv-hashtable))
         %loop)))
 
   (define loop-socket-new
@@ -1002,15 +1028,28 @@
 
   (define loop-accept
     (lambda (fd)
-      (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
-             (id (loop-alloc-id!)))
-        (io-uring-prep-accept sqe fd 0 0 0)
-        (io-uring-sqe-set-data64 sqe id)
+      ;; Multishot: submit once, get one CQE per incoming connection
+      (let ((active-id (hashtable-ref %multishots fd #f)))
+        (unless active-id
+          ;; No active multishot for this fd — submit one
+          (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+                 (id (loop-alloc-id!)))
+            (io-uring-prep-multishot-accept sqe fd 0 0 0)
+            (io-uring-sqe-set-data64 sqe id)
+            (hashtable-set! %multishots fd id)
+            (hashtable-set! %multishot-ids id fd)
+            (set! active-id id)))
         (let ((res (loop-abort
                      (lambda (k)
-                       (hashtable-set! (loop-handlers %loop) id k)))))
+                       (hashtable-set! (loop-handlers %loop) active-id k)))))
           (if (fx<? res 0)
-              #f
+              (begin
+                ;; Error — multishot may have ended, clean up just in case
+                (let ((mid (hashtable-ref %multishots fd #f)))
+                  (when mid
+                    (hashtable-delete! %multishots fd)
+                    (hashtable-delete! %multishot-ids mid)))
+                #f)
               (begin
                 (loop-socket-option! res 6 'tcp-option/nodelay #t)
                 res))))))
