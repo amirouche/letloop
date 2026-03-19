@@ -4,7 +4,7 @@
           www-form-urlencoded-read
           ~check-www-000 ~check-www-001 ~check-www-002 ~check-www-002-bis
           ~check-www-003)
-  (import (chezscheme) (letloop http) (letloop match))
+  (import (chezscheme) (letloop http) (letloop tls base) (letloop match))
 
   (define pk
     (lambda args
@@ -16,31 +16,16 @@
 
   (define www-request
     (lambda (method url headers body)
-
-      (define command-run
-        (lambda (command input)
-          (call-with-values (lambda () (open-process-ports command))
-            (lambda (stdin stdout stderr pid)
-              (put-bytevector stdin input)
-              (close-port stdin)
-              (let ((out (get-bytevector-all stdout)))
-                (close-port stdout)
-                (close-port stderr)
-                out)))))
-
-      (guard (ex (else (error 'www-request (condition-message ex) (condition-irritants ex))))
-        (define headers* (map (lambda (x) (format #f "~a: ~a" (car x) (cdr x))) headers))
-        (let ((response-bv (command-run (format #f "curl --raw --http1.1 -X ~s -i ~a ~{-H ~s ~}" method url headers*)
-                                        body)))
-          (let ((done #f))
-            (call-with-values (lambda ()
-                                (http-response-read
-                                 (lambda ()
-                                   (if done
-                                       (eof-object)
-                                       (begin (set! done #t) response-bv)))))
-              (lambda (version code reason headers body)
-                (values code headers body))))))))
+      (guard (ex (else (error 'www-request
+                              (if (condition? ex)
+                                  (condition-message ex)
+                                  (format #f "~a" ex))
+                              (if (condition? ex)
+                                  (condition-irritants ex)
+                                  '()))))
+        (call-with-values (lambda () (https-request method url headers body))
+          (lambda (version code reason headers body)
+            (values code headers body))))))
 
   (define ~check-www-000
     (lambda ()
