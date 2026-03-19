@@ -1,3 +1,10 @@
+;;
+;; WARNING: This is hand-rolled cryptography. It has NOT been
+;; independently audited. Use at your own risk. Do NOT use in
+;; production systems without a thorough security review by a
+;; qualified cryptographer.
+;;
+
 (library (letloop srp)
   (export make-srp-client-verifier
           make-srp-server
