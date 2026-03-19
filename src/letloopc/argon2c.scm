@@ -1,8 +1,13 @@
 #!chezscheme
-(library (letloop argon2c)
-  (export argon2id argon2id-encode argon2id-verify ~check-argon2-0)
+(library (letloopc argon2c)
+  (export argon2id argon2id-encode argon2id-verify
+          ~check-argon2-0
+          ~check-argon2c-cross-0
+          ~check-argon2c-cross-1
+          ~check-argon2c-cross-2)
   (import (chezscheme)
-          (letloop cffi))
+          (letloop cffi)
+          (prefix (letloop argon2) pure:))
 
   (define libargon2.so.1 (load-shared-object "libargon2.so.1"))
 
@@ -162,14 +167,55 @@
 
   (define ~check-argon2-0
     (lambda ()
+      (let ((salt (bytevector-random 256))
+            (password (bytevector-random 256)))
+        (assert (argon2id-verify (argon2id-encode salt password) password)))))
 
-      (define bytevector-random
-        (lambda (n)
-          (u8-list->bytevector (map (lambda _ (random 256)) (iota n)))))
+  (define bytevector-random
+    (lambda (n)
+      (u8-list->bytevector (map (lambda _ (random 256)) (iota n)))))
 
-      (define salt (bytevector-random 256))
-      (define password (bytevector-random 256))
+  (define ~check-argon2c-cross-0
+    (lambda ()
+      (random-seed 42)
+      (let* ((salt (bytevector-random 16))
+             (password (bytevector-random 32)))
+        ;; Raw hash must match
+        (assert (equal? (argon2id salt password)
+                        (pure:argon2id salt password)))
+        ;; Encoded output must match
+        (let ((enc-ffi (argon2id-encode salt password))
+              (enc-pure (pure:argon2id-encode salt password)))
+          (assert (equal? enc-ffi enc-pure))
+          ;; Cross-verify
+          (assert (pure:argon2id-verify enc-ffi password))
+          (assert (argon2id-verify enc-pure password))))))
 
-      (assert (argon2id-verify (argon2id-encode salt password) password))))
+  (define ~check-argon2c-cross-1
+    (lambda ()
+      (random-seed 7)
+      (let* ((salt (bytevector-random 32))
+             (password (bytevector-random 64)))
+        (assert (equal? (argon2id salt password)
+                        (pure:argon2id salt password)))
+        (let ((enc-ffi (argon2id-encode salt password))
+              (enc-pure (pure:argon2id-encode salt password)))
+          (assert (equal? enc-ffi enc-pure))
+          (assert (pure:argon2id-verify enc-ffi password))
+          (assert (argon2id-verify enc-pure password))))))
+
+  (define ~check-argon2c-cross-2
+    (lambda ()
+      (random-seed 99)
+      ;; Minimum salt size (8 bytes) and short password
+      (let* ((salt (bytevector-random 8))
+             (password (bytevector-random 8)))
+        (assert (equal? (argon2id salt password)
+                        (pure:argon2id salt password)))
+        (let ((enc-ffi (argon2id-encode salt password))
+              (enc-pure (pure:argon2id-encode salt password)))
+          (assert (equal? enc-ffi enc-pure))
+          (assert (pure:argon2id-verify enc-ffi password))
+          (assert (argon2id-verify enc-pure password))))))
 
   )
