@@ -1,5 +1,5 @@
 #!chezscheme
-(library (letloopc argon2c)
+(library (letloopc argon2)
   (export argon2id argon2id-encode argon2id-verify
           ~check-argon2-0
           ~check-argon2c-cross-0
