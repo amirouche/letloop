@@ -29,7 +29,7 @@ jobs:
 
       - name: Build C dependencies
         if: steps.cache-local.outputs.cache-hit != 'true'
-        run: ./venv local/ make sodium oprf opaque argon2 blake3
+        run: ./venv local/ make opaque argon2 blake3
 
       - name: Build letloop
         run: ./venv local/ make letloop
