@@ -4,6 +4,7 @@
   (import (chezscheme))
 
   ;; ===== Layer 1: 64-bit Arithmetic Helpers =====
+  ;; Used only by blake2b (Layer 2), NOT in the hot argon2 core.
 
   (define u64-mask #xFFFFFFFFFFFFFFFF)
   (define u32-mask #xFFFFFFFF)
@@ -27,6 +28,7 @@
     (bytevector-u64-ref bv offset (endianness little)))
 
   ;; ===== Layer 2: Blake2b =====
+  ;; Unchanged — not in the hot loop, called only at init and finalization.
 
   (define BLAKE2B-BLOCKBYTES 128)
   (define BLAKE2B-OUTBYTES 64)
@@ -69,7 +71,6 @@
     (let ((h (blake2b-state-h S)))
       (do ((i 0 (fx+ i 1))) ((fx= i 8))
         (vector-set! h i (vector-ref blake2b-IV i)))
-      ;; XOR parameter block: digest_length=outlen, key_length=0, fanout=1, depth=1
       (vector-set! h 0 (logxor (vector-ref h 0)
                                 (logior outlen #x01010000))))
     (blake2b-state-t0-set! S 0)
@@ -89,7 +90,6 @@
   (define (blake2b-set-lastblock! S)
     (blake2b-state-f0-set! S u64-mask))
 
-  ;; Blake2b G mixing function (uses addition, not fBlaMka)
   (define (blake2b-G! v ai bi ci di msg0 msg1)
     (vector-set! v ai (u64 (+ (vector-ref v ai) (vector-ref v bi) msg0)))
     (vector-set! v di (rotr64 (logxor (vector-ref v di) (vector-ref v ai)) 32))
@@ -104,11 +104,9 @@
     (let ((m (make-vector 16 0))
           (v (make-vector 16 0))
           (h (blake2b-state-h S)))
-      ;; Load message words
       (do ((i 0 (fx+ i 1))) ((fx= i 16))
         (vector-set! m i (bytevector-u64-ref block-bv (fx+ block-offset (fx* i 8))
                                              (endianness little))))
-      ;; Init working vector
       (do ((i 0 (fx+ i 1))) ((fx= i 8))
         (vector-set! v i (vector-ref h i)))
       (vector-set! v 8  (vector-ref blake2b-IV 0))
@@ -119,7 +117,6 @@
       (vector-set! v 13 (logxor (vector-ref blake2b-IV 5) (blake2b-state-t1 S)))
       (vector-set! v 14 (logxor (vector-ref blake2b-IV 6) (blake2b-state-f0 S)))
       (vector-set! v 15 (logxor (vector-ref blake2b-IV 7) (blake2b-state-f1 S)))
-      ;; 12 rounds
       (do ((r 0 (fx+ r 1))) ((fx= r 12))
         (let ((s (vector-ref blake2b-sigma r)))
           (blake2b-G! v 0 4  8 12 (vector-ref m (vector-ref s  0)) (vector-ref m (vector-ref s  1)))
@@ -130,7 +127,6 @@
           (blake2b-G! v 1 6 11 12 (vector-ref m (vector-ref s 10)) (vector-ref m (vector-ref s 11)))
           (blake2b-G! v 2 7  8 13 (vector-ref m (vector-ref s 12)) (vector-ref m (vector-ref s 13)))
           (blake2b-G! v 3 4  9 14 (vector-ref m (vector-ref s 14)) (vector-ref m (vector-ref s 15)))))
-      ;; Finalize: h[i] ^= v[i] ^ v[i+8]
       (do ((i 0 (fx+ i 1))) ((fx= i 8))
         (vector-set! h i (logxor (vector-ref h i)
                                   (logxor (vector-ref v i) (vector-ref v (fx+ i 8))))))))
@@ -165,24 +161,20 @@
           (outlen (blake2b-state-outlen S)))
       (blake2b-increment-counter! S buflen)
       (blake2b-set-lastblock! S)
-      ;; Zero-pad remaining buffer
       (do ((i buflen (fx+ i 1))) ((fx= i BLAKE2B-BLOCKBYTES))
         (bytevector-u8-set! buf i 0))
       (blake2b-compress! S buf 0)
-      ;; Extract output
       (let ((buffer (make-bytevector BLAKE2B-OUTBYTES 0)))
         (do ((i 0 (fx+ i 1))) ((fx= i 8))
           (store64! buffer (fx* i 8) (vector-ref (blake2b-state-h S) i)))
         (bytevector-copy! buffer 0 out 0 outlen))))
 
-  ;; One-shot blake2b hash (unkeyed)
   (define (blake2b out outlen in inlen)
     (let ((S (make-blake2b)))
       (blake2b-init! S outlen)
       (blake2b-update! S in 0 inlen)
       (blake2b-final! S out)))
 
-  ;; Variable-length blake2b output (used by Argon2)
   (define (blake2b-long out outlen in inlen)
     (let ((outlen-bytes (make-bytevector 4 0)))
       (store32! outlen-bytes 0 outlen)
@@ -198,7 +190,6 @@
               (blake2b-update! S outlen-bytes 0 4)
               (blake2b-update! S in 0 inlen)
               (blake2b-final! S out-buffer))
-            ;; Copy first 32 bytes
             (bytevector-copy! out-buffer 0 out 0 (/ BLAKE2B-OUTBYTES 2))
             (let loop ((out-offset (/ BLAKE2B-OUTBYTES 2))
                        (toproduce (- outlen (/ BLAKE2B-OUTBYTES 2))))
@@ -212,7 +203,9 @@
                     (blake2b out-buffer toproduce in-buffer BLAKE2B-OUTBYTES)
                     (bytevector-copy! out-buffer 0 out out-offset toproduce))))))))
 
-  ;; ===== Layer 3: Argon2 Core =====
+  ;; ===== Layer 3: Argon2 Core (OPTIMIZED) =====
+  ;; Blocks are flat bytevectors (1024 bytes). All hot-loop arithmetic
+  ;; uses 32-bit fixnum halves — zero bignum allocation.
 
   (define ARGON2-BLOCK-SIZE 1024)
   (define ARGON2-QWORDS-IN-BLOCK 128)
@@ -223,40 +216,103 @@
   (define ARGON2-VERSION-13 #x13)
   (define ARGON2-TYPE-ID 2)
 
-  ;; Block: vector of 128 uint64 values
-  (define (make-block) (make-vector ARGON2-QWORDS-IN-BLOCK 0))
+  ;; Block: flat bytevector of 1024 bytes (128 u64 values in little-endian)
+  (define (make-block) (make-bytevector ARGON2-BLOCK-SIZE 0))
 
   (define (copy-block! dst src)
-    (do ((i 0 (fx+ i 1))) ((fx= i ARGON2-QWORDS-IN-BLOCK))
-      (vector-set! dst i (vector-ref src i))))
+    (bytevector-copy! src 0 dst 0 ARGON2-BLOCK-SIZE))
 
+  ;; XOR at u32 level to stay in fixnums (256 iterations, no bignums)
   (define (xor-block! dst src)
-    (do ((i 0 (fx+ i 1))) ((fx= i ARGON2-QWORDS-IN-BLOCK))
-      (vector-set! dst i (logxor (vector-ref dst i) (vector-ref src i)))))
+    (do ((i 0 (fx+ i 4))) ((fx= i ARGON2-BLOCK-SIZE))
+      (bytevector-u32-set! dst i
+        (fxlogxor (bytevector-u32-ref dst i (endianness little))
+                  (bytevector-u32-ref src i (endianness little)))
+        (endianness little))))
 
   (define (block->bytevector blk)
-    (let ((bv (make-bytevector ARGON2-BLOCK-SIZE)))
-      (do ((i 0 (fx+ i 1))) ((fx= i ARGON2-QWORDS-IN-BLOCK) bv)
-        (store64! bv (fx* i 8) (vector-ref blk i)))))
+    (bytevector-copy blk))
 
   (define (bytevector->block! blk bv)
-    (do ((i 0 (fx+ i 1))) ((fx= i ARGON2-QWORDS-IN-BLOCK))
-      (vector-set! blk i (load64 bv (fx* i 8)))))
+    (bytevector-copy! bv 0 blk 0 ARGON2-BLOCK-SIZE))
 
-  ;; fBlaMka: x + y + 2*(x_lo32 * y_lo32) mod 2^64
-  (define (fBlaMka x y)
-    (u64 (+ x y (* 2 (* (logand x u32-mask) (logand y u32-mask))))))
+  ;; --- 32-bit split fBlaMka ---
+  ;; fBlaMka(x, y) = (x + y + 2*(x_lo32 * y_lo32)) mod 2^64
+  ;; All intermediates fit in 61-bit fixnums (verified: max ~2^34).
+  (define (fBlaMka32 x0 x1 y0 y1)
+    ;; x = (x0=lo32, x1=hi32), y = (y0=lo32, y1=hi32)
+    ;; Multiply x0*y0 using 16-bit halves to stay in fixnums
+    (let* ((xl0 (fxlogand x0 #xFFFF))
+           (xl1 (fxsrl x0 16))
+           (yl0 (fxlogand y0 #xFFFF))
+           (yl1 (fxsrl y0 16))
+           (p00 (fx* xl0 yl0))
+           (p01 (fx* xl0 yl1))
+           (p10 (fx* xl1 yl0))
+           (p11 (fx* xl1 yl1))
+           ;; Combine partial products into lo32/hi32 of x0*y0
+           (mid (fx+ p01 p10))
+           (lo-sum (fx+ p00 (fxsll (fxlogand mid #xFFFF) 16)))
+           (prod-lo (fxlogand lo-sum #xFFFFFFFF))
+           (carry (fx+ (fxsrl lo-sum 32) (fxsrl mid 16)))
+           (prod-hi (fxlogand (fx+ p11 carry) #xFFFFFFFF))
+           ;; 2 * prod
+           (two-lo (fxlogand (fxsll prod-lo 1) #xFFFFFFFF))
+           (two-carry (fxsrl prod-lo 31))
+           (two-hi (fxlogand (fx+ (fxsll prod-hi 1) two-carry) #xFFFFFFFF))
+           ;; result = x + y + 2*prod
+           (sum-lo (fx+ x0 (fx+ y0 two-lo)))
+           (r-lo (fxlogand sum-lo #xFFFFFFFF))
+           (carry-out (fxsrl sum-lo 32))
+           (sum-hi (fx+ x1 (fx+ y1 (fx+ two-hi carry-out))))
+           (r-hi (fxlogand sum-hi #xFFFFFFFF)))
+      (values r-lo r-hi)))
 
-  ;; Argon2 G mixing function (uses fBlaMka, no message words)
+  ;; --- Argon2 G mixing function (bytevector blocks, 32-bit split) ---
+  ;; Indices are element indices (0-127); byte offsets computed internally.
+  ;; Rotation amounts: 32 (swap), 24, 16, 63 (rotl 1).
+  ;; All left shifts ≤ 25 bits on u32 values, max result < 2^57 < 2^60 (fixnum).
   (define (argon2-G! v ai bi ci di)
-    (vector-set! v ai (fBlaMka (vector-ref v ai) (vector-ref v bi)))
-    (vector-set! v di (rotr64 (logxor (vector-ref v di) (vector-ref v ai)) 32))
-    (vector-set! v ci (fBlaMka (vector-ref v ci) (vector-ref v di)))
-    (vector-set! v bi (rotr64 (logxor (vector-ref v bi) (vector-ref v ci)) 24))
-    (vector-set! v ai (fBlaMka (vector-ref v ai) (vector-ref v bi)))
-    (vector-set! v di (rotr64 (logxor (vector-ref v di) (vector-ref v ai)) 16))
-    (vector-set! v ci (fBlaMka (vector-ref v ci) (vector-ref v di)))
-    (vector-set! v bi (rotr64 (logxor (vector-ref v bi) (vector-ref v ci)) 63)))
+    (let ((ao (fx* ai 8)) (bo (fx* bi 8)) (co (fx* ci 8)) (do2 (fx* di 8)))
+      (let ((a0 (bytevector-u32-ref v ao (endianness little)))
+            (a1 (bytevector-u32-ref v (fx+ ao 4) (endianness little)))
+            (b0 (bytevector-u32-ref v bo (endianness little)))
+            (b1 (bytevector-u32-ref v (fx+ bo 4) (endianness little)))
+            (c0 (bytevector-u32-ref v co (endianness little)))
+            (c1 (bytevector-u32-ref v (fx+ co 4) (endianness little)))
+            (d0 (bytevector-u32-ref v do2 (endianness little)))
+            (d1 (bytevector-u32-ref v (fx+ do2 4) (endianness little))))
+        ;; 1. a = fBlaMka(a, b)
+        (let-values (((a0 a1) (fBlaMka32 a0 a1 b0 b1)))
+          ;; 2. d = rotr64(d^a, 32) = swap halves of (d XOR a)
+          (let ((d0 (fxlogxor d1 a1)) (d1 (fxlogxor d0 a0)))
+            ;; 3. c = fBlaMka(c, d)
+            (let-values (((c0 c1) (fBlaMka32 c0 c1 d0 d1)))
+              ;; 4. b = rotr64(b^c, 24)
+              (let ((t0 (fxlogxor b0 c0)) (t1 (fxlogxor b1 c1)))
+                (let ((b0 (fxlogand (fxlogior (fxsrl t0 24) (fxsll t1 8)) #xFFFFFFFF))
+                      (b1 (fxlogand (fxlogior (fxsrl t1 24) (fxsll t0 8)) #xFFFFFFFF)))
+                  ;; 5. a = fBlaMka(a, b)
+                  (let-values (((a0 a1) (fBlaMka32 a0 a1 b0 b1)))
+                    ;; 6. d = rotr64(d^a, 16)
+                    (let ((t0 (fxlogxor d0 a0)) (t1 (fxlogxor d1 a1)))
+                      (let ((d0 (fxlogand (fxlogior (fxsrl t0 16) (fxsll t1 16)) #xFFFFFFFF))
+                            (d1 (fxlogand (fxlogior (fxsrl t1 16) (fxsll t0 16)) #xFFFFFFFF)))
+                        ;; 7. c = fBlaMka(c, d)
+                        (let-values (((c0 c1) (fBlaMka32 c0 c1 d0 d1)))
+                          ;; 8. b = rotr64(b^c, 63) = rotl64(b^c, 1)
+                          (let ((t0 (fxlogxor b0 c0)) (t1 (fxlogxor b1 c1)))
+                            (let ((b0 (fxlogand (fxlogior (fxsll t0 1) (fxsrl t1 31)) #xFFFFFFFF))
+                                  (b1 (fxlogand (fxlogior (fxsll t1 1) (fxsrl t0 31)) #xFFFFFFFF)))
+                              ;; Store results
+                              (bytevector-u32-set! v ao a0 (endianness little))
+                              (bytevector-u32-set! v (fx+ ao 4) a1 (endianness little))
+                              (bytevector-u32-set! v bo b0 (endianness little))
+                              (bytevector-u32-set! v (fx+ bo 4) b1 (endianness little))
+                              (bytevector-u32-set! v co c0 (endianness little))
+                              (bytevector-u32-set! v (fx+ co 4) c1 (endianness little))
+                              (bytevector-u32-set! v do2 d0 (endianness little))
+                              (bytevector-u32-set! v (fx+ do2 4) d1 (endianness little))))))))))))))))
 
   ;; BLAKE2_ROUND_NOMSG: 8 G calls on 16 words (columns then diagonals)
   (define (blake2-round-nomsg! v i0 i1 i2 i3 i4 i5 i6 i7 i8 i9 i10 i11 i12 i13 i14 i15)
@@ -270,14 +326,10 @@
     (argon2-G! v i3 i4 i9  i14))
 
   ;; fill-block: core block-filling function
-  ;; blockR and block-tmp are pre-allocated scratch blocks
   (define (fill-block! prev-block ref-block next-block with-xor blockR block-tmp)
-    ;; blockR = ref XOR prev
     (copy-block! blockR ref-block)
     (xor-block! blockR prev-block)
-    ;; block-tmp = blockR (save for final XOR)
     (copy-block! block-tmp blockR)
-    ;; If with-xor, also XOR next-block into block-tmp
     (when with-xor
       (xor-block! block-tmp next-block))
     ;; Column rounds: 8 groups of 16 consecutive words
@@ -296,13 +348,14 @@
           (fx+ b 32) (fx+ b 33) (fx+ b 48) (fx+ b 49)
           (fx+ b 64) (fx+ b 65) (fx+ b 80) (fx+ b 81)
           (fx+ b 96) (fx+ b 97) (fx+ b 112) (fx+ b 113))))
-    ;; next-block = block-tmp XOR blockR
     (copy-block! next-block block-tmp)
     (xor-block! next-block blockR))
 
   ;; Generate pseudo-random addresses for data-independent mode
   (define (next-addresses! address-block input-block zero-block blockR block-tmp)
-    (vector-set! input-block 6 (u64 (+ (vector-ref input-block 6) 1)))
+    ;; Increment element 6 (byte offset 48) — always a small fixnum
+    (let ((val (bytevector-u64-ref input-block 48 (endianness little))))
+      (bytevector-u64-set! input-block 48 (fx+ val 1) (endianness little)))
     (fill-block! zero-block input-block address-block #f blockR block-tmp)
     (fill-block! zero-block address-block address-block #f blockR block-tmp))
 
@@ -347,12 +400,12 @@
            (starting-index (if (and (= pass 0) (= slice 0)) 2 0)))
       ;; Set up input block for data-independent addressing
       (when data-independent
-        (vector-set! input-block 0 pass)
-        (vector-set! input-block 1 lane)
-        (vector-set! input-block 2 slice)
-        (vector-set! input-block 3 memory-blocks)
-        (vector-set! input-block 4 passes)
-        (vector-set! input-block 5 ARGON2-TYPE-ID))
+        (bytevector-u64-set! input-block 0 pass (endianness little))
+        (bytevector-u64-set! input-block 8 lane (endianness little))
+        (bytevector-u64-set! input-block 16 slice (endianness little))
+        (bytevector-u64-set! input-block 24 memory-blocks (endianness little))
+        (bytevector-u64-set! input-block 32 passes (endianness little))
+        (bytevector-u64-set! input-block 40 ARGON2-TYPE-ID (endianness little)))
       ;; Generate first address block if pass=0, slice=0
       (when (and (= pass 0) (= slice 0) data-independent)
         (next-addresses! address-block input-block zero-block blockR block-tmp))
@@ -366,15 +419,18 @@
           ;; Generate new addresses if needed
           (when (and data-independent (= (mod i ARGON2-ADDRESSES-IN-BLOCK) 0))
             (next-addresses! address-block input-block zero-block blockR block-tmp))
-          (let* ((pseudo-rand
-                  (if data-independent
-                      (vector-ref address-block (mod i ARGON2-ADDRESSES-IN-BLOCK))
-                      (vector-ref (vector-ref memory prev-offset) 0)))
-                 (ref-lane (mod (ash pseudo-rand -32) lanes))
+          ;; Read pseudo-rand as two u32 halves (no bignums)
+          (let* ((pr-blk (if data-independent
+                             address-block
+                             (vector-ref memory prev-offset)))
+                 (pr-off (if data-independent (fx* (mod i ARGON2-ADDRESSES-IN-BLOCK) 8) 0))
+                 (pseudo-rand-lo (bytevector-u32-ref pr-blk pr-off (endianness little)))
+                 (pseudo-rand-hi (bytevector-u32-ref pr-blk (fx+ pr-off 4) (endianness little)))
+                 (ref-lane (mod pseudo-rand-hi lanes))
                  (ref-lane (if (and (= pass 0) (= slice 0)) lane ref-lane))
                  (ref-index (index-alpha segment-length lane-length lanes
                                         pass slice i
-                                        (logand pseudo-rand u32-mask)
+                                        pseudo-rand-lo
                                         (= ref-lane lane)))
                  (ref-block (vector-ref memory (+ (* ref-lane lane-length) ref-index)))
                  (prev-block (vector-ref memory prev-offset))
@@ -387,7 +443,6 @@
     (let ((S (make-blake2b))
           (value (make-bytevector 4 0)))
       (blake2b-init! S ARGON2-PREHASH-DIGEST-LENGTH)
-      ;; Hash parameters in order: lanes, outlen, m_cost, t_cost, version, type
       (store32! value 0 lanes)
       (blake2b-update! S value 0 4)
       (store32! value 0 outlen)
@@ -400,23 +455,18 @@
       (blake2b-update! S value 0 4)
       (store32! value 0 ARGON2-TYPE-ID)
       (blake2b-update! S value 0 4)
-      ;; Password
       (store32! value 0 (bytevector-length password))
       (blake2b-update! S value 0 4)
       (when (> (bytevector-length password) 0)
         (blake2b-update! S password 0 (bytevector-length password)))
-      ;; Salt
       (store32! value 0 (bytevector-length salt))
       (blake2b-update! S value 0 4)
       (when (> (bytevector-length salt) 0)
         (blake2b-update! S salt 0 (bytevector-length salt)))
-      ;; Secret (none)
       (store32! value 0 0)
       (blake2b-update! S value 0 4)
-      ;; Associated data (none)
       (store32! value 0 0)
       (blake2b-update! S value 0 4)
-      ;; Finalize into 72-byte buffer (64 hash + 8 for block/lane indices)
       (let ((blockhash (make-bytevector ARGON2-PREHASH-SEED-LENGTH 0)))
         (blake2b-final! S blockhash)
         blockhash)))
@@ -425,12 +475,10 @@
   (define (fill-first-blocks! blockhash memory lane-length lanes)
     (let ((blockhash-bytes (make-bytevector ARGON2-BLOCK-SIZE 0)))
       (do ((l 0 (+ l 1))) ((= l lanes))
-        ;; Block 0 for lane l
         (store32! blockhash ARGON2-PREHASH-DIGEST-LENGTH 0)
         (store32! blockhash (+ ARGON2-PREHASH-DIGEST-LENGTH 4) l)
         (blake2b-long blockhash-bytes ARGON2-BLOCK-SIZE blockhash ARGON2-PREHASH-SEED-LENGTH)
         (bytevector->block! (vector-ref memory (+ (* l lane-length) 0)) blockhash-bytes)
-        ;; Block 1 for lane l
         (store32! blockhash ARGON2-PREHASH-DIGEST-LENGTH 1)
         (blake2b-long blockhash-bytes ARGON2-BLOCK-SIZE blockhash ARGON2-PREHASH-SEED-LENGTH)
         (bytevector->block! (vector-ref memory (+ (* l lane-length) 1)) blockhash-bytes))))
@@ -441,27 +489,21 @@
            (segment-length (quotient memory-blocks (* parallelism ARGON2-SYNC-POINTS)))
            (memory-blocks (* segment-length parallelism ARGON2-SYNC-POINTS))
            (lane-length (* segment-length ARGON2-SYNC-POINTS))
-           ;; Allocate memory: vector of blocks
            (memory (let ((mem (make-vector memory-blocks)))
                      (do ((i 0 (+ i 1))) ((= i memory-blocks) mem)
                        (vector-set! mem i (make-block))))))
-      ;; Initial hash
       (let ((blockhash (initial-hash parallelism outlen m-cost t-cost password salt)))
-        ;; Fill first blocks
         (fill-first-blocks! blockhash memory lane-length parallelism)
-        ;; Fill memory: passes x sync_points x lanes
         (do ((pass 0 (+ pass 1))) ((= pass t-cost))
           (do ((slice 0 (+ slice 1))) ((= slice ARGON2-SYNC-POINTS))
             (do ((lane 0 (+ lane 1))) ((= lane parallelism))
               (fill-segment! memory memory-blocks segment-length lane-length
                             parallelism t-cost pass lane slice))))
-        ;; Finalize: XOR last blocks of all lanes
         (let ((final-block (make-block)))
           (copy-block! final-block (vector-ref memory (- lane-length 1)))
           (do ((l 1 (+ l 1))) ((= l parallelism))
             (xor-block! final-block
                         (vector-ref memory (+ (* l lane-length) (- lane-length 1)))))
-          ;; Hash the XOR'd block with blake2b-long
           (let ((final-bytes (block->bytevector final-block))
                 (out (make-bytevector outlen 0)))
             (blake2b-long out outlen final-bytes ARGON2-BLOCK-SIZE)
@@ -499,7 +541,6 @@
        ((char=? c #\+) 62)
        ((char=? c #\/) 63)
        (else #f)))
-    ;; First pass: compute output length
     (let* ((slen (string-length str))
            (out-len (let loop ((i 0) (acc-len 0) (len 0))
                       (if (= i slen) len
@@ -511,7 +552,6 @@
                                       (loop (+ i 1) acc-len len)))
                                 len)))))
            (result (make-bytevector out-len 0)))
-      ;; Second pass: decode
       (let loop ((i 0) (j 0) (acc 0) (acc-len 0))
         (when (< i slen)
           (let ((d (char->b64 (string-ref str i))))
@@ -552,13 +592,11 @@
     (let* ((str (if (bytevector? encoded)
                     (bytevector->string encoded (make-transcoder (utf-8-codec)))
                     encoded))
-           ;; Strip null terminators
            (str (let loop ((s str))
                   (if (and (> (string-length s) 0)
                            (char=? (string-ref s (- (string-length s) 1)) #\nul))
                       (loop (substring s 0 (- (string-length s) 1)))
                       s)))
-           ;; Split by $: ("" "argon2id" "v=19" "m=...,t=...,p=..." salt-b64 hash-b64)
            (parts (string-split str #\$)))
       (let* ((version-str (list-ref parts 2))
              (version (string->number (substring version-str 2 (string-length version-str))))
