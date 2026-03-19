@@ -33,6 +33,8 @@ jobs:
 
       - name: Build letloop
         run: ./venv local/ make letloop
+        run: ./venv local/ letloop
 
       - name: Run tests
+
         run: ./venv local/ sh letloop-check.sh
