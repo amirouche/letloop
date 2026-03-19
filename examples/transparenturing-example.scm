@@ -18,7 +18,7 @@
                '()))
       ((GET "sleep")
        ;; Demo: io_uring-based sleep (1 second)
-       (sleep 1)
+       (loop-sleep 1)
        (values 200
                (html `(html (body (h1 "Slept 1 second (via io_uring timeout)"))))
                '()))
