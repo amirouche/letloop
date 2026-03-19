@@ -2,7 +2,7 @@
 (library (transparenturing)
 
   (export transparent json html xml match
-          loop-new loop-run sleep loop-spawn loop-close loop-stop
+          loop-new loop-run loop-sleep loop-spawn loop-close loop-stop
           www-request)
 
   (import (chezscheme))
@@ -798,7 +798,10 @@
   (define io-uring-get-sqe
     (let ((func (foreign-procedure "io_uring_get_sqe" (void*) void*)))
       (lambda (ring)
-        (func ring))))
+        (let ((sqe (func ring)))
+          (when (eqv? sqe 0)
+            (error 'transparenturing "SQ full: io_uring_get_sqe returned NULL"))
+          sqe))))
 
   (define io-uring-sqe-set-data64
     (let ((func (foreign-procedure "io_uring_sqe_set_data64"
@@ -853,6 +856,7 @@
 
   (define IORING-CQE-F-MORE 2)
   (define IORING-CQE-F-BUFFER 1)
+  (define IOSQE-IO-LINK 4)
   (define IOSQE-BUFFER-SELECT (bitwise-arithmetic-shift-left 1 5))
 
   (define io-uring-sqe-set-flags
@@ -897,6 +901,12 @@
                                    (void* void* unsigned unsigned) void)))
       (lambda (sqe ts count flags)
         (func sqe ts count flags))))
+
+  (define io-uring-prep-link-timeout
+    (let ((func (foreign-procedure "io_uring_prep_link_timeout"
+                                   (void* void* unsigned) void)))
+      (lambda (sqe ts flags)
+        (func sqe ts flags))))
 
   (define io-uring-prep-close
     (let ((func (foreign-procedure "io_uring_prep_close"
@@ -973,13 +983,19 @@
   (define %multishot-ids (make-eqv-hashtable))
 
   ;; Buffer ring state
-  (define %buf-ring-nentries 256)
+  (define %buf-ring-nentries 4096)
   (define %buf-ring-buf-size 4096)
   (define %buf-ring-bgid 0)
   (define %buf-ring #f)        ;; pointer to buffer ring struct
   (define %buf-ring-base 0)    ;; base address of buffer memory
   (define %buf-ring-mask 0)    ;; ring mask
   (define %buf-data (make-eqv-hashtable))  ;; id → bytevector (extracted buffer data)
+
+  ;; Read timeout: 30 seconds — defends against Slowloris and cleans up
+  ;; orphaned connections after clients disconnect
+  (define %read-timeout-seconds 5)
+  (define %read-timeout-ts #f)  ;; allocated in loop-new
+  (define %wait-timeout #f)     ;; 1s timeout for wait-cqe, allows signal delivery
 
   (define loop-prompt-current #f)
 
@@ -1044,15 +1060,16 @@
         (for-each (lambda (thunk) (loop-apply thunk)) thunks))
 
       ;; 2. Submit pending SQEs + wait for CQEs
-      ;;    Timeouts are now io_uring SQEs (no sleep queue), so always infinite wait
       (let ((ring (loop-ring %loop))
             (cqe-ptr (loop-cqe-ptr %loop)))
         (let ((has-handlers? (not (fxzero? (hashtable-size (loop-handlers %loop)))))
               (has-pending? (not (fxzero? (io-uring-sq-ready ring)))))
           (cond
-           ;; Have handlers: submit-and-wait (infinite wait, ts=NULL)
+           ;; Have handlers: submit pending SQEs, then wait for a CQE
+           ;; Use a 1-second timeout so signals (SIGINT) are delivered between calls
            (has-handlers?
-            (io-uring-submit-and-wait-timeout ring cqe-ptr 1 0 0))
+            (io-uring-submit ring)
+            (io-uring-wait-cqe-timeout ring cqe-ptr %wait-timeout))
            ;; No handlers but pending SQEs: submit without waiting
            (has-pending?
             (io-uring-submit ring))
@@ -1114,7 +1131,7 @@
       (let ((ring (make-io-uring))
             (cqe-ptr (make-cqe-pointer))
             (handlers (make-eqv-hashtable)))
-        (let ((ret (io-uring-queue-init 256 ring 0)))
+        (let ((ret (io-uring-queue-init 4096 ring 0)))
           (unless (fxzero? ret)
             (error 'transparenturing
                    (format #f "io_uring_queue_init failed: ~a" (strerror (fx- 0 ret))))))
@@ -1127,6 +1144,8 @@
                          handlers
                          0
                          '()))
+        (set! %read-timeout-ts (make-timespec %read-timeout-seconds 0))
+        (set! %wait-timeout (make-timespec 1 0))
         (set! %multishots (make-eqv-hashtable))
         (set! %multishot-ids (make-eqv-hashtable))
         (set! %buf-data (make-eqv-hashtable))
@@ -1190,10 +1209,25 @@
                 #f)
               (begin
                 (loop-socket-option! res 6 'tcp-option/nodelay #t)
+                (loop-socket-option! res 1 'socket-option/keepalive #t)
                 res))))))
+
+  (define IORING-ASYNC-CANCEL-ALL 1)
+  (define IORING-ASYNC-CANCEL-FD 2)
 
   (define loop-close
     (lambda (fd)
+      ;; Cancel all pending io_uring operations on this fd first,
+      ;; otherwise orphaned recv/send SQEs never get CQEs and leak handlers
+      (let* ((cancel-sqe (io-uring-get-sqe (loop-ring %loop)))
+             (cancel-id (loop-alloc-id!)))
+        (io-uring-prep-cancel64 cancel-sqe fd
+                                (fxlogor IORING-ASYNC-CANCEL-ALL IORING-ASYNC-CANCEL-FD))
+        (io-uring-sqe-set-data64 cancel-sqe cancel-id)
+        (loop-abort
+          (lambda (k)
+            (hashtable-set! (loop-handlers %loop) cancel-id k))))
+      ;; Now close the fd
       (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
              (id (loop-alloc-id!)))
         (io-uring-prep-close sqe fd)
@@ -1202,6 +1236,7 @@
                      (lambda (k)
                        (hashtable-set! (loop-handlers %loop) id k)))))
           res))))
+
 
   (define loop-socket-option!
     (let ((loop-socket-option-foreign! (foreign-procedure __atomic __disable_interrupts __errno "setsockopt" (int int int void* int) int)))
@@ -1230,6 +1265,21 @@
           ((socket-option/reuseport) (doit 15))
           ((tcp-option/nodelay) (doit 1))
           (else (error 'transparent "Unknown socket option" fd level optname optval))))))
+
+  (define loop-socket-error?
+    (let ((getsockopt-foreign (foreign-procedure __atomic __disable_interrupts __errno "getsockopt" (int int int void* void*) int)))
+      (lambda (fd)
+        (let* ((val-size (ftype-sizeof int))
+               (val-ptr (foreign-alloc val-size))
+               (len-ptr (foreign-alloc (ftype-sizeof int))))
+          (foreign-set! 'int val-ptr 0 0)
+          (foreign-set! 'int len-ptr 0 val-size)
+          (call-with-values (lambda () (getsockopt-foreign fd 1 4 val-ptr len-ptr))
+            (lambda (out errno)
+              (let ((so-error (foreign-ref 'int val-ptr 0)))
+                (foreign-free len-ptr)
+                (foreign-free val-ptr)
+                (not (fxzero? so-error)))))))))
 
   (define loop-bind
     (let ((loop-bind-foreign (foreign-procedure __atomic __disable_interrupts __errno "bind" (int void* size_t) int)))
@@ -1342,16 +1392,31 @@
       (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
              (id (loop-alloc-id!)))
         ;; Use provided buffer ring — no bytevector allocation or locking needed
+        ;; Link a timeout SQE so idle connections are cleaned up (Slowloris defense)
         (io-uring-prep-recv sqe fd 0 %buf-ring-buf-size 0)
-        (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
+        (io-uring-sqe-set-flags sqe (fxlogor IOSQE-BUFFER-SELECT IOSQE-IO-LINK))
         (io-uring-sqe-set-buf-group sqe %buf-ring-bgid)
         (io-uring-sqe-set-data64 sqe id)
+        ;; Linked timeout: if recv doesn't complete within %read-timeout-seconds,
+        ;; the kernel cancels it and delivers res=-ECANCELED
+        (let* ((timeout-sqe (io-uring-get-sqe (loop-ring %loop)))
+               (timeout-id (loop-alloc-id!)))
+          (io-uring-prep-link-timeout timeout-sqe
+                                      (ftype-pointer-address %read-timeout-ts) 0)
+          (io-uring-sqe-set-data64 timeout-sqe timeout-id)
+          ;; No handler for timeout — if recv completes first, timeout CQE
+          ;; arrives with -ECANCELED and is harmlessly ignored (no handler)
+          )
         (let ((res (loop-abort
                      (lambda (k)
                        (hashtable-set! (loop-handlers %loop) id k)))))
           (cond
-            ((fx<? res 0) #f)
-            ((fxzero? res) #t)    ;; EOF
+            ((fx<? res 0)
+             (hashtable-delete! %buf-data id)
+             #f)  ;; error or -ECANCELED from timeout
+            ((fxzero? res)
+             (hashtable-delete! %buf-data id)
+             #t)    ;; EOF
             (else
              ;; Buffer data was extracted by drain loop
              (let ((bv (hashtable-ref %buf-data id #f)))
@@ -1397,7 +1462,7 @@
 
       (values accept (lambda () (loop-close fd)))))
 
-  (define sleep
+  (define loop-sleep
     (lambda (seconds)
       (let* ((nanoseconds (exact (round (* seconds 1000000000))))
              (sqe (io-uring-get-sqe (loop-ring %loop)))
@@ -1654,8 +1719,13 @@
           (let* ((headers* (massage-headers-content-length headers content-length))
                  (response-line (format #f "~a ~a ~a\r\n" version code reason))
                  (header-str (apply string-append (map (lambda (x) (format #f "~a: ~a\r\n" (car x) (cdr x))) headers*))))
-            (accumulator (string->utf8 (string-append response-line header-str "\r\n")))
-            (for-each accumulator chunks))))))
+            ;; Check write results — abort on broken pipe (client disconnected)
+            (unless (accumulator (string->utf8 (string-append response-line header-str "\r\n")))
+              (error 'http "write failed"))
+            (for-each (lambda (chunk)
+                        (unless (accumulator chunk)
+                          (error 'http "write failed")))
+                      chunks))))))
 
   ;; http-request-write (for client requests)
   (define http-request-write
@@ -2935,6 +3005,11 @@
           (lambda ()
             (if done (eof-object) (begin (set! done #t) body-bv)))))))
 
+  (define connection-close?
+    (lambda (headers)
+      (let ((conn (assq 'connection headers)))
+        (and conn (string-ci=? (cdr conn) "close")))))
+
   (define handle-connection
     (lambda (application context dispatch client read write close)
       (define chunk-reader
@@ -2973,7 +3048,10 @@
                             write status (status-code->reason status)
                             (cons (cons 'content-type (cdr response-pair)) extra-headers)
                             (car response-pair)))))
-                    (loop)))))))))
+                    (if (or (connection-close? headers)
+                            (loop-socket-error? client))
+                        (close)
+                        (loop))))))))))
 
   (define transparent
     (lambda (port-number application context dispatch)
