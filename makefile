@@ -1,4 +1,4 @@
-.PHONY: help letloop argon2 blake3 opaque check
+.PHONY: help letloop argon2 blake3 sodium oprf opaque check
 
 SCHEME=$(shell which scheme)
 PWD=$(shell pwd)
@@ -49,12 +49,41 @@ blake3: ## Build libblake3 from source
 	cp $(PWD)/local/src/blake3/c/libblake3.so $(PWD)/local/lib/
 	cp $(PWD)/local/src/blake3/c/libblake3.a $(PWD)/local/lib/
 
-opaque: ## Build libopaque from source
+sodium: ## Build libsodium from source
+	rm -rf $(PWD)/local/src/libsodium
+	mkdir -p $(PWD)/local/src
+	cd $(PWD)/local/src && git clone --branch 1.0.21-RELEASE https://github.com/jedisct1/libsodium
+	cd $(PWD)/local/src/libsodium && ./configure --prefix=$(PWD)/local
+	cd $(PWD)/local/src/libsodium && make -j$(shell nproc --ignore 1)
+	cd $(PWD)/local/src/libsodium && make install
+
+oprf: sodium ## Build liboprf from source
+	rm -rf $(PWD)/local/src/liboprf
+	mkdir -p $(PWD)/local/src
+	cd $(PWD)/local/src && git clone --branch v0.9.4 https://github.com/stef/liboprf
+	cd $(PWD)/local/src/liboprf/src && make -C noise_xk all CFLAGS="-Wall -O2 -g -fpic -I$(PWD)/local/include"
+	cd $(PWD)/local/src/liboprf/src && $(CC) -Wall -O2 -g -fpic -DHAVE_SODIUM_HKDF=1 -I$(PWD)/local/include -Inoise_xk/include -Inoise_xk/include/karmel -Inoise_xk/include/karmel/minimal -c oprf.c toprf.c dkg.c dkg-vss.c utils.c tp-dkg.c mpmult.c stp-dkg.c toprf-update.c
+	cd $(PWD)/local/src/liboprf/src && $(LD) -r -o liboprf_merged.o oprf.o toprf.o dkg.o dkg-vss.o utils.o tp-dkg.o mpmult.o stp-dkg.o toprf-update.o
+	cd $(PWD)/local/src/liboprf/src && $(CC) -Wall -O2 -g -fpic -shared -Wl,-soname,liboprf.so.0 -o liboprf.so liboprf_merged.o -L$(PWD)/local/lib -lsodium -loprf-noiseXK -Lnoise_xk
+	cd $(PWD)/local/src/liboprf/src && ar rcs liboprf.a oprf.o toprf.o dkg.o dkg-vss.o utils.o tp-dkg.o mpmult.o stp-dkg.o toprf-update.o
+	mkdir -p $(PWD)/local/lib $(PWD)/local/include/oprf
+	cp $(PWD)/local/src/liboprf/src/liboprf.so $(PWD)/local/lib/
+	cp $(PWD)/local/src/liboprf/src/liboprf.a $(PWD)/local/lib/
+	cp $(PWD)/local/src/liboprf/src/noise_xk/liboprf-noiseXK.so $(PWD)/local/lib/
+	cp $(PWD)/local/src/liboprf/src/noise_xk/liboprf-noiseXK.a $(PWD)/local/lib/
+	cp $(PWD)/local/src/liboprf/src/oprf.h $(PWD)/local/include/oprf/
+	cp $(PWD)/local/src/liboprf/src/toprf.h $(PWD)/local/include/oprf/
+	cp $(PWD)/local/src/liboprf/src/toprf-update.h $(PWD)/local/include/oprf/
+	cp $(PWD)/local/src/liboprf/src/dkg.h $(PWD)/local/include/oprf/
+	cp $(PWD)/local/src/liboprf/src/tp-dkg.h $(PWD)/local/include/oprf/
+	cp $(PWD)/local/src/liboprf/src/stp-dkg.h $(PWD)/local/include/oprf/
+	cp $(PWD)/local/src/liboprf/src/utils.h $(PWD)/local/include/oprf/
+
+opaque: oprf ## Build libopaque from source
 	rm -rf $(PWD)/local/src/libopaque
 	mkdir -p $(PWD)/local/src
-	cd $(PWD)/local/src && git clone https://github.com/stef/libopaque
-	cd $(PWD)/local/src/libopaque && git submodule update --init --recursive --remote
-	cd $(PWD)/local/src/libopaque/src && make -j$(shell nproc --ignore 1)
+	cd $(PWD)/local/src && git clone https://github.com/stef/libopaque && cd libopaque && git checkout 98f6a6e
+	cd $(PWD)/local/src/libopaque/src && make -j$(shell nproc --ignore 1) libopaque.so libopaque.a PREFIX=$(PWD)/local OPRFINCDIR=$(PWD)/local/include SODIUM_NEWER_THAN_1_0_18=0 CFLAGS="-Wall -O2 -g -fpic -I$(PWD)/local/include -DHAVE_SODIUM_HKDF=1" LDFLAGS="-L$(PWD)/local/lib -lsodium -loprf"
 	cp $(PWD)/local/src/libopaque/src/libopaque.so $(PWD)/local/lib/
 	cp $(PWD)/local/src/libopaque/src/libopaque.a $(PWD)/local/lib/
 
