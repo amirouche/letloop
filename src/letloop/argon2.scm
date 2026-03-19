@@ -1,6 +1,8 @@
 #!chezscheme
 (library (letloop argon2)
-  (export argon2id argon2id-encode argon2id-verify ~check-argon2-0)
+  (export argon2id argon2id-encode argon2id-verify
+          argon2id-t-cost argon2id-m-cost argon2id-parallelism
+          ~check-argon2-0)
   (import (chezscheme))
 
   ;; ===== Layer 1: 64-bit Arithmetic Helpers =====
@@ -613,15 +615,26 @@
 
   ;; ===== Layer 5: Public API =====
 
+  ;; OWASP 2024 second choice: t=2, m=19456 (19MB), p=1
+  ;; Good balance of security and performance for single-core deployments.
+  ;; argon2id-verify reads params from the encoded string, so changing
+  ;; defaults does not break verification of existing hashes.
+  (define argon2id-t-cost 2)
+  (define argon2id-m-cost 19456)
+  (define argon2id-parallelism 1)
+
   (define argon2id
-    (lambda (salt password)
-      (argon2-ctx 2 102400 8 password salt 32)))
+    (lambda (salt password . args)
+      (let ((t-cost (if (and (pair? args) (car args)) (car args) argon2id-t-cost))
+            (m-cost (if (and (pair? args) (pair? (cdr args)) (cadr args)) (cadr args) argon2id-m-cost))
+            (parallelism (if (and (pair? args) (pair? (cdr args)) (pair? (cddr args)) (caddr args)) (caddr args) argon2id-parallelism)))
+        (argon2-ctx t-cost m-cost parallelism password salt 32))))
 
   (define argon2id-encode
-    (lambda (salt password)
-      (let* ((t-cost 2)
-             (m-cost 102400)
-             (parallelism 8)
+    (lambda (salt password . args)
+      (let* ((t-cost (if (and (pair? args) (car args)) (car args) argon2id-t-cost))
+             (m-cost (if (and (pair? args) (pair? (cdr args)) (cadr args)) (cadr args) argon2id-m-cost))
+             (parallelism (if (and (pair? args) (pair? (cdr args)) (pair? (cddr args)) (caddr args)) (caddr args) argon2id-parallelism))
              (hash-length 32)
              (hash (argon2-ctx t-cost m-cost parallelism password salt hash-length)))
         (encode-string salt hash t-cost m-cost parallelism))))

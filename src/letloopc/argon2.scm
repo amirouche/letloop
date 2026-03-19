@@ -1,6 +1,7 @@
 #!chezscheme
 (library (letloopc argon2)
   (export argon2id argon2id-encode argon2id-verify
+          argon2id-t-cost argon2id-m-cost argon2id-parallelism
           ~check-argon2-0
           ~check-argon2c-cross-0
           ~check-argon2c-cross-1
@@ -55,18 +56,20 @@
                                   (bytevector-pointer hash)
                                   (bytevector-length hash)))))))
 
-  (define argon2id
-    (lambda (salt password)
-      (define cost-iterations 2)
-      (define cost-memory 102400)
-      (define parallelism 8)
-      (define salt-length (bytevector-length salt))
-      (define hash-length 32)
-      (define hash (make-bytevector hash-length))
+  (define argon2id-t-cost 2)
+  (define argon2id-m-cost 19456)
+  (define argon2id-parallelism 1)
 
-      (if (argon2id-hash-raw cost-iterations cost-memory parallelism password salt hash)
-          hash
-          (error 'letloop "Failed to do hashing" argon2id))))
+  (define argon2id
+    (lambda (salt password . args)
+      (let ((cost-iterations (if (and (pair? args) (car args)) (car args) argon2id-t-cost))
+            (cost-memory (if (and (pair? args) (pair? (cdr args)) (cadr args)) (cadr args) argon2id-m-cost))
+            (parallelism (if (and (pair? args) (pair? (cdr args)) (pair? (cddr args)) (caddr args)) (caddr args) argon2id-parallelism))
+            (hash-length 32))
+        (let ((hash (make-bytevector hash-length)))
+          (if (argon2id-hash-raw cost-iterations cost-memory parallelism password salt hash)
+              hash
+              (error 'letloop "Failed to do hashing" argon2id))))))
 
   (define argon2id-encoded
     (let ((func (foreign-procedure "argon2id_hash_encoded"
@@ -141,28 +144,22 @@
               argon2-type))))
 
   (define argon2id-encode
-    (lambda (salt password)
-      ;; TODO: update cost based on latest password saas news
-      
-      ;; XXX: The user will need to re-set its password to be secure.
-      (define cost-iterations 2)
-      (define cost-memory 102400)
-      (define parallelism 8)
-      (define salt-length (bytevector-length salt))
-      (define hash-length 32)
-
-      (define encoded-length (argon2-encoded-length cost-iterations
+    (lambda (salt password . args)
+      (let* ((cost-iterations (if (and (pair? args) (car args)) (car args) argon2id-t-cost))
+             (cost-memory (if (and (pair? args) (pair? (cdr args)) (cadr args)) (cadr args) argon2id-m-cost))
+             (parallelism (if (and (pair? args) (pair? (cdr args)) (pair? (cddr args)) (caddr args)) (caddr args) argon2id-parallelism))
+             (salt-length (bytevector-length salt))
+             (hash-length 32)
+             (encoded-length (argon2-encoded-length cost-iterations
                                                     cost-memory
                                                     parallelism
                                                     salt-length
                                                     hash-length
                                                     ARGON2-ID))
-
-      (define out (make-bytevector encoded-length))
-
-      (if (argon2id-encoded cost-iterations cost-memory parallelism password salt hash-length out)
-          out
-          (error 'letloop "Error while hashing of password"))))
+             (out (make-bytevector encoded-length)))
+        (if (argon2id-encoded cost-iterations cost-memory parallelism password salt hash-length out)
+            out
+            (error 'letloop "Error while hashing of password")))))
 
 
   (define ~check-argon2-0
