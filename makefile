@@ -34,6 +34,7 @@ xxx: ## For those born under the eye of a wandering star...
 
 check: letloop-check.sh ## Hit the ground running!
 	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PWD)/local/lib/ LETLOOP=$(LETLOOP) sh letloop-check.sh
+	letloop check src
 
 clean:
 	$(shell find src/ -name "*.so" | xargs rm -f)
