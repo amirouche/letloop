@@ -10,14 +10,13 @@
   ;; ===== Constants =====
 
   (define OUT-LEN 32)
-  (define KEY-LEN 32)
   (define BLOCK-LEN 64)
   (define CHUNK-LEN 1024)
 
-  (define CHUNK-START (ash 1 0))
-  (define CHUNK-END   (ash 1 1))
-  (define PARENT      (ash 1 2))
-  (define ROOT        (ash 1 3))
+  (define CHUNK-START 1)
+  (define CHUNK-END   2)
+  (define PARENT      4)
+  (define ROOT        8)
 
   (define IV
     (vector #x6A09E667 #xBB67AE85 #x3C6EF372 #xA54FF53A
@@ -26,34 +25,37 @@
   (define MSG-PERMUTATION
     (vector 2 6 3 10 7 0 4 13 1 11 12 5 9 14 15 8))
 
+  ;; ===== Fixnum 32-bit Arithmetic =====
+  ;; All BLAKE3 values are 32-bit, which fit in Chez's 61-bit fixnums.
+  ;; Using fx operations compiles to single machine instructions.
+
   (define u32-mask #xFFFFFFFF)
 
-  (define (u32 x) (logand x u32-mask))
+  (define (u32+ a b) (fxlogand (fx+ a b) u32-mask))
 
-  (define (u32+ a b) (u32 (+ a b)))
-
+  ;; Safe for BLAKE3 rotation amounts (7, 8, 12, 16):
+  ;; max left shift is 25, so max value is (2^32-1)*2^25 = 2^57-2^25 < 2^60
   (define (rotr32 w c)
-    (u32 (logior (ash w (- c)) (ash w (- 32 c)))))
+    (let ((w w))
+      (fxlogand (fxlogior (fxsrl w c) (fxsll w (fx- 32 c))) u32-mask)))
 
   ;; ===== Compression Function =====
 
   (define (g! state a b c d mx my)
     (vector-set! state a (u32+ (u32+ (vector-ref state a) (vector-ref state b)) mx))
-    (vector-set! state d (rotr32 (logxor (vector-ref state d) (vector-ref state a)) 16))
+    (vector-set! state d (rotr32 (fxlogxor (vector-ref state d) (vector-ref state a)) 16))
     (vector-set! state c (u32+ (vector-ref state c) (vector-ref state d)))
-    (vector-set! state b (rotr32 (logxor (vector-ref state b) (vector-ref state c)) 12))
+    (vector-set! state b (rotr32 (fxlogxor (vector-ref state b) (vector-ref state c)) 12))
     (vector-set! state a (u32+ (u32+ (vector-ref state a) (vector-ref state b)) my))
-    (vector-set! state d (rotr32 (logxor (vector-ref state d) (vector-ref state a)) 8))
+    (vector-set! state d (rotr32 (fxlogxor (vector-ref state d) (vector-ref state a)) 8))
     (vector-set! state c (u32+ (vector-ref state c) (vector-ref state d)))
-    (vector-set! state b (rotr32 (logxor (vector-ref state b) (vector-ref state c)) 7)))
+    (vector-set! state b (rotr32 (fxlogxor (vector-ref state b) (vector-ref state c)) 7)))
 
   (define (blake3-round! state m)
-    ;; Columns
     (g! state 0 4  8 12 (vector-ref m 0)  (vector-ref m 1))
     (g! state 1 5  9 13 (vector-ref m 2)  (vector-ref m 3))
     (g! state 2 6 10 14 (vector-ref m 4)  (vector-ref m 5))
     (g! state 3 7 11 15 (vector-ref m 6)  (vector-ref m 7))
-    ;; Diagonals
     (g! state 0 5 10 15 (vector-ref m 8)  (vector-ref m 9))
     (g! state 1 6 11 12 (vector-ref m 10) (vector-ref m 11))
     (g! state 2 7  8 13 (vector-ref m 12) (vector-ref m 13))
@@ -67,8 +69,9 @@
         (vector-set! m i (vector-ref tmp i)))))
 
   (define (compress chaining-value block-words counter block-len flags)
-    (let ((counter-low (u32 counter))
-          (counter-high (u32 (ash counter -32)))
+    ;; counter is u64, split into two u32 fixnums
+    (let ((counter-low (logand counter u32-mask))
+          (counter-high (logand (ash counter -32) u32-mask))
           (state (make-vector 16)))
       (do ((i 0 (fx+ i 1))) ((fx= i 8))
         (vector-set! state i (vector-ref chaining-value i)))
@@ -96,10 +99,10 @@
         (blake3-round! state m))
       ;; Finalize
       (do ((i 0 (fx+ i 1))) ((fx= i 8))
-        (vector-set! state i (logxor (vector-ref state i)
-                                     (vector-ref state (fx+ i 8))))
-        (vector-set! state (fx+ i 8) (logxor (vector-ref state (fx+ i 8))
-                                             (vector-ref chaining-value i))))
+        (vector-set! state i (fxlogxor (vector-ref state i)
+                                       (vector-ref state (fx+ i 8))))
+        (vector-set! state (fx+ i 8) (fxlogxor (vector-ref state (fx+ i 8))
+                                               (vector-ref chaining-value i))))
       state))
 
   (define (first-8-words cv)
@@ -116,8 +119,6 @@
 
   ;; ===== Output =====
 
-  ;; output is a vector: #(input-chaining-value block-words counter block-len flags)
-
   (define (make-output icv bw counter blen flags)
     (vector icv bw counter blen flags))
 
@@ -129,85 +130,78 @@
                              (vector-ref out 4))))
 
   (define (output-root-bytes out out-bv out-len)
-    (let ((output-block-counter 0)
-          (pos 0))
-      (let loop ((pos 0) (ctr 0))
-        (when (< pos out-len)
-          (let* ((words (compress (vector-ref out 0)
-                                  (vector-ref out 1)
-                                  ctr
-                                  (vector-ref out 3)
-                                  (logior (vector-ref out 4) ROOT)))
-                 (available (min (- out-len pos) (* 2 OUT-LEN))))
-            ;; Write words to output as little-endian bytes
-            (let word-loop ((wi 0) (bp pos))
-              (when (and (< wi 16) (< bp (+ pos available)))
-                (let* ((word (vector-ref words wi))
-                       (bytes-left (- (+ pos available) bp))
-                       (to-write (min 4 bytes-left)))
-                  (when (>= to-write 1)
-                    (bytevector-u8-set! out-bv bp (logand word #xFF)))
-                  (when (>= to-write 2)
-                    (bytevector-u8-set! out-bv (+ bp 1) (logand (ash word -8) #xFF)))
-                  (when (>= to-write 3)
-                    (bytevector-u8-set! out-bv (+ bp 2) (logand (ash word -16) #xFF)))
-                  (when (>= to-write 4)
-                    (bytevector-u8-set! out-bv (+ bp 3) (logand (ash word -24) #xFF)))
-                  (word-loop (fx+ wi 1) (+ bp to-write)))))
-            (loop (+ pos available) (+ ctr 1)))))))
+    (let loop ((pos 0) (ctr 0))
+      (when (fx< pos out-len)
+        (let* ((words (compress (vector-ref out 0)
+                                (vector-ref out 1)
+                                ctr
+                                (vector-ref out 3)
+                                (fxlogior (vector-ref out 4) ROOT)))
+               (available (fxmin (fx- out-len pos) (fx* 2 OUT-LEN))))
+          (let word-loop ((wi 0) (bp pos))
+            (when (and (fx< wi 16) (fx< bp (fx+ pos available)))
+              (let* ((word (vector-ref words wi))
+                     (bytes-left (fx- (fx+ pos available) bp))
+                     (to-write (fxmin 4 bytes-left)))
+                (when (fx>= to-write 1)
+                  (bytevector-u8-set! out-bv bp (fxlogand word #xFF)))
+                (when (fx>= to-write 2)
+                  (bytevector-u8-set! out-bv (fx+ bp 1) (fxlogand (fxsrl word 8) #xFF)))
+                (when (fx>= to-write 3)
+                  (bytevector-u8-set! out-bv (fx+ bp 2) (fxlogand (fxsrl word 16) #xFF)))
+                (when (fx>= to-write 4)
+                  (bytevector-u8-set! out-bv (fx+ bp 3) (fxlogand (fxsrl word 24) #xFF)))
+                (word-loop (fx+ wi 1) (fx+ bp to-write)))))
+          (loop (fx+ pos available) (fx+ ctr 1))))))
 
   ;; ===== Chunk State =====
 
-  ;; chunk-state is a vector:
   ;; #(chaining-value chunk-counter block block-len blocks-compressed flags)
 
   (define (make-chunk-state key-words chunk-counter flags)
     (vector (vector-copy key-words)
             chunk-counter
             (make-bytevector BLOCK-LEN 0)
-            0    ;; block-len
-            0    ;; blocks-compressed
-            flags))
+            0 0 flags))
 
   (define (chunk-state-len cs)
-    (+ (* BLOCK-LEN (vector-ref cs 4)) (vector-ref cs 3)))
+    (fx+ (fx* BLOCK-LEN (vector-ref cs 4)) (vector-ref cs 3)))
 
   (define (chunk-state-start-flag cs)
-    (if (= (vector-ref cs 4) 0) CHUNK-START 0))
+    (if (fx= (vector-ref cs 4) 0) CHUNK-START 0))
 
   (define (chunk-state-update! cs input in-offset in-len)
     (let loop ((off in-offset) (remaining in-len))
-      (when (> remaining 0)
+      (when (fx> remaining 0)
         (let ((block-len (vector-ref cs 3)))
-          ;; If block buffer is full, compress it
-          (when (= block-len BLOCK-LEN)
+          (when (fx= block-len BLOCK-LEN)
             (let ((block-words (words-from-bytes (vector-ref cs 2) 0 16)))
               (vector-set! cs 0
                            (first-8-words
                             (compress (vector-ref cs 0)
                                       block-words
-                                      (vector-ref cs 1) ;; chunk-counter
+                                      (vector-ref cs 1)
                                       BLOCK-LEN
-                                      (logior (vector-ref cs 5) (chunk-state-start-flag cs)))))
-              (vector-set! cs 4 (+ (vector-ref cs 4) 1)) ;; blocks-compressed++
+                                      (fxlogior (vector-ref cs 5) (chunk-state-start-flag cs)))))
+              (vector-set! cs 4 (fx+ (vector-ref cs 4) 1))
               (bytevector-fill! (vector-ref cs 2) 0)
               (vector-set! cs 3 0)))
           (let* ((block-len (vector-ref cs 3))
-                 (want (- BLOCK-LEN block-len))
-                 (take (min want remaining)))
+                 (want (fx- BLOCK-LEN block-len))
+                 (take (fxmin want remaining)))
             (bytevector-copy! input off (vector-ref cs 2) block-len take)
-            (vector-set! cs 3 (+ block-len take))
-            (loop (+ off take) (- remaining take)))))))
+            (vector-set! cs 3 (fx+ block-len take))
+            (loop (fx+ off take) (fx- remaining take)))))))
 
   (define (chunk-state-output cs)
     (let ((block-words (words-from-bytes (vector-ref cs 2) 0 16)))
       (make-output (vector-ref cs 0)
                    block-words
-                   (vector-ref cs 1)  ;; chunk-counter
-                   (vector-ref cs 3)  ;; block-len
-                   (logior (vector-ref cs 5)
-                           (chunk-state-start-flag cs)
-                           CHUNK-END))))
+                   (vector-ref cs 1)
+                   (vector-ref cs 3)
+                   (fxlogior (vector-ref cs 5)
+                             (chunk-state-start-flag cs)
+                             CHUNK-END))))
 
   ;; ===== Parent Node =====
 
@@ -217,29 +211,29 @@
         (vector-set! block-words i (vector-ref left-cv i)))
       (do ((i 0 (fx+ i 1))) ((fx= i 8))
         (vector-set! block-words (fx+ i 8) (vector-ref right-cv i)))
-      (make-output key-words block-words 0 BLOCK-LEN (logior PARENT flags))))
+      (make-output key-words block-words 0 BLOCK-LEN (fxlogior PARENT flags))))
 
   (define (parent-cv left-cv right-cv key-words flags)
     (output-chaining-value (parent-output left-cv right-cv key-words flags)))
 
   ;; ===== Hasher =====
 
-  ;; hasher is a vector: #(chunk-state key-words cv-stack cv-stack-len flags)
+  ;; #(chunk-state key-words cv-stack cv-stack-len flags)
 
   (define (make-blake3)
     (vector (make-chunk-state IV 0 0)
             (vector-copy IV)
-            (make-vector 54 #f)  ;; cv-stack, each entry is a vector of 8 u32
-            0                    ;; cv-stack-len
-            0))                  ;; flags
+            (make-vector 54 #f)
+            0
+            0))
 
   (define (hasher-push-stack! h cv)
     (let ((len (vector-ref h 3)))
       (vector-set! (vector-ref h 2) len cv)
-      (vector-set! h 3 (+ len 1))))
+      (vector-set! h 3 (fx+ len 1))))
 
   (define (hasher-pop-stack! h)
-    (let ((len (- (vector-ref h 3) 1)))
+    (let ((len (fx- (vector-ref h 3) 1)))
       (vector-set! h 3 len)
       (vector-ref (vector-ref h 2) len)))
 
@@ -254,10 +248,9 @@
   (define (blake3-update! hasher input)
     (let ((input-len (bytevector-length input)))
       (let loop ((off 0) (remaining input-len))
-        (when (> remaining 0)
+        (when (fx> remaining 0)
           (let ((cs (vector-ref hasher 0)))
-            ;; If current chunk is complete, finalize it and start a new one
-            (when (= (chunk-state-len cs) CHUNK-LEN)
+            (when (fx= (chunk-state-len cs) CHUNK-LEN)
               (let ((chunk-cv (output-chaining-value (chunk-state-output cs)))
                     (total-chunks (+ (vector-ref cs 1) 1)))
                 (add-chunk-chaining-value! hasher chunk-cv total-chunks)
@@ -266,10 +259,10 @@
                                                total-chunks
                                                (vector-ref hasher 4)))))
             (let* ((cs (vector-ref hasher 0))
-                   (want (- CHUNK-LEN (chunk-state-len cs)))
-                   (take (min want remaining)))
+                   (want (fx- CHUNK-LEN (chunk-state-len cs)))
+                   (take (fxmin want remaining)))
               (chunk-state-update! cs input off take)
-              (loop (+ off take) (- remaining take))))))))
+              (loop (fx+ off take) (fx- remaining take))))))))
 
   (define (blake3-finalize hasher length)
     (let* ((cs (vector-ref hasher 0))
@@ -277,8 +270,8 @@
            (result (make-bytevector length 0)))
       (let loop ((out output)
                  (remaining (vector-ref hasher 3)))
-        (if (> remaining 0)
-            (let ((remaining (- remaining 1)))
+        (if (fx> remaining 0)
+            (let ((remaining (fx- remaining 1)))
               (loop (parent-output (vector-ref (vector-ref hasher 2) remaining)
                                    (output-chaining-value out)
                                    (vector-ref hasher 1)
@@ -295,7 +288,6 @@
 
   ;; ===== Tests =====
 
-  ;; Same test vectors as the FFI version
   (define ~check-blake3-000
     (lambda ()
       (assert (bytevector=? (blake3 (string->utf8 "azul dunith"))
@@ -312,7 +304,6 @@
                               (bytevector 147 96 202 209 250 91 234 79
                                           148 175 155 40 42 42 163 180))))))
 
-  ;; Test against official test vector: empty input
   (define ~check-blake3-002
     (lambda ()
       (define (hex->bytevector hex)
