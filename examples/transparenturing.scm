@@ -2,7 +2,7 @@
 (library (transparenturing)
 
   (export transparent json html xml match
-          loop-new loop-run loop-sleep loop-spawn loop-close loop-stop
+          loop-new loop-run sleep loop-spawn loop-close loop-stop
           www-request)
 
   (import (chezscheme))
@@ -1300,6 +1300,27 @@
             (unless (fxzero? out)
               (error 'transparent (format #f "listen errno ~a" (strerror errno)))))))))
 
+  (define loop-getpeername
+    (let ((getpeername-foreign (foreign-procedure __atomic __disable_interrupts __errno "getpeername" (int void* void*) int)))
+      (lambda (fd)
+        (let* ((addr-ptr (foreign-alloc (ftype-sizeof <sockaddr-in>)))
+               (addr (make-ftype-pointer <sockaddr-in> addr-ptr))
+               (len-ptr (foreign-alloc (foreign-sizeof 'unsigned-32)))
+               (_ (foreign-set! 'unsigned-32 len-ptr 0 (ftype-sizeof <sockaddr-in>))))
+          (call-with-values (lambda () (getpeername-foreign fd addr-ptr len-ptr))
+            (lambda (out errno)
+              (let ((ip (if (fxzero? out)
+                            (let ((raw (ftype-ref <sockaddr-in> (address) addr)))
+                              (format #f "~a.~a.~a.~a"
+                                      (fxsrl raw 24)
+                                      (fxand (fxsrl raw 16) #xff)
+                                      (fxand (fxsrl raw 8) #xff)
+                                      (fxand raw #xff)))
+                            #f)))
+                (foreign-free len-ptr)
+                (foreign-free addr-ptr)
+                ip)))))))
+
   (define subbytevector
     (case-lambda
      ((bv start end)
@@ -1364,19 +1385,22 @@
         (lambda ()
           (define client (loop-accept fd))
           (if (not client)
-              (values #f #f #f)
-              (values (lambda () (loop-read client))
-                      (lambda (bv) (loop-write client bv))
-                      (lambda () (loop-close client))))))
+              (values #f #f #f #f)
+              (let ((peer-ip (loop-getpeername client)))
+                (values (lambda () (loop-read client))
+                        (lambda (bv) (loop-write client bv))
+                        (lambda () (loop-close client))
+                        peer-ip)))))
 
       (loop-bind fd ip port)
       (loop-listen fd 128)
 
       (values accept (lambda () (loop-close fd)))))
 
-  (define loop-sleep
-    (lambda (nanoseconds)
-      (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+  (define sleep
+    (lambda (seconds)
+      (let* ((nanoseconds (exact (round (* seconds 1000000000))))
+             (sqe (io-uring-get-sqe (loop-ring %loop)))
              (id (loop-alloc-id!))
              (ts (make-timespec (div nanoseconds 1000000000)
                                 (mod nanoseconds 1000000000))))
@@ -2912,7 +2936,7 @@
             (if done (eof-object) (begin (set! done #t) body-bv)))))))
 
   (define handle-connection
-    (lambda (app-state init handler read write close)
+    (lambda (application context dispatch client read write close)
       (define chunk-reader
         (lambda ()
           (let ((result (read)))
@@ -2931,7 +2955,7 @@
                           write 500 "Internal Server Error"
                           '((content-type . "text/plain"))
                           (string->utf8 "Internal Server Error"))))
-                      (let* ((request-state (init))
+                      (let* ((request-state (context application client headers))
                              (uri-parts (call-with-values (lambda () (uri-parse uri)) list))
                              (path (car uri-parts))
                              (params (or (cadr uri-parts) '()))
@@ -2944,7 +2968,7 @@
                                     (unjson (utf8->string body)))
                                   (eof-object))))
                         (let-values (((status response-pair extra-headers)
-                                      (handler app-state request-state method path params parsed-body)))
+                                      (dispatch application request-state method path params parsed-body)))
                           (http-response-write*
                             write status (status-code->reason status)
                             (cons (cons 'content-type (cdr response-pair)) extra-headers)
@@ -2952,7 +2976,7 @@
                     (loop)))))))))
 
   (define transparent
-    (lambda (port-number app init handler)
+    (lambda (port-number application context dispatch)
       (loop-new)
       ;; SIGINT/SIGTERM → graceful shutdown
       (register-signal-handler 2  ;; SIGINT
@@ -2969,7 +2993,7 @@
             (loop-stop))))
       (loop-spawn
         (lambda ()
-          (define app-state (app))
+          (define app-state (application))
           (call-with-values (lambda () (loop-tcp-serve "0.0.0.0" port-number))
             (lambda (accept close)
               (format #t "transparent server at http://127.0.0.1:~a/\n" port-number)
@@ -2977,10 +3001,10 @@
               (let loop ()
                 (when (loop-running? %loop)
                   (call-with-values accept
-                    (lambda (read write close)
+                    (lambda (read write close peer-ip)
                       (when (and read write close)
                         (loop-spawn
-                          (lambda () (handle-connection app-state init handler read write close))))))
+                          (lambda () (handle-connection app-state context dispatch peer-ip read write close))))))
                   (loop)))))))
       (loop-run)
       ;; Cleanup after loop exits
