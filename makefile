@@ -1,4 +1,4 @@
-.PHONY: help letloop
+.PHONY: help letloop argon2 blake3 check
 
 SCHEME=$(shell which scheme)
 PWD=$(shell pwd)
@@ -32,9 +32,24 @@ todo: ## So say we all!
 xxx: ## For those born under the eye of a wandering star...
 	@grep -nR --color=always -B 2 -A 2 XXX src/
 
-check: letloop-check.sh ## Hit the ground running!
+argon2: ## Build libargon2 from source
+	rm -rf $(PWD)/local/src/argon2
+	mkdir -p $(PWD)/local/src
+	cd $(PWD)/local/src && git clone https://github.com/P-H-C/phc-winner-argon2 argon2
+	cd $(PWD)/local/src/argon2 && make -j$(shell nproc --ignore 1)
+	cp $(PWD)/local/src/argon2/libargon2.so.1 $(PWD)/local/lib/
+
+blake3: ## Build libblake3 from source
+	rm -rf $(PWD)/local/src/blake3
+	mkdir -p $(PWD)/local/src
+	cd $(PWD)/local/src && git clone https://github.com/BLAKE3-team/BLAKE3 blake3
+	cd $(PWD)/local/src/blake3/c && gcc -shared -O3 -o libblake3.so -fPIC blake3.c blake3_dispatch.c blake3_portable.c blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
+	cp $(PWD)/local/src/blake3/c/libblake3.so $(PWD)/local/lib/
+
+check: argon2 blake3 letloop-check.sh ## Hit the ground running!
 	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PWD)/local/lib/ LETLOOP=$(LETLOOP) sh letloop-check.sh
-	letloop check src
+	LD_LIBRARY_PATH=$(PWD)/local/lib/ $(LETLOOP) check src/ src/letloopc/ src/letloopc/argon2.scm
+	LD_LIBRARY_PATH=$(PWD)/local/lib/ $(LETLOOP) check src/ src/letloopc/ src/letloopc/blake3.scm
 
 clean:
 	$(shell find src/ -name "*.so" | xargs rm -f)
