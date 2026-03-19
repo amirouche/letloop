@@ -116,8 +116,8 @@
     (let loop ((strings strings)
                (out '()))
       (if (null? strings)
-          (apply string-append strings)
-          (loop (cdr strings) (cons* " " string out)))))
+          (apply string-append (reverse out))
+          (loop (cdr strings) (cons* " " (car strings) out)))))
 
   (define letloop-usage.md (include-filename-as-string "./src/letloop-usage.md"))
 
@@ -530,6 +530,7 @@
       (define disable-garbage-collector? #f)
       (define optimize-level* 0)
       (define program.scm #f)
+      (define extra '())
       (define sorted-discovered #f)
 
       (define errors (make-accumulator))
@@ -566,8 +567,7 @@
         (lambda (keywords standalone extra*)
           (massage-standalone! standalone)
           (massage-keywords! keywords)
-          (unless (null? extra*)
-            (errors (format #f "Unexpected extra: ~a" extra*)))))
+          (set! extra extra*)))
 
       (maybe-display-errors-then-exit errors)
 
@@ -635,8 +635,9 @@
 
       (system*
        (pk
-        (format #f "cc -I ~a/ -march=native ~a/my-letloop-program.c ~a/kernel.o -o a.out -ldl -lm -luuid -lpthread"
-                temporary-directory temporary-directory temporary-directory)))
+        (format #f "cc -I ~a/ -march=native ~a/my-letloop-program.c ~a/kernel.o -o a.out -ldl -lm -luuid -lpthread ~a"
+                temporary-directory temporary-directory temporary-directory
+                (string-join extra))))
       (display "Produced: ./a.out\n")))
 
   (define letloop-compile* (lambda () (letloop-compile (command-line-arguments))))
