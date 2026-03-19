@@ -920,6 +920,12 @@
       (lambda (sqe user-data flags)
         (func sqe user-data flags))))
 
+  (define io-uring-prep-cancel-fd
+    (let ((func (foreign-procedure "io_uring_prep_cancel_fd"
+                                   (void* int unsigned) void)))
+      (lambda (sqe fd flags)
+        (func sqe fd flags))))
+
   (define memcpy
     (let ((func (foreign-procedure "memcpy" (void* void* size_t) void*)))
       (lambda (dest src n)
@@ -1068,8 +1074,8 @@
            ;; Have handlers: submit pending SQEs, then wait for a CQE
            ;; Use a 1-second timeout so signals (SIGINT) are delivered between calls
            (has-handlers?
-            (io-uring-submit ring)
-            (io-uring-wait-cqe-timeout ring cqe-ptr %wait-timeout))
+            (io-uring-submit-and-wait-timeout ring cqe-ptr 1
+              (ftype-pointer-address %wait-timeout) 0))
            ;; No handlers but pending SQEs: submit without waiting
            (has-pending?
             (io-uring-submit ring))
@@ -1217,17 +1223,14 @@
 
   (define loop-close
     (lambda (fd)
-      ;; Cancel all pending io_uring operations on this fd first,
-      ;; otherwise orphaned recv/send SQEs never get CQEs and leak handlers
+      ;; Fire-and-forget cancel: cancel pending io_uring ops on this fd.
+      ;; Their -ECANCELED CQEs will clean up handlers in the drain loop.
+      ;; No handler registered for the cancel itself — its CQE is ignored.
       (let* ((cancel-sqe (io-uring-get-sqe (loop-ring %loop)))
              (cancel-id (loop-alloc-id!)))
-        (io-uring-prep-cancel64 cancel-sqe fd
-                                (fxlogor IORING-ASYNC-CANCEL-ALL IORING-ASYNC-CANCEL-FD))
-        (io-uring-sqe-set-data64 cancel-sqe cancel-id)
-        (loop-abort
-          (lambda (k)
-            (hashtable-set! (loop-handlers %loop) cancel-id k))))
-      ;; Now close the fd
+        (io-uring-prep-cancel-fd cancel-sqe fd IORING-ASYNC-CANCEL-ALL)
+        (io-uring-sqe-set-data64 cancel-sqe cancel-id))
+      ;; Async close
       (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
              (id (loop-alloc-id!)))
         (io-uring-prep-close sqe fd)
@@ -1392,21 +1395,10 @@
       (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
              (id (loop-alloc-id!)))
         ;; Use provided buffer ring — no bytevector allocation or locking needed
-        ;; Link a timeout SQE so idle connections are cleaned up (Slowloris defense)
         (io-uring-prep-recv sqe fd 0 %buf-ring-buf-size 0)
-        (io-uring-sqe-set-flags sqe (fxlogor IOSQE-BUFFER-SELECT IOSQE-IO-LINK))
+        (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
         (io-uring-sqe-set-buf-group sqe %buf-ring-bgid)
         (io-uring-sqe-set-data64 sqe id)
-        ;; Linked timeout: if recv doesn't complete within %read-timeout-seconds,
-        ;; the kernel cancels it and delivers res=-ECANCELED
-        (let* ((timeout-sqe (io-uring-get-sqe (loop-ring %loop)))
-               (timeout-id (loop-alloc-id!)))
-          (io-uring-prep-link-timeout timeout-sqe
-                                      (ftype-pointer-address %read-timeout-ts) 0)
-          (io-uring-sqe-set-data64 timeout-sqe timeout-id)
-          ;; No handler for timeout — if recv completes first, timeout CQE
-          ;; arrives with -ECANCELED and is harmlessly ignored (no handler)
-          )
         (let ((res (loop-abort
                      (lambda (k)
                        (hashtable-set! (loop-handlers %loop) id k)))))
@@ -3016,6 +3008,7 @@
         (lambda ()
           (let ((result (read)))
             (if (bytevector? result) result (eof-object)))))
+      (define request-state (context application client '()))
       (guard (ex (else (guard (ex2 (else (void))) (close))))
         (let-values (((read-byte! read-bytes!) (make-http-reader chunk-reader)))
           (let loop ()
@@ -3030,8 +3023,7 @@
                           write 500 "Internal Server Error"
                           '((content-type . "text/plain"))
                           (string->utf8 "Internal Server Error"))))
-                      (let* ((request-state (context application client headers))
-                             (uri-parts (call-with-values (lambda () (uri-parse uri)) list))
+                      (let* ((uri-parts (call-with-values (lambda () (uri-parse uri)) list))
                              (path (car uri-parts))
                              (params (or (cadr uri-parts) '()))
                              (parsed-body
@@ -3048,8 +3040,7 @@
                             write status (status-code->reason status)
                             (cons (cons 'content-type (cdr response-pair)) extra-headers)
                             (car response-pair)))))
-                    (if (or (connection-close? headers)
-                            (loop-socket-error? client))
+                    (if (connection-close? headers)
                         (close)
                         (loop))))))))))
 
