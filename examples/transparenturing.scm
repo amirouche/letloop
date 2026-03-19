@@ -2,7 +2,8 @@
 (library (transparenturing)
 
   (export transparent json html xml match
-          loop-sleep loop-spawn loop-close loop-stop)
+          loop-new loop-run loop-sleep loop-spawn loop-close loop-stop
+          www-request)
 
   (import (chezscheme))
 
@@ -101,6 +102,40 @@
     (let ((func (foreign-procedure "strerror" (int) string)))
       (lambda (code)
         (func code))))
+
+  (define %strlen (foreign-procedure "strlen" (void*) size_t))
+
+  (define (pointer->string p)
+    (if (zero? p)
+        #f
+        (let* ((len (%strlen p))
+               (bv (make-bytevector len)))
+          (let loop ((i 0))
+            (when (< i len)
+              (bytevector-u8-set! bv i (foreign-ref 'unsigned-8 p i))
+              (loop (+ i 1))))
+          (utf8->string bv))))
+
+  ;; fcntl / non-blocking socket support
+  (define fcntl!
+    (let ((func (foreign-procedure __atomic "fcntl" (int int int) int)))
+      (lambda (fd cmd arg)
+        (func fd cmd arg))))
+
+  (define fcntl
+    (let ((func (foreign-procedure __atomic "fcntl" (int int) int)))
+      (lambda (fd cmd)
+        (func fd cmd))))
+
+  (define %F_GETFL 3)
+  (define %F_SETFL 4)
+  (define %O_NONBLOCK 2048)
+
+  (define loop-nonblock!
+    (lambda (fd)
+      (fcntl! fd %F_SETFL
+              (fxlogior %O_NONBLOCK
+                        (fcntl fd %F_GETFL)))))
 
   ;; ============================================================
   ;; Section 3: Priority queue (from letloop sq)
@@ -916,6 +951,21 @@
       (lambda (ring)
         (func ring))))
 
+  (define io-uring-prep-connect
+    (let ((func (foreign-procedure "io_uring_prep_connect"
+                                   (void* int void* unsigned) void)))
+      (lambda (sqe fd addr addrlen)
+        (func sqe fd addr addrlen))))
+
+  (define io-uring-prep-poll-add
+    (let ((func (foreign-procedure "io_uring_prep_poll_add"
+                                   (void* int unsigned) void)))
+      (lambda (sqe fd poll-mask)
+        (func sqe fd poll-mask))))
+
+  (define POLLIN 1)
+  (define POLLOUT 4)
+
   (define %loop #f)
 
   ;; Multishot accept tracking (fd → id, id → fd)
@@ -1353,6 +1403,32 @@
       (when (not (fxzero? (io-uring-sq-ready (loop-ring %loop))))
         (io-uring-submit (loop-ring %loop)))))
 
+  (define loop-connect
+    (lambda (addr addrlen)
+      (let ((fd (loop-socket-new 2 1 0)))  ;; AF_INET, SOCK_STREAM
+        (unless fd (error 'loop-connect "socket failed"))
+        (loop-nonblock! fd)
+        (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+               (id (loop-alloc-id!)))
+          (io-uring-prep-connect sqe fd addr addrlen)
+          (io-uring-sqe-set-data64 sqe id)
+          (let ((res (loop-abort
+                       (lambda (k)
+                         (hashtable-set! (loop-handlers %loop) id k)))))
+            (if (fx<? res 0)
+                (begin (loop-close fd) #f)
+                fd))))))
+
+  (define loop-poll-wait
+    (lambda (fd poll-mask)
+      (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+             (id (loop-alloc-id!)))
+        (io-uring-prep-poll-add sqe fd poll-mask)
+        (io-uring-sqe-set-data64 sqe id)
+        (loop-abort
+          (lambda (k)
+            (hashtable-set! (loop-handlers %loop) id k))))))
+
   ;; ============================================================
   ;; Section 7: HTTP parser/writer (from letloop http)
   ;; ============================================================
@@ -1556,6 +1632,49 @@
                  (header-str (apply string-append (map (lambda (x) (format #f "~a: ~a\r\n" (car x) (cdr x))) headers*))))
             (accumulator (string->utf8 (string-append response-line header-str "\r\n")))
             (for-each accumulator chunks))))))
+
+  ;; http-request-write (for client requests)
+  (define http-request-write
+    (lambda (accumulator method target version headers body)
+      ;; body is (lambda () -> bytevector | eof-object)
+      (let ((chunks (generator->list body)))
+        (let ((content-length (apply fx+ (map bytevector-length chunks))))
+          (let* ((headers* (massage-headers-content-length headers content-length))
+                 (request-line (format #f "~a ~a ~a\r\n" method target version))
+                 (header-str (apply string-append (map (lambda (x) (format #f "~a: ~a\r\n" (car x) (cdr x))) headers*))))
+            (accumulator (string->utf8 (string-append request-line header-str "\r\n")))
+            (for-each accumulator chunks))))))
+
+  ;; http-response-read (for client responses)
+  (define http-response-read
+    (lambda (read)
+      ;; READ is (lambda () -> bytevector | eof-object)
+
+      (define response-line-read
+        (lambda (read-byte!)
+
+          (define massage
+            (lambda (line-bv)
+              (let loop ((bytes (bytevector->u8-list line-bv))
+                         (chunk '())
+                         (out '()))
+                (if (null? bytes)
+                    (if (null? chunk)
+                        (error 'http "Invalid response line")
+                        (reverse (cons (utf8->string (u8-list->bytevector (reverse chunk))) out)))
+                    (let ((byte (car bytes)))
+                      (if (and (fx=? byte byte-space) (not (null? chunk)))
+                          (loop (cdr bytes) '() (cons (utf8->string (u8-list->bytevector (reverse chunk))) out))
+                          (loop (cdr bytes) (cons byte chunk) out)))))))
+
+          (let ((strings (massage (http-line-read read-byte!))))
+            (values (string->symbol (car strings)) (string->number (cadr strings)) #f))))
+
+      (let-values (((read-byte! read-bytes!) (make-http-reader read)))
+        (call-with-values (lambda () (response-line-read read-byte!))
+          (lambda (version code reason)
+            (let ((headers (http-headers-read read-byte!)))
+              (values version code reason headers (http-body-read read-byte! read-bytes! headers))))))))
 
   ;; ============================================================
   ;; Section 8: URI parser (from letloop www)
@@ -2253,7 +2372,495 @@
       (out (eof-object)))))
 
   ;; ============================================================
-  ;; Section 12: Response helpers and transparent server
+  ;; Section 12a: Async DNS resolver
+  ;; ============================================================
+
+  (define %dns-nameserver #f)
+
+  (define %dns-read-resolv-conf
+    (lambda ()
+      (guard (ex (else "8.8.8.8"))
+        (let ((lines (call-with-input-file "/etc/resolv.conf"
+                       (lambda (port)
+                         (let loop ((out '()))
+                           (let ((line (get-line port)))
+                             (if (eof-object? line)
+                                 (reverse out)
+                                 (loop (cons line out)))))))))
+          (let find ((lines lines))
+            (if (null? lines)
+                "8.8.8.8"
+                (let ((line (car lines)))
+                  (if (and (> (string-length line) 11)
+                           (string=? "nameserver " (substring line 0 11)))
+                      (let ((ns (substring line 11 (string-length line))))
+                        ;; Trim trailing whitespace
+                        (let trim ((s ns))
+                          (if (and (> (string-length s) 0)
+                                   (char<=? (string-ref s (- (string-length s) 1)) #\space))
+                              (trim (substring s 0 (- (string-length s) 1)))
+                              s)))
+                      (find (cdr lines))))))))))
+
+  (define %dns-get-nameserver
+    (lambda ()
+      (unless %dns-nameserver
+        (set! %dns-nameserver (%dns-read-resolv-conf)))
+      %dns-nameserver))
+
+  (define %dns-encode-name
+    (lambda (hostname)
+      ;; "example.com" → #vu8(7 101 120 97 109 112 108 101 3 99 111 109 0)
+      (let ((parts (let split ((chars (string->list hostname))
+                                (current '())
+                                (out '()))
+                     (cond
+                       ((null? chars)
+                        (reverse (cons (list->string (reverse current)) out)))
+                       ((char=? (car chars) #\.)
+                        (split (cdr chars) '()
+                               (cons (list->string (reverse current)) out)))
+                       (else
+                        (split (cdr chars) (cons (car chars) current) out))))))
+        (let ((bvs (map (lambda (part)
+                          (let ((bv (string->utf8 part)))
+                            (let ((out (make-bytevector (+ 1 (bytevector-length bv)))))
+                              (bytevector-u8-set! out 0 (bytevector-length bv))
+                              (bytevector-copy! bv 0 out 1 (bytevector-length bv))
+                              out)))
+                        parts)))
+          (apply bytevector-append (append bvs (list (bytevector 0))))))))
+
+  (define %dns-build-query
+    (lambda (hostname)
+      (let* ((id-hi (random 256))
+             (id-lo (random 256))
+             (header (bytevector id-hi id-lo
+                                 1 0    ;; QR=0, OPCODE=0, RD=1
+                                 0 1    ;; QDCOUNT=1
+                                 0 0    ;; ANCOUNT=0
+                                 0 0    ;; NSCOUNT=0
+                                 0 0))  ;; ARCOUNT=0
+             (name (%dns-encode-name hostname))
+             (qtype (bytevector 0 1))   ;; A record
+             (qclass (bytevector 0 1))) ;; IN class
+        (bytevector-append header name qtype qclass))))
+
+  (define %dns-parse-response
+    (lambda (bv)
+      ;; Returns (values a b c d) for IPv4 or #f on failure
+      (guard (ex (else #f))
+        (when (< (bytevector-length bv) 12)
+          (error 'dns "Response too short"))
+        ;; Check QR=1 (response)
+        (let ((flags (bytevector-u8-ref bv 2)))
+          (unless (not (fxzero? (fxlogand flags #x80)))
+            (error 'dns "Not a response")))
+        ;; Check RCODE=0
+        (let ((rcode (fxlogand (bytevector-u8-ref bv 3) #x0F)))
+          (unless (fxzero? rcode)
+            (error 'dns "DNS error" rcode)))
+        ;; ANCOUNT
+        (let ((ancount (+ (* 256 (bytevector-u8-ref bv 6))
+                          (bytevector-u8-ref bv 7))))
+          (when (fxzero? ancount)
+            (error 'dns "No answers"))
+          ;; Skip question section
+          (let skip-question ((pos 12))
+            (let ((b (bytevector-u8-ref bv pos)))
+              (cond
+                ((fxzero? b)
+                 ;; Past null terminator + QTYPE(2) + QCLASS(2)
+                 (let parse-answers ((pos (+ pos 5)) (i 0))
+                   (if (fx>=? i ancount)
+                       (error 'dns "No A record found")
+                       ;; Skip name (may be compressed), find where RR fields start
+                       (let skip-name ((pos pos))
+                         (let ((b (bytevector-u8-ref bv pos)))
+                           (cond
+                             ;; Compression pointer — 2 bytes total, then RR fields
+                             ((not (fxzero? (fxlogand b #xC0)))
+                              (let* ((rr-pos (+ pos 2))
+                                     (rtype (+ (* 256 (bytevector-u8-ref bv rr-pos))
+                                               (bytevector-u8-ref bv (+ rr-pos 1))))
+                                     (rdlen (+ (* 256 (bytevector-u8-ref bv (+ rr-pos 8)))
+                                               (bytevector-u8-ref bv (+ rr-pos 9))))
+                                     (rdata-pos (+ rr-pos 10)))
+                                (if (and (= rtype 1) (= rdlen 4))
+                                    (values (bytevector-u8-ref bv rdata-pos)
+                                            (bytevector-u8-ref bv (+ rdata-pos 1))
+                                            (bytevector-u8-ref bv (+ rdata-pos 2))
+                                            (bytevector-u8-ref bv (+ rdata-pos 3)))
+                                    (parse-answers (+ rdata-pos rdlen) (+ i 1)))))
+                             ;; Null terminator — end of name, RR fields follow
+                             ((fxzero? b)
+                              (let* ((rr-pos (+ pos 1))
+                                     (rtype (+ (* 256 (bytevector-u8-ref bv rr-pos))
+                                               (bytevector-u8-ref bv (+ rr-pos 1))))
+                                     (rdlen (+ (* 256 (bytevector-u8-ref bv (+ rr-pos 8)))
+                                               (bytevector-u8-ref bv (+ rr-pos 9))))
+                                     (rdata-pos (+ rr-pos 10)))
+                                (if (and (= rtype 1) (= rdlen 4))
+                                    (values (bytevector-u8-ref bv rdata-pos)
+                                            (bytevector-u8-ref bv (+ rdata-pos 1))
+                                            (bytevector-u8-ref bv (+ rdata-pos 2))
+                                            (bytevector-u8-ref bv (+ rdata-pos 3)))
+                                    (parse-answers (+ rdata-pos rdlen) (+ i 1)))))
+                             ;; Normal label — skip length byte + label bytes
+                             (else
+                              (skip-name (+ pos 1 b)))))))))
+                ;; Compression pointer in question
+                ((not (fxzero? (fxlogand b #xC0)))
+                 (skip-question (+ pos 2)))
+                (else
+                 (skip-question (+ pos 1 b))))))))))
+
+  (define %dns-ip-string?
+    (lambda (s)
+      (let ((len (string-length s)))
+        (and (> len 0)
+             (let loop ((i 0))
+               (if (fx>=? i len)
+                   #t
+                   (let ((c (string-ref s i)))
+                     (if (or (char<=? #\0 c #\9) (char=? c #\.))
+                         (loop (fx+ i 1))
+                         #f))))))))
+
+  (define %dns-parse-ip
+    (lambda (s)
+      (let ((parts (let split ((chars (string->list s))
+                                (current '())
+                                (out '()))
+                     (cond
+                       ((null? chars)
+                        (reverse (cons (string->number (list->string (reverse current))) out)))
+                       ((char=? (car chars) #\.)
+                        (split (cdr chars) '()
+                               (cons (string->number (list->string (reverse current))) out)))
+                       (else
+                        (split (cdr chars) (cons (car chars) current) out))))))
+        (values (car parts) (cadr parts) (caddr parts) (cadddr parts)))))
+
+  (define-ftype <sockaddr-in>
+    (struct (family unsigned-short)
+            (port (endian big unsigned-16))
+            (address (endian big unsigned-32))
+            (padding (array 8 char))))
+
+  (define %make-sockaddr-in
+    (lambda (a b c d port)
+      (let* ((ptr (foreign-alloc (ftype-sizeof <sockaddr-in>)))
+             (addr (make-ftype-pointer <sockaddr-in> ptr)))
+        (ftype-set! <sockaddr-in> (family) addr 2)  ;; AF_INET
+        (ftype-set! <sockaddr-in> (port) addr port)
+        (ftype-set! <sockaddr-in> (address) addr
+                    (+ (* a 256 256 256) (* b 256 256) (* c 256) d))
+        (values ptr (ftype-sizeof <sockaddr-in>)))))
+
+  (define dns-resolve-a
+    (lambda (hostname port)
+      ;; Returns (values addr-ptr addrlen) or error
+      (if (%dns-ip-string? hostname)
+          ;; Already an IP address
+          (call-with-values (lambda () (%dns-parse-ip hostname))
+            (lambda (a b c d)
+              (%make-sockaddr-in a b c d port)))
+          ;; DNS lookup via io_uring
+          (let* ((ns (%dns-get-nameserver))
+                 (udp-fd (loop-socket-new 2 2 0)))  ;; AF_INET, SOCK_DGRAM
+            (unless udp-fd (error 'dns-resolve-a "UDP socket failed"))
+            (loop-nonblock! udp-fd)
+            ;; Connect UDP socket to nameserver:53
+            (call-with-values (lambda () (%dns-parse-ip ns))
+              (lambda (a b c d)
+                (call-with-values (lambda () (%make-sockaddr-in a b c d 53))
+                  (lambda (ns-addr ns-addrlen)
+                    (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+                           (id (loop-alloc-id!)))
+                      (io-uring-prep-connect sqe udp-fd ns-addr ns-addrlen)
+                      (io-uring-sqe-set-data64 sqe id)
+                      (let ((res (loop-abort
+                                   (lambda (k)
+                                     (hashtable-set! (loop-handlers %loop) id k)))))
+                        (foreign-free ns-addr)
+                        (when (fx<? res 0)
+                          (loop-close udp-fd)
+                          (error 'dns-resolve-a "UDP connect failed" (strerror (fx- 0 res))))))))))
+            ;; Build and send DNS query
+            (let ((query (%dns-build-query hostname)))
+              (lock-object query)
+              (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+                     (id (loop-alloc-id!)))
+                (io-uring-prep-send sqe udp-fd (bytevector-pointer query) (bytevector-length query) 0)
+                (io-uring-sqe-set-data64 sqe id)
+                (let ((res (loop-abort
+                             (lambda (k)
+                               (hashtable-set! (loop-handlers %loop) id k)))))
+                  (unlock-object query)
+                  (when (fx<? res 0)
+                    (loop-close udp-fd)
+                    (error 'dns-resolve-a "DNS send failed")))))
+            ;; Receive DNS response
+            (let ((buf (make-bytevector 512)))
+              (lock-object buf)
+              (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+                     (id (loop-alloc-id!)))
+                (io-uring-prep-recv sqe udp-fd (bytevector-pointer buf) 512 0)
+                (io-uring-sqe-set-data64 sqe id)
+                (let ((res (loop-abort
+                             (lambda (k)
+                               (hashtable-set! (loop-handlers %loop) id k)))))
+                  (unlock-object buf)
+                  (loop-close udp-fd)
+                  (when (fx<=? res 0)
+                    (error 'dns-resolve-a "DNS recv failed"))
+                  (let ((response (subbytevector buf 0 res)))
+                    (call-with-values (lambda () (%dns-parse-response response))
+                      (lambda (a b c d)
+                        (%make-sockaddr-in a b c d port)))))))))))
+
+  ;; ============================================================
+  ;; Section 12b: libtls FFI bindings
+  ;; ============================================================
+
+  (define libtls (load-shared-object "libtls.so"))
+
+  (define TLS_PROTOCOLS_DEFAULT
+    (bitwise-ior (bitwise-arithmetic-shift-left 1 3)   ;; TLSv1.2
+                 (bitwise-arithmetic-shift-left 1 4)))  ;; TLSv1.3
+  (define TLS_WANT_POLLIN -2)
+  (define TLS_WANT_POLLOUT -3)
+
+  (define tls-init (foreign-procedure "tls_init" () int))
+
+  (define tls-config-new (foreign-procedure "tls_config_new" () void*))
+  (define tls-config-free (foreign-procedure "tls_config_free" (void*) void))
+  (define tls-config-set-protocols (foreign-procedure "tls_config_set_protocols" (void* unsigned-32) int))
+
+  (define tls-config-error*
+    (let ((func (foreign-procedure "tls_config_error" (void*) void*)))
+      (lambda (config)
+        (pointer->string (func config)))))
+
+  (define tls-error*
+    (let ((func (foreign-procedure "tls_error" (void*) void*)))
+      (lambda (ctx)
+        (pointer->string (func ctx)))))
+
+  (define tls-client (foreign-procedure "tls_client" () void*))
+  (define tls-configure (foreign-procedure "tls_configure" (void* void*) int))
+  (define tls-connect-socket (foreign-procedure "tls_connect_socket" (void* int string) int))
+  (define tls-handshake (foreign-procedure "tls_handshake" (void*) int))
+  (define tls-read* (foreign-procedure "tls_read" (void* void* size_t) ssize_t))
+  (define tls-write* (foreign-procedure "tls_write" (void* void* size_t) ssize_t))
+  (define tls-close* (foreign-procedure "tls_close" (void*) int))
+  (define tls-free* (foreign-procedure "tls_free" (void*) void))
+
+  ;; ============================================================
+  ;; Section 12c: Non-blocking TLS over io_uring
+  ;; ============================================================
+
+  (define %tls-initialized #f)
+
+  (define %tls-ensure-init
+    (lambda ()
+      (unless %tls-initialized
+        (let ((rc (tls-init)))
+          (unless (zero? rc)
+            (error 'tls-open "tls_init failed" rc))
+          (set! %tls-initialized #t)))))
+
+  (define tls-open
+    (lambda (host port)
+      (%tls-ensure-init)
+      (let ((config (tls-config-new)))
+        (when (zero? config)
+          (error 'tls-open "tls_config_new failed"))
+        (let ((rc (tls-config-set-protocols config TLS_PROTOCOLS_DEFAULT)))
+          (unless (zero? rc)
+            (let ((msg (tls-config-error* config)))
+              (tls-config-free config)
+              (error 'tls-open "tls_config_set_protocols failed" msg))))
+        (let ((ctx (tls-client)))
+          (when (zero? ctx)
+            (tls-config-free config)
+            (error 'tls-open "tls_client failed"))
+          (let ((rc (tls-configure ctx config)))
+            (unless (zero? rc)
+              (let ((msg (tls-error* ctx)))
+                (tls-config-free config)
+                (tls-free* ctx)
+                (error 'tls-open "tls_configure failed" msg))))
+          (tls-config-free config)
+          ;; Async DNS + connect
+          (let-values (((addr addrlen) (dns-resolve-a host port)))
+            (let ((fd (loop-connect addr addrlen)))
+              (foreign-free addr)
+              (unless fd
+                (tls-free* ctx)
+                (error 'tls-open "connect failed"))
+              ;; Attach TLS to connected socket
+              (let ((rc (tls-connect-socket ctx fd host)))
+                (unless (zero? rc)
+                  (let ((msg (tls-error* ctx)))
+                    (tls-free* ctx)
+                    (loop-close fd)
+                    (error 'tls-open "tls_connect_socket failed" msg))))
+              ;; Non-blocking handshake — yield on WANT_POLLIN/POLLOUT
+              (let loop ()
+                (let ((rc (tls-handshake ctx)))
+                  (cond
+                    ((zero? rc) (void))
+                    ((= rc TLS_WANT_POLLIN)
+                     (loop-poll-wait fd POLLIN)
+                     (loop))
+                    ((= rc TLS_WANT_POLLOUT)
+                     (loop-poll-wait fd POLLOUT)
+                     (loop))
+                    (else
+                     (let ((msg (tls-error* ctx)))
+                       (tls-close* ctx)
+                       (tls-free* ctx)
+                       (loop-close fd)
+                       (error 'tls-open "tls_handshake failed" msg))))))
+              (values ctx fd)))))))
+
+  (define tls-reader
+    (lambda (ctx fd)
+      (let ((buf (make-bytevector 4096)))
+        (lambda ()
+          (let loop ()
+            (let ((n (with-lock (list buf)
+                       (tls-read* ctx (bytevector-pointer buf) 4096))))
+              (cond
+                ((> n 0)
+                 (let ((out (make-bytevector n)))
+                   (bytevector-copy! buf 0 out 0 n)
+                   out))
+                ((zero? n) (eof-object))
+                ((= n TLS_WANT_POLLIN)
+                 (loop-poll-wait fd POLLIN)
+                 (loop))
+                ((= n TLS_WANT_POLLOUT)
+                 (loop-poll-wait fd POLLOUT)
+                 (loop))
+                (else
+                 (error 'tls-reader "tls_read failed" (tls-error* ctx))))))))))
+
+  (define tls-writer
+    (lambda (ctx fd)
+      (lambda (bv)
+        (let ((total (bytevector-length bv)))
+          (let loop ((offset 0))
+            (when (< offset total)
+              (let ((n (with-lock (list bv)
+                         (tls-write* ctx
+                                     (+ (bytevector-pointer bv) offset)
+                                     (- total offset)))))
+                (cond
+                  ((> n 0) (loop (+ offset n)))
+                  ((= n TLS_WANT_POLLIN)
+                   (loop-poll-wait fd POLLIN)
+                   (loop offset))
+                  ((= n TLS_WANT_POLLOUT)
+                   (loop-poll-wait fd POLLOUT)
+                   (loop offset))
+                  (else
+                   (error 'tls-writer "tls_write failed" (tls-error* ctx)))))))))))
+
+  (define tls-shutdown
+    (lambda (ctx fd)
+      (tls-close* ctx)
+      (tls-free* ctx)
+      (loop-close fd)))
+
+  ;; ============================================================
+  ;; Section 12d: URL parser
+  ;; ============================================================
+
+  (define url-parse
+    (lambda (url)
+      (let ((sep (let loop ((i 0))
+                   (and (< i (- (string-length url) 2))
+                        (if (and (char=? (string-ref url i) #\:)
+                                 (char=? (string-ref url (+ i 1)) #\/)
+                                 (char=? (string-ref url (+ i 2)) #\/))
+                            i
+                            (loop (+ i 1)))))))
+        (unless sep
+          (error 'url-parse "invalid URL: no ://" url))
+        (let* ((scheme (substring url 0 sep))
+               (rest (substring url (+ sep 3) (string-length url)))
+               (slash-pos (let loop ((i 0))
+                            (if (>= i (string-length rest))
+                                #f
+                                (if (char=? (string-ref rest i) #\/)
+                                    i
+                                    (loop (+ i 1))))))
+               (authority (if slash-pos
+                              (substring rest 0 slash-pos)
+                              rest))
+               (request-target (if slash-pos
+                                   (substring rest slash-pos (string-length rest))
+                                   "/"))
+               (colon-pos (let loop ((i (- (string-length authority) 1)))
+                            (if (< i 0)
+                                #f
+                                (if (char=? (string-ref authority i) #\:)
+                                    i
+                                    (loop (- i 1))))))
+               (host (if colon-pos
+                         (substring authority 0 colon-pos)
+                         authority))
+               (port (if colon-pos
+                         (string->number (substring authority (+ colon-pos 1) (string-length authority)))
+                         #f)))
+          (values scheme host port request-target)))))
+
+  ;; ============================================================
+  ;; Section 12e: www-request — HTTPS client
+  ;; ============================================================
+
+  (define www-request
+    (lambda (method url headers body)
+      (guard (ex (else
+                  (if (condition? ex)
+                      (display-condition ex (current-error-port))
+                      (format (current-error-port) "www-request error: ~a\n" ex))
+                  (newline (current-error-port))
+                  (flush-output-port (current-error-port))
+                  (values #f #f #f)))
+        (let-values (((scheme host port request-target) (url-parse url)))
+          (let ((port* (or port (if (string=? scheme "https") 443 80))))
+            ;; NOTE: cannot use dynamic-wind here because loop-abort
+            ;; uses continuations that would trigger the exit guard prematurely
+            (let-values (((ctx fd) (tls-open host port*)))
+              (let ((headers* (if (assq 'host headers)
+                                  headers
+                                  (cons (cons 'host host) headers))))
+                ;; Write request
+                (let ((write! (tls-writer ctx fd)))
+                  (http-request-write write!
+                                      method
+                                      request-target
+                                      'HTTP/1.1
+                                      headers*
+                                      (if (bytevector? body)
+                                          (let ((sent #f))
+                                            (lambda ()
+                                              (if sent
+                                                  (eof-object)
+                                                  (begin (set! sent #t) body))))
+                                          body)))
+                ;; Read response
+                (let-values (((version code reason resp-headers resp-body)
+                              (http-response-read (tls-reader ctx fd))))
+                  (tls-shutdown ctx fd)
+                  (values code resp-headers resp-body)))))))))
+
+  ;; ============================================================
+  ;; Section 13: Response helpers and transparent server
   ;; ============================================================
 
   (define string-contains?
