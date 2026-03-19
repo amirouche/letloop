@@ -828,11 +828,21 @@
       (lambda (sqe sockfd buf len flags)
         (func sqe sockfd buf len flags))))
 
+  (define io-uring-submit-and-wait-timeout
+    (let ((func (foreign-procedure "io_uring_submit_and_wait_timeout"
+                                   (void* void* unsigned void* void*) int)))
+      (lambda (ring cqe-ptr wait-nr ts sigmask)
+        (func ring cqe-ptr wait-nr ts sigmask))))
+
+  (define io-uring-sq-ready
+    (let ((func (foreign-procedure "io_uring_sq_ready"
+                                   (void*) unsigned)))
+      (lambda (ring)
+        (func ring))))
+
   (define %loop #f)
 
   (define loop-prompt-current #f)
-
-  (define socket-error-would-block 11)
 
   (define loop-prompt-singleton '(loop-prompt-singleton))
 
@@ -889,12 +899,15 @@
 
   (define loop-run-once
     (lambda ()
+      ;; 1. Run queued thunks (may prep SQEs)
       (let ((thunks (loop-thunks %loop)))
         (loop-thunks! %loop '())
         (for-each (lambda (thunk) (loop-apply thunk)) thunks))
 
+      ;; 2. Update jiffy
       (%loop-jiffy! %loop (jiffy-current))
 
+      ;; 3. Wake expired timers
       (call-with-values (lambda ()
                           (sq-split (loop-sleeping %loop)
                                     (%loop-jiffy %loop)))
@@ -903,12 +916,14 @@
             (loop-sleeping! %loop after)
             (sq-for-each before (lambda (jiffy thunk) (loop-apply thunk))))))
 
+      ;; 4. Submit pending SQEs + wait for CQEs
       (let ((ring (loop-ring %loop))
             (cqe-ptr (loop-cqe-ptr %loop)))
         (let ((has-handlers? (not (fxzero? (hashtable-size (loop-handlers %loop)))))
-              (has-sleepers? (not (sq-empty? (loop-sleeping %loop)))))
+              (has-sleepers? (not (sq-empty? (loop-sleeping %loop))))
+              (has-pending? (not (fxzero? (io-uring-sq-ready ring)))))
           (cond
-           ;; Have pending io_uring operations: wait for CQEs
+           ;; Have handlers: submit-and-wait (batches submit + wait into one syscall)
            (has-handlers?
             (if has-sleepers?
                 (let* ((timeout-ns (max 0 (- (car (sq-min (loop-sleeping %loop)))
@@ -916,13 +931,17 @@
                        (timeout-s (div timeout-ns 1000000000))
                        (timeout-rem-ns (mod timeout-ns 1000000000))
                        (ts (make-timespec timeout-s timeout-rem-ns)))
-                  (io-uring-wait-cqe-timeout ring cqe-ptr ts)
+                  (io-uring-submit-and-wait-timeout ring cqe-ptr 1
+                    (ftype-pointer-address ts) 0)
                   (foreign-free (ftype-pointer-address ts)))
-                (io-uring-wait-cqe ring cqe-ptr)))
-           ;; No handlers: don't block on io_uring
+                ;; No sleepers: submit + wait forever (ts=NULL)
+                (io-uring-submit-and-wait-timeout ring cqe-ptr 1 0 0)))
+           ;; No handlers but pending SQEs: submit without waiting
+           (has-pending?
+            (io-uring-submit ring))
            (else (void))))
 
-        ;; Drain all available CQEs
+        ;; 5. Drain all available CQEs (resumed coroutines may prep new SQEs)
         (let drain ()
           (when (fxzero? (io-uring-peek-cqe ring cqe-ptr))
             (let* ((cqe (foreign-ref 'void* cqe-ptr 0))
@@ -933,7 +952,11 @@
                 (hashtable-delete! (loop-handlers %loop) id)
                 (when handler
                   (loop-apply (lambda () (handler res))))))
-            (drain))))))
+            (drain)))
+
+        ;; 6. Flush SQEs prepped during drain (avoids extra loop iteration latency)
+        (when (not (fxzero? (io-uring-sq-ready ring)))
+          (io-uring-submit ring)))))
 
   (define loop-run
     (lambda ()
@@ -947,26 +970,6 @@
     (lambda (thunk)
       (loop-thunks! %loop
                         (cons thunk (loop-thunks %loop)))))
-
-  (define fcntl!
-    (let ((func (foreign-procedure __atomic "fcntl" (int int int) int)))
-      (lambda (fd command value)
-        (func fd command value))))
-
-  (define fcntl
-    (let ((func (foreign-procedure __atomic "fcntl" (int int) int)))
-      (lambda (fd)
-        (func fd loop-get-flag))))
-
-  (define loop-get-flag 3)
-  (define loop-set-flag 4)
-  (define loop-nonblock 2048)
-
-  (define loop-nonblock!
-    (lambda (fd)
-      (fcntl! fd loop-set-flag
-              (fxlogior loop-nonblock
-                        (fcntl fd)))))
 
   (define loop-new
     (lambda ()
@@ -1003,7 +1006,6 @@
              (id (loop-alloc-id!)))
         (io-uring-prep-accept sqe fd 0 0 0)
         (io-uring-sqe-set-data64 sqe id)
-        (io-uring-submit (loop-ring %loop))
         (let ((res (loop-abort
                      (lambda (k)
                        (hashtable-set! (loop-handlers %loop) id k)))))
@@ -1139,7 +1141,6 @@
                (id (loop-alloc-id!)))
           (io-uring-prep-recv sqe fd (bytevector-pointer bv) 1024 0)
           (io-uring-sqe-set-data64 sqe id)
-          (io-uring-submit (loop-ring %loop))
           (let ((res (loop-abort
                        (lambda (k)
                          (hashtable-set! (loop-handlers %loop) id k)))))
@@ -1157,7 +1158,6 @@
                (id (loop-alloc-id!)))
           (io-uring-prep-send sqe fd (bytevector-pointer bv) (bytevector-length bv) 0)
           (io-uring-sqe-set-data64 sqe id)
-          (io-uring-submit (loop-ring %loop))
           (let ((res (loop-abort
                        (lambda (k)
                          (hashtable-set! (loop-handlers %loop) id k)))))
