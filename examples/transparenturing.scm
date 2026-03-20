@@ -998,8 +998,11 @@
   (define %buf-data (make-eqv-hashtable))  ;; id → bytevector (extracted buffer data)
   (define %fd-handlers (make-eqv-hashtable)) ;; fd → list of handler ids (for cleanup on close)
 
-  ;; Read timeout: 30 seconds — defends against Slowloris and cleans up
-  ;; orphaned connections after clients disconnect
+  ;; Idle connection reaper: close connections with no activity for %idle-timeout-seconds
+  (define %idle-timeout-seconds 30)
+  (define %idle-sweep-interval 5)  ;; sweep every N seconds
+  (define %active-connections (make-eqv-hashtable)) ;; fd → last-activity jiffy
+
   (define %read-timeout-seconds 5)
   (define %read-timeout-ts #f)  ;; allocated in loop-new
   (define %wait-timeout #f)     ;; 1s timeout for wait-cqe, allows signal delivery
@@ -1211,6 +1214,7 @@
               (begin
                 (loop-socket-option! res 6 'tcp-option/nodelay #t)
                 (loop-socket-option! res 1 'socket-option/keepalive #t)
+                (hashtable-set! %active-connections res (jiffy-current))
                 res))))))
 
   (define IORING-ASYNC-CANCEL-ALL 1)
@@ -1225,6 +1229,7 @@
                     (hashtable-delete! (loop-handlers %loop) id))
                   ids)
         (hashtable-delete! %fd-handlers fd))
+      (hashtable-delete! %active-connections fd)
       ;; Fire-and-forget cancel: cancel pending io_uring ops on this fd.
       (let* ((cancel-sqe (io-uring-get-sqe (loop-ring %loop)))
              (cancel-id (loop-alloc-id!)))
@@ -1414,6 +1419,7 @@
              #t)    ;; EOF
             (else
              ;; Buffer data was extracted by drain loop
+             (hashtable-set! %active-connections fd (jiffy-current))
              (let ((bv (hashtable-ref %buf-data id #f)))
                (hashtable-delete! %buf-data id)
                bv)))))))
@@ -3066,6 +3072,21 @@
             (format #t "\nReceived SIGTERM, shutting down...\n")
             (flush-output-port)
             (loop-stop))))
+      ;; Idle connection reaper — closes connections with no activity
+      (loop-spawn
+        (lambda ()
+          (let reap ()
+            (when (loop-running? %loop)
+              (loop-sleep %idle-sweep-interval)
+              (let ((now (jiffy-current))
+                    (timeout-ns (* %idle-timeout-seconds (expt 10 9))))
+                (let-values (((fds jiffies) (hashtable-entries %active-connections)))
+                  (vector-for-each
+                    (lambda (fd last-active)
+                      (when (> (- now last-active) timeout-ns)
+                        (loop-close fd)))
+                    fds jiffies)))
+              (reap)))))
       (loop-spawn
         (lambda ()
           (define app-state (application))
