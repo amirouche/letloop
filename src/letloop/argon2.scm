@@ -53,8 +53,8 @@
                                   (bytevector-length hash)))))))
 
   (define argon2id-t-cost 2)
-  (define argon2id-m-cost 19456)
-  (define argon2id-parallelism 1)
+  (define argon2id-m-cost 102400)
+  (define argon2id-parallelism 8)
 
   (define argon2id
     (lambda (salt password . args)
