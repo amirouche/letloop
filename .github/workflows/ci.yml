@@ -59,7 +59,8 @@ jobs:
         run: ./venv letloop-root exec $(pwd)/rootfs / -- make PREFIX=/usr/local/ -j$(nproc) opaque argon2 blake3 liburing
 
       - uses: actions/checkout@v5
-        path: rootfs/letloop
+        with:
+          path: rootfs/letloop
 
       - name: build
         run: ./venv letloop-root exec $(pwd)/rootfs /letloop -- make PREFIX=/usr/local/ letloop
