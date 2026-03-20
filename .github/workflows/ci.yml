@@ -1,0 +1,69 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches: [hello-schemer, dev]
+  pull_request:
+    branches: [hello-schemer, dev]
+  workflow_dispatch:
+
+jobs:
+  ci:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distribution: ubuntu
+            version: questing
+            machine: amd64
+            chezscheme: bdcdfbb2ebda1ee83415317d61986387035f4722
+            setup: sudo apt-get update -y && sudo apt-get install -y git build-essential uuid-dev libtls-dev liburing-dev wrk python3-srp
+          - distribution: ubuntu
+            version: questing
+            machine: arm64
+            chezscheme: bdcdfbb2ebda1ee83415317d61986387035f4722
+            setup: sudo apt-get update -y && sudo apt-get install -y git build-essential uuid-dev libtls-dev liburing-dev wrk python3-srp
+              
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y qemu-user qemu-binfmt chezscheme bubblewrap
+
+      - name: Cache rootfs
+        id: cache-rootfs
+        uses: actions/cache@v5
+        with:
+          path: rootfs/
+          key: rootfs-${{ matrix.distribution }}-${{ matrix.version }}-${{ matrix.machine }}-chezscheme-${{ matrix.chezscheme }}
+
+      - name: init rootfs
+        if: steps.cache-rootfs.outputs.cache-hit != 'true'
+        run: mkdir $(pwd)/rootfs && cp makefile $(pwd)/rootfs/ && ./venv letloop-root create ${{ matrix.distribution }} ${{ matrix.version }} ${{ matrix.machine }} $(pwd)/rootfs
+
+      - name: setup rootfs
+        if: steps.cache-rootfs.outputs.cache-hit != 'true'
+        run: ./venv letloop-root exec $(pwd)/rootfs / -- ${{ matrix.setup }}
+
+      - name: clone chezscheme
+        if: steps.cache-rootfs.outputs.cache-hit != 'true'
+        run: ./venv letloop-root exec $(pwd)/rootfs / -- git clone --filter=blob:none --depth 1 https://github.com/cisco/ChezScheme chezscheme && cd chezscheme && git fetch --depth 1 origin ${{ matrix.chezscheme }} && git checkout ${{ matrix.chezscheme }}
+
+      - name: build chezscheme
+        if: steps.cache-rootfs.outputs.cache-hit != 'true'
+        run: ./venv letloop-root exec $(pwd)/rootfs / -- cd chezscheme && ./configure --threads --disable-x11 --disable-curses --kernelobj --installprefix=/usr/local/ && make -j$(nproc) && make install
+        
+      - name: build c dependencies
+        if: steps.cache-rootfs.outputs.cache-hit != 'true'
+        run: ./venv letloop-root exec $(pwd)/rootfs / -- make PREFIX=/usr/local/ -j$(nproc) opaque argon2 blake3 liburing
+
+      - uses: actions/checkout@v5
+        path: rootfs/letloop
+
+      - name: build
+        run: ./venv letloop-root exec $(pwd)/rootfs /letloop -- make PREFIX=/usr/local/ letloop
+
+      - name: check
+        run: ./venv letloop-root exec $(pwd)/rootfs /letloop -- make PREFIX=/usr/local/ check
+
