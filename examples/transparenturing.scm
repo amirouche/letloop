@@ -1395,10 +1395,18 @@
       (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
              (id (loop-alloc-id!)))
         ;; Use provided buffer ring — no bytevector allocation or locking needed
+        ;; Link a timeout SQE so idle connections are cleaned up
         (io-uring-prep-recv sqe fd 0 %buf-ring-buf-size 0)
-        (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
+        (io-uring-sqe-set-flags sqe (fxlogor IOSQE-BUFFER-SELECT IOSQE-IO-LINK))
         (io-uring-sqe-set-buf-group sqe %buf-ring-bgid)
         (io-uring-sqe-set-data64 sqe id)
+        ;; Linked timeout: if recv doesn't complete within %read-timeout-seconds,
+        ;; the kernel cancels it and delivers res=-ECANCELED
+        (let* ((timeout-sqe (io-uring-get-sqe (loop-ring %loop)))
+               (timeout-id (loop-alloc-id!)))
+          (io-uring-prep-link-timeout timeout-sqe
+                                      (ftype-pointer-address %read-timeout-ts) 0)
+          (io-uring-sqe-set-data64 timeout-sqe timeout-id))
         (let ((res (loop-abort
                      (lambda (k)
                        (hashtable-set! (loop-handlers %loop) id k)))))
