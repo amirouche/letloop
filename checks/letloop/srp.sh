@@ -1,7 +1,7 @@
 #!/bin/bash
 # Cross-implementation SRP test: letloop/srp (Scheme) vs pysrp (Python)
 # Both sides use SHA-256, 2048-bit group, RFC 5054 padding.
-set -e
+set -xe
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LETLOOP="${LETLOOP:-$ROOT/local/bin/letloop}"
