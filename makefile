@@ -89,6 +89,8 @@ opaque: oprf ## Build libopaque from source
 
 check: argon2 blake3 opaque letloop-check.sh ## Hit the ground running!
 	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PWD)/local/lib/ LETLOOP=$(LETLOOP) sh letloop-check.sh
+	$(LETLOOP) check src/
+	sh checks/stress-transparenturing.sh
 
 clean:
 	$(shell find src/ -name "*.so" | xargs rm -f)
