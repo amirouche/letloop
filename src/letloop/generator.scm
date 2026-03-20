@@ -100,11 +100,11 @@
     (define resume #f)
     (define yield (lambda (v) (call/1cc (lambda (r) (set! resume r) (return v)))))
     (lambda () (call/1cc (lambda (cc) (set! return cc)
-                                 (if resume
-                                     (resume (if #f #f))  ; void? or yield again?
-                                     (begin (proc yield)
-                                            (set! resume (lambda (v) (return (eof-object))))
-                                            (return (eof-object))))))))
+                                (if resume
+                                    (resume (if #f #f))  ; void? or yield again?
+                                    (begin (proc yield)
+                                           (set! resume (lambda (v) (return (eof-object))))
+                                           (return (eof-object))))))))
 
 
   ;; list->generator
@@ -217,10 +217,10 @@
   ;; ggroup
   (define ggroup
     (case-lambda
-     ((gen k)
-      (simple-ggroup gen k))
-     ((gen k padding)
-      (padded-ggroup (simple-ggroup gen k) k padding))))
+      ((gen k)
+       (simple-ggroup gen k))
+      ((gen k padding)
+       (padded-ggroup (simple-ggroup gen k) k padding))))
 
   (define (simple-ggroup gen k)
     (lambda ()
@@ -244,43 +244,43 @@
   ;; gmerge
   (define gmerge
     (case-lambda
-     ((<) (error 'letloop-generator "wrong number of arguments for gmerge"))
-     ((< gen) gen)
-     ((< genleft genright)
-      (let ((left (genleft))
-            (right (genright)))
-        (lambda ()
-          (cond
-           ((and (eof-object? left) (eof-object? right))
-            left)
-           ((eof-object? left)
-            (let ((obj right)) (set! right (genright)) obj))
-           ((eof-object? right)
-            (let ((obj left))  (set! left (genleft)) obj))
-           ((< right left)
-            (let ((obj right)) (set! right (genright)) obj))
-           (else
-            (let ((obj left)) (set! left (genleft)) obj))))))
-     ((< . gens)
-      (apply gmerge <
-             (let loop ((gens gens) (gs '()))
-               (cond ((null? gens) (reverse gs))
-                     ((null? (cdr gens)) (reverse (cons (car gens) gs)))
-                     (else (loop (cddr gens)
-                                 (cons (gmerge < (car gens) (cadr gens)) gs)))))))))
+      ((<) (error 'generator "wrong number of arguments for gmerge"))
+      ((< gen) gen)
+      ((< genleft genright)
+       (let ((left (genleft))
+             (right (genright)))
+         (lambda ()
+           (cond
+            ((and (eof-object? left) (eof-object? right))
+             left)
+            ((eof-object? left)
+             (let ((obj right)) (set! right (genright)) obj))
+            ((eof-object? right)
+             (let ((obj left))  (set! left (genleft)) obj))
+            ((< right left)
+             (let ((obj right)) (set! right (genright)) obj))
+            (else
+             (let ((obj left)) (set! left (genleft)) obj))))))
+      ((< . gens)
+       (apply gmerge <
+              (let loop ((gens gens) (gs '()))
+                (cond ((null? gens) (reverse gs))
+                      ((null? (cdr gens)) (reverse (cons (car gens) gs)))
+                      (else (loop (cddr gens)
+                                  (cons (gmerge < (car gens) (cadr gens)) gs)))))))))
 
   ;; gmap
   (define gmap
     (case-lambda
-     ((proc) (error 'letloop-generator "wrong number of arguments for gmap"))
-     ((proc gen)
-      (lambda ()
-        (let ((item (gen)))
-          (if (eof-object? item) item (proc item)))))
-     ((proc . gens)
-      (lambda ()
-        (let ((items (map (lambda (x) (x)) gens)))
-          (if (any eof-object? items) (eof-object) (apply proc items)))))))
+      ((proc) (error 'generator "wrong number of arguments for gmap"))
+      ((proc gen)
+       (lambda ()
+         (let ((item (gen)))
+           (if (eof-object? item) item (proc item)))))
+      ((proc . gens)
+       (lambda ()
+         (let ((items (map (lambda (x) (x)) gens)))
+           (if (any eof-object? items) (eof-object) (apply proc items)))))))
 
   ;; gcombine
   (define (gcombine proc seed . gens)
@@ -603,5 +603,5 @@
   (define (product-accumulator) (make-accumulator * 1 (lambda (x) x)))
 
 
-  
-)
+
+  )

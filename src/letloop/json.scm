@@ -13,7 +13,7 @@
 
   (import (chezscheme))
   (import (letloop r999))
-  (import (scheme generator))
+  (import (letloop generator))
 
 
   (define pk
