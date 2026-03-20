@@ -101,10 +101,16 @@ opaque: oprf ## Build libopaque from source
 	cp $(PWD)/local/src/libopaque/src/libopaque.a $(PWD)/local/lib/
 
 check: letloop-check.sh clean ## Hit the ground running!
-	echo '(import (letloop base)) (letloop-check (list "./src/"))' | $(SCHEME) --quiet --libdirs ./src/
+	LD_LIBRARY_PATH=$(PWD)/local/lib/ echo '(import (letloop base)) (letloop-check (list "./src/"))' | $(SCHEME) --quiet --libdirs ./src/
 	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PWD)/local/lib/ LETLOOP=$(LETLOOP) sh letloop-check.sh
 	LETLOOP=$(LETLOOP) bash checks/letloop/srp.sh
 	sh checks/stress-transparenturing.sh
+
+check-fail-fast: letloop-check.sh clean ## Hit the ground running!
+	LD_LIBRARY_PATH=$(PWD)/local/lib/ echo '(import (letloop base)) (letloop-check (list "./src/" "--fail-fast"))' | $(SCHEME) --quiet --libdirs ./src/
+	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PWD)/local/lib/ LETLOOP=$(LETLOOP) sh letloop-check.sh
+	LETLOOP=$(LETLOOP) bash checks/letloop/srp.sh
+	LETLOOP=$(LETLOOP) sh checks/stress-transparenturing.sh
 
 clean:
 	$(shell find src/ -name "*.so" | xargs rm -f)
