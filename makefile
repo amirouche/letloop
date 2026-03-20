@@ -1,4 +1,4 @@
-.PHONY: help letloop argon2 blake3 sodium oprf opaque check
+.PHONY: help letloop argon2 blake3 sodium oprf opaque liburing check
 
 SCHEME=$(shell which scheme)
 PWD=$(shell pwd)
@@ -31,6 +31,17 @@ todo: ## So say we all!
 
 xxx: ## For those born under the eye of a wandering star...
 	@grep -nR --color=always -B 2 -A 2 XXX src/
+
+
+liburing:  ## Build liburing from source
+	rm -rf $(PWD)/local/src/liburing
+	mkdir -p $(PWD)/local/src
+	cd $(PWD)/local/src && git clone https://github.com/axboe/liburing
+	cd $(PWD)/local/src/liburing && git checkout liburing-2.14
+	cd $(PWD)/local/src/liburing && ./configure --prefix=$(PWD)/local/
+	cd $(PWD)/local/src/liburing && make -j$(shell nproc --ignore 1)
+	cd $(PWD)/local/src/liburing && make liburing.pc
+	cd $(PWD)/local/src/liburing && make install
 
 argon2: ## Build libargon2 from source
 	rm -rf $(PWD)/local/src/argon2
