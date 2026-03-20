@@ -1074,8 +1074,8 @@
            ;; Have handlers: submit pending SQEs, then wait for a CQE
            ;; Use a 1-second timeout so signals (SIGINT) are delivered between calls
            (has-handlers?
-            (io-uring-submit-and-wait-timeout ring cqe-ptr 1
-              (ftype-pointer-address %wait-timeout) 0))
+            (io-uring-submit ring)
+            (io-uring-wait-cqe-timeout ring cqe-ptr %wait-timeout))
            ;; No handlers but pending SQEs: submit without waiting
            (has-pending?
             (io-uring-submit ring))
@@ -3069,11 +3069,12 @@
               (flush-output-port)
               (let loop ()
                 (when (loop-running? %loop)
-                  (call-with-values accept
-                    (lambda (read write close peer-ip)
-                      (when (and read write close)
-                        (loop-spawn
-                          (lambda () (handle-connection app-state context dispatch peer-ip read write close))))))
+                  (guard (ex (else (void)))
+                    (call-with-values accept
+                      (lambda (read write close peer-ip)
+                        (when (and read write close)
+                          (loop-spawn
+                            (lambda () (handle-connection app-state context dispatch peer-ip read write close)))))))
                   (loop)))))))
       (loop-run)
       ;; Cleanup after loop exits
