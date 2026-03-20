@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+set -xe
+
 if [ ! "$LETLOOP_VENV" ]; then
     export LETLOOP_ROOT=$(pwd)
     export LETLOOP_VENV=yes
@@ -10,14 +12,14 @@ if [ ! "$LETLOOP_VENV" ]; then
         export LETLOOP_PREFIX=$(pwd)/local
     fi
     mkdir -p "$LETLOOP_PREFIX/bin"
-    export SCHEME=$LETLOOP_ROOT/local/bin/scheme
     export LD_LIBRARY_PATH="$LETLOOP_PREFIX/lib/"
     export PATH="$LETLOOP_PREFIX/bin:$HOME/.local/bin:$PATH"
+    export SCHEME=$(which scheme)
     if [ $# -eq 0 ]; then
         echo "Entering letloop... There is $(make todo | grep TODO | wc -l) TODOs..."
         $SHELL
     else
-        exec $@
+        exec "$@"
     fi
 else
     echo "You are already in letloop!"

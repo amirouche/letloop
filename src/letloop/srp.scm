@@ -6,10 +6,13 @@
 ;;
 
 (library (letloop srp)
-  (export make-srp-client-verifier
+  (export PARAMETER-2048
+          make-srp-client-verifier
           make-srp-server
           make-srp-client
+          srp-client-A
           srp-server-A!
+          srp-server-B
           srp-client-B!
           srp-server-K
           srp-server-M2
@@ -17,22 +20,28 @@
           srp-client-K
           srp-client-M1
           srp-client-check-M2?
-          ~check-srp-000)
+          ~check-srp-000
+          ~check-srp-rfc5054)
   (import (chezscheme)
           (letloop bytevector)
-          (letloop blake3)
-          (letloop argon2)
+          (letloop sodium)
           (letloop r999))
 
   ;; The SRP Authentication and Key Exchange System
   ;;
-  ;; ref: https://tools.ietf.org/html/rfc2945
+  ;; ref: https://datatracker.ietf.org/doc/html/rfc5054
+  ;; ref: https://datatracker.ietf.org/doc/html/rfc2945
   ;; ref: http://srp.stanford.edu/doc.html
-  ;; ref: https://en.wikipedia.org/wiki/Secure_Remote_Password_protocol
+  ;;
+  ;; Hash function: SHA-256 via libsodium (modern replacement for
+  ;; SHA-1 specified in RFC 5054, per section 3.4 guidance)
   ;;
   ;; TODO: Use unicode NFKD normalization to avoid problems because of
   ;; the input method
 
+  ;; RFC 5054 section 2.1: "Conversion between integers and
+  ;; byte-strings assumes the most significant bytes are stored first"
+  ;; NOTE: despite the names, these functions are big-endian.
   (define ->bytevector integer->bytevector-little-endian)
   (define ->integer bytevector-little-endian->integer)
 
@@ -124,13 +133,21 @@
          (srp-value-bytevector! N SRP-N-2048)
          N))))
 
+  ;; RFC 5054 section 2.4: x = H(s | H(I | ":" | P))
   (define srp-compute-x
     (lambda (salt identity password)
-      (define ip (argon2id
-                  (srp-value-bytevector salt)
-                  (bytevector-append (srp-value-bytevector identity) (srp-value-bytevector password))))
-      (define x (make-srp-value 'x (bytevector-length ip)))
-      (srp-value-bytevector! x ip)
+      (define colon (bytevector 58))
+      (define inner (crypto-hash-sha256
+                     (bytevector-append
+                      (srp-value-bytevector identity)
+                      colon
+                      (srp-value-bytevector password))))
+      (define hash (crypto-hash-sha256
+                    (bytevector-append
+                     (srp-value-bytevector salt)
+                     inner)))
+      (define x (make-srp-value 'x 32))
+      (srp-value-bytevector! x hash)
       x))
 
   (define make-srp-client-verifier
@@ -150,19 +167,20 @@
                           (srp-parameter-N parameter))))
       (srp-value-bytevector verifier)))
 
+  ;; RFC 5054 section 2.6: k = H(N | PAD(g))
+  ;; PAD(g) is already 256 bytes since generator is stored with
+  ;; byte-count matching N.
   (define srp-compute-k
     (lambda (parameter)
       (define k (make-srp-value 'k 32))
-      (define hasher (make-blake3))
-      (blake3-update! hasher
-                      (srp-value-bytevector
-                       (srp-parameter-N parameter)))
-      (blake3-update! hasher
-                      (srp-value-bytevector
-                       (srp-parameter-generator parameter)))
-      (srp-value-bytevector! k (blake3-finalize hasher 32))
+      (srp-value-bytevector! k
+       (crypto-hash-sha256
+        (bytevector-append
+         (srp-value-bytevector (srp-parameter-N parameter))
+         (srp-value-bytevector (srp-parameter-generator parameter)))))
       k))
 
+  ;; RFC 5054 section 2.5.3: B = k*v + g^b % N
   (define srp-compute-B
     (lambda (parameter k v b)
       (define generator (srp-parameter-generator parameter))
@@ -176,6 +194,7 @@
                                   (srp-value-integer N)))
       B))
 
+  ;; RFC 5054 section 2.5.4: A = g^a % N
   (define srp-compute-A
     (lambda (parameter a)
       (define A (make-srp-value 'A 256))
@@ -184,22 +203,27 @@
       (define ignore
         (unless (<= 256 (bitwise-bit-count (srp-value-integer a)))
           (error 'srp "secret key has insufficient entropy" (bitwise-bit-count (srp-value-integer a)))))
-      
+
       (srp-value-integer! A
                         (expt-mod (srp-value-integer generator)
                                   (srp-value-integer a)
                                   (srp-value-integer N)))
       A))
 
+  ;; RFC 5054 section 2.6: u = H(PAD(A) | PAD(B))
+  ;; A and B are already 256 bytes (= byte-count of N).
   (define srp-compute-u
     (lambda (A B)
       (define u (make-srp-value 'u 32))
-      (define hasher (make-blake3))
-      (blake3-update! hasher (srp-value-bytevector A))
-      (blake3-update! hasher (srp-value-bytevector B))
-      (srp-value-bytevector! u (blake3-finalize hasher 32))
+      (srp-value-bytevector! u
+       (crypto-hash-sha256
+        (bytevector-append
+         (srp-value-bytevector A)
+         (srp-value-bytevector B))))
       u))
 
+  ;; RFC 5054 section 2.6 client:
+  ;; S = (B - (k * g^x)) ^ (a + (u * x)) % N
   (define srp-client-compute-S
     (lambda (parameter k x a B u)
       (define N (srp-parameter-N parameter))
@@ -225,6 +249,8 @@
                                   (srp-value-integer N)))
       client-S))
 
+  ;; RFC 5054 section 2.6 server:
+  ;; S = (A * v^u) ^ b % N
   (define srp-server-compute-S
     (lambda (parameter v A b u)
       (define N (srp-parameter-N parameter))
@@ -242,62 +268,58 @@
                                   (srp-value-integer N)))
       server-S))
 
+  ;; K = H(S)
   (define srp-compute-K
     (lambda (S)
       (define K (make-srp-value 'K 32))
-      (srp-value-bytevector! K (blake3 (srp-value-bytevector S)))
+      (srp-value-bytevector! K (crypto-hash-sha256 (srp-value-bytevector S)))
       K))
 
+  ;; RFC 2945: M1 = H(H(N) XOR H(g) | H(I) | s | A | B | K)
   (define srp-compute-M1
     (lambda (who parameter I s A B K)
 
-      (define magic
-        (lambda ()
-          (define N (srp-parameter-N parameter))
-          (define g (srp-parameter-generator parameter))
-          (blake3
-           (->bytevector
-            (bitwise-xor
-             (->integer (blake3 (srp-value-bytevector N)))
-             (->integer (blake3 (srp-value-bytevector g))))
-            32))))
+      (define N (srp-parameter-N parameter))
+      (define g (srp-parameter-generator parameter))
 
-      (define hasher (make-blake3))
+      ;; H(N) XOR H(g)
+      (define hN-xor-hg
+        (->bytevector
+         (bitwise-xor
+          (->integer (crypto-hash-sha256 (srp-value-bytevector N)))
+          (->integer (crypto-hash-sha256 (srp-value-bytevector g))))
+         32))
+
       (define M1 (make-srp-value (cons who 'M1) 32))
 
-      (blake3-update! hasher (magic))
-      (blake3-update! hasher (blake3 (srp-value-bytevector I)))
-      (blake3-update! hasher (srp-value-bytevector s))
-      (blake3-update! hasher (srp-value-bytevector A))
-      (blake3-update! hasher (srp-value-bytevector B))
-      (blake3-update! hasher (srp-value-bytevector K))
-      (srp-value-bytevector! M1 (blake3-finalize hasher 32))
+      (srp-value-bytevector! M1
+       (crypto-hash-sha256
+        (bytevector-append
+         hN-xor-hg
+         (crypto-hash-sha256 (srp-value-bytevector I))
+         (srp-value-bytevector s)
+         (srp-value-bytevector A)
+         (srp-value-bytevector B)
+         (srp-value-bytevector K))))
       M1))
 
+  ;; RFC 2945: M2 = H(A | M1 | K)
   (define srp-compute-M2
     (lambda (who parameter A M K)
-      (define hasher (make-blake3))
       (define M2 (make-srp-value (cons who 'M2) 32))
-      (blake3-update! hasher (srp-value-bytevector A))
-      (blake3-update! hasher (srp-value-bytevector M))
-      (blake3-update! hasher (srp-value-bytevector K))
-      (srp-value-bytevector! M2 (blake3-finalize hasher 32))
+      (srp-value-bytevector! M2
+       (crypto-hash-sha256
+        (bytevector-append
+         (srp-value-bytevector A)
+         (srp-value-bytevector M)
+         (srp-value-bytevector K))))
       M2))
 
+  ;; Constant-time comparison via libsodium
   (define srp-bytevector=?
-    (lambda (bytevector other)
-      ;; constant-time comparison
-      (if (not (fx=? (bytevector-length bytevector)
-                     (bytevector-length other)))
-          #f
-          (let loop ((index 0)
-                     (acc 0))
-            (if (fx=? index (bytevector-length bytevector))
-                (fxzero? acc)
-                (loop (fx+ index 1)
-                      (fxior acc
-                             (fxxor (bytevector-u8-ref bytevector index)
-                                    (bytevector-u8-ref other index)))))))))
+    (lambda (a b)
+      (and (fx=? (bytevector-length a) (bytevector-length b))
+           (sodium-memcmp a b))))
 
   (define-record-type* <srp-client>
     (make-srp-client~ parameter salt identity k x a A B K M1 M2)
@@ -327,7 +349,7 @@
   (define make-random-srp-value
     (lambda (name length)
       (define out (make-srp-value name length))
-      (srp-value-bytevector! out (bytevector-random length))
+      (srp-value-bytevector! out (randombytes-buf length))
       out))
 
   (define make-srp-client
@@ -365,7 +387,7 @@
           (error 'srp "B mod N is zero")))
 
       (define u (srp-compute-u (srp-client-A~ client) B))
-      
+
       (define ignore2 (unless (not (= 0 (srp-value-integer u)))
                         (error 'srp "u must not be zero")))
 
@@ -520,9 +542,10 @@
 
   (define ~check-srp-000
     (lambda ()
-      (define salt (srp-value-bytevector (make-random-srp-value 'salt 25)))
-      (define identity (srp-value-bytevector (make-random-srp-value 'identity 25)))
-      (define password (srp-value-bytevector (make-random-srp-value 'password 25)))
+      (define _init (sodium-init))
+      (define salt (randombytes-buf 25))
+      (define identity (randombytes-buf 25))
+      (define password (randombytes-buf 25))
 
       ;; The client compute an identifier based on salt, identity, and
       ;; password.
@@ -534,7 +557,7 @@
       ;; the server knows only about salt, identity, and verifier.
       (define server
         (make-srp-server PARAMETER-2048
-                             (srp-value-bytevector (make-random-srp-value 'server-secret 1536))
+                             (randombytes-buf 1536)
                              salt
                              identity
                              verifier))
@@ -542,7 +565,7 @@
       ;; Client knows about salt, identity, and password.
       (define client
         (make-srp-client PARAMETER-2048
-                             (srp-value-bytevector (make-random-srp-value 'client-secret 1536))
+                             (randombytes-buf 1536)
                              salt
                              identity
                              password))
@@ -569,5 +592,97 @@
 
        ;; The Client must also verify the server proof
        (srp-client-check-M2? client (srp-server-M2 server)))))
+
+  ;; RFC 5054 Appendix B test vectors.
+  ;; The vectors use SHA-1 for k, x, u. We inject those values
+  ;; directly to verify the algebraic operations (expt-mod,
+  ;; modular arithmetic) are correct independently of hash choice.
+
+  (define hex->bytevector
+    (lambda (str)
+      (define clean
+        (list->string
+         (filter (lambda (c) (not (char=? c #\space)))
+                 (string->list str))))
+      (define len (div (string-length clean) 2))
+      (define out (make-bytevector len))
+      (let loop ((i 0))
+        (when (< i len)
+          (bytevector-u8-set! out i
+            (string->number (substring clean (* i 2) (+ (* i 2) 2)) 16))
+          (loop (+ i 1))))
+      out))
+
+  (define ~check-srp-rfc5054
+    (lambda ()
+      ;; 1024-bit group from RFC 5054 Appendix A, g = 2
+      (define N-bytes
+        (hex->bytevector
+         "EEAF0AB9ADB38DD69C33F80AFA8FC5E86072618775FF3C0B9EA2314C9C256576D674DF7496EA81D3383B4813D692C6E0E0D5D8E250B98BE48E495C1D6089DAD15DC7D7B46154D6B6CE8EF4AD69B15D4982559B297BCF1885C529F566660E57EC68EDBC3C05726CC02FD4CBF4976EAA9AFD5138FE8376435B9FC61D2FC0EB06E3"))
+      (define N (->integer N-bytes))
+      (define g 2)
+      (define byte-count 128)
+
+      ;; SHA-1 derived values from RFC test vectors
+      (define k (->integer (hex->bytevector "7556AA045AEF2CDD07ABAF0F665C3E818913186F")))
+      (define x (->integer (hex->bytevector "94B7555AABE9127CC58CCF4993DB6CF84D16C124")))
+      (define u (->integer (hex->bytevector "CE38B9593487DA98554ED47D70A7AE5F462EF019")))
+
+      ;; Private keys
+      (define a (->integer (hex->bytevector "60975527035CF2AD1989806F0407210BC81EDC04E2762A56AFD529DDDA2D4393")))
+      (define b (->integer (hex->bytevector "E487CB59D31AC550471E81F00F6928E01DDA08E974A004F49E61F5D105284D20")))
+
+      ;; Expected results
+      (define v-expected
+        (hex->bytevector
+         "7E273DE8696FFC4F4E337D05B4B375BEB0DDE1569E8FA00A9886D8129BADA1F1822223CA1A605B530E379BA4729FDC59F105B4787E5186F5C671085A1447B52A48CF1970B4FB6F8400BBF4CEBFBB168152E08AB5EA53D15C1AFF87B2B9DA6E04E058AD51CC72BFC9033B564E26480D78E955A5E29E7AB245DB2BE315E2099AFB"))
+      (define A-expected
+        (hex->bytevector
+         "61D5E490F6F1B79547B0704C436F523DD0E560F0C64115BB72557EC44352E8903211C04692272D8B2D1A5358A2CF1B6E0BFCF99F921530EC8E39356179EAE45E42BA92AEACED825171E1E8B9AF6D9C03E1327F44BE087EF06530E69F66615261EEF54073CA11CF5858F0EDFDFE15EFEAB349EF5D76988A3672FAC47B0769447B"))
+      (define B-expected
+        (hex->bytevector
+         "BD0C61512C692C0CB6D041FA01BB152D4916A1E77AF46AE105393011BAF38964DC46A0670DD125B95A981652236F99D9B681CBF87837EC996C6DA04453728610D0C6DDB58B318885D7D82C7F8DEB75CE7BD4FBAA37089E6F9C6059F388838E7A00030B331EB76840910440B1B27AAEAEEB4012B7D7665238A8E3FB004B117B58"))
+      (define S-expected
+        (hex->bytevector
+         "B0DC82BABCF30674AE450C0287745E7990A3381F63B387AAF271A10D233861E359B48220F7C4693C9AE12B0A6F67809F0876E2D013800D6C41BB59B6D5979B5C00A172B4A2A5903A0BDCAF8A709585EB2AFAFA8F3499B200210DCC1F10EB33943CD67FC88A2F39A4BE5BEC4EC0A3212DC346D7E474B29EDE8A469FFECA686E5A"))
+
+      ;; v = g^x % N
+      (define v-computed (->bytevector (expt-mod g x N) byte-count))
+      (define _a1 (assert (equal? v-computed v-expected)))
+
+      ;; A = g^a % N
+      (define A-computed (->bytevector (expt-mod g a N) byte-count))
+      (define _a2 (assert (equal? A-computed A-expected)))
+
+      ;; B = k*v + g^b % N
+      (define v-int (->integer v-expected))
+      (define B-computed
+        (->bytevector (modulo (+ (* k v-int) (expt-mod g b N)) N) byte-count))
+      (define _a3 (assert (equal? B-computed B-expected)))
+
+      ;; Client premaster secret: S = (B - k*g^x) ^ (a + u*x) % N
+      (define B-int (->integer B-expected))
+      (define S-client
+        (->bytevector
+         (expt-mod (mod (- B-int (* k (expt-mod g x N))) N)
+                   (+ a (* u x))
+                   N)
+         byte-count))
+      (define _a4 (assert (equal? S-client S-expected)))
+
+      ;; Server premaster secret: S = (A * v^u) ^ b % N
+      (define A-int (->integer A-expected))
+      (define S-server
+        (->bytevector
+         (expt-mod (* A-int (expt-mod v-int u N))
+                   b
+                   N)
+         byte-count))
+      (define _a5 (assert (equal? S-server S-expected)))
+
+      ;; Client and server must agree
+      (define _a6 (assert (equal? S-client S-server)))
+
+      #t))
 
 )

@@ -1,0 +1,17 @@
+#!/usr/bin/bash
+
+set -xeo pipefail
+
+
+args=""
+for a in "$@"; do args="$args \"$a\""; done
+
+echo "(import (letloop root))
+      (with-exception-handler
+       (lambda (c)
+         (display-condition c (current-error-port))
+         (newline (current-error-port))
+         (exit 1))
+       (lambda ()
+         (exit (letloop-root (list $args)))))" \
+  | scheme --libdirs "$LETLOOP_ROOT/src/" --quiet
