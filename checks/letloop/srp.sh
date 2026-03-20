@@ -6,7 +6,7 @@ set -ex
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LETLOOP="${LETLOOP:-$ROOT/local/bin/letloop}"
 TMPDIR=$(mktemp -d)
-trap "rm -rf $TMPDIR" EXIT
+trap "cat $TMPDIR/*.txt && rm -rf $TMPDIR" EXIT
 
 echo "=== SRP interop: letloop/srp vs pysrp (SHA-256, 2048-bit) ==="
 
