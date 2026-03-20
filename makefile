@@ -47,6 +47,7 @@ argon2: ## Build libargon2 from source
 	rm -rf $(PWD)/local/src/argon2
 	mkdir -p $(PWD)/local/src
 	cd $(PWD)/local/src && git clone https://github.com/P-H-C/phc-winner-argon2 argon2
+	cd $(PWD)/local/src/argon2 && git checkout 20190702
 	cd $(PWD)/local/src/argon2 && make -j$(shell nproc --ignore 1)
 	cp $(PWD)/local/src/argon2/libargon2.so.1 $(PWD)/local/lib/
 	cp $(PWD)/local/src/argon2/libargon2.a $(PWD)/local/lib/
@@ -55,6 +56,7 @@ blake3: ## Build libblake3 from source
 	rm -rf $(PWD)/local/src/blake3
 	mkdir -p $(PWD)/local/src
 	cd $(PWD)/local/src && git clone https://github.com/BLAKE3-team/BLAKE3 blake3
+	cd $(PWD)/local/src/blake3 && git checkout 1.8.3
 	cd $(PWD)/local/src/blake3/c && gcc -shared -O3 -o libblake3.so -fPIC blake3.c blake3_dispatch.c blake3_portable.c blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
 	cd $(PWD)/local/src/blake3/c && gcc -c -O3 -fPIC blake3.c blake3_dispatch.c blake3_portable.c blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S && ar rcs libblake3.a blake3.o blake3_dispatch.o blake3_portable.o blake3_sse2_x86-64_unix.o blake3_sse41_x86-64_unix.o blake3_avx2_x86-64_unix.o blake3_avx512_x86-64_unix.o
 	cp $(PWD)/local/src/blake3/c/libblake3.so $(PWD)/local/lib/
