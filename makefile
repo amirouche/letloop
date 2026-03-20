@@ -87,7 +87,7 @@ opaque: oprf ## Build libopaque from source
 	cp $(PWD)/local/src/libopaque/src/libopaque.so $(PWD)/local/lib/
 	cp $(PWD)/local/src/libopaque/src/libopaque.a $(PWD)/local/lib/
 
-check: argon2 blake3 opaque letloop-check.sh clean ## Hit the ground running!
+check: letloop-check.sh clean ## Hit the ground running!
 	echo '(import (letloop base)) (letloop-check (list "./src/"))' | $(SCHEME) --quiet --libdirs ./src/
 	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PWD)/local/lib/ LETLOOP=$(LETLOOP) sh letloop-check.sh
 	sh checks/stress-transparenturing.sh
