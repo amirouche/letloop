@@ -821,7 +821,7 @@
         (func ring cqe-ptr))))
 
   (define io-uring-wait-cqe-timeout
-    (let ((func (foreign-procedure "io_uring_wait_cqe_timeout"
+    (let ((func (foreign-procedure __collect_safe "io_uring_wait_cqe_timeout"
                                    (void* void* void*) int)))
       (lambda (ring cqe-ptr ts)
         (func ring cqe-ptr (ftype-pointer-address ts)))))
@@ -1125,8 +1125,7 @@
     (lambda ()
       (let loop ()
         (when (loop-running? %loop)
-          (guard (ex (else (loop-running! %loop #f)))
-            (loop-run-once))
+          (loop-run-once)
           (loop)))))
 
   (define loop-spawn
@@ -1139,7 +1138,7 @@
       (let ((ring (make-io-uring))
             (cqe-ptr (make-cqe-pointer))
             (handlers (make-eqv-hashtable)))
-        (let ((ret (io-uring-queue-init 4096 ring 0)))
+        (let ((ret (io-uring-queue-init 16384 ring 0)))
           (unless (fxzero? ret)
             (error 'transparenturing
                    (format #f "io_uring_queue_init failed: ~a" (strerror (fx- 0 ret))))))
@@ -1397,18 +1396,10 @@
       (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
              (id (loop-alloc-id!)))
         ;; Use provided buffer ring — no bytevector allocation or locking needed
-        ;; Link a timeout SQE so idle connections are cleaned up
         (io-uring-prep-recv sqe fd 0 %buf-ring-buf-size 0)
-        (io-uring-sqe-set-flags sqe (fxlogor IOSQE-BUFFER-SELECT IOSQE-IO-LINK))
+        (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
         (io-uring-sqe-set-buf-group sqe %buf-ring-bgid)
         (io-uring-sqe-set-data64 sqe id)
-        ;; Linked timeout: if recv doesn't complete within %read-timeout-seconds,
-        ;; the kernel cancels it and delivers res=-ECANCELED
-        (let* ((timeout-sqe (io-uring-get-sqe (loop-ring %loop)))
-               (timeout-id (loop-alloc-id!)))
-          (io-uring-prep-link-timeout timeout-sqe
-                                      (ftype-pointer-address %read-timeout-ts) 0)
-          (io-uring-sqe-set-data64 timeout-sqe timeout-id))
         (let ((res (loop-abort
                      (lambda (k)
                        (hashtable-set! (loop-handlers %loop) id k)))))
