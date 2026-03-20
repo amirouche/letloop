@@ -996,6 +996,7 @@
   (define %buf-ring-base 0)    ;; base address of buffer memory
   (define %buf-ring-mask 0)    ;; ring mask
   (define %buf-data (make-eqv-hashtable))  ;; id → bytevector (extracted buffer data)
+  (define %fd-handlers (make-eqv-hashtable)) ;; fd → list of handler ids (for cleanup on close)
 
   ;; Read timeout: 30 seconds — defends against Slowloris and cleans up
   ;; orphaned connections after clients disconnect
@@ -1071,15 +1072,11 @@
         (let ((has-handlers? (not (fxzero? (hashtable-size (loop-handlers %loop)))))
               (has-pending? (not (fxzero? (io-uring-sq-ready ring)))))
           (cond
-           ;; Have handlers: submit pending SQEs, then wait for a CQE
-           ;; Use a 1-second timeout so signals (SIGINT) are delivered between calls
            (has-handlers?
             (io-uring-submit ring)
             (io-uring-wait-cqe-timeout ring cqe-ptr %wait-timeout))
-           ;; No handlers but pending SQEs: submit without waiting
            (has-pending?
             (io-uring-submit ring))
-           ;; Idle: no handlers, no pending — wait with timeout to avoid busy-loop
            (else
             (io-uring-wait-cqe-timeout ring cqe-ptr %wait-timeout))))
 
@@ -1091,13 +1088,11 @@
                    (res (io-uring-cqe-get-res cqe))
                    (flags (io-uring-cqe-get-flags cqe)))
               (io-uring-cqe-seen ring cqe)
-              ;; If multishot CQE without MORE flag, the multishot ended
               (when (fxzero? (fxlogand flags IORING-CQE-F-MORE))
                 (let ((ms-fd (hashtable-ref %multishot-ids id #f)))
                   (when ms-fd
                     (hashtable-delete! %multishot-ids id)
                     (hashtable-delete! %multishots ms-fd))))
-              ;; If buffer was selected, extract data and return buffer to ring
               (when (and (fx>? res 0)
                          (not (fxzero? (fxlogand flags IORING-CQE-F-BUFFER))))
                 (let* ((bid (fxsrl (fxlogand flags #xFFFF0000) 16))
@@ -1105,11 +1100,9 @@
                        (bv (make-bytevector res)))
                   (with-lock (list bv)
                     (memcpy (bytevector-pointer bv) buf-addr res))
-                  ;; Return buffer to ring for reuse
                   (io-uring-buf-ring-add %buf-ring buf-addr %buf-ring-buf-size
                                          bid %buf-ring-mask 0)
                   (io-uring-buf-ring-advance %buf-ring 1)
-                  ;; Stash for loop-read to retrieve
                   (hashtable-set! %buf-data id bv)))
               (let ((handler (hashtable-ref (loop-handlers %loop) id #f)))
                 (hashtable-delete! (loop-handlers %loop) id)
@@ -1117,7 +1110,7 @@
                   (loop-apply (lambda () (handler res))))))
             (drain)))
 
-        ;; 4. Flush SQEs prepped during drain (avoids extra loop iteration latency)
+        ;; 4. Flush SQEs prepped during drain
         (when (not (fxzero? (io-uring-sq-ready ring)))
           (io-uring-submit ring)))))
 
@@ -1125,7 +1118,8 @@
     (lambda ()
       (let loop ()
         (when (loop-running? %loop)
-          (loop-run-once)
+          (guard (ex (else (loop-running! %loop #f)))
+            (loop-run-once))
           (loop)))))
 
   (define loop-spawn
@@ -1224,9 +1218,14 @@
 
   (define loop-close
     (lambda (fd)
+      ;; Purge any stale handlers for this fd — CQ overflow can cause
+      ;; old CQEs to arrive after the fd is closed, resuming dead coroutines.
+      (let ((ids (hashtable-ref %fd-handlers fd '())))
+        (for-each (lambda (id)
+                    (hashtable-delete! (loop-handlers %loop) id))
+                  ids)
+        (hashtable-delete! %fd-handlers fd))
       ;; Fire-and-forget cancel: cancel pending io_uring ops on this fd.
-      ;; Their -ECANCELED CQEs will clean up handlers in the drain loop.
-      ;; No handler registered for the cancel itself — its CQE is ignored.
       (let* ((cancel-sqe (io-uring-get-sqe (loop-ring %loop)))
              (cancel-id (loop-alloc-id!)))
         (io-uring-prep-cancel-fd cancel-sqe fd IORING-ASYNC-CANCEL-ALL)
@@ -1400,6 +1399,9 @@
         (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
         (io-uring-sqe-set-buf-group sqe %buf-ring-bgid)
         (io-uring-sqe-set-data64 sqe id)
+        ;; Track this handler for fd-based cleanup on close
+        (hashtable-set! %fd-handlers fd
+                        (cons id (hashtable-ref %fd-handlers fd '())))
         (let ((res (loop-abort
                      (lambda (k)
                        (hashtable-set! (loop-handlers %loop) id k)))))
@@ -1424,6 +1426,9 @@
                (id (loop-alloc-id!)))
           (io-uring-prep-send sqe fd (bytevector-pointer bv) (bytevector-length bv) 0)
           (io-uring-sqe-set-data64 sqe id)
+          ;; Track this handler for fd-based cleanup on close
+          (hashtable-set! %fd-handlers fd
+                          (cons id (hashtable-ref %fd-handlers fd '())))
           (let ((res (loop-abort
                        (lambda (k)
                          (hashtable-set! (loop-handlers %loop) id k)))))
