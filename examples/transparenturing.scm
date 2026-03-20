@@ -1079,7 +1079,9 @@
            ;; No handlers but pending SQEs: submit without waiting
            (has-pending?
             (io-uring-submit ring))
-           (else (void))))
+           ;; Idle: no handlers, no pending — wait with timeout to avoid busy-loop
+           (else
+            (io-uring-wait-cqe-timeout ring cqe-ptr %wait-timeout))))
 
         ;; 3. Drain all available CQEs (resumed coroutines may prep new SQEs)
         (let drain ()
