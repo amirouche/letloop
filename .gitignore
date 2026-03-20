@@ -11,3 +11,4 @@ local
 *.so
 *.wpo
 *~
+.venv
