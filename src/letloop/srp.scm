@@ -181,8 +181,10 @@
       (define A (make-srp-value 'A 256))
       (define generator (srp-parameter-generator parameter))
       (define N (srp-parameter-N parameter))
-      (unless (<= 256 (bitwise-bit-count (srp-value-integer a)))
-        (error 'srp "secret key has insufficient entropy" (bitwise-bit-count (srp-value-integer a))))
+      (define ignore
+        (unless (<= 256 (bitwise-bit-count (srp-value-integer a)))
+          (error 'srp "secret key has insufficient entropy" (bitwise-bit-count (srp-value-integer a)))))
+      
       (srp-value-integer! A
                         (expt-mod (srp-value-integer generator)
                                   (srp-value-integer a)
@@ -204,10 +206,11 @@
       (define g (srp-parameter-generator parameter))
       (define client-S (make-srp-value 'S 256))
 
-      (unless (< 0
-                 (srp-value-integer B)
-                 (srp-value-integer (srp-parameter-N parameter)))
-        (error 'srp "B must be between 1 and N - 1" B))
+      (define ignore
+        (unless (< 0
+                   (srp-value-integer B)
+                   (srp-value-integer (srp-parameter-N parameter)))
+          (error 'srp "B must be between 1 and N - 1" B)))
 
       (srp-value-integer! client-S
                         (expt-mod (mod (- (srp-value-integer B)
@@ -354,16 +357,17 @@
       (define parameter (srp-client-parameter client))
 
       ;; safeguard: B mod N must not be zero
-      (unless (not (= 0
-                      (mod (srp-value-integer B)
-                           (srp-value-integer
-                            (srp-parameter-N parameter)))))
-        (error 'srp "B mod N is zero"))
+      (define ignore
+        (unless (not (= 0
+                        (mod (srp-value-integer B)
+                             (srp-value-integer
+                              (srp-parameter-N parameter)))))
+          (error 'srp "B mod N is zero")))
 
       (define u (srp-compute-u (srp-client-A~ client) B))
-
-      (unless (not (= 0 (srp-value-integer u)))
-        (error 'srp "u must not be zero"))
+      
+      (define ignore2 (unless (not (= 0 (srp-value-integer u)))
+                        (error 'srp "u must not be zero")))
 
       (define S
         (srp-client-compute-S
@@ -453,11 +457,12 @@
       (define parameter (srp-server-parameter server))
 
       ;; safeguard: A mod N must not be zero
-      (unless (not (= 0
-                      (mod (srp-value-integer A)
-                           (srp-value-integer
-                            (srp-parameter-N parameter)))))
-        (error 'srp "A mod N is zero"))
+      (define ignore
+        (unless (not (= 0
+                        (mod (srp-value-integer A)
+                             (srp-value-integer
+                              (srp-parameter-N parameter)))))
+          (error 'srp "A mod N is zero")))
 
       (define B (srp-compute-B parameter
                                    (srp-compute-k parameter)
@@ -467,8 +472,9 @@
       (define u (srp-compute-u A B))
 
       ;; u must not be zero
-      (unless (not (= 0 (srp-value-integer u)))
-        (error 'srp "u must not be zero"))
+      (define ignore2
+        (unless (not (= 0 (srp-value-integer u)))
+          (error 'srp "u must not be zero")))
 
       (define S
         (srp-server-compute-S parameter

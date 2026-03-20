@@ -1,14 +1,10 @@
 #!chezscheme
-(library (letloopc blake3)
+(library (letloop blake3)
   (export blake3 make-blake3 blake3-update! blake3-finalize
           ~check-blake3-000
-          ~check-blake3-001
-          ~check-blake3-cross-0
-          ~check-blake3-cross-1
-          ~check-blake3-cross-2)
+          ~check-blake3-001)
 
-  (import (chezscheme)
-          (prefix (letloop blake3) pure:))
+  (import (chezscheme))
 
   (define libblake3 (load-shared-object "libblake3.so"))
 
@@ -70,39 +66,5 @@
   (define bytevector-random
     (lambda (n)
       (u8-list->bytevector (map (lambda _ (random 256)) (iota n)))))
-
-  ;; Cross-verify: one-shot hash, small input
-  (define ~check-blake3-cross-0
-    (lambda ()
-      (random-seed 42)
-      (let ((input (bytevector-random 64)))
-        (assert (bytevector=? (blake3 input)
-                              (pure:blake3 input))))))
-
-  ;; Cross-verify: one-shot hash, large input (>1 chunk = 1024 bytes)
-  (define ~check-blake3-cross-1
-    (lambda ()
-      (random-seed 7)
-      (let ((input (bytevector-random 2048)))
-        (assert (bytevector=? (blake3 input)
-                              (pure:blake3 input))))))
-
-  ;; Cross-verify: incremental update and variable output length
-  (define ~check-blake3-cross-2
-    (lambda ()
-      (random-seed 99)
-      (let ((part1 (bytevector-random 100))
-            (part2 (bytevector-random 200)))
-        ;; Incremental FFI
-        (let ((h (make-blake3)))
-          (blake3-update! h part1)
-          (blake3-update! h part2)
-          (let ((ffi-result (blake3-finalize h 64)))
-            ;; Incremental pure
-            (let ((hp (pure:make-blake3)))
-              (pure:blake3-update! hp part1)
-              (pure:blake3-update! hp part2)
-              (let ((pure-result (pure:blake3-finalize hp 64)))
-                (assert (bytevector=? ffi-result pure-result)))))))))
 
   )
