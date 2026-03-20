@@ -101,6 +101,7 @@ opaque: oprf ## Build libopaque from source
 check: letloop-check.sh clean ## Hit the ground running!
 	echo '(import (letloop base)) (letloop-check (list "./src/"))' | $(SCHEME) --quiet --libdirs ./src/
 	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PWD)/local/lib/ LETLOOP=$(LETLOOP) sh letloop-check.sh
+	LETLOOP=$(LETLOOP) bash checks/letloop/srp.sh
 	sh checks/stress-transparenturing.sh
 
 clean:
