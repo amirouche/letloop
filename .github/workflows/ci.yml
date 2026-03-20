@@ -26,7 +26,8 @@ jobs:
               
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - name: Clone letloop
+        uses: actions/checkout@v6
 
       - name: Install dependencies
         run: sudo apt-get update -y && sudo apt-get install -y qemu-user qemu-binfmt chezscheme bubblewrap
@@ -58,7 +59,8 @@ jobs:
         if: steps.cache-rootfs.outputs.cache-hit != 'true'
         run: ./venv letloop-root exec $(pwd)/rootfs / -- make PREFIX=/usr/local/ -j$(nproc) opaque argon2 blake3 liburing
 
-      - uses: actions/checkout@v5
+      - name: clone letloop within rootfs
+        uses: actions/checkout@v6
         with:
           path: rootfs/letloop
 
