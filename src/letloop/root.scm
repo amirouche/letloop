@@ -6,9 +6,10 @@
           root-exec)
 
   (import (chezscheme)
+          (letloop cffi)
           (letloop environment)
           (letloop generator)
-          (letloop html base)          
+          (letloop html base)
           (letloop root base)
           (letloop sxpath)
           (letloop www))
@@ -17,7 +18,7 @@
 
    (define pk
      (lambda args
-       (when (environment-variable-ref "LETLOOP_DEBUG_ROOT")
+       (when #t #;(environment-variable-ref "LETLOOP_DEBUG_ROOT")
          (display ";; " (current-error-port))
          (write args (current-error-port))
          (newline (current-error-port)))
@@ -71,9 +72,41 @@
                          (loop (cdr env)))))
                  (apply values args)))))))
 
-   (define system?
-     (lambda (command)
-       (zero? (system command))))
+   ;; call-raw-execve always returns (values ret errno).
+   ;; Prefer __atomic __errno (Chez 10+); fall back to a manual errno read on Chez 9.x.
+   (define call-raw-execve
+     (guard (exn [#t
+                  (let ([f (foreign-procedure "execve" (string uptr uptr) int)])
+                    (lambda (path argv envp)
+                      (call-with-errno (lambda () (f path argv envp)) values)))])
+       (eval '(foreign-procedure __atomic __errno "execve" (string uptr uptr) int))))
+
+   (define execve!
+     (let ([raw call-raw-execve])
+       (lambda (pathname . argv-strings)
+         (define i (pk 'execve! pathname argv-strings))
+         (define (make-c-string s)
+           (let* ([bv  (string->utf8 s)]
+                  [out (make-bytevector (+ (bytevector-length bv) 1) 0)])
+             (bytevector-copy! bv 0 out 0 (bytevector-length bv))
+             out))
+         (let* ([c-strings (map make-c-string argv-strings)]
+                [n         (length c-strings)]
+                [ptr-size  (foreign-sizeof 'void*)]
+                [argv      (foreign-alloc (* (+ n 1) ptr-size))]
+                [envp      (foreign-ref 'uptr (foreign-entry "environ") 0)])
+           (with-lock c-strings
+             (let loop ([i 0] [ss c-strings])
+               (unless (null? ss)
+                 (foreign-set! 'uptr argv (* i ptr-size)
+                               (bytevector-pointer (car ss)))
+                 (loop (+ i 1) (cdr ss))))
+             (foreign-set! 'uptr argv (* n ptr-size) 0)
+             (let-values ([(ret errno) (raw pathname argv envp)])
+               (foreign-free argv)
+               (when (= ret -1)
+                 (format (current-error-port) "execve: ~a\n" (strerror errno))
+                 (exit 1))))))))
 
    (define system*
      (lambda (directory env command . variables)
@@ -88,8 +121,8 @@
        (unless (call-with-env env (lambda ()
                                     (if directory
                                         (parameterize ((current-directory directory))
-                                          (system? command*))
-                                        (system? command*))))
+                                          (zero? (system (pk 'system command*))))
+                                        (zero? (system (pk 'system command*))))))
          (error 'system* "non-zero exit code" directory env command*))))
 
    (define URL_IMAGES_INDEX "https://images.linuxcontainers.org/images/")
@@ -214,32 +247,43 @@
                    (cdr strings))))))
 
    (define root-exec
-     (lambda (directory target-directory command . variables)
+     (lambda (directory target-directory command)
 
        (define target-directory* (pk (or target-directory "/")))
 
-       (pk 'directory directory 'target-directory target-directory 'command command 'variables variables)
+       (pk 'directory directory 'target-directory target-directory 'command command)
        
        (system* directory #f "cp /etc/resolv.conf ~a/etc/resolv.conf" directory)
        (system* directory #f "mkdir -p ~a/mnt/host" directory)
-       (system* #f
-                #f
-                "bwrap --die-with-parent --as-pid-1 --clearenv --unshare-uts --unshare-ipc --unshare-pid --unshare-cgroup  --share-net  --cap-add ALL --uid 0 --gid 0 --tmpfs /tmp/ --dev-bind ~a / --proc /proc --dev /dev --ro-bind /sys /sys --bind ~a /mnt/host --chdir ~a --hostname ~a -- ~a"
-                directory
-                (current-directory)
-                target-directory*
-                (basename directory)
-                (apply format #f command variables))))
+       (apply execve! "/usr/bin/bwrap"
+              "--die-with-parent" "--as-pid-1" "--clearenv"
+             "--setenv" "PATH" "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+             "--setenv" "HOME" "/root"
+             "--setenv" "USER" "root"
+              "--unshare-uts" "--unshare-ipc" "--unshare-pid" "--unshare-cgroup"
+              "--share-net"
+              "--cap-add" "ALL"
+              "--uid" "0" "--gid" "0"
+              "--tmpfs" "/tmp/"
+              "--dev-bind" directory "/"
+              "--proc" "/proc"
+              "--dev" "/dev"
+              "--ro-bind" "/sys" "/sys"
+              "--bind" (current-directory) "/mnt/host"
+              "--chdir" target-directory*
+              "--hostname" (basename directory)
+              "--"
+              command)))
 
    (define letloop-root
      (lambda (args)
-       (if (null? args)
+       (if (null? (pk 'args args))
            (begin (display "Choose: available / create / exec.\nYou can do it!\n")
                   (exit 1))
            (case (string->symbol (car args))
              ((available) (root-available-print))
              ((create) (apply root-create (cdr args)))
-             ((exec) (root-exec (cadr args) (caddr args) (string-join (cddr (cddr args)) " ")))
+             ((exec) (root-exec (cadr args) (caddr args) (cddr (cddr args))))
              (else (display "A typo? Almost, try again...!\n")
                    (exit 1))))))
 
