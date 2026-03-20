@@ -35,4 +35,4 @@ jobs:
         run: ./venv $(pwd)/local/ make letloop
 
       - name: Run tests
-        run: ./venv $(pwd)/local/ make check
+        run: ./venv $(pwd)/local/ make check --fail-fast
