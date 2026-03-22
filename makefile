@@ -60,6 +60,16 @@ blake3: ## Build libblake3 from source
 	cp $(PWD)/local/src/blake3/c/libblake3.so $(PWD)/local/lib/
 	cp $(PWD)/local/src/blake3/c/libblake3.a $(PWD)/local/lib/
 
+picohttpparser: ## Build libpicohttpparser from source
+	rm -rf $(PWD)/local/src/picohttpparser
+	mkdir -p $(PWD)/local/src $(PWD)/local/lib
+	cd $(PWD)/local/src && git clone https://github.com/h2o/picohttpparser
+	cp $(PWD)/src/letloop/picohttpparser_wrapper.c $(PWD)/local/src/picohttpparser/
+	cd $(PWD)/local/src/picohttpparser && gcc -shared -O3 -o libpicohttpparser.so -fPIC picohttpparser_wrapper.c
+	cd $(PWD)/local/src/picohttpparser && gcc -c -O3 -fPIC picohttpparser_wrapper.c && ar rcs libpicohttpparser.a picohttpparser_wrapper.o
+	cp $(PWD)/local/src/picohttpparser/libpicohttpparser.so $(PWD)/local/lib/
+	cp $(PWD)/local/src/picohttpparser/libpicohttpparser.a $(PWD)/local/lib/
+
 sodium: ## Build libsodium from source
 	rm -rf $(PWD)/local/src/libsodium
 	mkdir -p $(PWD)/local/src
