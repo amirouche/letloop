@@ -130,4 +130,6 @@ clean:
 	$(shell find src/ -name "*.wpo" | xargs rm -f)
 	$(shell find examples/ -name "*.so" | xargs rm -f)
 	$(shell find examples/ -name "*.wpo" | xargs rm -f)
+	$(shell find benchmarks/ -name "*.so" | xargs rm -f)
+	$(shell find benchmarks/ -name "*.wpo" | xargs rm -f)
 	rm -rf /tmp/letloop/

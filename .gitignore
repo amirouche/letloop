@@ -1,4 +1,6 @@
+__pycache__
 a.out
+benchmarks/bin/
 local
 *.ss~
 *.ss#*
