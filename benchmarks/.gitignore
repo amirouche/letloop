@@ -1,0 +1,21 @@
+# Go
+go/counter-server
+
+# Rust
+rust/target/
+rust/Cargo.lock
+
+# Python
+python/venv/
+python/__pycache__/
+python/*.egg-info/
+python/.Python
+
+# Results (generated)
+results/
+
+# General
+*.swp
+*.swo
+*~
+.DS_Store
