@@ -184,6 +184,14 @@ if command -v python3 &>/dev/null; then
     fi
 fi
 
+# Gleam
+if command -v gleam &>/dev/null && [ -f "$BENCHMARK_DIR/gleam/gleam.toml" ]; then
+    (cd "$BENCHMARK_DIR/gleam" && gleam build >/dev/null 2>&1)
+    SERVERS[gleam]="Gleam"
+    COMMANDS[gleam]="bash -c 'cd $BENCHMARK_DIR/gleam && exec env ERL_FLAGS=\"+S 1:1\" gleam run -- \"\$1\"' --"
+    echo "✓ Gleam"
+fi
+
 # Racket
 if command -v racket &>/dev/null; then
     SERVERS[racket]="Racket"
