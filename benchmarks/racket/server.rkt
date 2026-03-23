@@ -55,7 +55,7 @@
 
 (serve/servlet start
                #:port port
-               #:listen-ip "192.168.105.2"
+               #:listen-ip "127.0.0.1"
                #:servlet-path "/"
                #:servlet-regexp #rx""
                #:command-line? #t
