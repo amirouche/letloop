@@ -1,4 +1,4 @@
-.PHONY: help build-scheme build-go build-rust build-fastapi build-flask build-js bench bench-perf clean
+.PHONY: help build-scheme build-go build-rust build-fastapi build-flask build-js build-gleam bench bench-perf clean
 
 help:
 	@echo "Benchmark Suite - Counter Application"
@@ -8,6 +8,7 @@ help:
 	@echo "  make build-go       - Build Go implementation"
 	@echo "  make build-js       - Check Node.js availability"
 	@echo "  make build-rust     - Build Rust implementation (release mode)"
+	@echo "  make build-gleam    - Build Gleam implementation"
 	@echo "  make build-fastapi  - Setup FastAPI venv and dependencies"
 	@echo "  make build-flask    - Setup Flask venv and dependencies"
 	@echo ""
@@ -37,6 +38,11 @@ build-js:
 		echo "✗ Node.js not found"; exit 1; \
 	fi
 
+build-gleam:
+	@echo "Building Gleam implementation..."
+	@cd gleam && gleam build 2>&1 | tail -1
+	@echo "✓ Gleam built"
+
 build-rust:
 	@echo "Building Rust implementation..."
 	@cd rust && cargo build --release 2>&1 | grep -v "Compiling\|Finished" || true
@@ -63,6 +69,7 @@ clean:
 	@echo "Cleaning build artifacts..."
 	@rm -rf bin results
 	@rm -rf rust/target rust/Cargo.lock
+	@rm -rf gleam/build
 	@rm -rf fastapi/venv flask/venv
 	@find . -name "*.pyc" -delete
 	@find . -name "__pycache__" -type d -delete
