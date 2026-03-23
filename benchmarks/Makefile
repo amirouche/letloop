@@ -1,4 +1,6 @@
-.PHONY: help build-scheme build-go build-rust build-fastapi build-flask build-js build-gleam bench bench-perf clean
+.PHONY: help build-scheme build-go build-rust build-fastapi build-flask build-js build-gleam build-h2o bench bench-perf clean
+
+ROOT := $(shell cd .. && pwd)
 
 help:
 	@echo "Benchmark Suite - Counter Application"
@@ -9,6 +11,7 @@ help:
 	@echo "  make build-js       - Check Node.js availability"
 	@echo "  make build-rust     - Build Rust implementation (release mode)"
 	@echo "  make build-gleam    - Build Gleam implementation"
+	@echo "  make build-h2o      - Build C/h2o implementation (clones h2o, builds libh2o-evloop)"
 	@echo "  make build-fastapi  - Setup FastAPI venv and dependencies"
 	@echo "  make build-flask    - Setup Flask venv and dependencies"
 	@echo ""
@@ -43,6 +46,31 @@ build-gleam:
 	@cd gleam && gleam build 2>&1 | tail -1
 	@echo "✓ Gleam built"
 
+build-h2o:
+	@echo "Building C/h2o implementation..."
+	@mkdir -p bin h2o-dep
+	@if [ ! -d h2o-dep/src ]; then \
+		cd h2o-dep && git clone --depth 1 https://github.com/h2o/h2o.git src; \
+	fi
+	@if [ ! -f h2o-dep/src/build/libh2o-evloop.so ]; then \
+		mkdir -p h2o-dep/src/build && cd h2o-dep/src/build && \
+		cmake .. -DCMAKE_INSTALL_PREFIX=$(ROOT)/local -DBUILD_SHARED_LIBS=ON -DWITH_MRUBY=OFF -DWITH_DTRACE=OFF && \
+		$(MAKE) libh2o-evloop; \
+	fi
+	@cp h2o-dep/src/build/libh2o-evloop.so $(ROOT)/local/lib/libh2o-evloop.so
+	@ln -sf libh2o-evloop.so $(ROOT)/local/lib/libh2o-evloop.so.0.16
+	@ln -sf /usr/lib/x86_64-linux-gnu/libbrotlienc.so.1 $(ROOT)/local/lib/libbrotlienc.so
+	@ln -sf /usr/lib/x86_64-linux-gnu/libbrotlidec.so.1 $(ROOT)/local/lib/libbrotlidec.so
+	@ln -sf /usr/lib/x86_64-linux-gnu/libbrotlicommon.so.1 $(ROOT)/local/lib/libbrotlicommon.so
+	@gcc -O3 -DH2O_USE_LIBUV=0 -o bin/h2o-server h2o/server.c \
+		-Ih2o-dep/src/include -Ih2o-dep/src/deps/picohttpparser -Ih2o-dep/src/deps/yoml \
+		-Ih2o-dep/src/deps/cloexec -Ih2o-dep/src/deps/picotls/include \
+		-Ih2o-dep/src/deps/quicly/include -Ih2o-dep/src/deps/picotest -Ih2o-dep/src/deps/klib \
+		-L$(ROOT)/local/lib -lh2o-evloop -lssl -lcrypto -lpthread -lz \
+		-lbrotlienc -lbrotlidec -lbrotlicommon \
+		-Wl,-rpath,$(ROOT)/local/lib
+	@echo "✓ C/h2o built"
+
 build-rust:
 	@echo "Building Rust implementation..."
 	@cd rust && cargo build --release 2>&1 | grep -v "Compiling\|Finished" || true
@@ -70,6 +98,7 @@ clean:
 	@rm -rf bin results
 	@rm -rf rust/target rust/Cargo.lock
 	@rm -rf gleam/build
+	@rm -rf h2o-dep
 	@rm -rf fastapi/venv flask/venv
 	@find . -name "*.pyc" -delete
 	@find . -name "__pycache__" -type d -delete
