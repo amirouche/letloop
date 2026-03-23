@@ -1,5 +1,5 @@
 #!chezscheme
-(library (transparenturing)
+(library (transparentuation)
 
   (export transparent json html xml match
           loop-new loop-run loop-sleep loop-spawn loop-close loop-stop
@@ -141,105 +141,44 @@
   ;; Section 3: Priority queue (from letloop sq)
   ;; ============================================================
 
-  (define-record-type* <heap>
-    (make-heap vec size)
-    heap?
-    (vec heap-vec heap-vec!)
-    (size heap-size heap-size!))
+  (define-record-type* <sq>
+    (make-sq box)
+    sq?
+    (box sq-unbox sq-setbox!))
 
-  (define heap-new
+  (define sq-for-each
+    (lambda (sq proc)
+      (for-each (lambda (kv) (proc (car kv) (cdr kv))) (sq-unbox sq))))
+
+  (define sq-new
     (lambda ()
-      (make-heap (make-vector 64) 0)))
+      (make-sq '())))
 
-  (define heap-empty?
-    (lambda (h)
-      (fxzero? (heap-size h))))
+  (define sq-empty?
+    (lambda (sq)
+      (null? (sq-unbox sq))))
 
-  (define heap-min
-    (lambda (h)
-      (if (heap-empty? h)
+  (define sq-min
+    (lambda (sq)
+      (if (sq-empty? sq)
           #f
-          (vector-ref (heap-vec h) 0))))
+          (car (sq-unbox sq)))))
 
-  (define heap-add!
-    (lambda (h k v)
-      (let* ((n (heap-size h))
-             (vec (heap-vec h)))
-        ;; Grow if needed
-        (when (fx>=? n (vector-length vec))
-          (let ((new (make-vector (fx* 2 (vector-length vec)))))
-            (let cp ((i 0))
-              (when (fx<? i n)
-                (vector-set! new i (vector-ref vec i))
-                (cp (fx+ i 1))))
-            (set! vec new)
-            (heap-vec! h new)))
-        ;; Insert at end
-        (vector-set! vec n (cons k v))
-        (heap-size! h (fx+ n 1))
-        ;; Bubble up
-        (let up ((i n))
-          (when (fx>? i 0)
-            (let ((parent (fxsrl (fx- i 1) 1)))
-              (when (< (car (vector-ref vec i))
-                       (car (vector-ref vec parent)))
-                (let ((tmp (vector-ref vec i)))
-                  (vector-set! vec i (vector-ref vec parent))
-                  (vector-set! vec parent tmp))
-                (up parent))))))))
+  (define sq-add!
+    (lambda (sq k v)
+      (define new (sort (lambda (a b) (< (car a) (car b)))
+                        (cons (cons k v) (sq-unbox sq))))
+      (sq-setbox! sq new)))
 
-  (define heap-pop-min!
-    (lambda (h)
-      (let* ((n (heap-size h))
-             (vec (heap-vec h))
-             (min (vector-ref vec 0)))
-        (heap-size! h (fx- n 1))
-        (let ((last-idx (fx- n 1)))
-          (vector-set! vec 0 (vector-ref vec last-idx))
-          (vector-set! vec last-idx #f)
-          ;; Sift down
-          (let down ((i 0))
-            (let* ((left (fx+ (fx* 2 i) 1))
-                   (right (fx+ left 1))
-                   (smallest i))
-              (when (and (fx<? left last-idx)
-                         (< (car (vector-ref vec left))
-                            (car (vector-ref vec smallest))))
-                (set! smallest left))
-              (when (and (fx<? right last-idx)
-                         (< (car (vector-ref vec right))
-                            (car (vector-ref vec smallest))))
-                (set! smallest right))
-              (unless (fx=? smallest i)
-                (let ((tmp (vector-ref vec i)))
-                  (vector-set! vec i (vector-ref vec smallest))
-                  (vector-set! vec smallest tmp))
-                (down smallest)))))
-        min)))
-
-  (define heap-split
-    (lambda (h k)
-      (let ((before (heap-new)))
-        (let pop ()
-          (if (heap-empty? h)
-              (values before h)
-              (let ((min (heap-min h)))
-                (if (<= (car min) k)
-                    (begin
-                      (heap-pop-min! h)
-                      (heap-add! before (car min) (cdr min))
-                      (pop))
-                    (values before h))))))))
-
-  (define heap-for-each
-    (lambda (h proc)
-      (let ((n (heap-size h))
-            (vec (heap-vec h)))
-        (let loop ((i 0))
-          (when (fx<? i n)
-            (let ((kv (vector-ref vec i)))
-              (proc (car kv) (cdr kv)))
-            (loop (fx+ i 1)))))))
+  (define sq-split
+    (lambda (sq k)
+      (let loop ((kv* (sq-unbox sq))
+                 (before-or-equal '()))
+        (if (null? kv*)
+            (values (make-sq (reverse before-or-equal)) (make-sq '()))
+            (if (<= (caar kv*) k)
+                (loop (cdr kv*) (cons (car kv*) before-or-equal))
+                (values (make-sq (reverse before-or-equal)) (make-sq kv*)))))))
 
   ;; ============================================================
   ;; Section 4: Pattern matcher - SRFI 241 (from letloop match)
@@ -861,7 +800,7 @@
       (lambda (ring)
         (let ((sqe (func ring)))
           (when (eqv? sqe 0)
-            (error 'transparenturing "SQ full: io_uring_get_sqe returned NULL"))
+            (error 'transparentuation "SQ full: io_uring_get_sqe returned NULL"))
           sqe))))
 
   (define io-uring-sqe-set-data64
@@ -1068,9 +1007,9 @@
   (define %read-timeout-ts #f)  ;; allocated in loop-new
   (define %wait-timeout #f)     ;; 1s timeout for wait-cqe, allows signal delivery
 
-  (define loop-prompt-current #f)
-
-  (define loop-prompt-singleton '(loop-prompt-singleton))
+  ;; CPS/callback-based event loop — no call/cc or continuations.
+  ;; Each I/O operation takes a callback that receives the result.
+  ;; The handlers hashtable maps id → callback (a plain procedure).
 
   (define-record-type* <loop>
     (loop-base-new jiffy sleeping running ring cqe-ptr handlers next-id thunks)
@@ -1090,32 +1029,6 @@
         (loop-next-id! %loop (fx+ id 1))
         id)))
 
-  (define call-with-loop-prompt
-    (lambda (thunk handlery)
-      (call-with-values (lambda ()
-                          (call/1cc
-                           (lambda (k)
-                             (set! loop-prompt-current k)
-                             (thunk))))
-        (lambda out
-          (cond
-           ((and (pair? out) (eq? (car out) loop-prompt-singleton))
-            (apply handlery (cdr out)))
-           (else (apply values out)))))))
-
-  (define loop-abort
-    (lambda args
-      (call/1cc
-       (lambda (k)
-         (let ((prompt loop-prompt-current))
-           (set! loop-prompt-current #f)
-           (apply prompt (cons loop-prompt-singleton (cons k args))))))))
-
-  (define loop-apply
-    (lambda (thunk)
-      (guard (ex (else (void)))
-        (call-with-loop-prompt thunk (lambda (k handler) (handler k))))))
-
   (define jiffy-current
     (lambda ()
       (let* ((time (current-time 'time-monotonic))
@@ -1125,10 +1038,13 @@
 
   (define loop-run-once
     (lambda ()
-      ;; 1. Run queued thunks (may prep SQEs)
+      ;; 1. Run queued thunks directly (may prep SQEs)
       (let ((thunks (loop-thunks %loop)))
         (loop-thunks! %loop '())
-        (for-each (lambda (thunk) (loop-apply thunk)) thunks))
+        (for-each (lambda (thunk)
+                    (guard (ex (else (void)))
+                      (thunk)))
+                  thunks))
 
       ;; 2. Submit pending SQEs + wait for CQEs
       (let ((ring (loop-ring %loop))
@@ -1144,7 +1060,7 @@
            (else
             (io-uring-wait-cqe-timeout ring cqe-ptr %wait-timeout))))
 
-        ;; 3. Drain all available CQEs (resumed coroutines may prep new SQEs)
+        ;; 3. Drain all available CQEs — call handler callbacks directly
         (let drain ()
           (when (fxzero? (io-uring-peek-cqe ring cqe-ptr))
             (let* ((cqe (foreign-ref 'void* cqe-ptr 0))
@@ -1169,9 +1085,13 @@
                   (io-uring-buf-ring-advance %buf-ring 1)
                   (hashtable-set! %buf-data id bv)))
               (let ((handler (hashtable-ref (loop-handlers %loop) id #f)))
-                (hashtable-delete! (loop-handlers %loop) id)
+                ;; For multishot ops (IORING-CQE-F-MORE set), keep the handler
+                ;; so it can be called again for the next CQE.
+                (unless (not (fxzero? (fxlogand flags IORING-CQE-F-MORE)))
+                  (hashtable-delete! (loop-handlers %loop) id))
                 (when handler
-                  (loop-apply (lambda () (handler res))))))
+                  (guard (ex (else (void)))
+                    (handler res)))))
             (drain)))
 
         ;; 4. Flush SQEs prepped during drain
@@ -1198,11 +1118,11 @@
             (handlers (make-eqv-hashtable)))
         (let ((ret (io-uring-queue-init 256 ring 0)))
           (unless (fxzero? ret)
-            (error 'transparenturing
+            (error 'transparentuation
                    (format #f "io_uring_queue_init failed: ~a" (strerror (fx- 0 ret))))))
         (set! %loop
           (loop-base-new (jiffy-current)
-                         (heap-new)
+                         (sq-new)
                          #t
                          ring
                          cqe-ptr
@@ -1210,7 +1130,7 @@
                          0
                          '()))
         (set! %read-timeout-ts (make-timespec %read-timeout-seconds 0))
-        (set! %wait-timeout (make-timespec 0 100000000))
+        (set! %wait-timeout (make-timespec 1 0))
         (set! %multishots (make-eqv-hashtable))
         (set! %multishot-ids (make-eqv-hashtable))
         (set! %buf-data (make-eqv-hashtable))
@@ -1222,7 +1142,7 @@
             (let ((err (foreign-ref 'integer-32 err-ptr 0)))
               (foreign-free err-ptr)
               (when (eqv? br 0)
-                (error 'transparenturing
+                (error 'transparentuation
                        (format #f "io_uring_setup_buf_ring failed: ~a"
                                (strerror (fx- 0 err))))))
             (let ((base (foreign-alloc (* %buf-ring-nentries %buf-ring-buf-size)))
@@ -1249,8 +1169,10 @@
                 out))))))
 
   (define loop-accept
-    (lambda (fd)
-      ;; Multishot: submit once, get one CQE per incoming connection
+    (lambda (fd callback)
+      ;; Multishot: submit once, get one CQE per incoming connection.
+      ;; callback receives #f on error, or the client fd on success.
+      ;; With multishot accept, the callback may be called multiple times.
       (let ((active-id (hashtable-ref %multishots fd #f)))
         (unless active-id
           ;; No active multishot for this fd — submit one
@@ -1261,50 +1183,48 @@
             (hashtable-set! %multishots fd id)
             (hashtable-set! %multishot-ids id fd)
             (set! active-id id)))
-        (let ((res (loop-abort
-                     (lambda (k)
-                       (hashtable-set! (loop-handlers %loop) active-id k)))))
-          (if (fx<? res 0)
-              (begin
-                ;; Error — multishot may have ended, clean up just in case
-                (let ((mid (hashtable-ref %multishots fd #f)))
-                  (when mid
-                    (hashtable-delete! %multishots fd)
-                    (hashtable-delete! %multishot-ids mid)))
-                #f)
-              (begin
-                (loop-socket-option! res 6 'tcp-option/nodelay #t)
-                (loop-socket-option! res 1 'socket-option/keepalive #t)
-                (hashtable-set! %active-connections res (jiffy-current))
-                res))))))
+        (hashtable-set! (loop-handlers %loop) active-id
+          (lambda (res)
+            (if (fx<? res 0)
+                (begin
+                  ;; Error — multishot may have ended, clean up just in case
+                  (let ((mid (hashtable-ref %multishots fd #f)))
+                    (when mid
+                      (hashtable-delete! %multishots fd)
+                      (hashtable-delete! %multishot-ids mid)))
+                  (callback #f))
+                (begin
+                  (loop-socket-option! res 6 'tcp-option/nodelay #t)
+                  (loop-socket-option! res 1 'socket-option/keepalive #t)
+                  (hashtable-set! %active-connections res (jiffy-current))
+                  (callback res))))))))
 
   (define IORING-ASYNC-CANCEL-ALL 1)
   (define IORING-ASYNC-CANCEL-FD 2)
 
   (define loop-close
-    (lambda (fd)
-      ;; Purge any stale handlers for this fd — CQ overflow can cause
-      ;; old CQEs to arrive after the fd is closed, resuming dead coroutines.
-      (let ((ids (hashtable-ref %fd-handlers fd '())))
-        (for-each (lambda (id)
-                    (hashtable-delete! (loop-handlers %loop) id))
-                  ids)
-        (hashtable-delete! %fd-handlers fd))
-      (hashtable-delete! %active-connections fd)
-      ;; Fire-and-forget cancel: cancel pending io_uring ops on this fd.
-      (let* ((cancel-sqe (io-uring-get-sqe (loop-ring %loop)))
-             (cancel-id (loop-alloc-id!)))
-        (io-uring-prep-cancel-fd cancel-sqe fd IORING-ASYNC-CANCEL-ALL)
-        (io-uring-sqe-set-data64 cancel-sqe cancel-id))
-      ;; Async close
-      (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
-             (id (loop-alloc-id!)))
-        (io-uring-prep-close sqe fd)
-        (io-uring-sqe-set-data64 sqe id)
-        (let ((res (loop-abort
-                     (lambda (k)
-                       (hashtable-set! (loop-handlers %loop) id k)))))
-          res))))
+    (lambda (fd . rest)
+      ;; CPS: (loop-close fd callback) or (loop-close fd) for fire-and-forget.
+      ;; callback receives the close result.
+      (let ((callback (if (null? rest) (lambda (_) (void)) (car rest))))
+        ;; Purge any stale handlers for this fd
+        (let ((ids (hashtable-ref %fd-handlers fd '())))
+          (for-each (lambda (id)
+                      (hashtable-delete! (loop-handlers %loop) id))
+                    ids)
+          (hashtable-delete! %fd-handlers fd))
+        (hashtable-delete! %active-connections fd)
+        ;; Fire-and-forget cancel: cancel pending io_uring ops on this fd.
+        (let* ((cancel-sqe (io-uring-get-sqe (loop-ring %loop)))
+               (cancel-id (loop-alloc-id!)))
+          (io-uring-prep-cancel-fd cancel-sqe fd IORING-ASYNC-CANCEL-ALL)
+          (io-uring-sqe-set-data64 cancel-sqe cancel-id))
+        ;; Async close
+        (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+               (id (loop-alloc-id!)))
+          (io-uring-prep-close sqe fd)
+          (io-uring-sqe-set-data64 sqe id)
+          (hashtable-set! (loop-handlers %loop) id callback)))))
 
 
   (define loop-socket-option!
@@ -1457,7 +1377,8 @@
       (subbytevector bv start (bytevector-length bv)))))
 
   (define loop-read
-    (lambda (fd)
+    (lambda (fd callback)
+      ;; CPS: callback receives #f on error, #t on EOF, or a bytevector with data.
       (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
              (id (loop-alloc-id!)))
         ;; Use provided buffer ring — no bytevector allocation or locking needed
@@ -1468,28 +1389,26 @@
         ;; Track this handler for fd-based cleanup on close
         (hashtable-set! %fd-handlers fd
                         (cons id (hashtable-ref %fd-handlers fd '())))
-        (let ((res (loop-abort
-                     (lambda (k)
-                       (hashtable-set! (loop-handlers %loop) id k)))))
-          ;; Remove completed handler from fd tracking
-          (hashtable-set! %fd-handlers fd
-                          (remq id (hashtable-ref %fd-handlers fd '())))
-          (cond
-            ((fx<? res 0)
-             (hashtable-delete! %buf-data id)
-             #f)  ;; error or -ECANCELED from timeout
-            ((fxzero? res)
-             (hashtable-delete! %buf-data id)
-             #t)    ;; EOF
-            (else
-             ;; Buffer data was extracted by drain loop
-             (hashtable-set! %active-connections fd (jiffy-current))
-             (let ((bv (hashtable-ref %buf-data id #f)))
+        (hashtable-set! (loop-handlers %loop) id
+          (lambda (res)
+            (cond
+              ((fx<? res 0)
                (hashtable-delete! %buf-data id)
-               bv)))))))
+               (callback #f))  ;; error or -ECANCELED from timeout
+              ((fxzero? res)
+               (hashtable-delete! %buf-data id)
+               (callback #t))    ;; EOF
+              (else
+               ;; Buffer data was extracted by drain loop
+               (hashtable-set! %active-connections fd (jiffy-current))
+               (let ((bv (hashtable-ref %buf-data id #f)))
+                 (hashtable-delete! %buf-data id)
+                 (callback bv)))))))))
 
   (define loop-write
-    (lambda (fd bv)
+    (lambda (fd bv callback)
+      ;; CPS: callback receives #t on success, #f on error.
+      ;; Handles partial writes by recursing with the remainder.
       (let write-loop ((bv bv))
         (lock-object bv)
         (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
@@ -1499,17 +1418,13 @@
           ;; Track this handler for fd-based cleanup on close
           (hashtable-set! %fd-handlers fd
                           (cons id (hashtable-ref %fd-handlers fd '())))
-          (let ((res (loop-abort
-                       (lambda (k)
-                         (hashtable-set! (loop-handlers %loop) id k)))))
-            (unlock-object bv)
-            ;; Remove completed handler from fd tracking
-            (hashtable-set! %fd-handlers fd
-                            (remq id (hashtable-ref %fd-handlers fd '())))
-            (cond
-              ((fx<=? res 0) #f)
-              ((fx=? res (bytevector-length bv)) #t)
-              (else (write-loop (subbytevector bv res)))))))))
+          (hashtable-set! (loop-handlers %loop) id
+            (lambda (res)
+              (unlock-object bv)
+              (cond
+                ((fx<=? res 0) (callback #f))
+                ((fx=? res (bytevector-length bv)) (callback #t))
+                (else (write-loop (subbytevector bv res))))))))))
 
   (define loop-tcp-serve
     (lambda (ip port)
@@ -1517,24 +1432,16 @@
       (define SOCKET-TYPE=STREAM 1)
       (define fd (loop-socket-new SOCKET-DOMAIN=AF-INET SOCKET-TYPE=STREAM 0))
 
-      (define accept
-        (lambda ()
-          (define client (loop-accept fd))
-          (if (not client)
-              (values #f #f #f #f)
-              (let ((peer-ip (loop-getpeername client)))
-                (values (lambda () (loop-read client))
-                        (lambda (bv) (loop-write client bv))
-                        (lambda () (loop-close client))
-                        peer-ip)))))
-
       (loop-bind fd ip port)
       (loop-listen fd 128)
 
-      (values accept (lambda () (loop-close fd)))))
+      ;; Return the listening fd and a close thunk.
+      ;; In CPS, callers use loop-accept directly with the listening fd.
+      (values fd (lambda () (loop-close fd)))))
 
   (define loop-sleep
-    (lambda (seconds)
+    (lambda (seconds callback)
+      ;; CPS: callback receives the result after the timeout expires.
       (let* ((nanoseconds (exact (round (* seconds 1000000000))))
              (sqe (io-uring-get-sqe (loop-ring %loop)))
              (id (loop-alloc-id!))
@@ -1542,11 +1449,10 @@
                                 (mod nanoseconds 1000000000))))
         (io-uring-prep-timeout sqe (ftype-pointer-address ts) 0 0)
         (io-uring-sqe-set-data64 sqe id)
-        (let ((res (loop-abort
-                     (lambda (k)
-                       (hashtable-set! (loop-handlers %loop) id k)))))
-          (foreign-free (ftype-pointer-address ts))
-          res))))
+        (hashtable-set! (loop-handlers %loop) id
+          (lambda (res)
+            (foreign-free (ftype-pointer-address ts))
+            (callback res))))))
 
   (define loop-stop
     (lambda ()
@@ -1564,30 +1470,30 @@
         (io-uring-submit (loop-ring %loop)))))
 
   (define loop-connect
-    (lambda (addr addrlen)
+    (lambda (addr addrlen callback)
+      ;; CPS: callback receives the connected fd, or #f on failure.
       (let ((fd (loop-socket-new 2 1 0)))  ;; AF_INET, SOCK_STREAM
-        (unless fd (error 'loop-connect "socket failed"))
-        (loop-nonblock! fd)
-        (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
-               (id (loop-alloc-id!)))
-          (io-uring-prep-connect sqe fd addr addrlen)
-          (io-uring-sqe-set-data64 sqe id)
-          (let ((res (loop-abort
-                       (lambda (k)
-                         (hashtable-set! (loop-handlers %loop) id k)))))
-            (if (fx<? res 0)
-                (begin (loop-close fd) #f)
-                fd))))))
+        (unless fd (callback #f))
+        (when fd
+          (loop-nonblock! fd)
+          (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+                 (id (loop-alloc-id!)))
+            (io-uring-prep-connect sqe fd addr addrlen)
+            (io-uring-sqe-set-data64 sqe id)
+            (hashtable-set! (loop-handlers %loop) id
+              (lambda (res)
+                (if (fx<? res 0)
+                    (loop-close fd (lambda (_) (callback #f)))
+                    (callback fd)))))))))
 
   (define loop-poll-wait
-    (lambda (fd poll-mask)
+    (lambda (fd poll-mask callback)
+      ;; CPS: callback receives the poll result.
       (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
              (id (loop-alloc-id!)))
         (io-uring-prep-poll-add sqe fd poll-mask)
         (io-uring-sqe-set-data64 sqe id)
-        (loop-abort
-          (lambda (k)
-            (hashtable-set! (loop-handlers %loop) id k))))))
+        (hashtable-set! (loop-handlers %loop) id callback))))
 
   ;; ============================================================
   ;; Section 7: HTTP parser/writer (from letloop http)
@@ -1745,22 +1651,23 @@
     (lambda (read-byte! read-bytes!)
       (define request-line-read
         (lambda (read-byte!)
-          ;; Parse request line directly from bytevector — no list conversions
-          (let* ((line-bv (http-line-read read-byte!))
-                 (len (bytevector-length line-bv)))
-            ;; Find first space (end of method)
-            (let scan1 ((i 0))
-              (when (fx>=? i len) (error 'http "Invalid request line"))
-              (if (fx=? (bytevector-u8-ref line-bv i) byte-space)
-                  ;; Find second space (end of URI)
-                  (let scan2 ((j (fx+ i 1)))
-                    (when (fx>=? j len) (error 'http "Invalid request line"))
-                    (if (fx=? (bytevector-u8-ref line-bv j) byte-space)
-                        (values (string->symbol (utf8->string (subbytevector line-bv 0 i)))
-                                (utf8->string (subbytevector line-bv (fx+ i 1) j))
-                                (string->symbol (utf8->string (subbytevector line-bv (fx+ j 1) len))))
-                        (scan2 (fx+ j 1))))
-                  (scan1 (fx+ i 1)))))))
+          (define massage
+            (lambda (line-bv)
+              (let loop ((bytes (bytevector->u8-list line-bv))
+                         (chunk '())
+                         (out '()))
+                (if (null? bytes)
+                    (if (null? chunk)
+                        (error 'http "Invalid request line")
+                        (reverse (cons (utf8->string (u8-list->bytevector (reverse chunk))) out)))
+                    (let ((byte (car bytes)))
+                      (if (and (fx=? byte byte-space) (not (null? chunk)))
+                          (loop (cdr bytes) '() (cons (utf8->string (u8-list->bytevector (reverse chunk))) out))
+                          (loop (cdr bytes) (cons byte chunk) out)))))))
+          (let ((strings (massage (http-line-read read-byte!))))
+            (unless (fx=? (length strings) 3)
+              (error 'http "Invalid request line"))
+            (values (string->symbol (car strings)) (cadr strings) (string->symbol (caddr strings))))))
 
       (guard (ex (else (values #f #f #f #f #f)))
         (call-with-values (lambda () (request-line-read read-byte!))
@@ -1781,63 +1688,21 @@
        ((transfer-encoding-chunked? (car headers)) (cons (cons 'content-length content-length) (cdr headers)))
        (else (cons (car headers) (massage-headers-content-length (cdr headers) content-length))))))
 
-  ;; Pre-computed status line bytevectors for common codes
-  (define %status-lines
-    (let ((ht (make-eqv-hashtable)))
-      (for-each
-        (lambda (pair)
-          (hashtable-set! ht (car pair)
-            (string->utf8 (string-append "HTTP/1.1 " (number->string (car pair)) " " (cdr pair) "\r\n"))))
-        '((200 . "OK") (201 . "Created") (204 . "No Content")
-          (301 . "Moved Permanently") (302 . "Found") (304 . "Not Modified")
-          (400 . "Bad Request") (401 . "Unauthorized") (403 . "Forbidden")
-          (404 . "Not Found") (405 . "Method Not Allowed")
-          (500 . "Internal Server Error")))
-      ht))
-
   (define http-response-write
     (lambda (accumulator version code reason headers body)
       (assert (or (pair? headers) (null? headers)))
-      ;; Fast single-chunk / empty body detection (avoids generator->list + reverse)
-      (let* ((first (body))
-             (chunks
-              (if (eof-object? first)
-                  '()
-                  (let ((second (body)))
-                    (if (eof-object? second)
-                        (list first)
-                        ;; Multi-chunk: collect remaining
-                        (let loop ((out (list second first)))
-                          (let ((next (body)))
-                            (if (eof-object? next)
-                                (reverse out)
-                                (loop (cons next out))))))))))
-        (let ((content-length (if (null? chunks) 0 (apply fx+ (map bytevector-length chunks)))))
+      (let ((chunks (generator->list body)))
+        (let ((content-length (apply fx+ (map bytevector-length chunks))))
           (let* ((headers* (massage-headers-content-length headers content-length))
-                 ;; Use pre-computed status line when available
-                 (status-bv (or (hashtable-ref %status-lines code #f)
-                                (string->utf8 (string-append version " " (number->string code) " " reason "\r\n"))))
-                 ;; Build headers without format — use string-append
-                 (header-bv (string->utf8
-                              (apply string-append
-                                (let loop ((h headers*) (acc '()))
-                                  (if (null? h)
-                                      (reverse (cons "\r\n" acc))
-                                      (let ((pair (car h)))
-                                        (loop (cdr h)
-                                              (cons "\r\n"
-                                                    (cons (if (string? (cdr pair))
-                                                              (cdr pair)
-                                                              (if (number? (cdr pair))
-                                                                  (number->string (cdr pair))
-                                                                  (format #f "~a" (cdr pair))))
-                                                          (cons ": "
-                                                                (cons (symbol->string (car pair))
-                                                                      acc))))))))))))
-            ;; Single write: combine status + headers + body into one bytevector
-            (let ((response-bv (apply bytevector-append status-bv header-bv chunks)))
-              (unless (accumulator response-bv)
-                (error 'http "write failed"))))))))
+                 (response-line (format #f "~a ~a ~a\r\n" version code reason))
+                 (header-str (apply string-append (map (lambda (x) (format #f "~a: ~a\r\n" (car x) (cdr x))) headers*))))
+            ;; Check write results — abort on broken pipe (client disconnected)
+            (unless (accumulator (string->utf8 (string-append response-line header-str "\r\n")))
+              (error 'http "write failed"))
+            (for-each (lambda (chunk)
+                        (unless (accumulator chunk)
+                          (error 'http "write failed")))
+                      chunks))))))
 
   ;; http-request-write (for client requests)
   (define http-request-write
@@ -2483,31 +2348,29 @@
     (lambda (tag)
       (pair? (memq tag html-element-no-end-tag))))
 
+  (define html-character->string
+    (lambda (char)
+      (cdr
+       (or (assv char
+                 '((#\" . "&quot;")
+                   (#\& . "&amp;")
+                   (#\< . "&lt;")
+                   (#\> . "&gt;")))
+           (cons char (list->string (list char)))))))
+
   (define string->html-string
-    (lambda (str)
-      (let ((port (open-output-string)))
-        (string-for-each
-          (lambda (ch)
-            (case ch
-              ((#\<) (put-string port "&lt;"))
-              ((#\>) (put-string port "&gt;"))
-              ((#\&) (put-string port "&amp;"))
-              ((#\") (put-string port "&quot;"))
-              (else (put-char port ch))))
-          str)
-        (get-output-string port))))
+    (lambda (string)
+      (apply string-append
+             (map html-character->string (string->list string)))))
 
   (define html-write-tag-start
     (lambda (tag attributes accumulator)
-      (accumulator (string-append "<" (symbol->string tag)))
+      (accumulator (format #f "<~a" tag))
       (for-each
        (lambda (attribute)
-         (accumulator (string-append " " (symbol->string (car attribute))
-                                     "=\"" (string->html-string
-                                             (if (string? (cadr attribute))
-                                                 (cadr attribute)
-                                                 (format #f "~a" (cadr attribute))))
-                                     "\"")))
+         (accumulator (format #f " ~a=\"~a\""
+                              (car attribute)
+                              (string->html-string (format #f "~a" (cadr attribute))))))
        attributes)
       (if (html-element-no-end-tag? tag)
           (accumulator "/>")
@@ -2516,7 +2379,7 @@
   (define html-write-tag-end
     (lambda (tag accumulator)
       (unless (html-element-no-end-tag? tag)
-        (accumulator (string-append "</" (symbol->string tag) ">")))))
+        (accumulator (format #f "</~a>" tag)))))
 
   (define html-make-string-accumulator
     (lambda ()
@@ -2767,13 +2630,14 @@
         (values ptr (ftype-sizeof <sockaddr-in>)))))
 
   (define dns-resolve-a
-    (lambda (hostname port)
-      ;; Returns (values addr-ptr addrlen) or error
+    (lambda (hostname port callback)
+      ;; CPS: callback receives (values addr-ptr addrlen).
       (if (%dns-ip-string? hostname)
-          ;; Already an IP address
+          ;; Already an IP address — resolve synchronously
           (call-with-values (lambda () (%dns-parse-ip hostname))
             (lambda (a b c d)
-              (%make-sockaddr-in a b c d port)))
+              (call-with-values (lambda () (%make-sockaddr-in a b c d port))
+                callback)))
           ;; DNS lookup via io_uring
           (let* ((ns (%dns-get-nameserver))
                  (udp-fd (loop-socket-new 2 2 0)))  ;; AF_INET, SOCK_DGRAM
@@ -2788,45 +2652,43 @@
                            (id (loop-alloc-id!)))
                       (io-uring-prep-connect sqe udp-fd ns-addr ns-addrlen)
                       (io-uring-sqe-set-data64 sqe id)
-                      (let ((res (loop-abort
-                                   (lambda (k)
-                                     (hashtable-set! (loop-handlers %loop) id k)))))
-                        (foreign-free ns-addr)
-                        (when (fx<? res 0)
-                          (loop-close udp-fd)
-                          (error 'dns-resolve-a "UDP connect failed" (strerror (fx- 0 res))))))))))
-            ;; Build and send DNS query
-            (let ((query (%dns-build-query hostname)))
-              (lock-object query)
-              (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
-                     (id (loop-alloc-id!)))
-                (io-uring-prep-send sqe udp-fd (bytevector-pointer query) (bytevector-length query) 0)
-                (io-uring-sqe-set-data64 sqe id)
-                (let ((res (loop-abort
-                             (lambda (k)
-                               (hashtable-set! (loop-handlers %loop) id k)))))
-                  (unlock-object query)
-                  (when (fx<? res 0)
-                    (loop-close udp-fd)
-                    (error 'dns-resolve-a "DNS send failed")))))
-            ;; Receive DNS response
-            (let ((buf (make-bytevector 512)))
-              (lock-object buf)
-              (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
-                     (id (loop-alloc-id!)))
-                (io-uring-prep-recv sqe udp-fd (bytevector-pointer buf) 512 0)
-                (io-uring-sqe-set-data64 sqe id)
-                (let ((res (loop-abort
-                             (lambda (k)
-                               (hashtable-set! (loop-handlers %loop) id k)))))
-                  (unlock-object buf)
-                  (loop-close udp-fd)
-                  (when (fx<=? res 0)
-                    (error 'dns-resolve-a "DNS recv failed"))
-                  (let ((response (subbytevector buf 0 res)))
-                    (call-with-values (lambda () (%dns-parse-response response))
-                      (lambda (a b c d)
-                        (%make-sockaddr-in a b c d port)))))))))))
+                      (hashtable-set! (loop-handlers %loop) id
+                        (lambda (res)
+                          (foreign-free ns-addr)
+                          (when (fx<? res 0)
+                            (loop-close udp-fd)
+                            (error 'dns-resolve-a "UDP connect failed" (strerror (fx- 0 res))))
+                          ;; Build and send DNS query
+                          (let ((query (%dns-build-query hostname)))
+                            (lock-object query)
+                            (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+                                   (id (loop-alloc-id!)))
+                              (io-uring-prep-send sqe udp-fd (bytevector-pointer query) (bytevector-length query) 0)
+                              (io-uring-sqe-set-data64 sqe id)
+                              (hashtable-set! (loop-handlers %loop) id
+                                (lambda (res)
+                                  (unlock-object query)
+                                  (when (fx<? res 0)
+                                    (loop-close udp-fd)
+                                    (error 'dns-resolve-a "DNS send failed"))
+                                  ;; Receive DNS response
+                                  (let ((buf (make-bytevector 512)))
+                                    (lock-object buf)
+                                    (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+                                           (id (loop-alloc-id!)))
+                                      (io-uring-prep-recv sqe udp-fd (bytevector-pointer buf) 512 0)
+                                      (io-uring-sqe-set-data64 sqe id)
+                                      (hashtable-set! (loop-handlers %loop) id
+                                        (lambda (res)
+                                          (unlock-object buf)
+                                          (loop-close udp-fd)
+                                          (when (fx<=? res 0)
+                                            (error 'dns-resolve-a "DNS recv failed"))
+                                          (let ((response (subbytevector buf 0 res)))
+                                            (call-with-values (lambda () (%dns-parse-response response))
+                                              (lambda (a b c d)
+                                                (call-with-values (lambda () (%make-sockaddr-in a b c d port))
+                                                  callback)))))))))))))))))))))))
 
   ;; ============================================================
   ;; Section 12b: libtls FFI bindings
@@ -2880,7 +2742,8 @@
           (set! %tls-initialized #t)))))
 
   (define tls-open
-    (lambda (host port)
+    (lambda (host port callback)
+      ;; CPS: callback receives (values ctx fd).
       (%tls-ensure-init)
       (let ((config (tls-config-new)))
         (when (zero? config)
@@ -2902,86 +2765,92 @@
                 (error 'tls-open "tls_configure failed" msg))))
           (tls-config-free config)
           ;; Async DNS + connect
-          (let-values (((addr addrlen) (dns-resolve-a host port)))
-            (let ((fd (loop-connect addr addrlen)))
-              (foreign-free addr)
-              (unless fd
-                (tls-free* ctx)
-                (error 'tls-open "connect failed"))
-              ;; Attach TLS to connected socket
-              (let ((rc (tls-connect-socket ctx fd host)))
-                (unless (zero? rc)
-                  (let ((msg (tls-error* ctx)))
+          (dns-resolve-a host port
+            (lambda (addr addrlen)
+              (loop-connect addr addrlen
+                (lambda (fd)
+                  (foreign-free addr)
+                  (unless fd
                     (tls-free* ctx)
-                    (loop-close fd)
-                    (error 'tls-open "tls_connect_socket failed" msg))))
-              ;; Non-blocking handshake — yield on WANT_POLLIN/POLLOUT
-              (let loop ()
-                (let ((rc (tls-handshake ctx)))
-                  (cond
-                    ((zero? rc) (void))
-                    ((= rc TLS_WANT_POLLIN)
-                     (loop-poll-wait fd POLLIN)
-                     (loop))
-                    ((= rc TLS_WANT_POLLOUT)
-                     (loop-poll-wait fd POLLOUT)
-                     (loop))
-                    (else
-                     (let ((msg (tls-error* ctx)))
-                       (tls-close* ctx)
-                       (tls-free* ctx)
-                       (loop-close fd)
-                       (error 'tls-open "tls_handshake failed" msg))))))
-              (values ctx fd)))))))
+                    (error 'tls-open "connect failed"))
+                  ;; Attach TLS to connected socket
+                  (let ((rc (tls-connect-socket ctx fd host)))
+                    (unless (zero? rc)
+                      (let ((msg (tls-error* ctx)))
+                        (tls-free* ctx)
+                        (loop-close fd)
+                        (error 'tls-open "tls_connect_socket failed" msg))))
+                  ;; Non-blocking handshake — yield on WANT_POLLIN/POLLOUT
+                  (let handshake-loop ()
+                    (let ((rc (tls-handshake ctx)))
+                      (cond
+                        ((zero? rc) (callback ctx fd))
+                        ((= rc TLS_WANT_POLLIN)
+                         (loop-poll-wait fd POLLIN
+                           (lambda (_) (handshake-loop))))
+                        ((= rc TLS_WANT_POLLOUT)
+                         (loop-poll-wait fd POLLOUT
+                           (lambda (_) (handshake-loop))))
+                        (else
+                         (let ((msg (tls-error* ctx)))
+                           (tls-close* ctx)
+                           (tls-free* ctx)
+                           (loop-close fd)
+                           (error 'tls-open "tls_handshake failed" msg))))))))))))))
 
   (define tls-reader
     (lambda (ctx fd)
+      ;; Returns a CPS read procedure: (read callback)
+      ;; callback receives bytevector on data, or eof-object on EOF.
       (let ((buf (make-bytevector 4096)))
-        (lambda ()
-          (let loop ()
+        (lambda (callback)
+          (let try-read ()
             (let ((n (with-lock (list buf)
                        (tls-read* ctx (bytevector-pointer buf) 4096))))
               (cond
                 ((> n 0)
                  (let ((out (make-bytevector n)))
                    (bytevector-copy! buf 0 out 0 n)
-                   out))
-                ((zero? n) (eof-object))
+                   (callback out)))
+                ((zero? n) (callback (eof-object)))
                 ((= n TLS_WANT_POLLIN)
-                 (loop-poll-wait fd POLLIN)
-                 (loop))
+                 (loop-poll-wait fd POLLIN
+                   (lambda (_) (try-read))))
                 ((= n TLS_WANT_POLLOUT)
-                 (loop-poll-wait fd POLLOUT)
-                 (loop))
+                 (loop-poll-wait fd POLLOUT
+                   (lambda (_) (try-read))))
                 (else
                  (error 'tls-reader "tls_read failed" (tls-error* ctx))))))))))
 
   (define tls-writer
     (lambda (ctx fd)
-      (lambda (bv)
+      ;; Returns a CPS write procedure: (write bv callback)
+      ;; callback is called when the write completes.
+      (lambda (bv callback)
         (let ((total (bytevector-length bv)))
-          (let loop ((offset 0))
-            (when (< offset total)
-              (let ((n (with-lock (list bv)
-                         (tls-write* ctx
-                                     (+ (bytevector-pointer bv) offset)
-                                     (- total offset)))))
-                (cond
-                  ((> n 0) (loop (+ offset n)))
-                  ((= n TLS_WANT_POLLIN)
-                   (loop-poll-wait fd POLLIN)
-                   (loop offset))
-                  ((= n TLS_WANT_POLLOUT)
-                   (loop-poll-wait fd POLLOUT)
-                   (loop offset))
-                  (else
-                   (error 'tls-writer "tls_write failed" (tls-error* ctx)))))))))))
+          (let write-loop ((offset 0))
+            (if (>= offset total)
+                (callback)
+                (let ((n (with-lock (list bv)
+                           (tls-write* ctx
+                                       (+ (bytevector-pointer bv) offset)
+                                       (- total offset)))))
+                  (cond
+                    ((> n 0) (write-loop (+ offset n)))
+                    ((= n TLS_WANT_POLLIN)
+                     (loop-poll-wait fd POLLIN
+                       (lambda (_) (write-loop offset))))
+                    ((= n TLS_WANT_POLLOUT)
+                     (loop-poll-wait fd POLLOUT
+                       (lambda (_) (write-loop offset))))
+                    (else
+                     (error 'tls-writer "tls_write failed" (tls-error* ctx)))))))))))
 
   (define tls-shutdown
-    (lambda (ctx fd)
+    (lambda (ctx fd callback)
       (tls-close* ctx)
       (tls-free* ctx)
-      (loop-close fd)))
+      (loop-close fd callback)))
 
   ;; ============================================================
   ;; Section 12d: URL parser
@@ -3031,41 +2900,64 @@
   ;; ============================================================
 
   (define www-request
-    (lambda (method url headers body)
+    (lambda (method url headers body callback)
+      ;; CPS: callback receives (code resp-headers resp-body)
+      ;; or (#f #f #f) on error.
       (guard (ex (else
                   (if (condition? ex)
                       (display-condition ex (current-error-port))
                       (format (current-error-port) "www-request error: ~a\n" ex))
                   (newline (current-error-port))
                   (flush-output-port (current-error-port))
-                  (values #f #f #f)))
+                  (callback #f #f #f)))
         (let-values (((scheme host port request-target) (url-parse url)))
           (let ((port* (or port (if (string=? scheme "https") 443 80))))
-            ;; NOTE: cannot use dynamic-wind here because loop-abort
-            ;; uses continuations that would trigger the exit guard prematurely
-            (let-values (((ctx fd) (tls-open host port*)))
-              (let ((headers* (if (assq 'host headers)
-                                  headers
-                                  (cons (cons 'host host) headers))))
-                ;; Write request
-                (let ((write! (tls-writer ctx fd)))
-                  (http-request-write write!
-                                      method
-                                      request-target
-                                      'HTTP/1.1
-                                      headers*
-                                      (if (bytevector? body)
-                                          (let ((sent #f))
-                                            (lambda ()
-                                              (if sent
-                                                  (eof-object)
-                                                  (begin (set! sent #t) body))))
-                                          body)))
-                ;; Read response
-                (let-values (((version code reason resp-headers resp-body)
-                              (http-response-read (tls-reader ctx fd))))
-                  (tls-shutdown ctx fd)
-                  (values code resp-headers resp-body)))))))))
+            (tls-open host port*
+              (lambda (ctx fd)
+                (let ((headers* (if (assq 'host headers)
+                                    headers
+                                    (cons (cons 'host host) headers)))
+                      (write! (tls-writer ctx fd))
+                      (read! (tls-reader ctx fd)))
+                  ;; Build entire request as one bytevector
+                  (let* ((body-gen (if (bytevector? body)
+                                       (let ((sent #f))
+                                         (lambda ()
+                                           (if sent
+                                               (eof-object)
+                                               (begin (set! sent #t) body))))
+                                       body))
+                         (chunks (generator->list body-gen))
+                         (content-length (apply fx+ (map bytevector-length chunks)))
+                         (headers** (massage-headers-content-length headers* content-length))
+                         (request-line (format #f "~a ~a ~a\r\n" method request-target 'HTTP/1.1))
+                         (header-str (apply string-append
+                                            (map (lambda (x) (format #f "~a: ~a\r\n" (car x) (cdr x)))
+                                                 headers**)))
+                         (request-bv (apply bytevector-append
+                                            (cons (string->utf8 (string-append request-line header-str "\r\n"))
+                                                  chunks))))
+                    (write! request-bv
+                      (lambda ()
+                        ;; Read response by accumulating all TLS chunks, then parsing
+                        (let read-response ((buf (bytevector)))
+                          (read! (lambda (chunk)
+                                   (if (eof-object? chunk)
+                                       ;; Parse the accumulated response buffer synchronously
+                                       (guard (ex (else
+                                                   (tls-shutdown ctx fd (lambda (_) (void)))
+                                                   (callback #f #f #f)))
+                                         (let-values (((version code reason resp-headers resp-body)
+                                                       (http-response-read
+                                                         (let ((port (open-bytevector-input-port buf)))
+                                                           (lambda ()
+                                                             (let ((bv (get-bytevector-some port)))
+                                                               (if (eof-object? bv) bv bv)))))))
+                                           (tls-shutdown ctx fd
+                                             (lambda (_)
+                                               (callback code resp-headers resp-body)))))
+                                       ;; More data -- keep accumulating
+                                       (read-response (bytevector-append buf chunk)))))))))))))))))
 
   ;; ============================================================
   ;; Section 13: Response helpers and transparent server
@@ -3124,52 +3016,108 @@
       (let ((conn (assq 'connection headers)))
         (and conn (string-ci=? (cdr conn) "close")))))
 
-  (define handle-connection
-    (lambda (application context dispatch client read write close)
-      (define chunk-reader
-        (lambda ()
-          (let ((result (read)))
-            (if (bytevector? result) result (eof-object)))))
-      (define request-state (context application client '()))
-      (guard (ex (else (guard (ex2 (else (void))) (close))))
-        (let-values (((read-byte! read-bytes!) (make-http-reader chunk-reader)))
-          (let loop ()
+  ;; try-parse-http-request: attempt to parse a complete HTTP request from a buffer.
+  ;; Returns (values method uri version headers body remainder) if successful,
+  ;; or (values #f #f #f #f #f #f) if more data is needed.
+  (define try-parse-http-request
+    (lambda (buf)
+      (guard (ex (else (values #f #f #f #f #f #f)))
+        (let ((port (open-bytevector-input-port buf)))
+          (let-values (((read-byte! read-bytes!)
+                        (make-http-reader
+                          (lambda ()
+                            (let ((bv (get-bytevector-some port)))
+                              (if (eof-object? bv) bv bv))))))
             (let-values (((method uri version headers body)
                           (%http-request-read read-byte! read-bytes!)))
               (if (not method)
-                  (close)
-                  (begin
-                    (guard (ex
-                      (else
-                        (http-response-write*
-                          write 500 "Internal Server Error"
-                          '((content-type . "text/plain"))
-                          (string->utf8 "Internal Server Error"))))
-                      (let* ((uri-parts (call-with-values (lambda () (uri-parse uri)) list))
-                             (path (car uri-parts))
-                             (params (or (cadr uri-parts) '()))
-                             (parsed-body
-                              (if (and (bytevector? body)
-                                       (fx>? (bytevector-length body) 0)
-                                       (let ((ct (assq 'content-type headers)))
-                                         (and ct (string-contains? (string-downcase (cdr ct)) "json"))))
-                                  (guard (ex (else (eof-object)))
-                                    (unjson (utf8->string body)))
-                                  (eof-object))))
-                        (let-values (((status response-pair extra-headers)
-                                      (dispatch application request-state method path params parsed-body)))
-                          (http-response-write*
-                            write status (status-code->reason status)
-                            (cons (cons 'content-type (cdr response-pair)) extra-headers)
-                            (car response-pair)))))
-                    (if (connection-close? headers)
-                        (close)
-                        (loop))))))))))
+                  (values #f #f #f #f #f #f)
+                  ;; Collect remaining bytes from the port as the remainder
+                  (let ((remainder (get-bytevector-all port)))
+                    (values method uri version headers body
+                            (if (eof-object? remainder) (bytevector) remainder))))))))))
+
+  (define handle-connection
+    (lambda (application context dispatch client-fd)
+      ;; CPS-based connection handler.
+      ;; Buffers incoming data, parses HTTP requests from the buffer,
+      ;; dispatches synchronously, then writes the response via CPS.
+      (define request-state (context application client-fd '()))
+
+      (define (send-error-and-close client-fd)
+        (let ((err-bv (string->utf8
+                        (string-append
+                          "HTTP/1.1 500 Internal Server Error\r\n"
+                          "Content-Type: text/plain\r\n"
+                          "Content-Length: 21\r\n"
+                          "Connection: close\r\n"
+                          "\r\n"
+                          "Internal Server Error"))))
+          (loop-write client-fd err-bv
+            (lambda (_) (loop-close client-fd)))))
+
+      (define (handle-loop buf)
+        ;; Try to parse a complete HTTP request from the buffer
+        (let-values (((method uri version headers body remainder)
+                      (try-parse-http-request buf)))
+          (if (not method)
+              ;; Incomplete request — read more data
+              (loop-read client-fd
+                (lambda (data)
+                  (cond
+                    ((not data)
+                     ;; Error — close connection
+                     (loop-close client-fd))
+                    ((eq? data #t)
+                     ;; EOF — close connection
+                     (loop-close client-fd))
+                    (else
+                     ;; Got data — append to buffer and try again
+                     (handle-loop (bytevector-append buf data))))))
+              ;; Complete request — dispatch and respond
+              (guard (ex
+                (else (send-error-and-close client-fd)))
+                (let* ((uri-parts (call-with-values (lambda () (uri-parse uri)) list))
+                       (path (car uri-parts))
+                       (params (or (cadr uri-parts) '()))
+                       (parsed-body
+                        (if (and (bytevector? body)
+                                 (fx>? (bytevector-length body) 0)
+                                 (let ((ct (assq 'content-type headers)))
+                                   (and ct (string-contains? (string-downcase (cdr ct)) "json"))))
+                            (guard (ex (else (eof-object)))
+                              (unjson (utf8->string body)))
+                            (eof-object))))
+                  (let-values (((status response-pair extra-headers)
+                                (dispatch application request-state method path params parsed-body)))
+                    ;; Build response bytevector
+                    (let* ((reason (status-code->reason status))
+                           (body-bv (car response-pair))
+                           (content-type (cdr response-pair))
+                           (all-headers (cons (cons 'content-type content-type) extra-headers))
+                           (response-bv
+                            (let ((chunks '()))
+                              (http-response-write
+                                (lambda (bv) (set! chunks (cons bv chunks)) #t)
+                                "HTTP/1.1" status reason all-headers
+                                (let ((done #f))
+                                  (lambda ()
+                                    (if done (eof-object) (begin (set! done #t) body-bv)))))
+                              (apply bytevector-append (reverse chunks)))))
+                      (loop-write client-fd response-bv
+                        (lambda (ok)
+                          (if (or (not ok) (connection-close? headers))
+                              (loop-close client-fd)
+                              ;; Keep-alive: process next request from remainder
+                              (handle-loop remainder)))))))))))
+
+      ;; Start reading the first request
+      (handle-loop (bytevector))))
 
   (define transparent
     (lambda (port-number application context dispatch)
       (loop-new)
-      ;; SIGINT/SIGTERM → graceful shutdown
+      ;; SIGINT/SIGTERM -> graceful shutdown
       (register-signal-handler 2  ;; SIGINT
         (lambda (sig)
           (when (and %loop (loop-running? %loop))
@@ -3185,9 +3133,8 @@
       ;; Idle connection reaper — closes connections with no activity
       (loop-spawn
         (lambda ()
-          (let reap ()
+          (define (reap _)
             (when (loop-running? %loop)
-              (loop-sleep %idle-sweep-interval)
               (let ((now (jiffy-current))
                     (timeout-ns (* %idle-timeout-seconds (expt 10 9))))
                 (let-values (((fds jiffies) (hashtable-entries %active-connections)))
@@ -3196,24 +3143,23 @@
                       (when (> (- now last-active) timeout-ns)
                         (loop-close fd)))
                     fds jiffies)))
-              (reap)))))
+              (loop-sleep %idle-sweep-interval reap)))
+          (loop-sleep %idle-sweep-interval reap)))
       (loop-spawn
         (lambda ()
           (define app-state (application))
           (call-with-values (lambda () (loop-tcp-serve "0.0.0.0" port-number))
-            (lambda (accept close)
+            (lambda (listen-fd close-server)
               (format #t "transparent server at http://127.0.0.1:~a/\n" port-number)
               (flush-output-port)
-              (let loop ()
-                (when (loop-running? %loop)
-                  (guard (ex (else (void)))
-                    (call-with-values accept
-                      (lambda (read write close peer-ip)
-                        (when (and read write close)
-                          (loop-spawn
-                            (lambda () (handle-connection app-state context dispatch peer-ip read write close)))))))
-                  (loop)))))))
-      (time (loop-run))
+              ;; Multishot accept — register once, callback fires per connection.
+              ;; The handler stays registered as long as CQEs have IORING-CQE-F-MORE.
+              (loop-accept listen-fd
+                (lambda (client-fd)
+                  (when (and client-fd (loop-running? %loop))
+                    (guard (ex (else (void)))
+                      (handle-connection app-state context dispatch client-fd)))))))))
+      (loop-run)
       ;; Cleanup after loop exits
       (io-uring-queue-exit (loop-ring %loop))))
 
