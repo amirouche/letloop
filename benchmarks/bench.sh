@@ -184,6 +184,13 @@ if command -v python3 &>/dev/null; then
     fi
 fi
 
+# C/h2o
+if [ -x "$BENCHMARK_DIR/bin/h2o-server" ]; then
+    SERVERS[h2o]="C-h2o"
+    COMMANDS[h2o]="env LD_LIBRARY_PATH=$BENCHMARK_DIR/../local/lib $BENCHMARK_DIR/bin/h2o-server"
+    echo "✓ C (h2o, compiled)"
+fi
+
 # Gleam
 if command -v gleam &>/dev/null && [ -f "$BENCHMARK_DIR/gleam/gleam.toml" ]; then
     (cd "$BENCHMARK_DIR/gleam" && gleam build >/dev/null 2>&1)
