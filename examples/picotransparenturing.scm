@@ -1,9 +1,12 @@
 #!chezscheme
-(library (transparenturing)
+(library (picotransparenturing)
 
   (export transparent json html xml match
           loop-new loop-run loop-sleep loop-spawn loop-close loop-stop
-          www-request)
+          www-request
+          phr-request-header-ref
+          phr-request-header-count phr-request-header-name
+          phr-request-header-value)
 
   (import (chezscheme))
 
@@ -165,7 +168,6 @@
     (lambda (h k v)
       (let* ((n (heap-size h))
              (vec (heap-vec h)))
-        ;; Grow if needed
         (when (fx>=? n (vector-length vec))
           (let ((new (make-vector (fx* 2 (vector-length vec)))))
             (let cp ((i 0))
@@ -174,10 +176,8 @@
                 (cp (fx+ i 1))))
             (set! vec new)
             (heap-vec! h new)))
-        ;; Insert at end
         (vector-set! vec n (cons k v))
         (heap-size! h (fx+ n 1))
-        ;; Bubble up
         (let up ((i n))
           (when (fx>? i 0)
             (let ((parent (fxsrl (fx- i 1) 1)))
@@ -197,7 +197,6 @@
         (let ((last-idx (fx- n 1)))
           (vector-set! vec 0 (vector-ref vec last-idx))
           (vector-set! vec last-idx #f)
-          ;; Sift down
           (let down ((i 0))
             (let* ((left (fx+ (fx* 2 i) 1))
                    (right (fx+ left 1))
@@ -240,6 +239,7 @@
             (let ((kv (vector-ref vec i)))
               (proc (car kv) (cdr kv)))
             (loop (fx+ i 1)))))))
+
 
   ;; ============================================================
   ;; Section 4: Pattern matcher - SRFI 241 (from letloop match)
@@ -1502,10 +1502,10 @@
           (let ((res (loop-abort
                        (lambda (k)
                          (hashtable-set! (loop-handlers %loop) id k)))))
-            (unlock-object bv)
             ;; Remove completed handler from fd tracking
             (hashtable-set! %fd-handlers fd
                             (remq id (hashtable-ref %fd-handlers fd '())))
+            (unlock-object bv)
             (cond
               ((fx<=? res 0) #f)
               ((fx=? res (bytevector-length bv)) #t)
@@ -1745,22 +1745,23 @@
     (lambda (read-byte! read-bytes!)
       (define request-line-read
         (lambda (read-byte!)
-          ;; Parse request line directly from bytevector — no list conversions
-          (let* ((line-bv (http-line-read read-byte!))
-                 (len (bytevector-length line-bv)))
-            ;; Find first space (end of method)
-            (let scan1 ((i 0))
-              (when (fx>=? i len) (error 'http "Invalid request line"))
-              (if (fx=? (bytevector-u8-ref line-bv i) byte-space)
-                  ;; Find second space (end of URI)
-                  (let scan2 ((j (fx+ i 1)))
-                    (when (fx>=? j len) (error 'http "Invalid request line"))
-                    (if (fx=? (bytevector-u8-ref line-bv j) byte-space)
-                        (values (string->symbol (utf8->string (subbytevector line-bv 0 i)))
-                                (utf8->string (subbytevector line-bv (fx+ i 1) j))
-                                (string->symbol (utf8->string (subbytevector line-bv (fx+ j 1) len))))
-                        (scan2 (fx+ j 1))))
-                  (scan1 (fx+ i 1)))))))
+          (define massage
+            (lambda (line-bv)
+              (let loop ((bytes (bytevector->u8-list line-bv))
+                         (chunk '())
+                         (out '()))
+                (if (null? bytes)
+                    (if (null? chunk)
+                        (error 'http "Invalid request line")
+                        (reverse (cons (utf8->string (u8-list->bytevector (reverse chunk))) out)))
+                    (let ((byte (car bytes)))
+                      (if (and (fx=? byte byte-space) (not (null? chunk)))
+                          (loop (cdr bytes) '() (cons (utf8->string (u8-list->bytevector (reverse chunk))) out))
+                          (loop (cdr bytes) (cons byte chunk) out)))))))
+          (let ((strings (massage (http-line-read read-byte!))))
+            (unless (fx=? (length strings) 3)
+              (error 'http "Invalid request line"))
+            (values (string->symbol (car strings)) (cadr strings) (string->symbol (caddr strings))))))
 
       (guard (ex (else (values #f #f #f #f #f)))
         (call-with-values (lambda () (request-line-read read-byte!))
@@ -1806,7 +1807,6 @@
                   (let ((second (body)))
                     (if (eof-object? second)
                         (list first)
-                        ;; Multi-chunk: collect remaining
                         (let loop ((out (list second first)))
                           (let ((next (body)))
                             (if (eof-object? next)
@@ -1814,10 +1814,8 @@
                                 (loop (cons next out))))))))))
         (let ((content-length (if (null? chunks) 0 (apply fx+ (map bytevector-length chunks)))))
           (let* ((headers* (massage-headers-content-length headers content-length))
-                 ;; Use pre-computed status line when available
                  (status-bv (or (hashtable-ref %status-lines code #f)
                                 (string->utf8 (string-append version " " (number->string code) " " reason "\r\n"))))
-                 ;; Build headers without format — use string-append
                  (header-bv (string->utf8
                               (apply string-append
                                 (let loop ((h headers*) (acc '()))
@@ -1834,7 +1832,6 @@
                                                           (cons ": "
                                                                 (cons (symbol->string (car pair))
                                                                       acc))))))))))))
-            ;; Single write: combine status + headers + body into one bytevector
             (let ((response-bv (apply bytevector-append status-bv header-bv chunks)))
               (unless (accumulator response-bv)
                 (error 'http "write failed"))))))))
@@ -3111,6 +3108,349 @@
   (define html (lambda (obj) (response 'html obj)))
   (define xml  (lambda (obj) (response 'xml obj)))
 
+
+  ;; ---- picohttpparser FFI bindings ----
+
+  (define libpicohttpparser (load-shared-object "libpicohttpparser.so"))
+
+  (define %phr-max-headers 100)
+  (define %request-out-size (fx+ 48 (fx* %phr-max-headers 32)))
+  (define %native (native-endianness))
+
+  (define %phr-parse-request-wrapper
+    (let ((func (foreign-procedure "phr_parse_request_wrapper"
+                                   (void* size_t void* size_t size_t) int)))
+      (lambda (buf-ptr buf-len out-ptr max-headers last-len)
+        (func buf-ptr buf-len out-ptr max-headers last-len))))
+
+  ;; Allocate a reusable out buffer per connection
+  (define make-phr-out
+    (lambda ()
+      (let ((out (make-bytevector %request-out-size 0)))
+        (lock-object out)
+        out)))
+
+  (define phr-parse-request
+    (lambda (buf out . rest)
+      (let* ((last-len (cond
+                         ((and (pair? rest) (fixnum? (car rest))) (car rest))
+                         (else 0)))
+             (req-vec (cond
+                        ((and (pair? rest) (vector? (car rest))) (car rest))
+                        ((and (pair? rest) (pair? (cdr rest)) (vector? (cadr rest))) (cadr rest))
+                        (else #f))))
+        (lock-object buf)
+        (let ((ret (%phr-parse-request-wrapper
+                    (bytevector-pointer buf)
+                    (bytevector-length buf)
+                    (bytevector-pointer out)
+                    %phr-max-headers
+                    last-len)))
+          (unlock-object buf)
+          (cond
+           ((fx>? ret 0)
+            (if req-vec
+                (begin
+                  (vector-set! req-vec 1 buf)
+                  (vector-set! req-vec 2 out)
+                  (vector-set! req-vec 3 ret)
+                  req-vec)
+                (vector 'phr-request buf out ret)))
+           ((fx=? ret -2) 'incomplete)
+           (else #f))))))
+
+  (define phr-request?
+    (lambda (x)
+      (and (vector? x)
+           (fx=? (vector-length x) 4)
+           (eq? (vector-ref x 0) 'phr-request))))
+
+  (define %phr-buf (lambda (req) (vector-ref req 1)))
+  (define %phr-out (lambda (req) (vector-ref req 2)))
+
+  (define phr-request-bytes-consumed
+    (lambda (req) (vector-ref req 3)))
+
+  (define phr-request-method
+    (lambda (req)
+      (let ((out (%phr-out req))
+            (buf (%phr-buf req)))
+        (let ((offset (bytevector-u64-ref out 0 %native))
+              (len (bytevector-u64-ref out 8 %native)))
+          (utf8->string (subbytevector buf offset (fx+ offset len)))))))
+
+  (define phr-request-path
+    (lambda (req)
+      (let ((out (%phr-out req))
+            (buf (%phr-buf req)))
+        (let ((offset (bytevector-u64-ref out 16 %native))
+              (len (bytevector-u64-ref out 24 %native)))
+          (utf8->string (subbytevector buf offset (fx+ offset len)))))))
+
+  (define phr-request-minor-version
+    (lambda (req)
+      (bytevector-s32-ref (%phr-out req) 32 %native)))
+
+  (define phr-request-header-count
+    (lambda (req)
+      (bytevector-u64-ref (%phr-out req) 40 %native)))
+
+  (define phr-request-header-name
+    (lambda (req index)
+      (let ((out (%phr-out req))
+            (buf (%phr-buf req)))
+        (let ((base (fx+ 48 (fx* index 32))))
+          (let ((offset (bytevector-u64-ref out base %native))
+                (len (bytevector-u64-ref out (fx+ base 8) %native)))
+            (if (fxzero? len)
+                #f
+                (utf8->string (subbytevector buf offset (fx+ offset len)))))))))
+
+  (define phr-request-header-value
+    (lambda (req index)
+      (let ((out (%phr-out req))
+            (buf (%phr-buf req)))
+        (let ((base (fx+ 48 (fx* index 32))))
+          (let ((offset (bytevector-u64-ref out (fx+ base 16) %native))
+                (len (bytevector-u64-ref out (fx+ base 24) %native)))
+            (utf8->string (subbytevector buf offset (fx+ offset len))))))))
+
+  (define phr-request-header-ref
+    (lambda (req name)
+      (let ((count (phr-request-header-count req))
+            (target (string-downcase name)))
+        (let loop ((i 0))
+          (if (fx>=? i count)
+              #f
+              (let ((hdr-name (phr-request-header-name req i)))
+                (if (and hdr-name (string-ci=? hdr-name target))
+                    (phr-request-header-value req i)
+                    (loop (fx+ i 1)))))))))
+
+  (define phr-request-body
+    (lambda (req)
+      (let ((cl (phr-request-header-ref req "content-length")))
+        (if (not cl)
+            (bytevector)
+            (let* ((len (string->number cl))
+                   (consumed (phr-request-bytes-consumed req))
+                   (buf (%phr-buf req)))
+              (if (or (not len) (fxzero? len)
+                      (fx<? (bytevector-length buf) (fx+ consumed len)))
+                  (bytevector)
+                  (subbytevector buf consumed (fx+ consumed len))))))))
+
+  ;; ---- Zero-allocation header/method primitives ----
+
+  ;; Pre-computed bytevector constants for header names and values
+  (define %hdr-connection (string->utf8 "connection"))
+  (define %hdr-content-length (string->utf8 "content-length"))
+  (define %hdr-content-type (string->utf8 "content-type"))
+  (define %val-close (string->utf8 "close"))
+
+  ;; Pre-computed method bytevectors
+  (define %method-GET     (string->utf8 "GET"))
+  (define %method-POST    (string->utf8 "POST"))
+  (define %method-PUT     (string->utf8 "PUT"))
+  (define %method-DELETE  (string->utf8 "DELETE"))
+  (define %method-HEAD    (string->utf8 "HEAD"))
+  (define %method-OPTIONS (string->utf8 "OPTIONS"))
+  (define %method-PATCH   (string->utf8 "PATCH"))
+
+  ;; Compare pre-lowercased bytevector key against buf[offset..offset+len)
+  ;; case-insensitively. HTTP header names are ASCII, so we fold A-Z to a-z.
+  ;; Zero allocation.
+  (define bytevector-range-ci=?
+    (lambda (key buf offset len)
+      (and (fx=? (bytevector-length key) len)
+           (let loop ((i 0))
+             (or (fx=? i len)
+                 (let* ((b (bytevector-u8-ref buf (fx+ offset i)))
+                        (b* (if (and (fx>=? b 65) (fx<=? b 90))
+                                (fxlogior b 32)
+                                b))
+                        (a (bytevector-u8-ref key i)))
+                   (and (fx=? a b*)
+                        (loop (fx+ i 1)))))))))
+
+  ;; Compare pre-computed bytevector key against buf[offset..offset+len)
+  ;; exactly (case-sensitive). Zero allocation.
+  (define bytevector-range=?
+    (lambda (key buf offset len)
+      (and (fx=? (bytevector-length key) len)
+           (let loop ((i 0))
+             (or (fx=? i len)
+                 (and (fx=? (bytevector-u8-ref key i)
+                            (bytevector-u8-ref buf (fx+ offset i)))
+                      (loop (fx+ i 1))))))))
+
+  ;; Header lookup using pre-computed bytevector key. Zero allocation
+  ;; for non-matching headers; only allocates on the matched value.
+  (define phr-request-header-ref/bv
+    (lambda (req key-bv)
+      (let ((out (%phr-out req))
+            (buf (%phr-buf req))
+            (count (phr-request-header-count req)))
+        (let loop ((i 0))
+          (if (fx>=? i count)
+              #f
+              (let* ((base (fx+ 48 (fx* i 32)))
+                     (name-offset (bytevector-u64-ref out base %native))
+                     (name-len (bytevector-u64-ref out (fx+ base 8) %native)))
+                (if (and (not (fxzero? name-len))
+                         (bytevector-range-ci=? key-bv buf name-offset name-len))
+                    (let ((val-offset (bytevector-u64-ref out (fx+ base 16) %native))
+                          (val-len (bytevector-u64-ref out (fx+ base 24) %native)))
+                      (utf8->string (subbytevector buf val-offset (fx+ val-offset val-len))))
+                    (loop (fx+ i 1)))))))))
+
+  ;; Header lookup that parses the value as a decimal integer directly
+  ;; from bytes. Zero allocation.
+  (define phr-request-header-ref-as-integer
+    (lambda (req key-bv)
+      (let ((out (%phr-out req))
+            (buf (%phr-buf req))
+            (count (phr-request-header-count req)))
+        (let loop ((i 0))
+          (if (fx>=? i count)
+              #f
+              (let* ((base (fx+ 48 (fx* i 32)))
+                     (name-offset (bytevector-u64-ref out base %native))
+                     (name-len (bytevector-u64-ref out (fx+ base 8) %native)))
+                (if (and (not (fxzero? name-len))
+                         (bytevector-range-ci=? key-bv buf name-offset name-len))
+                    (let ((val-offset (bytevector-u64-ref out (fx+ base 16) %native))
+                          (val-len (bytevector-u64-ref out (fx+ base 24) %native)))
+                      (let iloop ((j 0) (n 0))
+                        (if (fx>=? j val-len)
+                            n
+                            (let ((d (fx- (bytevector-u8-ref buf (fx+ val-offset j)) 48)))
+                              (if (and (fx>=? d 0) (fx<? d 10))
+                                  (iloop (fx+ j 1) (fx+ (fx* n 10) d))
+                                  #f)))))
+                    (loop (fx+ i 1)))))))))
+
+  ;; Check if a header's value matches a bytevector constant without
+  ;; extracting it. Zero allocation.
+  (define phr-request-header-value-ci=?
+    (lambda (req key-bv val-bv)
+      (let ((out (%phr-out req))
+            (buf (%phr-buf req))
+            (count (phr-request-header-count req)))
+        (let loop ((i 0))
+          (if (fx>=? i count)
+              #f
+              (let* ((base (fx+ 48 (fx* i 32)))
+                     (name-offset (bytevector-u64-ref out base %native))
+                     (name-len (bytevector-u64-ref out (fx+ base 8) %native)))
+                (if (and (not (fxzero? name-len))
+                         (bytevector-range-ci=? key-bv buf name-offset name-len))
+                    (let ((val-offset (bytevector-u64-ref out (fx+ base 16) %native))
+                          (val-len (bytevector-u64-ref out (fx+ base 24) %native)))
+                      (bytevector-range-ci=? val-bv buf val-offset val-len))
+                    (loop (fx+ i 1)))))))))
+
+  ;; Return method as symbol without allocating strings for common methods.
+  (define phr-request-method-symbol
+    (lambda (req)
+      (let* ((out (%phr-out req))
+             (buf (%phr-buf req))
+             (offset (bytevector-u64-ref out 0 %native))
+             (len (bytevector-u64-ref out 8 %native)))
+        (cond
+          ((bytevector-range=? %method-GET buf offset len) 'GET)
+          ((bytevector-range=? %method-POST buf offset len) 'POST)
+          ((bytevector-range=? %method-PUT buf offset len) 'PUT)
+          ((bytevector-range=? %method-DELETE buf offset len) 'DELETE)
+          ((bytevector-range=? %method-HEAD buf offset len) 'HEAD)
+          ((bytevector-range=? %method-OPTIONS buf offset len) 'OPTIONS)
+          ((bytevector-range=? %method-PATCH buf offset len) 'PATCH)
+          (else (string->symbol (phr-request-method req)))))))
+
+  ;; ---- Bytevector-range URI parsing ----
+
+  ;; Scan buf[start..end) for a byte value, return index or #f.
+  (define bytevector-find-byte
+    (lambda (bv start end byte)
+      (let loop ((i start))
+        (cond
+          ((fx>=? i end) #f)
+          ((fx=? (bytevector-u8-ref bv i) byte) i)
+          (else (loop (fx+ i 1)))))))
+
+  ;; Split path on #\/ bytes working on buf[start..end) directly.
+  ;; Only allocates one subbytevector + utf8->string per segment.
+  (define path-split/range
+    (lambda (buf start end)
+      ;; Skip leading /
+      (let ((start (if (and (fx<? start end)
+                            (fx=? (bytevector-u8-ref buf start) 47))
+                       (fx+ start 1)
+                       start)))
+        ;; Skip trailing /
+        (let ((end (if (and (fx<? start end)
+                            (fx=? (bytevector-u8-ref buf (fx- end 1)) 47))
+                       (fx- end 1)
+                       end)))
+          (if (fx>=? start end)
+              '()
+              (let loop ((i start) (seg-start start) (acc '()))
+                (cond
+                  ((fx>=? i end)
+                   (reverse (cons (percent-decode
+                                    (utf8->string (subbytevector buf seg-start end)))
+                                  acc)))
+                  ((fx=? (bytevector-u8-ref buf i) 47) ;; #\/
+                   (loop (fx+ i 1) (fx+ i 1)
+                         (cons (percent-decode
+                                 (utf8->string (subbytevector buf seg-start i)))
+                               acc)))
+                  (else (loop (fx+ i 1) seg-start acc)))))))))
+
+  ;; Parse URI from buf[offset..offset+len) without creating the full
+  ;; URI string. Returns (values path-list query-alist fragment).
+  (define uri-parse/range
+    (lambda (buf offset len)
+      (let* ((end (fx+ offset len))
+             ;; Find # boundary
+             (h-pos (bytevector-find-byte buf offset end 35))
+             (before-frag (or h-pos end))
+             ;; Find ? boundary (before fragment)
+             (q-pos (bytevector-find-byte buf offset before-frag 63))
+             (path-end (or q-pos before-frag))
+             (path (path-split/range buf offset path-end))
+             (query (and q-pos
+                         (let ((qstart (fx+ q-pos 1))
+                               (qend before-frag))
+                           (if (fx>=? qstart qend)
+                               '()
+                               (www-query-read
+                                 (utf8->string (subbytevector buf qstart qend))))))))
+        (values path query))))
+
+  (define try-parse-http-request
+    (lambda (buf out . rest)
+      (let ((req-vec (if (pair? rest) (car rest) #f)))
+      (if (fxzero? (bytevector-length buf))
+          (values #f #f)
+          (let ((req (if req-vec
+                         (phr-parse-request buf out req-vec)
+                         (phr-parse-request buf out))))
+            (cond
+              ((eq? req 'incomplete) (values #f #f))
+              ((not req) (values #f #f))
+              (else
+               (let* ((consumed (phr-request-bytes-consumed req))
+                      (body-len (or (phr-request-header-ref-as-integer req %hdr-content-length) 0))
+                      (total (fx+ consumed body-len))
+                      (have (bytevector-length buf)))
+                 (if (fx<? have total)
+                     (values #f #f)
+                     (let ((remainder (if (fx>=? total have)
+                                          (bytevector)
+                                          (subbytevector buf total have))))
+                       (values req remainder)))))))))))
+
   (define http-response-write*
     (lambda (write-proc status reason headers body-bv)
       (http-response-write
@@ -3119,52 +3459,64 @@
           (lambda ()
             (if done (eof-object) (begin (set! done #t) body-bv)))))))
 
-  (define connection-close?
-    (lambda (headers)
-      (let ((conn (assq 'connection headers)))
-        (and conn (string-ci=? (cdr conn) "close")))))
+  (define %canned-response
+    (string->utf8 (string-append
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: text/html\r\n"
+      "Content-Length: 5\r\n"
+      "\r\n"
+      "hello")))
 
   (define handle-connection
     (lambda (application context dispatch client read write close)
-      (define chunk-reader
-        (lambda ()
-          (let ((result (read)))
-            (if (bytevector? result) result (eof-object)))))
-      (define request-state (context application client '()))
-      (guard (ex (else (guard (ex2 (else (void))) (close))))
-        (let-values (((read-byte! read-bytes!) (make-http-reader chunk-reader)))
-          (let loop ()
-            (let-values (((method uri version headers body)
-                          (%http-request-read read-byte! read-bytes!)))
-              (if (not method)
-                  (close)
-                  (begin
-                    (guard (ex
-                      (else
-                        (http-response-write*
-                          write 500 "Internal Server Error"
-                          '((content-type . "text/plain"))
-                          (string->utf8 "Internal Server Error"))))
-                      (let* ((uri-parts (call-with-values (lambda () (uri-parse uri)) list))
-                             (path (car uri-parts))
-                             (params (or (cadr uri-parts) '()))
-                             (parsed-body
-                              (if (and (bytevector? body)
-                                       (fx>? (bytevector-length body) 0)
-                                       (let ((ct (assq 'content-type headers)))
-                                         (and ct (string-contains? (string-downcase (cdr ct)) "json"))))
-                                  (guard (ex (else (eof-object)))
-                                    (unjson (utf8->string body)))
-                                  (eof-object))))
-                        (let-values (((status response-pair extra-headers)
-                                      (dispatch application request-state method path params parsed-body)))
-                          (http-response-write*
-                            write status (status-code->reason status)
-                            (cons (cons 'content-type (cdr response-pair)) extra-headers)
-                            (car response-pair)))))
-                    (if (connection-close? headers)
-                        (close)
-                        (loop))))))))))
+      (define request-state #f)
+      (define out (make-phr-out))
+      (define req-vec (vector 'phr-request #f #f 0))
+
+      (define (cleanup)
+        (unlock-object out)
+        (close))
+
+      (define (handle-loop buf)
+        (let-values (((req remainder) (try-parse-http-request buf out req-vec)))
+          (if (not req)
+              (let ((data (read)))
+                (cond
+                  ((not data) (cleanup))
+                  ((eq? data #t) (cleanup))
+                  ((eof-object? data) (cleanup))
+                  (else (handle-loop (bytevector-append buf data)))))
+              (begin
+                (unless request-state
+                  (set! request-state (context application client req)))
+                (let* ((method (phr-request-method-symbol req))
+                       (path-out (%phr-out req))
+                       (path-offset (bytevector-u64-ref path-out 16 %native))
+                       (path-len (bytevector-u64-ref path-out 24 %native)))
+                  (let-values (((path params) (uri-parse/range (%phr-buf req) path-offset path-len)))
+                    (let ((params (or params '())))
+                      (let-values (((status response-pair extra-headers)
+                                    (dispatch application request-state method path params req)))
+                        (let* ((reason (status-code->reason status))
+                               (body-bv (car response-pair))
+                               (content-type (cdr response-pair))
+                               (all-headers (cons (cons 'content-type content-type) extra-headers))
+                               (response-bv
+                                (let ((chunks '()))
+                                  (http-response-write
+                                    (lambda (bv) (set! chunks (cons bv chunks)) #t)
+                                    "HTTP/1.1" status reason all-headers
+                                    (let ((done #f))
+                                      (lambda ()
+                                        (if done (eof-object) (begin (set! done #t) body-bv)))))
+                                  (apply bytevector-append (reverse chunks)))))
+                          (write response-bv))))))
+                (if (phr-request-header-value-ci=? req %hdr-connection %val-close)
+                    (cleanup)
+                    (handle-loop remainder))))))
+
+      (handle-loop (bytevector))))
+
 
   (define transparent
     (lambda (port-number application context dispatch)
@@ -3213,7 +3565,7 @@
                           (loop-spawn
                             (lambda () (handle-connection app-state context dispatch peer-ip read write close)))))))
                   (loop)))))))
-      (time (loop-run))
+      (loop-run)
       ;; Cleanup after loop exits
       (io-uring-queue-exit (loop-ring %loop))))
 
