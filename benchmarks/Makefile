@@ -1,26 +1,28 @@
-.PHONY: help build-scheme build-go build-rust build-fastapi build-flask build-js build-gleam build-h2o bench bench-perf clean
+.PHONY: help build-scheme build-go build-rust build-fastapi build-flask build-js build-gleam build-h2o bench bench-perf report clean
 
 ROOT := $(shell cd .. && pwd)
 
 help:
-	@echo "Benchmark Suite - Counter Application"
+	@echo "Benchmark Suite - HTTP Counter Application"
 	@echo ""
-	@echo "Build:"
-	@echo "  make build-scheme   - Build Scheme (picotransparenturing) server"
-	@echo "  make build-go       - Build Go implementation"
-	@echo "  make build-js       - Check Node.js availability"
-	@echo "  make build-rust     - Build Rust implementation (release mode)"
-	@echo "  make build-gleam    - Build Gleam implementation"
-	@echo "  make build-h2o      - Build C/h2o implementation (clones h2o, builds libh2o-evloop)"
-	@echo "  make build-fastapi  - Setup FastAPI venv and dependencies"
-	@echo "  make build-flask    - Setup Flask venv and dependencies"
+	@echo "Build targets:"
+	@echo "  make build-scheme   Build Scheme server (picotransparenturing, requires ./venv)"
+	@echo "  make build-go       Build Go server (net/http stdlib)"
+	@echo "  make build-rust     Build Rust server (axum + tokio, release mode)"
+	@echo "  make build-h2o      Build C server (clones h2o, builds libh2o-evloop, installs to local/lib)"
+	@echo "  make build-gleam    Build Gleam server (mist + gleam_otp on BEAM)"
+	@echo "  make build-js       Check Node.js is available (interpreted, no build step)"
+	@echo "  make build-fastapi  Setup Python venv and install FastAPI + uvicorn"
+	@echo "  make build-flask    Setup Python venv and install Flask + gunicorn"
 	@echo ""
-	@echo "Benchmarking:"
-	@echo "  make bench          - Run scaling benchmark"
-	@echo "  make bench-perf     - Run perf-profiled benchmark (Scheme)"
+	@echo "Run:"
+	@echo "  make bench          Run scaling benchmark (all detected implementations)"
+	@echo "  make bench-perf     Run perf-profiled benchmark (Scheme only)"
+	@echo "  make report         Generate HTML report from CSV results"
 	@echo ""
-	@echo "Cleanup:"
-	@echo "  make clean          - Clean all build artifacts"
+	@echo "Other:"
+	@echo "  make clean          Remove bin/, results/, and all build artifacts"
+	@echo "  make help           Show this help"
 
 build-scheme:
 	@echo "Building Scheme implementation..."
@@ -92,6 +94,9 @@ bench:
 bench-perf:
 	@echo "Running perf-profiled benchmark..."
 	@bash bench-perf.sh
+
+report:
+	@bash gen-report.sh
 
 clean:
 	@echo "Cleaning build artifacts..."
