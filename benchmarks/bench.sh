@@ -191,12 +191,41 @@ if [ -x "$BENCHMARK_DIR/bin/h2o-server" ]; then
     echo "✓ C (h2o, compiled)"
 fi
 
+# Common Lisp
+if [ -x "$BENCHMARK_DIR/bin/cl-server" ]; then
+    SERVERS[cl]="Common-Lisp"
+    COMMANDS[cl]="$BENCHMARK_DIR/bin/cl-server"
+    echo "✓ Common Lisp (Hunchentoot, compiled)"
+fi
+
 # Gleam
 if command -v gleam &>/dev/null && [ -f "$BENCHMARK_DIR/gleam/gleam.toml" ]; then
     (cd "$BENCHMARK_DIR/gleam" && gleam build >/dev/null 2>&1)
     SERVERS[gleam]="Gleam"
     COMMANDS[gleam]="bash -c 'cd $BENCHMARK_DIR/gleam && exec env ERL_FLAGS=\"+S 1:1\" gleam run -- \"\$1\"' --"
     echo "✓ Gleam"
+fi
+
+# Java (Loom / virtual threads)
+if [ -f "$BENCHMARK_DIR/java-loom/Server.class" ] || (command -v javac &>/dev/null && cd "$BENCHMARK_DIR/java-loom" && javac Server.java 2>/dev/null); then
+    SERVERS[java-loom]="Java-Loom"
+    COMMANDS[java-loom]="java -cp $BENCHMARK_DIR/java-loom Server"
+    echo "✓ Java (Loom, virtual threads)"
+fi
+
+# Java (Vert.x)
+if [ -f "$BENCHMARK_DIR/java-vertx/target/server.jar" ]; then
+    SERVERS[java-vertx]="Java-Vertx"
+    COMMANDS[java-vertx]="java -jar $BENCHMARK_DIR/java-vertx/target/server.jar"
+    echo "✓ Java (Vert.x)"
+fi
+
+# Ruby (Falcon)
+FALCON_BIN=$(ruby -e 'puts Gem.bin_path("falcon", "falcon")' 2>/dev/null || true)
+if command -v ruby &>/dev/null && [ -n "$FALCON_BIN" ] && [ -f "$FALCON_BIN" ]; then
+    SERVERS[ruby]="Ruby"
+    COMMANDS[ruby]="bash -c 'cd $BENCHMARK_DIR/ruby && exec ruby $FALCON_BIN serve --bind http://127.0.0.1:\"\$1\" --count 1 2>/dev/null' --"
+    echo "✓ Ruby (Falcon)"
 fi
 
 # Racket

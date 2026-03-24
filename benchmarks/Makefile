@@ -1,4 +1,4 @@
-.PHONY: help build-scheme build-go build-rust build-fastapi build-flask build-js build-gleam build-h2o bench bench-perf report clean
+.PHONY: help build-scheme build-go build-rust build-fastapi build-flask build-js build-gleam build-h2o build-cl build-ruby build-java-loom build-java-vertx bench bench-perf report clean
 
 ROOT := $(shell cd .. && pwd)
 
@@ -11,6 +11,10 @@ help:
 	@echo "  make build-rust     Build Rust server (axum + tokio, release mode)"
 	@echo "  make build-h2o      Build C server (clones h2o, builds libh2o-evloop, installs to local/lib)"
 	@echo "  make build-gleam    Build Gleam server (mist + gleam_otp on BEAM)"
+	@echo "  make build-cl       Build Common Lisp server (Hunchentoot, SBCL standalone binary)"
+	@echo "  make build-ruby     Check Ruby and Falcon gem availability"
+	@echo "  make build-java-loom  Build Java virtual threads server (JDK stdlib, zero deps)"
+	@echo "  make build-java-vertx Build Java Vert.x server (Maven fat jar)"
 	@echo "  make build-js       Check Node.js is available (interpreted, no build step)"
 	@echo "  make build-fastapi  Setup Python venv and install FastAPI + uvicorn"
 	@echo "  make build-flask    Setup Python venv and install Flask + gunicorn"
@@ -73,6 +77,33 @@ build-h2o:
 		-Wl,-rpath,$(ROOT)/local/lib
 	@echo "✓ C/h2o built"
 
+build-cl:
+	@echo "Building Common Lisp implementation..."
+	@mkdir -p bin
+	@sbcl --noinform --non-interactive \
+		--load /mnt/quicklisp/setup.lisp \
+		--eval '(ql:quickload "hunchentoot" :silent t)' \
+		--load cl/server.lisp \
+		--eval '(sb-ext:save-lisp-and-die "bin/cl-server" :toplevel (function main) :executable t)'
+	@echo "✓ Common Lisp (Hunchentoot) built"
+
+build-ruby:
+	@if command -v ruby >/dev/null 2>&1 && ruby -e 'require "falcon"' 2>/dev/null; then \
+		echo "✓ Ruby + Falcon available"; \
+	else \
+		echo "✗ Ruby or Falcon gem not found (gem install falcon)"; exit 1; \
+	fi
+
+build-java-loom:
+	@echo "Building Java virtual threads implementation..."
+	@cd java-loom && javac Server.java
+	@echo "✓ Java (Loom) built"
+
+build-java-vertx:
+	@echo "Building Java Vert.x implementation..."
+	@cd java-vertx && mvn package -q
+	@echo "✓ Java (Vert.x) built"
+
 build-rust:
 	@echo "Building Rust implementation..."
 	@cd rust && cargo build --release 2>&1 | grep -v "Compiling\|Finished" || true
@@ -104,6 +135,8 @@ clean:
 	@rm -rf rust/target rust/Cargo.lock
 	@rm -rf gleam/build
 	@rm -rf h2o-dep
+	@rm -f java-loom/*.class
+	@rm -rf java-vertx/target
 	@rm -rf fastapi/venv flask/venv
 	@find . -name "*.pyc" -delete
 	@find . -name "__pycache__" -type d -delete
