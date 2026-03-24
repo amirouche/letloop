@@ -19,7 +19,7 @@ jobs:
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Install dependencies
-        run: sudo apt-get update -y && sudo apt-get install -y uuid-dev libtls-dev liburing-dev wrk
+        run: sudo apt-get update -y && sudo apt-get install -y uuid-dev libtls-dev liburing-dev wrk cmake
 
       - name: Cache local
         id: cache-local
@@ -34,7 +34,7 @@ jobs:
 
       - name: Build C dependencies
         if: steps.cache-local.outputs.cache-hit != 'true'
-        run: ./venv $(pwd)/local/ make opaque argon2 blake3 liburing
+        run: ./venv $(pwd)/local/ make opaque argon2 blake3 liburing cmark
 
       - name: Build letloop
         run: ./venv $(pwd)/local/ make letloop

@@ -1,4 +1,4 @@
-.PHONY: help letloop argon2 blake3 sodium oprf opaque liburing check
+.PHONY: help letloop argon2 blake3 sodium oprf opaque liburing cmark check
 
 SCHEME=$(shell which scheme)
 PWD=$(shell pwd)
@@ -102,6 +102,12 @@ oprf: sodium ## Build liboprf from source
 	cp $(PREFIX)/src/liboprf/src/tp-dkg.h $(PREFIX)/include/oprf/
 	cp $(PREFIX)/src/liboprf/src/stp-dkg.h $(PREFIX)/include/oprf/
 	cp $(PREFIX)/src/liboprf/src/utils.h $(PREFIX)/include/oprf/
+
+cmark: ## Build libcmark from source
+	rm -rf $(PWD)/local/src/cmark
+	mkdir -p $(PWD)/local/src
+	cd $(PWD)/local/src && git clone --branch 0.31.2 https://github.com/commonmark/cmark
+	cd $(PWD)/local/src/cmark && mkdir build && cd build && cmake -DCMAKE_INSTALL_PREFIX=$(PWD)/local/ .. && make -j$(shell nproc --ignore 1) && make install
 
 opaque: oprf ## Build libopaque from source
 	rm -rf $(PREFIX)/src/libopaque
