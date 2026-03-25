@@ -196,6 +196,17 @@
   (mins nstore-morton-mins)
   (maxs nstore-morton-maxs))
 
+;; XZ constraint — spatial rectangle for extended objects (bounding boxes)
+;; Unlike morton (point-in-region), xz handles region-overlaps-region.
+;; The stored value is an xzstore code (integer).
+;; Binds decoded min/max bounds as ((mins . maxs)) to the var name.
+(define-record-type* <nstore-xz>
+  (nstore-xz xzstore qmins qmaxs)
+  nstore-xz?
+  (xzstore nstore-xz-xzstore)
+  (qmins nstore-xz-qmins)
+  (qmaxs nstore-xz-qmaxs))
+
 ;; Variable with optional constraints
 
 (define-record-type* <nstore-var>
@@ -219,6 +230,12 @@
     (morton-interleave (nstore-morton-ndims c)
                        (nstore-morton-bits c)
                        (nstore-morton-mins c)))
+   ((nstore-xz? c)
+    ;; XZ lower bound: smallest code in the query ranges
+    (let ((ranges (xzstore-ranges (nstore-xz-xzstore c)
+                                   (nstore-xz-qmins c)
+                                   (nstore-xz-qmaxs c))))
+      (if (null? ranges) 0 (caar ranges))))
    (else #f)))
 
 (define (constraint-upper-bound c)
@@ -229,6 +246,12 @@
     (morton-interleave (nstore-morton-ndims c)
                        (nstore-morton-bits c)
                        (nstore-morton-maxs c)))
+   ((nstore-xz? c)
+    ;; XZ upper bound: largest code in the query ranges
+    (let ((ranges (xzstore-ranges (nstore-xz-xzstore c)
+                                   (nstore-xz-qmins c)
+                                   (nstore-xz-qmaxs c))))
+      (if (null? ranges) 0 (cdar (reverse ranges)))))
    (else #f)))
 
 (define (constraint-satisfies? val c)
@@ -242,19 +265,30 @@
                                           (nstore-morton-bits c)
                                           val)
                     (nstore-morton-mins c)
-                    (nstore-morton-maxs c)))))
+                    (nstore-morton-maxs c)))
+   ((nstore-xz? c)
+    ;; XZ satisfaction: the stored code falls within one of the query ranges
+    (let ((ranges (xzstore-ranges (nstore-xz-xzstore c)
+                                   (nstore-xz-qmins c)
+                                   (nstore-xz-qmaxs c))))
+      (any (lambda (range) (and (<= (car range) val) (<= val (cdr range))))
+           ranges)))))
 
 (define (constraint-decode val c)
-  (if (nstore-morton? c)
-      (morton-deinterleave (nstore-morton-ndims c)
-                           (nstore-morton-bits c)
-                           val)
-      val))
+  (cond
+   ((nstore-morton? c)
+    (morton-deinterleave (nstore-morton-ndims c)
+                         (nstore-morton-bits c)
+                         val))
+   ((nstore-xz? c)
+    ;; XZ code is an integer — bind as-is (caller knows the xzstore)
+    val)
+   (else val)))
 
 (define (nstore-var-constrained? v)
   (and (nstore-var? v)
        (not (null? (nstore-var-constraints v)))
-       (any (lambda (c) (or (nstore-gte? c) (nstore-gt? c) (nstore-morton? c)))
+       (any (lambda (c) (or (nstore-gte? c) (nstore-gt? c) (nstore-morton? c) (nstore-xz? c)))
             (nstore-var-constraints v))))
 
 (define (nstore-var-lower v)
@@ -268,7 +302,7 @@
         (or (constraint-upper-bound (car cs)) (loop (cdr cs))))))
 
 (define (nstore-var-upper-inclusive? v)
-  (any (lambda (c) (or (nstore-lte? c) (nstore-morton? c)))
+  (any (lambda (c) (or (nstore-lte? c) (nstore-morton? c) (nstore-xz? c)))
        (nstore-var-constraints v)))
 
 ;; bind* — for nstore-query (no constraints)
@@ -430,8 +464,10 @@
   (call-with-values (lambda () (pattern->index pattern (nstore-indices nstore)))
     (lambda (index subspace)
       (define pattern-prefix (pattern->prefix pattern index))
-      (define base (append (list (nstore-prefix nstore) subspace)
-                           pattern-prefix))
+      (define base-head (append (list (nstore-prefix nstore) subspace)
+                                (if (null? pattern-prefix)
+                                    '()
+                                    (reverse (cdr (reverse pattern-prefix))))))
 
       ;; Check if last prefix element came from a constrained var
       (define last-var
@@ -440,25 +476,47 @@
                (let ((v (list-ref pattern last-idx)))
                  (and (nstore-var? v) (nstore-var-constrained? v) v)))))
 
-      (define lower (byter-encode base))
-      (define upper
-        (if (and last-var (nstore-var-upper last-var))
-            ;; Replace lower bound with upper bound in last position
-            (let ((upper-items (append (list (nstore-prefix nstore) subspace)
-                                       (reverse (cdr (reverse pattern-prefix)))
-                                       (list (nstore-var-upper last-var)))))
-              (if (nstore-var-upper-inclusive? last-var)
-                  (byter-encode (fold-right cons byter-end upper-items))
-                  (byter-encode upper-items)))
-            (byter-encode (fold-right cons byter-end base))))
+      ;; Find XZ constraint if any
+      (define xz-constraint
+        (and last-var
+             (find nstore-xz? (nstore-var-constraints last-var))))
 
-      (filter-map
-       (lambda (pair)
-         (let* ((tuple (cddr (byter-decode (car pair))))
-                (unpermuted (make-tuple tuple index)))
-           (and (nstore-check-constraints pattern unpermuted)
-                (bind*+ pattern unpermuted seed))))
-       (aql-query transaction lower upper)))))
+      (define (decode-and-filter pairs)
+        (filter-map
+         (lambda (pair)
+           (let* ((tuple (cddr (byter-decode (car pair))))
+                  (unpermuted (make-tuple tuple index)))
+             (and (nstore-check-constraints pattern unpermuted)
+                  (bind*+ pattern unpermuted seed))))
+         pairs))
+
+      (if xz-constraint
+          ;; XZ: issue one aql-query per range interval
+          (let ((ranges (xzstore-ranges (nstore-xz-xzstore xz-constraint)
+                                         (nstore-xz-qmins xz-constraint)
+                                         (nstore-xz-qmaxs xz-constraint))))
+            (decode-and-filter
+             (apply append
+                    (map (lambda (range)
+                           (let ((lower (byter-encode (append base-head (list (car range)))))
+                                 (upper (byter-encode (fold-right cons byter-end
+                                                                  (append base-head (list (cdr range)))))))
+                             (aql-query transaction lower upper)))
+                         ranges))))
+
+          ;; Non-XZ: single range scan
+          (let* ((base (append (list (nstore-prefix nstore) subspace)
+                               pattern-prefix))
+                 (lower (byter-encode base))
+                 (upper
+                  (if (and last-var (nstore-var-upper last-var))
+                      (let ((upper-items (append base-head
+                                                  (list (nstore-var-upper last-var)))))
+                        (if (nstore-var-upper-inclusive? last-var)
+                            (byter-encode (fold-right cons byter-end upper-items))
+                            (byter-encode upper-items)))
+                      (byter-encode (fold-right cons byter-end base)))))
+            (decode-and-filter (aql-query transaction lower upper)))))))
 
 (define nstore-where*
   (lambda (transaction nstore pattern from)
