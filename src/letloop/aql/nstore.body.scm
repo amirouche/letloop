@@ -7,6 +7,14 @@
               #t
               (loop (cdr objects)))))))
 
+(define filter-map
+  (lambda (proc lst)
+    (let loop ((lst lst) (out '()))
+      (if (null? lst)
+          (reverse out)
+          (let ((v (proc (car lst))))
+            (loop (cdr lst) (if v (cons v out) out)))))))
+
 (define every
   (lambda (p? objects)
     (let loop ((objects objects))
@@ -173,24 +181,128 @@
           (aql-remove! transaction key)
           (loop (cdr indices) (+ subspace 1)))))))
 
+;; Constraint records
+
+(define-record-type* <nstore-gte> (nstore-gte value) nstore-gte? (value nstore-gte-value))
+(define-record-type* <nstore-gt>  (nstore-gt value)  nstore-gt?  (value nstore-gt-value))
+(define-record-type* <nstore-lte> (nstore-lte value) nstore-lte? (value nstore-lte-value))
+(define-record-type* <nstore-lt>  (nstore-lt value)  nstore-lt?  (value nstore-lt-value))
+
+(define-record-type* <nstore-morton>
+  (nstore-morton ndims bits mins maxs)
+  nstore-morton?
+  (ndims nstore-morton-ndims)
+  (bits nstore-morton-bits)
+  (mins nstore-morton-mins)
+  (maxs nstore-morton-maxs))
+
+;; Variable with optional constraints
+
 (define-record-type* <nstore-var>
-  (nstore-var name)
+  (make-nstore-var name constraints)
   nstore-var?
-  (name nstore-var-name))
+  (name nstore-var-name)
+  (constraints nstore-var-constraints))
+
+(define nstore-var
+  (case-lambda
+    ((name) (make-nstore-var name '()))
+    ((name . constraints) (make-nstore-var name constraints))))
+
+;; Constraint helpers
+
+(define (constraint-lower-bound c)
+  (cond
+   ((nstore-gte? c) (nstore-gte-value c))
+   ((nstore-gt? c) (nstore-gt-value c))
+   ((nstore-morton? c)
+    (morton-interleave (nstore-morton-ndims c)
+                       (nstore-morton-bits c)
+                       (nstore-morton-mins c)))
+   (else #f)))
+
+(define (constraint-upper-bound c)
+  (cond
+   ((nstore-lte? c) (nstore-lte-value c))
+   ((nstore-lt? c) (nstore-lt-value c))
+   ((nstore-morton? c)
+    (morton-interleave (nstore-morton-ndims c)
+                       (nstore-morton-bits c)
+                       (nstore-morton-maxs c)))
+   (else #f)))
+
+(define (constraint-satisfies? val c)
+  (cond
+   ((nstore-gte? c) (memq (byter-compare* val (nstore-gte-value c)) '(equal bigger)))
+   ((nstore-gt? c) (eq? (byter-compare* val (nstore-gt-value c)) 'bigger))
+   ((nstore-lte? c) (memq (byter-compare* val (nstore-lte-value c)) '(equal smaller)))
+   ((nstore-lt? c) (eq? (byter-compare* val (nstore-lt-value c)) 'smaller))
+   ((nstore-morton? c)
+    (morton-in-box? (morton-deinterleave (nstore-morton-ndims c)
+                                          (nstore-morton-bits c)
+                                          val)
+                    (nstore-morton-mins c)
+                    (nstore-morton-maxs c)))))
+
+(define (constraint-decode val c)
+  (if (nstore-morton? c)
+      (morton-deinterleave (nstore-morton-ndims c)
+                           (nstore-morton-bits c)
+                           val)
+      val))
+
+(define (nstore-var-constrained? v)
+  (and (nstore-var? v)
+       (not (null? (nstore-var-constraints v)))
+       (any (lambda (c) (or (nstore-gte? c) (nstore-gt? c) (nstore-morton? c)))
+            (nstore-var-constraints v))))
+
+(define (nstore-var-lower v)
+  (let loop ((cs (nstore-var-constraints v)))
+    (if (null? cs) #f
+        (or (constraint-lower-bound (car cs)) (loop (cdr cs))))))
+
+(define (nstore-var-upper v)
+  (let loop ((cs (nstore-var-constraints v)))
+    (if (null? cs) #f
+        (or (constraint-upper-bound (car cs)) (loop (cdr cs))))))
+
+(define (nstore-var-upper-inclusive? v)
+  (any (lambda (c) (or (nstore-lte? c) (nstore-morton? c)))
+       (nstore-var-constraints v)))
+
+;; bind* — for nstore-query (no constraints)
 
 (define (bind* pattern tuple seed)
-  ;; Associate variables of PATTERN to value of TUPLE with SEED.
   (let loop ((tuple tuple)
              (pattern pattern)
              (out seed))
     (if (null? tuple)
         out
-        (if (nstore-var? (car pattern)) ;; only bind variables
+        (if (nstore-var? (car pattern))
             (loop (cdr tuple)
                   (cdr pattern)
                   (cons (cons (nstore-var-name (car pattern))
                               (car tuple))
                         out))
+            (loop (cdr tuple) (cdr pattern) out)))))
+
+;; bind*+ — for nstore-query* (decodes morton constraints)
+
+(define (bind*+ pattern tuple seed)
+  (let loop ((tuple tuple)
+             (pattern pattern)
+             (out seed))
+    (if (null? tuple)
+        out
+        (if (nstore-var? (car pattern))
+            (let* ((v (car pattern))
+                   (val (car tuple))
+                   (morton-c (find nstore-morton? (nstore-var-constraints v)))
+                   (bound-val (if morton-c (constraint-decode val morton-c) val)))
+              (loop (cdr tuple)
+                    (cdr pattern)
+                    (cons (cons (nstore-var-name v) bound-val) out)))
             (loop (cdr tuple) (cdr pattern) out)))))
 
 (define (pattern->combination pattern)
@@ -201,7 +313,8 @@
         (reverse out)
         (loop (cdr pattern)
               (+ 1 index)
-              (if (nstore-var? (car pattern))
+              (if (and (nstore-var? (car pattern))
+                       (not (nstore-var-constrained? (car pattern))))
                   out
                   (cons index out))))))
 
@@ -221,14 +334,21 @@
 
 (define (pattern->prefix pattern index)
   ;; Return the list that correspond to INDEX, that is the items
-  ;; of PATTERN that are not variables. This is used as the prefix
-  ;; for the range query done later.
+  ;; of PATTERN that are not variables (or constrained var lower
+  ;; bounds). Stops at unconstrained variables.
   (let loop ((index index)
              (out '()))
     (let ((v (list-ref pattern (car index))))
-      (if (nstore-var? v)
-          (reverse out)
-          (loop (cdr index) (cons v out))))))
+      (cond
+       ((and (nstore-var? v) (not (nstore-var-constrained? v)))
+        ;; Unconstrained variable: stop
+        (reverse out))
+       ((nstore-var-constrained? v)
+        ;; Constrained variable: include lower bound, then stop
+        (reverse (cons (nstore-var-lower v) out)))
+       (else
+        ;; Exact value: include and continue
+        (loop (cdr index) (cons v out)))))))
 
 (define (nstore-from transaction nstore pattern seed)
   (call-with-values (lambda () (pattern->index pattern (nstore-indices nstore)))
@@ -290,4 +410,72 @@
           (if (null? patterns)
               results
               (loop (nstore-where transaction nstore (car patterns) results)
+                    (cdr patterns)))))))
+
+;; nstore-query* — supports constrained variables
+
+(define (nstore-check-constraints pattern unpermuted)
+  ;; Verify all constrained var values satisfy their constraints
+  (let loop ((pattern pattern) (tuple unpermuted))
+    (if (null? pattern)
+        #t
+        (if (and (nstore-var? (car pattern))
+                 (nstore-var-constrained? (car pattern)))
+            (and (every (lambda (c) (constraint-satisfies? (car tuple) c))
+                        (nstore-var-constraints (car pattern)))
+                 (loop (cdr pattern) (cdr tuple)))
+            (loop (cdr pattern) (cdr tuple))))))
+
+(define (nstore-from* transaction nstore pattern seed)
+  (call-with-values (lambda () (pattern->index pattern (nstore-indices nstore)))
+    (lambda (index subspace)
+      (define pattern-prefix (pattern->prefix pattern index))
+      (define base (append (list (nstore-prefix nstore) subspace)
+                           pattern-prefix))
+
+      ;; Check if last prefix element came from a constrained var
+      (define last-var
+        (and (> (length pattern-prefix) 0)
+             (let ((last-idx (list-ref index (- (length pattern-prefix) 1))))
+               (let ((v (list-ref pattern last-idx)))
+                 (and (nstore-var? v) (nstore-var-constrained? v) v)))))
+
+      (define lower (byter-encode base))
+      (define upper
+        (if (and last-var (nstore-var-upper last-var))
+            ;; Replace lower bound with upper bound in last position
+            (let ((upper-items (append (list (nstore-prefix nstore) subspace)
+                                       (reverse (cdr (reverse pattern-prefix)))
+                                       (list (nstore-var-upper last-var)))))
+              (if (nstore-var-upper-inclusive? last-var)
+                  (byter-encode (fold-right cons byter-end upper-items))
+                  (byter-encode upper-items)))
+            (byter-encode (fold-right cons byter-end base))))
+
+      (filter-map
+       (lambda (pair)
+         (let* ((tuple (cddr (byter-decode (car pair))))
+                (unpermuted (make-tuple tuple index)))
+           (and (nstore-check-constraints pattern unpermuted)
+                (bind*+ pattern unpermuted seed))))
+       (aql-query transaction lower upper)))))
+
+(define nstore-where*
+  (lambda (transaction nstore pattern from)
+    (apply append
+           (map (lambda (bindings)
+                  (nstore-from* transaction nstore
+                                (pattern-bind pattern bindings)
+                                bindings))
+                from))))
+
+(define nstore-query*
+  (lambda (transaction nstore patterns)
+    (if (null? patterns)
+        '()
+        (let loop ((results (nstore-from* transaction nstore (car patterns) '()))
+                   (patterns (cdr patterns)))
+          (if (null? patterns)
+              results
+              (loop (nstore-where* transaction nstore (car patterns) results)
                     (cdr patterns)))))))
