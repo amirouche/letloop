@@ -118,6 +118,120 @@
           (and (<= (car los) (car vs) (car his))
                (loop (cdr vs) (cdr los) (cdr his)))))))
 
+;; Morton range decomposition — compute Z-order ranges covering a bounding box.
+;; Uses quadtree BFS like xzstore-ranges but for points (no extension).
+;; Returns sorted, merged list of (min . max) integer pairs.
+
+(define-record-type* <morton-cell>
+  (make-morton-cell mins maxs)
+  morton-cell?
+  (mins morton-cell-mins)
+  (maxs morton-cell-maxs))
+
+(define (morton-cell-contained? cell qmins qmaxs)
+  (let loop ((cmins (morton-cell-mins cell)) (cmaxs (morton-cell-maxs cell))
+             (qmins qmins) (qmaxs qmaxs))
+    (or (null? cmins)
+        (and (<= (car qmins) (car cmins))
+             (>= (car qmaxs) (car cmaxs))
+             (loop (cdr cmins) (cdr cmaxs) (cdr qmins) (cdr qmaxs))))))
+
+(define (morton-cell-overlaps? cell qmins qmaxs)
+  (let loop ((cmins (morton-cell-mins cell)) (cmaxs (morton-cell-maxs cell))
+             (qmins qmins) (qmaxs qmaxs))
+    (or (null? cmins)
+        (and (<= (car qmins) (car cmaxs))
+             (>= (car qmaxs) (car cmins))
+             (loop (cdr cmins) (cdr cmaxs) (cdr qmins) (cdr qmaxs))))))
+
+(define (morton-cell-children cell ndims)
+  (let* ((mins (morton-cell-mins cell))
+         (maxs (morton-cell-maxs cell))
+         (centers (map (lambda (lo hi) (quotient (+ lo hi) 2)) mins maxs))
+         (n-children (expt 2 ndims)))
+    (let loop ((idx 0) (out '()))
+      (if (= idx n-children)
+          (reverse out)
+          (let* ((child-mins
+                  (let dloop ((d 0) (mn mins) (ct centers) (acc '()))
+                    (if (null? mn) (reverse acc)
+                        (dloop (+ d 1) (cdr mn) (cdr ct)
+                               (cons (if (zero? (bitwise-and idx (expt 2 d)))
+                                         (car mn) (+ (car ct) 1))
+                                     acc)))))
+                 (child-maxs
+                  (let dloop ((d 0) (mx maxs) (ct centers) (acc '()))
+                    (if (null? mx) (reverse acc)
+                        (dloop (+ d 1) (cdr mx) (cdr ct)
+                               (cons (if (zero? (bitwise-and idx (expt 2 d)))
+                                         (car ct) (car mx))
+                                     acc))))))
+            (loop (+ idx 1) (cons (make-morton-cell child-mins child-maxs) out)))))))
+
+(define (bv<=? a b)
+  (memq (byter-compare a b) '(smaller equal)))
+
+(define (bv-max a b)
+  (if (eq? 'bigger (byter-compare a b)) a b))
+
+(define morton-merge-ranges
+  (lambda (sorted-ranges)
+    (if (null? sorted-ranges)
+        '()
+        (let loop ((ranges (cdr sorted-ranges))
+                   (current (car sorted-ranges))
+                   (out '()))
+          (if (null? ranges)
+              (reverse (cons current out))
+              (let ((next (car ranges)))
+                ;; Adjacent or overlapping bytevector ranges
+                (if (bv<=? (car next) (cdr current))
+                    (loop (cdr ranges)
+                          (cons (car current) (bv-max (cdr current) (cdr next)))
+                          out)
+                    (loop (cdr ranges) next (cons current out)))))))))
+
+(define morton-ranges
+  (lambda (ndims bits mins maxs)
+    (let* ((max-val (- (expt 2 bits) 1))
+           (root (make-morton-cell (make-list ndims 0) (make-list ndims max-val)))
+           (max-ranges 200))
+
+      (define (cell-code-range cell)
+        ;; Morton code range as bytevector pairs for all points in this cell
+        (cons (morton-interleave ndims bits (morton-cell-mins cell))
+              (morton-interleave ndims bits (morton-cell-maxs cell))))
+
+      (let level-loop ((current (morton-cell-children root ndims))
+                       (ranges '())
+                       (count 0)
+                       (depth 0)
+                       (max-depth bits))
+
+        (cond
+         ((null? current)
+          (morton-merge-ranges (list-sort (lambda (a b) (eq? 'smaller (byter-compare (car a) (car b)))) ranges)))
+
+         ((or (>= count max-ranges) (>= depth max-depth))
+          (let bottom ((elts current) (acc ranges))
+            (if (null? elts)
+                (morton-merge-ranges (list-sort (lambda (a b) (< (car a) (car b))) acc))
+                (bottom (cdr elts) (cons (cell-code-range (car elts)) acc)))))
+
+         (else
+          (let elem-loop ((elts current) (next '()) (ranges ranges) (count count))
+            (if (null? elts)
+                (level-loop (reverse next) ranges count (+ depth 1) max-depth)
+                (let ((head (car elts)) (rest (cdr elts)))
+                  (cond
+                   ((morton-cell-contained? head mins maxs)
+                    (elem-loop rest next (cons (cell-code-range head) ranges) (+ count 1)))
+                   ((morton-cell-overlaps? head mins maxs)
+                    (elem-loop rest (append (morton-cell-children head ndims) next)
+                               (cons (cell-code-range head) ranges) (+ count 1)))
+                   (else
+                    (elem-loop rest next ranges count))))))))))))
+
 (define make-coroutine-generator
   (lambda (proc)
     (define return #f)
