@@ -156,7 +156,7 @@
     (let loop ((indices (nstore-indices nstore))
                (subspace 0))
       (unless (null? indices)
-        (let ((key (byter-write (append (list prefix subspace)
+        (let ((key (byter-encode (append (list prefix subspace)
                                         (permute items (car indices))))))
           (aql-set! transaction key value)
           (loop (cdr indices) (+ subspace 1)))))))
@@ -168,7 +168,7 @@
     (let loop ((indices (nstore-indices nstore))
                (subspace 0))
       (unless (null? indices)
-        (let ((key (byter-write (append (list prefix subspace)
+        (let ((key (byter-encode (append (list prefix subspace)
                                         (permute items (car indices))))))
           (aql-remove! transaction key)
           (loop (cdr indices) (+ subspace 1)))))))
@@ -244,16 +244,16 @@
       (define pattern-prefix (pattern->prefix pattern index))
       (define items (append (list (nstore-prefix nstore) subspace)
                             pattern-prefix))
-      (define lower (byter-write items))
+      (define lower (byter-encode items))
       ;; Upper bound: same prefix but with a bytevector sentinel as
       ;; the last cdr instead of null. Since bytevector tag (#x06) >
       ;; pair tag (#x03) > null (#x00), this is greater than any
       ;; list extension of items.
-      (define upper (byter-write (fold-right cons byter-end items)))
+      (define upper (byter-encode (fold-right cons byter-end items)))
 
       (gmap (lambda (pair)
               (bind* pattern
-                     (make-tuple (cddr (byter-read (car pair))) index)
+                     (make-tuple (cddr (byter-decode (car pair))) index)
                      seed))
             (aql-query transaction lower upper)))))
 
@@ -303,7 +303,7 @@
     ;; the following `list` is the index of the base subspace in
     ;; nstore-indices
 
-    (let* ((key (byter-write (append (list (nstore-prefix nstore) 0) items))))
+    (let* ((key (byter-encode (append (list (nstore-prefix nstore) 0) items))))
        (aql-query transaction key))))
 
 (define nstore-query
