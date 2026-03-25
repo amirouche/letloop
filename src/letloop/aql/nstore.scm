@@ -4,7 +4,7 @@
   (export make-nstore nstore-add! nstore-clear!
           nstore-var nstore-var? nstore-var-name
           nstore-gte nstore-gt nstore-lte nstore-lt
-          nstore-morton
+          nstore-morton nstore-xz
           nstore-ref nstore-query nstore-query*
 
           ~check-nstore-000
@@ -14,13 +14,15 @@
           ~check-nstore-004
           ~check-nstore-005
           ~check-nstore-006
-          ~check-nstore-007)
+          ~check-nstore-007
+          ~check-nstore-008)
 
   (import (chezscheme)
           (letloop r999)
           (letloop aql)
           (letloop aql shims)
           (letloop aql morton)
+          (letloop aql xz)
           (letloop byter))
 
   (begin

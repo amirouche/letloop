@@ -151,3 +151,31 @@
                                     (nstore-var 'category)
                                     (nstore-var 'name)))))))))))
 
+(define ~check-nstore-008
+  (lambda ()
+    ;; XZ constraint — query extended objects (bounding boxes) within a region
+    (let* ((xz (make-xzstore 2 8 (list (cons 0.0 100.0) (cons 0.0 100.0))))
+           (okvs (make-aql))
+           (store (make-nstore (bytevector 63) 3)))
+      (aql-in-transaction okvs
+        (lambda (tx)
+          ;; Store (xz-code, category, name) triples
+          (nstore-add! tx store
+            (list (xzstore-index xz '(10.0 10.0) '(15.0 15.0)) "building" "Library")
+            (bytevector))
+          (nstore-add! tx store
+            (list (xzstore-index xz '(50.0 50.0) '(55.0 55.0)) "building" "School")
+            (bytevector))
+          (nstore-add! tx store
+            (list (xzstore-index xz '(80.0 80.0) '(85.0 85.0)) "building" "Hospital")
+            (bytevector))))
+      ;; Query region [5,5]-[60,60] — should find Library and School
+      (check '("Library" "School")
+             (aql-in-transaction okvs
+               (lambda (tx)
+                 (map (lambda (b) (cdr (assq 'name b)))
+                      (nstore-query* tx store
+                        (list (list (nstore-var 'loc (nstore-xz xz '(5.0 5.0) '(60.0 60.0)))
+                                    (nstore-var 'category)
+                                    (nstore-var 'name)))))))))))
+
