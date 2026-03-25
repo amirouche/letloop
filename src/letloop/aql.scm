@@ -480,18 +480,7 @@
        ((aql-cursor? handle)
         (apply aql-keys (aql-cursor-transaction handle) args)))))
 
-  (define aql-bytevector-next-prefix
-    (lambda (bv)
-      (let loop ((len (bytevector-length bv)))
-        (if (fxzero? len)
-            #f ;; all bytes were 255
-            (let ((last (bytevector-u8-ref bv (fx- len 1))))
-              (if (fx=? last 255)
-                  (loop (fx- len 1))
-                  (let ((out (make-bytevector len)))
-                    (bytevector-copy! bv 0 out 0 (fx- len 1))
-                    (bytevector-u8-set! out (fx- len 1) (fx+ last 1))
-                    out)))))))
+  (define aql-bytevector-next-prefix byter-next-prefix)
 
   (include "letloop/aql/aql.check.scm")
 
