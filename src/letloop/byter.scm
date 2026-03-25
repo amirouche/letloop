@@ -26,6 +26,7 @@
           ~check-byter-101
           ~check-byter-102
           ~check-byter-103
+          ~check-byter-104
           ~check-byter-998/seed
           ~check-byter-998/random
           ~check-byter-999/seed
@@ -628,6 +629,200 @@
                 (iota 128))
       #t))
 
+  (define ~check-byter-104
+    (lambda ()
+      ;; -------------------------------------------------------
+      ;; exwen key encoding assumption tests
+      ;;
+      ;; The claim: if we encode keys as
+      ;;
+      ;;   (byter-write (list prefix uid attribute-name))
+      ;;
+      ;; then a range scan from
+      ;;
+      ;;   (byter-write (list prefix uid))
+      ;;
+      ;; to
+      ;;
+      ;;   (byter-write (list prefix uid (bytevector 255)))
+      ;;
+      ;; will capture all attribute keys for that entity and
+      ;; nothing else.
+      ;;
+      ;; This requires:
+      ;;
+      ;;   1. (list prefix uid) < (list prefix uid attr) for any attr
+      ;;   2. (list prefix uid attr) < (list prefix uid (bytevector 255))
+      ;;   3. (list prefix other-uid attr) is NOT in that range
+      ;;      when other-uid ≠ uid
+      ;;   4. attributes sort consistently within an entity
+      ;; -------------------------------------------------------
+
+      (define pk
+        (lambda args
+          (display ";; ")
+          (write args)
+          (newline)
+          (flush-output-port)
+          (car (reverse args))))
+
+      (define (assert-smaller label a b)
+        (let ((result (byter-compare (byter-write a) (byter-write b))))
+          (unless (eq? result 'smaller)
+            (error 'assert-smaller
+                   (string-append label ": expected smaller, got ")
+                   result a b))))
+
+      (define (assert-bigger label a b)
+        (let ((result (byter-compare (byter-write a) (byter-write b))))
+          (unless (eq? result 'bigger)
+            (error 'assert-bigger
+                   (string-append label ": expected bigger, got ")
+                   result a b))))
+
+      (define (assert-equal label a b)
+        (let ((result (byter-compare (byter-write a) (byter-write b))))
+          (unless (eq? result 'equal)
+            (error 'assert-equal
+                   (string-append label ": expected equal, got ")
+                   result a b))))
+
+      ;; --- test fixtures ---
+
+      (define prefix 'todos)
+      (define uid-a 1)
+      (define uid-b 2)
+
+      (define start (list prefix uid-a))
+      (define end   (list prefix uid-a (bytevector 255)))
+
+      ;; --- test 1: two-element list < three-element list ---
+      ;; (list prefix uid) < (list prefix uid 'todo/title)
+      ;;
+      ;; structurally: (cons prefix (cons uid '()))
+      ;;            vs (cons prefix (cons uid (cons 'todo/title '())))
+      ;;
+      ;; they diverge at the third position: '() (tag #x03)
+      ;; vs (cons ...) (tag #x02). pair tag #x02 < null tag #x03.
+      ;;
+      ;; WAIT — that means the three-element list sorts BEFORE
+      ;; the two-element list. #x02 < #x03.
+      ;;
+      ;; let's find out.
+
+      (display "test 1: start < key?\n")
+      (let* ((key (list prefix uid-a 'todo/title))
+             (result (byter-compare (byter-write start) (byter-write key))))
+        (pk 'test-1 result)
+        ;; if this prints 'bigger, our range scan is backwards
+        )
+
+      ;; --- test 2: key < end? ---
+      (display "test 2: key < end?\n")
+      (let* ((key (list prefix uid-a 'todo/title))
+             (result (byter-compare (byter-write key) (byter-write end))))
+        (pk 'test-2 result)
+        )
+
+      ;; --- test 3: multiple attributes sort within range ---
+      (display "test 3: multiple attributes within range\n")
+      (for-each
+       (lambda (attr)
+         (let* ((key (list prefix uid-a attr))
+                (vs-start (byter-compare (byter-write start) (byter-write key)))
+                (vs-end   (byter-compare (byter-write key) (byter-write end))))
+           (pk 'test-3 attr vs-start vs-end)))
+       '(todo/done todo/title todo/created-at actor/email))
+
+      ;; --- test 4: different uid is outside range ---
+      (display "test 4: different uid outside range\n")
+      (let* ((foreign-key (list prefix uid-b 'todo/title))
+             (vs-start (byter-compare (byter-write start) (byter-write foreign-key)))
+             (vs-end   (byter-compare (byter-write foreign-key) (byter-write end))))
+        (pk 'test-4-vs-start vs-start)
+        (pk 'test-4-vs-end   vs-end)
+        ;; foreign key should be BIGGER than end (uid-b > uid-a)
+        )
+
+      ;; --- test 5: attribute sort order is stable ---
+      (display "test 5: attribute ordering\n")
+      (let* ((key-done  (byter-write (list prefix uid-a 'todo/done)))
+             (key-title (byter-write (list prefix uid-a 'todo/title))))
+        (pk 'test-5-done-vs-title (byter-compare key-done key-title))
+        ;; should be consistent with (byter-compare (byter-write 'todo/done)
+        ;;                                          (byter-write 'todo/title))
+        (pk 'test-5-bare (byter-compare (byter-write 'todo/done)
+                                        (byter-write 'todo/title))))
+
+      ;; --- test 6: the critical pair/null tag question ---
+      ;; list encoding: (list a b) = (cons a (cons b '()))
+      ;; at the divergence point we compare '() vs (cons attr ...)
+      ;; null tag = #x03, pair tag = #x02
+      ;; so #x02 < #x03 means three-element sorts BEFORE two-element
+      ;;
+      ;; if that's the case, we need to swap: start should be the
+      ;; shorter list and end the sentinel, but only if shorter > longer.
+      ;; let's just see what happens.
+
+      (display "test 6: raw tag check\n")
+      (pk 'null-tag #x03)
+      (pk 'pair-tag #x02)
+      (pk 'pair<null? (< #x02 #x03))
+
+      ;; if pair < null, then (list p u attr) < (list p u)
+      ;; and our range scan needs (list p u attr) as START
+      ;; which breaks the model.
+      ;;
+      ;; possible fix: use vectors instead of lists for keys
+      ;; since vector encoding uses length prefix, not recursive cons.
+
+      (display "test 7: vector encoding alternative\n")
+      (let* ((vstart (vector prefix uid-a))
+             (vkey   (vector prefix uid-a 'todo/title))
+             (vend   (vector prefix uid-a (bytevector 255))))
+        (pk 'vec-start<key (byter-compare (byter-write vstart) (byter-write vkey)))
+        (pk 'vec-key<end   (byter-compare (byter-write vkey) (byter-write vend))))
+
+      ;; vector uses byter-vector (#x04) tag then elements then
+      ;; byter-vector-end (#x05). A two-element vector hits #x05
+      ;; at position 3. A three-element vector has another element
+      ;; at position 3. Since any element tag > #x05? Let's check:
+      ;; #x05 vs #x08 (symbol tag) — #x05 < #x08, so three-element
+      ;; sorts AFTER two-element. That's what we want.
+
+      (display "test 8: vector end tag check\n")
+      (pk 'vector-end-tag #x05)
+      (pk 'symbol-tag #x08)
+      (pk 'string-tag #x07)
+      (pk 'bytevector-tag #x06)
+      (pk 'bool-false-tag #x00)
+      (pk 'bool-true-tag #x01)
+      ;; #x00 and #x01 are BELOW #x05 — booleans as attributes
+      ;; would sort before vector-end, breaking the range.
+      ;; but we're using symbols for attribute names, so #x08 > #x05. ok.
+
+      ;; --- test 9: what about integer uids? ---
+
+      ;; all above #x05, so vector encoding works for integer uids too.
+
+      (display "test 9: integer uid with vectors\n")
+      (let* ((vstart (vector 'todos 42))
+             (vkey   (vector 'todos 42 'todo/title))
+             (vend   (vector 'todos 42 (bytevector 255))))
+        (pk 'int-uid-start<key (byter-compare (byter-write vstart) (byter-write vkey)))
+        (pk 'int-uid-key<end   (byter-compare (byter-write vkey) (byter-write vend))))
+
+      ;; --- test 10: uuid as bytevector uid ---
+      (display "test 10: bytevector uid (pseudo-uuid)\n")
+      (let* ((fake-uuid (bytevector 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16))
+             (vstart (vector 'todos fake-uuid))
+             (vkey   (vector 'todos fake-uuid 'todo/title))
+             (vend   (vector 'todos fake-uuid (bytevector 255))))
+        (pk 'bv-uid-start<key (byter-compare (byter-write vstart) (byter-write vkey)))
+        (pk 'bv-uid-key<end   (byter-compare (byter-write vkey) (byter-write vend))))
+
+      (display "\ndone.\n")))
+  
   (define random-object-max-complexity (expt 10 4))
 
   (define random-object-complexity (make-parameter random-object-max-complexity))
