@@ -106,7 +106,7 @@
                 (out '()))
       (if (null? cx)
           (begin (unless (ok? (combinations tab) out)
-                   (error 'okvs "impossible..."))
+                   (error 'nstore "impossible..."))
                  (list-sort lex< out))
           (let loop2 ((L (map (lambda (i) (cons i (not (not (memv i (car cx)))))) tab))
                       (a '())
@@ -150,7 +150,7 @@
 (define nstore-add!
   (lambda (transaction nstore items value)
     (define prefix (nstore-prefix nstore))
-    ;; add ITEMS into the okvs and prefix each of the permutation
+    ;; add ITEMS into aql and prefix each of the permutation
     ;; of ITEMS with the nstore-prefix and the index of the
     ;; permutation inside the list INDICES called SUBSPACE.
     (let loop ((indices (nstore-indices nstore))
@@ -158,7 +158,7 @@
       (unless (null? indices)
         (let ((key (byter-write (append (list prefix subspace)
                                         (permute items (car indices))))))
-          (okvs-set! transaction key value)
+          (aql-set! transaction key value)
           (loop (cdr indices) (+ subspace 1)))))))
 
 (define nstore-clear!
@@ -170,7 +170,7 @@
       (unless (null? indices)
         (let ((key (byter-write (append (list prefix subspace)
                                         (permute items (car indices))))))
-          (okvs-clear! transaction key)
+          (aql-remove! transaction key)
           (loop (cdr indices) (+ subspace 1)))))))
 
 (define-record-type* <nstore-var>
@@ -249,13 +249,13 @@
       ;; the last cdr instead of null. Since bytevector tag (#x06) >
       ;; pair tag (#x03) > null (#x00), this is greater than any
       ;; list extension of items.
-      (define upper (byter-write (fold-right cons #vu8(255) items)))
+      (define upper (byter-write (fold-right cons byter-end items)))
 
       (gmap (lambda (pair)
               (bind* pattern
                      (make-tuple (cddr (byter-read (car pair))) index)
                      seed))
-            (okvs-query transaction lower upper)))))
+            (aql-query transaction lower upper)))))
 
 (define (pattern-bind pattern seed)
   ;; Return a pattern where variables that have a binding in SEED
@@ -304,7 +304,7 @@
     ;; nstore-indices
 
     (let* ((key (byter-write (append (list (nstore-prefix nstore) 0) items))))
-       (okvs-query transaction key))))
+       (aql-query transaction key))))
 
 (define nstore-query
   (lambda (transaction nstore patterns)

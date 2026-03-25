@@ -1,6 +1,7 @@
 (library (letloop byter)
 
-  (export byter-write
+  (export byter-end
+          byter-write
           byter-read
           byter-compare
           byter-next-prefix
@@ -126,6 +127,8 @@
   ;; ... after zero
 
   (define byter-escape #xFF)
+
+  (define byter-end (bytevector 255))
 
   (define boolean-compare
     (lambda (a b)
