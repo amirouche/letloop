@@ -415,8 +415,8 @@
        ((aql? handle)
         (call-with-aql-transaction handle (lambda (tx) (aql-remove! tx key other))))
        ((aql-transaction? handle)
-        (generator-foreach (lambda (x) (aql-remove! handle (car x)))
-                           (aql-query handle key other)))))))
+        (for-each (lambda (x) (aql-remove! handle (car x)))
+                  (aql-query handle key other)))))))
 
   (define aql-query
     (lambda (handle . args)
@@ -431,9 +431,15 @@
                 ;; Otherwise `out` is a generator, convert to a list.
                 (generator->list out)))))
        ((aql-transaction? handle)
-        (apply aql-query-base handle args))
+        (let ((out (apply aql-query-base handle args)))
+          (if (null? (cdr args))
+              out
+              (generator->list out))))
        ((aql-cursor? handle)
-        (apply aql-query-base (aql-cursor-transaction handle) args)))))
+        (let ((out (apply aql-query-base (aql-cursor-transaction handle) args)))
+          (if (null? (cdr args))
+              out
+              (generator->list out)))))))
 
   ;; New public API
 
@@ -472,11 +478,7 @@
               (let ((val (aql-cursor-ref handle key)))
                 (if val key #f)))
             ;; range: return list of keys
-            (let ((gen (apply aql-query-base handle args)))
-              (generator->list
-               (make-coroutine-generator
-                (lambda (yield)
-                  (generator-foreach (lambda (pair) (yield (car pair))) gen)))))))
+            (map car (apply aql-query handle args))))
        ((aql-cursor? handle)
         (apply aql-keys (aql-cursor-transaction handle) args)))))
 

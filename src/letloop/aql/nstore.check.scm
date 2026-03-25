@@ -37,14 +37,6 @@
             ;; ref
             (nstore-ref tx triplestore '("P4X432" blog/title "hyper.dev")))))))))
 
-(define generator->list
-  (lambda (g)
-    (let fx ()
-      (let ((object (g)))
-        (if (eof-object? object)
-            '()
-            (cons object (fx)))))))
-
 (define ~check-nstore-003
   (lambda ()
     (check '("DIY a database" "DIY a full-text search engine")
@@ -66,18 +58,17 @@
         ;; query
         (aql-in-transaction okvs
           (lambda (tx)
-            (generator->list
-             (gmap (lambda (x) (cdr (assq 'post/title x)))
-                   (nstore-query tx triplestore
-                                 (list (list (nstore-var 'blog/uid)
-                                             'blog/title
-                                             "hyper.dev")
-                                       (list (nstore-var 'post/uid)
-                                             'post/blog
-                                             (nstore-var 'blog/uid))
-                                      (list (nstore-var 'post/uid)
-                                            'post/title
-                                            (nstore-var 'post/title))))))))))))
+            (map (lambda (x) (cdr (assq 'post/title x)))
+                 (nstore-query tx triplestore
+                               (list (list (nstore-var 'blog/uid)
+                                           'blog/title
+                                           "hyper.dev")
+                                     (list (nstore-var 'post/uid)
+                                           'post/blog
+                                           (nstore-var 'blog/uid))
+                                     (list (nstore-var 'post/uid)
+                                           'post/title
+                                           (nstore-var 'post/title)))))))))))
 
 (define ~check-nstore-004
   (lambda ()
@@ -91,9 +82,8 @@
                  (nstore-add! tx triplestore '("P4X434" blog/title "hypermove.net") (bytevector))))
              (aql-in-transaction okvs
                (lambda (tx)
-                 (generator->list
-                  (gmap
-                   (lambda (item) (cdr (assq 'title item)))
-                   (nstore-query tx triplestore (list (list (nstore-var 'uid)
-                                                            'blog/title
-                                                            (nstore-var 'title))))))))))))
+                 (map (lambda (item) (cdr (assq 'title item)))
+                      (nstore-query tx triplestore
+                                    (list (list (nstore-var 'uid)
+                                                'blog/title
+                                                (nstore-var 'title)))))))))))

@@ -230,14 +230,6 @@
           (reverse out)
           (loop (cdr index) (cons v out))))))
 
-(define gmap
-  (lambda (proc g)
-    (lambda ()
-      (let ((object (g)))
-        (if (eof-object? object)
-            (eof-object)
-            (proc object))))))
-
 (define (nstore-from transaction nstore pattern seed)
   (call-with-values (lambda () (pattern->index pattern (nstore-indices nstore)))
     (lambda (index subspace)
@@ -251,11 +243,11 @@
       ;; list extension of items.
       (define upper (byter-encode (fold-right cons byter-end items)))
 
-      (gmap (lambda (pair)
-              (bind* pattern
-                     (make-tuple (cddr (byter-decode (car pair))) index)
-                     seed))
-            (aql-query transaction lower upper)))))
+      (map (lambda (pair)
+             (bind* pattern
+                    (make-tuple (cddr (byter-decode (car pair))) index)
+                    seed))
+           (aql-query transaction lower upper)))))
 
 (define (pattern-bind pattern seed)
   ;; Return a pattern where variables that have a binding in SEED
@@ -268,32 +260,15 @@
              item))
        pattern))
 
-(define (gconcatenate generator)
-  ;; Return a generator that yields the elements of the generators
-  ;; produced by the given GENERATOR. Similar to gflatten but
-  ;; GENERATOR contains other generators instead of lists.
-  (let ((state eof-object))
-    (lambda ()
-      (let ((value (state)))
-        (if (eof-object? value)
-            (let loop ((new (generator)))
-              (if (eof-object? new)
-                  new
-                  (let ((value (new)))
-                    (if (eof-object? value)
-                        (loop (generator))
-                        (begin (set! state new)
-                               value)))))
-            value)))))
-
 (define nstore-where
   (lambda (transaction nstore pattern from)
-    (gconcatenate
-     (gmap (lambda (bindings) (nstore-from transaction
-                                           nstore
-                                           (pattern-bind pattern bindings)
-                                           bindings))
-           from))))
+    (apply append
+           (map (lambda (bindings)
+                  (nstore-from transaction
+                               nstore
+                               (pattern-bind pattern bindings)
+                               bindings))
+                from))))
 
 (define nstore-ref
   (lambda (transaction nstore items)
@@ -309,10 +284,10 @@
 (define nstore-query
   (lambda (transaction nstore patterns)
     (if (null? patterns)
-        (eof-object)
-        (let loop ((g (nstore-from transaction nstore (car patterns) '()))
+        '()
+        (let loop ((results (nstore-from transaction nstore (car patterns) '()))
                    (patterns (cdr patterns)))
           (if (null? patterns)
-              g
-              (loop (nstore-where transaction nstore (car patterns) g)
+              results
+              (loop (nstore-where transaction nstore (car patterns) results)
                     (cdr patterns)))))))
