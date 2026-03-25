@@ -24,6 +24,11 @@
           ~check-byter-010
           ~check-byter-011
           ~check-byter-012
+          ~check-byter-013
+          ~check-byter-014
+          ~check-byter-015
+          ~check-byter-016
+          ~check-byter-017/random
           ~check-byter-100
           ~check-byter-101
           ~check-byter-102
@@ -122,6 +127,7 @@
   (define byter-bytevector #x06)
   (define byter-string #x07)
   (define byter-symbol #x08)
+  (define byter-flonum #x09)
 
   ;; before zero ...
   (define byter-zero #x20)
@@ -232,6 +238,11 @@
     (lambda (a b)
       (string-compare (symbol->string a) (symbol->string b))))
 
+  (define flonum-compare
+    (lambda (a b)
+      (if (fl<? a b) 'smaller
+          (if (fl=? a b) 'equal 'bigger))))
+
   (define byter-spec
     (list (list null? byter-null (lambda (a b) 'equal))
           (list boolean? byter-false boolean-compare)
@@ -240,7 +251,8 @@
           (list vector? byter-vector vector-compare)
           (list bytevector? byter-bytevector byter-compare)
           (list string? byter-string string-compare)
-          (list symbol? byter-symbol symbol-compare)))
+          (list symbol? byter-symbol symbol-compare)
+          (list flonum? byter-flonum flonum-compare)))
 
   ;; helpers
 
@@ -327,6 +339,47 @@
       (call-with-values (lambda () (byter-bytevector-unpack bytevector index))
         (lambda (bytevector index)
           (values (string->symbol (utf8->string bytevector)) index)))))
+
+  (define byter-flonum-pack
+    (lambda (accumulator value)
+      (accumulator byter-flonum)
+      (let ((bv (make-bytevector 8)))
+        (bytevector-ieee-double-set! bv 0 value 'big)
+        (if (fx>=? (bytevector-u8-ref bv 0) #x80)
+            ;; Negative: flip all bits for correct ordering
+            (let loop ((i 0))
+              (unless (fx=? i 8)
+                (accumulator (fxlogxor (bytevector-u8-ref bv i) #xFF))
+                (loop (fx+ i 1))))
+            ;; Positive (including +0): flip sign bit
+            (begin
+              (accumulator (fxlogior (bytevector-u8-ref bv 0) #x80))
+              (let loop ((i 1))
+                (unless (fx=? i 8)
+                  (accumulator (bytevector-u8-ref bv i))
+                  (loop (fx+ i 1)))))))))
+
+  (define byter-flonum-unpack
+    (lambda (bytevector index)
+      (let ((bv (make-bytevector 8))
+            (first (bytevector-u8-ref bytevector (fx+ index 1))))
+        (if (fx>=? first #x80)
+            ;; Was positive: flip sign bit back
+            (begin
+              (bytevector-u8-set! bv 0 (fxlogxor first #x80))
+              (let loop ((i 1))
+                (unless (fx=? i 8)
+                  (bytevector-u8-set! bv i
+                    (bytevector-u8-ref bytevector (fx+ index 1 i)))
+                  (loop (fx+ i 1)))))
+            ;; Was negative: flip all bits back
+            (let loop ((i 0))
+              (unless (fx=? i 8)
+                (bytevector-u8-set! bv i
+                  (fxlogxor (bytevector-u8-ref bytevector (fx+ index 1 i)) #xFF))
+                (loop (fx+ i 1)))))
+        (values (bytevector-ieee-double-ref bv 0 'big)
+                (fx+ index 9)))))
 
   (define integer->bytevector
     (lambda (integer)
@@ -428,6 +481,7 @@
              (if (positive? object)
                  (byter-positive-integer-pack accumulator object)
                  (byter-negative-integer-pack accumulator object))))
+        ((flonum? object) (byter-flonum-pack accumulator object))
         ((string? object) (byter-string-pack accumulator object))
         ((symbol? object) (byter-symbol-pack accumulator object))
         ((vector? object)
@@ -451,6 +505,7 @@
           ((#x06) (byter-bytevector-unpack bytevector index))
           ((#x07) (byter-string-unpack bytevector index))
           ((#x08) (byter-symbol-unpack bytevector index))
+          ((#x09) (byter-flonum-unpack bytevector index))
           ((#x18 #x19 #x1A #x1B #x1C #x1D #x1E #x1F) (byter-negative-integer-unpack bytevector index))
           ((#x20) (values 0 (fx+ index 1)))
           ((#x21 #x22 #x23 #x24 #x25 #x26 #x27 #x28) (byter-positive-integer-unpack bytevector index))
@@ -566,6 +621,41 @@
   (define ~check-byter-012
     (lambda ()
       (equal? (bytevector 0 0 0) (byter-decode (byter-encode (bytevector 0 0 0))))))
+
+  (define ~check-byter-013
+    (lambda ()
+      (fl=? 3.14 (byter-decode (byter-encode 3.14)))))
+
+  (define ~check-byter-014
+    (lambda ()
+      (fl=? -2.718 (byter-decode (byter-encode -2.718)))))
+
+  (define ~check-byter-015
+    (lambda ()
+      (and (fl=? 0.0 (byter-decode (byter-encode 0.0)))
+           (fl=? -0.0 (byter-decode (byter-encode -0.0)))
+           (fl=? +inf.0 (byter-decode (byter-encode +inf.0)))
+           (fl=? -inf.0 (byter-decode (byter-encode -inf.0))))))
+
+  (define ~check-byter-016
+    (lambda ()
+      ;; Ordering: -inf < -1.5 < -0.0 < 0.0 < 1.5 < +inf
+      (let ((vals (list -inf.0 -1.5 -0.0 0.0 1.5 +inf.0)))
+        (let loop ((encoded (map byter-encode vals)))
+          (if (null? (cdr encoded))
+              #t
+              (and (eq? 'smaller (byter-compare (car encoded) (cadr encoded)))
+                   (loop (cdr encoded))))))))
+
+  (define ~check-byter-017/random
+    (lambda ()
+      (let loop ((i 1000))
+        (if (fxzero? i)
+            #t
+            (let ((v (fl* (fl- (fixnum->flonum (random 2000000)) 1000000.0)
+                          (fixnum->flonum (+ 1 (random 1000000))))))
+              (assert (fl=? v (byter-decode (byter-encode v))))
+              (loop (fx- i 1)))))))
 
   (define ~check-byter-100
     (lambda ()
