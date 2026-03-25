@@ -87,3 +87,70 @@
                                     (list (list (nstore-var 'uid)
                                                 'blog/title
                                                 (nstore-var 'title)))))))))))
+
+;; nstore-query* tests
+
+(define ~check-nstore-005
+  (lambda ()
+    ;; Number range constraint
+    (let* ((okvs (make-aql))
+           (store (make-nstore (bytevector 60) 3)))
+      (aql-in-transaction okvs
+        (lambda (tx)
+          (nstore-add! tx store '(10 "person" "Alice") (bytevector))
+          (nstore-add! tx store '(25 "person" "Bob") (bytevector))
+          (nstore-add! tx store '(30 "person" "Carol") (bytevector))
+          (nstore-add! tx store '(50 "person" "Dave") (bytevector))))
+      (check '("Bob" "Carol")
+             (aql-in-transaction okvs
+               (lambda (tx)
+                 (map (lambda (b) (cdr (assq 'name b)))
+                      (nstore-query* tx store
+                        (list (list (nstore-var 'age (nstore-gte 18) (nstore-lte 35))
+                                    "person"
+                                    (nstore-var 'name)))))))))))
+
+(define ~check-nstore-006
+  (lambda ()
+    ;; String range constraint
+    (let* ((okvs (make-aql))
+           (store (make-nstore (bytevector 61) 3)))
+      (aql-in-transaction okvs
+        (lambda (tx)
+          (nstore-add! tx store '("Alpha" "book" "Author1") (bytevector))
+          (nstore-add! tx store '("Beta" "book" "Author2") (bytevector))
+          (nstore-add! tx store '("Gamma" "book" "Author3") (bytevector))))
+      (check '("Author1")
+             (aql-in-transaction okvs
+               (lambda (tx)
+                 (map (lambda (b) (cdr (assq 'author b)))
+                      (nstore-query* tx store
+                        (list (list (nstore-var 'title (nstore-gte "A") (nstore-lt "B"))
+                                    "book"
+                                    (nstore-var 'author)))))))))))
+
+(define ~check-nstore-007
+  (lambda ()
+    ;; Morton spatial query — binds decoded coordinates
+    (let* ((okvs (make-aql))
+           (store (make-nstore (bytevector 62) 3))
+           (enc (lambda (x y) (morton-interleave 2 32 (list x y)))))
+      (aql-in-transaction okvs
+        (lambda (tx)
+          (nstore-add! tx store (list (enc 1 1) "person" "Alice") (bytevector))
+          (nstore-add! tx store (list (enc 5 5) "person" "Bob") (bytevector))
+          (nstore-add! tx store (list (enc 3 3) "place" "Park") (bytevector))
+          (nstore-add! tx store (list (enc 8 8) "person" "Carol") (bytevector))))
+      ;; Query rectangle [2,2]-[6,6] — should find Bob(5,5) and Park(3,3)
+      (let ((results
+             (aql-in-transaction okvs
+               (lambda (tx)
+                 (nstore-query* tx store
+                   (list (list (nstore-var 'pos (nstore-morton 2 32 '(2 2) '(6 6)))
+                               (nstore-var 'category)
+                               (nstore-var 'name))))))))
+        ;; Check count and that coordinates are decoded
+        (check #t (and (= 2 (length results))
+                       (member '(5 5) (map (lambda (b) (cdr (assq 'pos b))) results))
+                       (member '(3 3) (map (lambda (b) (cdr (assq 'pos b))) results))
+                       #t))))))

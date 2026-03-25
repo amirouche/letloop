@@ -4,6 +4,7 @@
           byter-encode
           byter-decode
           byter-compare
+          byter-compare*
           byter-next-prefix
           byter-slice
           byter-append
