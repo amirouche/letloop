@@ -1,8 +1,8 @@
 (library (letloop byter)
 
   (export byter-end
-          byter-write
-          byter-read
+          byter-encode
+          byter-decode
           byter-compare
           byter-next-prefix
           byter-slice
@@ -403,17 +403,17 @@
           (loop (fx+ index 1) (fx+ other 1))))
       (values (- (bytevector->integer out)) (fx+ index length 1))))
 
-  (define byter-write
+  (define byter-encode
     (case-lambda
       ((object)
-       (byter-write object (bytevector-accumulator)))
+       (byter-encode object (bytevector-accumulator)))
       ((object accumulator)
        (cond
         ((null? object) (accumulator byter-null))
         ((pair? object)
          (accumulator byter-pair)
-         (byter-write (car object) accumulator)
-         (byter-write (cdr object) accumulator))
+         (byter-encode (car object) accumulator)
+         (byter-encode (cdr object) accumulator))
         ((eq? object #f) (accumulator byter-false))
         ((eq? object #t) (accumulator byter-true))
         ((bytevector? object) (byter-bytevector-pack accumulator
@@ -432,10 +432,10 @@
         ((vector? object)
          (accumulator byter-vector)
          (vector-for-each
-          (lambda (object) (byter-write object accumulator))
+          (lambda (object) (byter-encode object accumulator))
           object)
          (accumulator byter-vector-end))
-        (else (error 'byter-write "Unsupported type" object)))
+        (else (error 'byter-encode "Unsupported type" object)))
        (accumulator (eof-object)))))
 
   (define byter-base-unpack
@@ -453,9 +453,9 @@
           ((#x18 #x19 #x1A #x1B #x1C #x1D #x1E #x1F) (byter-negative-integer-unpack bytevector index))
           ((#x20) (values 0 (fx+ index 1)))
           ((#x21 #x22 #x23 #x24 #x25 #x26 #x27 #x28) (byter-positive-integer-unpack bytevector index))
-          (else (error 'byter-read "Unsupported type with tag" (number->string tag 16)))))))
+          (else (error 'byter-decode "Unsupported type with tag" (number->string tag 16)))))))
 
-  (define byter-read
+  (define byter-decode
     (lambda (bytevector)
       (call-with-values (lambda () (byter-base-unpack bytevector 0))
         (lambda (out index) out))))
@@ -496,19 +496,19 @@
 
   (define ~check-byter-000
     (lambda ()
-      (eq? #f (byter-read (byter-write #f)))))
+      (eq? #f (byter-decode (byter-encode #f)))))
 
   (define ~check-byter-001
     (lambda ()
-      (eq? #t (byter-read (byter-write #t)))))
+      (eq? #t (byter-decode (byter-encode #t)))))
 
   (define ~check-byter-002
     (lambda ()
-      (null? (byter-read (byter-write '())))))
+      (null? (byter-decode (byter-encode '())))))
 
   (define ~check-byter-003
     (lambda ()
-      (equal? (bytevector 13 37) (byter-read (byter-write (bytevector 13 37))))))
+      (equal? (bytevector 13 37) (byter-decode (byter-encode (bytevector 13 37))))))
 
   (define ~check-byter-004
     (lambda ()
@@ -516,7 +516,7 @@
         (if (fxzero? power)
             #t
             (let ((number (- (expt 2 (fx- power 1)) 1)))
-              (assert (= number (byter-read (byter-write number))))
+              (assert (= number (byter-decode (byter-encode number))))
               (loop (fx- power 1)))))))
 
   (define ~check-byter-005
@@ -525,7 +525,7 @@
         (if (fxzero? power)
             #t
             (let ((number (- (- (expt 2 (fx- power 1)) 1))))
-              (assert (= number (byter-read (byter-write number))))
+              (assert (= number (byter-decode (byter-encode number))))
               (loop (fx- power 1)))))))
 
   (define ~check-byter-006/random
@@ -534,7 +534,7 @@
         (if (fxzero? i)
             #t
             (let ((number (random (expt 2 64))))
-              (assert (= number (byter-read (byter-write number))))
+              (assert (= number (byter-decode (byter-encode number))))
               (loop (fx- i 1)))))))
 
   (define ~check-byter-007/random
@@ -543,28 +543,28 @@
         (if (fxzero? i)
             #t
             (let ((number (- (random (expt 2 64)))))
-              (assert (= number (byter-read (byter-write number))))
+              (assert (= number (byter-decode (byter-encode number))))
               (loop (fx- i 1)))))))
 
   (define ~check-byter-008
     (lambda ()
-      (string=? "azul" (byter-read (byter-write "azul")))))
+      (string=? "azul" (byter-decode (byter-encode "azul")))))
 
   (define ~check-byter-009
     (lambda ()
-      (eq? 'grenouille (byter-read (byter-write 'grenouille)))))
+      (eq? 'grenouille (byter-decode (byter-encode 'grenouille)))))
 
   (define ~check-byter-010
     (lambda ()
-      (equal? (bytevector) (byter-read (byter-write (bytevector))))))
+      (equal? (bytevector) (byter-decode (byter-encode (bytevector))))))
 
   (define ~check-byter-011
     (lambda ()
-      (equal? (bytevector 0) (byter-read (byter-write (bytevector 0))))))
+      (equal? (bytevector 0) (byter-decode (byter-encode (bytevector 0))))))
 
   (define ~check-byter-012
     (lambda ()
-      (equal? (bytevector 0 0 0) (byter-read (byter-write (bytevector 0 0 0))))))
+      (equal? (bytevector 0 0 0) (byter-decode (byter-encode (bytevector 0 0 0))))))
 
   (define ~check-byter-100
     (lambda ()
@@ -582,7 +582,7 @@
                              (- (expt 2 32))
                              (- (expt 2 64) 1)
                              (- (- (expt 2 64) 1))))
-      (equal? (byter-read (byter-write expected)) expected)))
+      (equal? (byter-decode (byter-encode expected)) expected)))
 
   (define ~check-byter-101
     (lambda ()
@@ -601,7 +601,7 @@
                          (- (expt 2 64) 1)
                          (- (- (expt 2 64) 1))))
       (define expected (list->vector base))
-      (equal? (byter-read (byter-write expected)) expected)))
+      (equal? (byter-decode (byter-encode expected)) expected)))
 
   (define ~check-byter-102
     (lambda ()
@@ -620,7 +620,7 @@
                          (- (expt 2 64) 1)
                          (- (- (expt 2 64) 1))))
       (define expected (cons (list->vector base) base))
-      (equal? (byter-read (byter-write expected)) expected)))
+      (equal? (byter-decode (byter-encode expected)) expected)))
 
   (define ~check-byter-103
     (lambda ()
@@ -957,7 +957,7 @@
       (define seed (string->number (or (getenv "LETLOOP_BYTER_SEED") "1")))
       (call-with-values (lambda () (byter-random-object seed))
         (lambda (seed object)
-          (equal? object (byter-read (byter-write object)))))))
+          (equal? object (byter-decode (byter-encode object)))))))
 
   (define ~check-byter-998/random
     (lambda ()
@@ -966,7 +966,7 @@
             #t
             (call-with-values (lambda () (byter-random-object))
               (lambda (seed object)
-                (assert (equal? object (byter-read (byter-write object))))
+                (assert (equal? object (byter-decode (byter-encode object))))
                 (loop (fx- i 1))))))))
 
   (define make-comparator
@@ -982,7 +982,7 @@
           (call-with-values (lambda () (byter-random-object seed))
             (lambda (seed other)
               (let ((comparator (make-comparator object other)))
-                (comparator (byter-write object) (byter-write other)))))))))
+                (comparator (byter-encode object) (byter-encode other)))))))))
 
   (define ~check-byter-999/random
     (lambda ()
@@ -995,7 +995,7 @@
                   (call-with-values (lambda () (byter-random-object seed))
                     (lambda (seed other)
                       (let ((comparator (make-comparator object other)))
-                        (assert (comparator (byter-write object) (byter-write other)))
+                        (assert (comparator (byter-encode object) (byter-encode other)))
                         (loop (fx- i 1))))))))))))
 
   )
