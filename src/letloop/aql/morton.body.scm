@@ -1,0 +1,173 @@
+;; Morton codes (Z-order curves) for multi-dimensional spatial indexing
+
+;; Record type
+
+(define-record-type* <morton>
+  (make-morton prefix dimensions bits)
+  morton?
+  (prefix morton-prefix)
+  (dimensions morton-dimensions)
+  (bits morton-bits))
+
+;; Helpers
+
+(define integer->fixed-bytevector
+  (lambda (integer byte-count)
+    (let ((bv (make-bytevector byte-count 0)))
+      (let loop ((i (- byte-count 1))
+                 (n integer))
+        (when (and (>= i 0) (positive? n))
+          (bytevector-u8-set! bv i (bitwise-and n #xFF))
+          (loop (- i 1) (bitwise-arithmetic-shift-right n 8))))
+      bv)))
+
+(define fixed-bytevector->integer
+  (lambda (bv)
+    (let loop ((i 0) (acc 0))
+      (if (= i (bytevector-length bv))
+          acc
+          (loop (+ i 1)
+                (+ (bitwise-arithmetic-shift-left acc 8)
+                   (bytevector-u8-ref bv i)))))))
+
+;; Bit interleaving
+;;
+;; For ndims dimensions and bits per dimension, iterate from the most
+;; significant bit to the least. At each bit position b, process
+;; dimensions 0..ndims-1, extracting bit b from each value and
+;; shifting it into the result. The output is a fixed-width
+;; big-endian bytevector of ceil(ndims * bits / 8) bytes.
+
+(define morton-interleave
+  (lambda (ndims bits values)
+    (let ((total-bits (* ndims bits))
+          (vals (list->vector values)))
+      (let loop-bit ((b (- bits 1))
+                     (result 0))
+        (if (< b 0)
+            (integer->fixed-bytevector result
+                                       (fxquotient (+ total-bits 7) 8))
+            (let loop-dim ((d 0)
+                           (result result))
+              (if (= d ndims)
+                  (loop-bit (- b 1) result)
+                  (loop-dim (+ d 1)
+                            (bitwise-ior
+                             (bitwise-arithmetic-shift-left result 1)
+                             (if (bitwise-bit-set? (vector-ref vals d) b)
+                                 1 0))))))))))
+
+(define morton-deinterleave
+  (lambda (ndims bits bv)
+    (let ((z (fixed-bytevector->integer bv)))
+      (let ((values (make-vector ndims 0)))
+        (let loop-bit ((b 0)
+                       (shift 0))
+          (if (= b bits)
+              (vector->list values)
+              (let loop-dim ((d (- ndims 1))
+                             (shift shift))
+                (if (< d 0)
+                    (loop-bit (+ b 1) shift)
+                    (begin
+                      (when (bitwise-bit-set? z shift)
+                        (vector-set! values d
+                          (bitwise-ior (vector-ref values d)
+                                       (bitwise-arithmetic-shift-left 1 b))))
+                      (loop-dim (- d 1) (+ shift 1)))))))))))
+
+;; Key encode/decode with aql prefix
+
+(define morton-encode
+  (lambda (morton values)
+    (byter-append
+     (byter-encode (morton-prefix morton))
+     (morton-interleave (morton-dimensions morton)
+                        (morton-bits morton)
+                        values))))
+
+(define morton-decode
+  (lambda (morton key)
+    (let* ((prefix-bv (byter-encode (morton-prefix morton)))
+           (prefix-len (bytevector-length prefix-bv))
+           (morton-bv (byter-slice key prefix-len)))
+      (morton-deinterleave (morton-dimensions morton)
+                           (morton-bits morton)
+                           morton-bv))))
+
+;; aql operations
+
+(define morton-set!
+  (lambda (handle morton values value)
+    (aql-set! handle (morton-encode morton values) value)))
+
+(define morton-remove!
+  (lambda (handle morton values)
+    (aql-remove! handle (morton-encode morton values))))
+
+(define morton-ref
+  (lambda (handle morton values)
+    (aql-query handle (morton-encode morton values))))
+
+;; Bounding-box query
+
+(define morton-in-box?
+  (lambda (values mins maxs)
+    (let loop ((vs values) (los mins) (his maxs))
+      (or (null? vs)
+          (and (<= (car los) (car vs) (car his))
+               (loop (cdr vs) (cdr los) (cdr his)))))))
+
+(define make-coroutine-generator
+  (lambda (proc)
+    (define return #f)
+    (define resume #f)
+    (define yield (lambda (v)
+                    (call/cc (lambda (r) (set! resume r) (return v)))))
+    (lambda () (call/cc
+                (lambda (cc) (set! return cc)
+                        (if resume
+                            (resume (if #f #f))
+                            (begin (proc yield)
+                                   (set! resume (lambda (v) (return (eof-object))))
+                                   (return (eof-object)))))))))
+
+(define generator->list
+  (lambda (g)
+    (let loop ()
+      (let ((o (g)))
+        (if (eof-object? o)
+            '()
+            (cons o (loop)))))))
+
+(define morton-query
+  (lambda (handle morton mins maxs)
+    (let ((lower (morton-encode morton mins))
+          (upper (let* ((raw (morton-interleave (morton-dimensions morton)
+                                                (morton-bits morton)
+                                                maxs))
+                        (prefix-bv (byter-encode (morton-prefix morton)))
+                        (next (byter-next-prefix raw)))
+                   (if next
+                       (byter-append prefix-bv next)
+                       ;; maxs are all-max, use byter-end as sentinel
+                       (byter-append prefix-bv byter-end)))))
+      (make-coroutine-generator
+       (lambda (yield)
+         (let ((gen (aql-query handle lower upper)))
+           (if (pair? gen)
+               ;; aql-query returned a list (called on aql handle)
+               (for-each
+                (lambda (pair)
+                  (let ((coords (morton-decode morton (car pair))))
+                    (when (morton-in-box? coords mins maxs)
+                      (yield pair))))
+                gen)
+               ;; aql-query returned a generator (called on transaction)
+               (let loop ()
+                 (let ((pair (gen)))
+                   (unless (eof-object? pair)
+                     (let ((coords (morton-decode morton (car pair))))
+                       (when (morton-in-box? coords mins maxs)
+                         (yield pair)))
+                     (loop)))))))))))
