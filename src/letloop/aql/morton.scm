@@ -4,6 +4,7 @@
           morton-encode morton-decode
           morton-interleave morton-deinterleave
           morton-in-box?
+          morton-ranges
           morton-set! morton-remove! morton-ref
           morton-query
 
