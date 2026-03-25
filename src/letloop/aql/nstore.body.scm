@@ -156,10 +156,8 @@
     (let loop ((indices (nstore-indices nstore))
                (subspace 0))
       (unless (null? indices)
-        (let ((key (byter-write
-                    (list->vector (append (list prefix
-                                                subspace)
-                                          (permute items (car indices)))))))
+        (let ((key (byter-write (append (list prefix subspace)
+                                        (permute items (car indices))))))
           (okvs-set! transaction key value)
           (loop (cdr indices) (+ subspace 1)))))))
 
@@ -170,10 +168,8 @@
     (let loop ((indices (nstore-indices nstore))
                (subspace 0))
       (unless (null? indices)
-        (let ((key (byter-write (list->vector
-                                (append (list prefix
-                                              subspace)
-                                        (permute items (car indices)))))))
+        (let ((key (byter-write (append (list prefix subspace)
+                                        (permute items (car indices))))))
           (okvs-clear! transaction key)
           (loop (cdr indices) (+ subspace 1)))))))
 
@@ -246,20 +242,20 @@
   (call-with-values (lambda () (pattern->index pattern (nstore-indices nstore)))
     (lambda (index subspace)
       (define pattern-prefix (pattern->prefix pattern index))
-      (define prefix (let ((out (byter-write
-                                 (list->vector
-                                  (append (list (nstore-prefix nstore)
-                                                subspace)
-                                          pattern-prefix)))))
-                       (byter-slice out 0 (- (bytevector-length out) 1))))
+      (define items (append (list (nstore-prefix nstore) subspace)
+                            pattern-prefix))
+      (define lower (byter-write items))
+      ;; Upper bound: same prefix but with a bytevector sentinel as
+      ;; the last cdr instead of null. Since bytevector tag (#x06) >
+      ;; pair tag (#x03) > null (#x00), this is greater than any
+      ;; list extension of items.
+      (define upper (byter-write (fold-right cons #vu8(255) items)))
 
       (gmap (lambda (pair)
               (bind* pattern
-                     (make-tuple (cddr (vector->list (byter-read (car pair)))) index)
+                     (make-tuple (cddr (byter-read (car pair))) index)
                      seed))
-            (okvs-query transaction
-                        prefix
-                        (byter-next-prefix prefix))))))
+            (okvs-query transaction lower upper)))))
 
 (define (pattern-bind pattern seed)
   ;; Return a pattern where variables that have a binding in SEED
@@ -307,7 +303,7 @@
     ;; the following `list` is the index of the base subspace in
     ;; nstore-indices
 
-    (let* ((key (byter-write (list->vector (append (list (nstore-prefix nstore) 0) items)))))
+    (let* ((key (byter-write (append (list (nstore-prefix nstore) 0) items))))
        (okvs-query transaction key))))
 
 (define nstore-query
