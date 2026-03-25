@@ -12,8 +12,8 @@
 the implementation of efficient extensions easier thanks to the
 ability to estimate the count of keys, and the count of bytes.
 
-The key space starts at `(bytevector 00)` and ends at `(bytevector
-255)` there is valeu associated with `(bytevector 255)` or any
+The key space starts at `(bytevector 0)` and ends at `(bytevector
+255)` there is no value associated with `(bytevector 255)` or any
 bytevector bigger than that.
 
 ## Reference
@@ -68,7 +68,7 @@ and a new value for the associated transaction. It returns no values.
 In the following example, `aql-in-transaction` will return `#f`:
 
 ```scheme
-(define read-only? (make-aql-transaction-parameter #t))
+(define read-only? (make-aql-transaction-variable #t))
 
 (define (proc tx)
   (display (read-only? tx)) ;; => #t
@@ -212,7 +212,7 @@ Similar to `aql-query` but returns one or more keys.
 If `OTHER` is not provided then it returns key or the next biggest key
 smaller than `(bytevector 255)`, otherwise if there isn't any, it
 returns the biggest key smaller than `key` bigger than the empty
-bytevetor.
+bytevector.
 
 If `OTHER` is provided and `KEY` is smaller than `OTHER` they it
 returns a ordered list of keys between `KEY` and `OTHER` but not
