@@ -111,10 +111,10 @@
             (loop (+ start length)
                   (cons (byter-slice bytevector start (+ start length)) out))))))
 
-  (define byter-false #x00)
-  (define byter-true #x01)
-  (define byter-pair #x02)
-  (define byter-null #x03)
+  (define byter-null #x00)
+  (define byter-false #x01)
+  (define byter-true #x02)
+  (define byter-pair #x03)
   (define byter-vector #x04)
   (define byter-vector-end #x05)
   (define byter-bytevector #x06)
@@ -229,10 +229,10 @@
       (string-compare (symbol->string a) (symbol->string b))))
 
   (define byter-spec
-    (list (list boolean? byter-false boolean-compare)
-          (list byter-integer? byter-zero integer-compare)
+    (list (list null? byter-null (lambda (a b) 'equal))
+          (list boolean? byter-false boolean-compare)
           (list pair? byter-pair pair-compare)
-          (list null? byter-null (lambda (a b) 'equal))
+          (list byter-integer? byter-zero integer-compare)
           (list vector? byter-vector vector-compare)
           (list bytevector? byter-bytevector byter-compare)
           (list string? byter-string string-compare)
@@ -406,13 +406,13 @@
        (byter-write object (bytevector-accumulator)))
       ((object accumulator)
        (cond
+        ((null? object) (accumulator byter-null))
         ((pair? object)
          (accumulator byter-pair)
          (byter-write (car object) accumulator)
          (byter-write (cdr object) accumulator))
         ((eq? object #f) (accumulator byter-false))
         ((eq? object #t) (accumulator byter-true))
-        ((null? object) (accumulator byter-null))
         ((bytevector? object) (byter-bytevector-pack accumulator
                                                      byter-bytevector
                                                      object))
@@ -439,10 +439,10 @@
     (lambda (bytevector index)
       (let ((tag (bytevector-u8-ref bytevector index)))
         (case tag
-          ((#x00) (values #f (fx+ index 1)))
-          ((#x01) (values #t (fx+ index 1)))
-          ((#x02) (byter-pair-unpack bytevector index))
-          ((#x03) (values '() (fx+ index 1)))
+          ((#x00) (values '() (fx+ index 1)))
+          ((#x01) (values #f (fx+ index 1)))
+          ((#x02) (values #t (fx+ index 1)))
+          ((#x03) (byter-pair-unpack bytevector index))
           ((#x04) (byter-vector-unpack bytevector (fx+ index 1) '() 0))
           ((#x06) (byter-bytevector-unpack bytevector index))
           ((#x07) (byter-string-unpack bytevector index))
