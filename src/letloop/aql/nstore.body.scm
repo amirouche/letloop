@@ -476,10 +476,11 @@
                (let ((v (list-ref pattern last-idx)))
                  (and (nstore-var? v) (nstore-var-constrained? v) v)))))
 
-      ;; Find XZ constraint if any
+      ;; Find spatial constraint if any
       (define xz-constraint
-        (and last-var
-             (find nstore-xz? (nstore-var-constraints last-var))))
+        (and last-var (find nstore-xz? (nstore-var-constraints last-var))))
+      (define morton-constraint
+        (and last-var (find nstore-morton? (nstore-var-constraints last-var))))
 
       (define (decode-and-filter pairs)
         (filter-map
@@ -490,33 +491,47 @@
                   (bind*+ pattern unpermuted seed))))
          pairs))
 
-      (if xz-constraint
-          ;; XZ: issue one aql-query per range interval
-          (let ((ranges (xzstore-ranges (nstore-xz-xzstore xz-constraint)
-                                         (nstore-xz-qmins xz-constraint)
-                                         (nstore-xz-qmaxs xz-constraint))))
-            (decode-and-filter
-             (apply append
-                    (map (lambda (range)
-                           (let ((lower (byter-encode (append base-head (list (car range)))))
-                                 (upper (byter-encode (fold-right cons byter-end
-                                                                  (append base-head (list (cdr range)))))))
-                             (aql-query transaction lower upper)))
-                         ranges))))
+      (define (multi-range-query ranges)
+        ;; Issue one aql-query per range interval, merge results
+        (decode-and-filter
+         (apply append
+                (map (lambda (range)
+                       (let ((lower (byter-encode (append base-head (list (car range)))))
+                             (upper (byter-encode (fold-right cons byter-end
+                                                              (append base-head (list (cdr range)))))))
+                         (aql-query transaction lower upper)))
+                     ranges))))
 
-          ;; Non-XZ: single range scan
-          (let* ((base (append (list (nstore-prefix nstore) subspace)
-                               pattern-prefix))
-                 (lower (byter-encode base))
-                 (upper
-                  (if (and last-var (nstore-var-upper last-var))
-                      (let ((upper-items (append base-head
-                                                  (list (nstore-var-upper last-var)))))
-                        (if (nstore-var-upper-inclusive? last-var)
-                            (byter-encode (fold-right cons byter-end upper-items))
-                            (byter-encode upper-items)))
-                      (byter-encode (fold-right cons byter-end base)))))
-            (decode-and-filter (aql-query transaction lower upper)))))))
+      (cond
+       ;; XZ: multiple targeted range queries
+       (xz-constraint
+        (multi-range-query
+         (xzstore-ranges (nstore-xz-xzstore xz-constraint)
+                          (nstore-xz-qmins xz-constraint)
+                          (nstore-xz-qmaxs xz-constraint))))
+
+       ;; Morton: multiple targeted range queries
+       (morton-constraint
+        (multi-range-query
+         (morton-ranges (nstore-morton-ndims morton-constraint)
+                        (nstore-morton-bits morton-constraint)
+                        (nstore-morton-mins morton-constraint)
+                        (nstore-morton-maxs morton-constraint))))
+
+       ;; Scalar constraints or unconstrained: single range scan
+       (else
+        (let* ((base (append (list (nstore-prefix nstore) subspace)
+                             pattern-prefix))
+               (lower (byter-encode base))
+               (upper
+                (if (and last-var (nstore-var-upper last-var))
+                    (let ((upper-items (append base-head
+                                                (list (nstore-var-upper last-var)))))
+                      (if (nstore-var-upper-inclusive? last-var)
+                          (byter-encode (fold-right cons byter-end upper-items))
+                          (byter-encode upper-items)))
+                    (byter-encode (fold-right cons byter-end base)))))
+          (decode-and-filter (aql-query transaction lower upper))))))))
 
 (define nstore-where*
   (lambda (transaction nstore pattern from)
