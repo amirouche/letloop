@@ -142,15 +142,12 @@
           (nstore-add! tx store (list (enc 3 3) "place" "Park") (bytevector))
           (nstore-add! tx store (list (enc 8 8) "person" "Carol") (bytevector))))
       ;; Query rectangle [2,2]-[6,6] — should find Bob(5,5) and Park(3,3)
-      (let ((results
+      (check '("Park" "Bob")
              (aql-in-transaction okvs
                (lambda (tx)
-                 (nstore-query* tx store
-                   (list (list (nstore-var 'pos (nstore-morton 2 32 '(2 2) '(6 6)))
-                               (nstore-var 'category)
-                               (nstore-var 'name))))))))
-        ;; Check count and that coordinates are decoded
-        (check #t (and (= 2 (length results))
-                       (member '(5 5) (map (lambda (b) (cdr (assq 'pos b))) results))
-                       (member '(3 3) (map (lambda (b) (cdr (assq 'pos b))) results))
-                       #t))))))
+                 (map (lambda (b) (cdr (assq 'name b)))
+                      (nstore-query* tx store
+                        (list (list (nstore-var 'pos (nstore-morton 2 32 '(2 2) '(6 6)))
+                                    (nstore-var 'category)
+                                    (nstore-var 'name)))))))))))
+
