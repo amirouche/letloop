@@ -730,15 +730,15 @@
       ;;
       ;; The claim: if we encode keys as
       ;;
-      ;;   (byter-write (list prefix uid attribute-name))
+      ;;   (byter-encode (list prefix uid attribute-name))
       ;;
       ;; then a range scan from
       ;;
-      ;;   (byter-write (list prefix uid))
+      ;;   (byter-encode (list prefix uid))
       ;;
       ;; to
       ;;
-      ;;   (byter-write (list prefix uid (bytevector 255)))
+      ;;   (byter-encode (list prefix uid (bytevector 255)))
       ;;
       ;; will capture all attribute keys for that entity and
       ;; nothing else.
@@ -761,21 +761,21 @@
           (car (reverse args))))
 
       (define (assert-smaller label a b)
-        (let ((result (byter-compare (byter-write a) (byter-write b))))
+        (let ((result (byter-compare (byter-encode a) (byter-encode b))))
           (unless (eq? result 'smaller)
             (error 'assert-smaller
                    (string-append label ": expected smaller, got ")
                    result a b))))
 
       (define (assert-bigger label a b)
-        (let ((result (byter-compare (byter-write a) (byter-write b))))
+        (let ((result (byter-compare (byter-encode a) (byter-encode b))))
           (unless (eq? result 'bigger)
             (error 'assert-bigger
                    (string-append label ": expected bigger, got ")
                    result a b))))
 
       (define (assert-equal label a b)
-        (let ((result (byter-compare (byter-write a) (byter-write b))))
+        (let ((result (byter-compare (byter-encode a) (byter-encode b))))
           (unless (eq? result 'equal)
             (error 'assert-equal
                    (string-append label ": expected equal, got ")
@@ -806,7 +806,7 @@
 
       (display "test 1: start < key?\n")
       (let* ((key (list prefix uid-a 'todo/title))
-             (result (byter-compare (byter-write start) (byter-write key))))
+             (result (byter-compare (byter-encode start) (byter-encode key))))
         (pk 'test-1 result)
         ;; if this prints 'bigger, our range scan is backwards
         )
@@ -814,7 +814,7 @@
       ;; --- test 2: key < end? ---
       (display "test 2: key < end?\n")
       (let* ((key (list prefix uid-a 'todo/title))
-             (result (byter-compare (byter-write key) (byter-write end))))
+             (result (byter-compare (byter-encode key) (byter-encode end))))
         (pk 'test-2 result)
         )
 
@@ -823,16 +823,16 @@
       (for-each
        (lambda (attr)
          (let* ((key (list prefix uid-a attr))
-                (vs-start (byter-compare (byter-write start) (byter-write key)))
-                (vs-end   (byter-compare (byter-write key) (byter-write end))))
+                (vs-start (byter-compare (byter-encode start) (byter-encode key)))
+                (vs-end   (byter-compare (byter-encode key) (byter-encode end))))
            (pk 'test-3 attr vs-start vs-end)))
        '(todo/done todo/title todo/created-at actor/email))
 
       ;; --- test 4: different uid is outside range ---
       (display "test 4: different uid outside range\n")
       (let* ((foreign-key (list prefix uid-b 'todo/title))
-             (vs-start (byter-compare (byter-write start) (byter-write foreign-key)))
-             (vs-end   (byter-compare (byter-write foreign-key) (byter-write end))))
+             (vs-start (byter-compare (byter-encode start) (byter-encode foreign-key)))
+             (vs-end   (byter-compare (byter-encode foreign-key) (byter-encode end))))
         (pk 'test-4-vs-start vs-start)
         (pk 'test-4-vs-end   vs-end)
         ;; foreign key should be BIGGER than end (uid-b > uid-a)
@@ -840,13 +840,13 @@
 
       ;; --- test 5: attribute sort order is stable ---
       (display "test 5: attribute ordering\n")
-      (let* ((key-done  (byter-write (list prefix uid-a 'todo/done)))
-             (key-title (byter-write (list prefix uid-a 'todo/title))))
+      (let* ((key-done  (byter-encode (list prefix uid-a 'todo/done)))
+             (key-title (byter-encode (list prefix uid-a 'todo/title))))
         (pk 'test-5-done-vs-title (byter-compare key-done key-title))
-        ;; should be consistent with (byter-compare (byter-write 'todo/done)
-        ;;                                          (byter-write 'todo/title))
-        (pk 'test-5-bare (byter-compare (byter-write 'todo/done)
-                                        (byter-write 'todo/title))))
+        ;; should be consistent with (byter-compare (byter-encode 'todo/done)
+        ;;                                          (byter-encode 'todo/title))
+        (pk 'test-5-bare (byter-compare (byter-encode 'todo/done)
+                                        (byter-encode 'todo/title))))
 
       ;; --- test 6: the critical pair/null tag question ---
       ;; list encoding: (list a b) = (cons a (cons b '()))
@@ -874,8 +874,8 @@
       (let* ((vstart (vector prefix uid-a))
              (vkey   (vector prefix uid-a 'todo/title))
              (vend   (vector prefix uid-a (bytevector 255))))
-        (pk 'vec-start<key (byter-compare (byter-write vstart) (byter-write vkey)))
-        (pk 'vec-key<end   (byter-compare (byter-write vkey) (byter-write vend))))
+        (pk 'vec-start<key (byter-compare (byter-encode vstart) (byter-encode vkey)))
+        (pk 'vec-key<end   (byter-compare (byter-encode vkey) (byter-encode vend))))
 
       ;; vector uses byter-vector (#x04) tag then elements then
       ;; byter-vector-end (#x05). A two-element vector hits #x05
@@ -903,8 +903,8 @@
       (let* ((vstart (vector 'todos 42))
              (vkey   (vector 'todos 42 'todo/title))
              (vend   (vector 'todos 42 (bytevector 255))))
-        (pk 'int-uid-start<key (byter-compare (byter-write vstart) (byter-write vkey)))
-        (pk 'int-uid-key<end   (byter-compare (byter-write vkey) (byter-write vend))))
+        (pk 'int-uid-start<key (byter-compare (byter-encode vstart) (byter-encode vkey)))
+        (pk 'int-uid-key<end   (byter-compare (byter-encode vkey) (byter-encode vend))))
 
       ;; --- test 10: uuid as bytevector uid ---
       (display "test 10: bytevector uid (pseudo-uuid)\n")
@@ -912,8 +912,8 @@
              (vstart (vector 'todos fake-uuid))
              (vkey   (vector 'todos fake-uuid 'todo/title))
              (vend   (vector 'todos fake-uuid (bytevector 255))))
-        (pk 'bv-uid-start<key (byter-compare (byter-write vstart) (byter-write vkey)))
-        (pk 'bv-uid-key<end   (byter-compare (byter-write vkey) (byter-write vend))))
+        (pk 'bv-uid-start<key (byter-compare (byter-encode vstart) (byter-encode vkey)))
+        (pk 'bv-uid-key<end   (byter-compare (byter-encode vkey) (byter-encode vend))))
 
       (display "\ndone.\n")))
   
