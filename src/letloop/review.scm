@@ -926,33 +926,80 @@
                 (set! *content-cursor* next)
                 (loop))))))))
 
-  ;; Count visual rows from line `from` up to (not including) line `to`,
-  ;; treating each folded define as 1 row.
+  (define ANN-PREFIX-LEN 4)
+
+  (define (ceiling-div a b)
+    (cond
+     ((fx<=? a 0) 0)
+     (else (fx+ 1 (fxdiv (fx- a 1) b)))))
+
+  (define (content-avail)
+    (let* ((n (vector-length *file-lines*))
+           (cw (fx- (tb-width) TREE-WIDTH))
+           (gutter (fx+ (string-length (number->string (fxmax n 1))) 2)))
+      (fxmax (fx- cw gutter) 1)))
+
+  (define (line-display-rows i)
+    (let* ((text (vector-ref *file-lines* i))
+           (len (string-length text))
+           (avail (content-avail)))
+      (cond
+       ((fx<=? len avail) 1)
+       (else
+        (let ((main-end (find-paren-tail-start text)))
+          (cond
+           ((or (fx=? main-end len) (fx=? main-end 0))
+            (ceiling-div len avail))
+           (else
+            (fx+ (ceiling-div main-end avail)
+                 (ceiling-div (fx- len main-end) avail)))))))))
+
+  (define (annotation-display-rows i)
+    (if *current-file*
+        (let ((text (hashtable-ref *annotations* (cons *current-file* i) #f)))
+          (if text
+              (let* ((cw (fx- (tb-width) TREE-WIDTH))
+                     (max-w (fxmax (fx- cw ANN-PREFIX-LEN) 1)))
+                (fxmax 1 (ceiling-div (string-length text) max-w)))
+              0))
+        0))
+
+  (define (file-line-display-rows i)
+    (fx+ (line-display-rows i) (annotation-display-rows i)))
+
+  ;; Count visual rows from line `from` up to (not including) line `to`.
+  ;; Folded defines collapse to 1 row; otherwise each line contributes
+  ;; its wrapped display-row count plus any annotation rows.
   (define (visual-distance from to)
     (let loop ((i from) (rows 0))
       (cond
        ((fx>=? i to) rows)
        ((and (memv i *folded*) (fx>? (vector-ref *fold-ends* i) i))
         (loop (fx+ (vector-ref *fold-ends* i) 1) (fx+ rows 1)))
-       (else (loop (fx+ i 1) (fx+ rows 1))))))
+       (else (loop (fx+ i 1) (fx+ rows (file-line-display-rows i)))))))
 
-  ;; Walk backward from `cursor` to find scroll s such that cursor sits at
-  ;; visual row h-1 from s.  Never returns a line inside a fold body.
+  ;; Walk backward from `cursor` to find the maximum scroll s such that
+  ;; the display rows from s to cursor (inclusive) fit in `h` rows.
   (define (scroll-for-bottom cursor h)
-    (scroll-for-row cursor (fx- h 1)))
+    (let ((cursor-rows (file-line-display-rows cursor)))
+      (scroll-walk-back cursor (fxmax 0 (fx- h cursor-rows)))))
 
+  ;; Walk back from cursor so that ~target-rows of display rows sit above it.
   (define (scroll-for-row cursor target-rows)
+    (scroll-walk-back cursor target-rows))
+
+  (define (scroll-walk-back cursor budget-above)
     (let loop ((i cursor) (rows 0))
       (cond
        ((fx<=? i 0) 0)
-       ((fx>=? rows target-rows)
-        (let ((range (folded-range-at i)))
-          (if range (car range) i)))
        (else
-        (let ((range (folded-range-at (fx- i 1))))
-          (if range
-              (loop (car range) (fx+ rows 1))
-              (loop (fx- i 1) (fx+ rows 1))))))))
+        (let* ((prev (fx- i 1))
+               (range (folded-range-at prev))
+               (prev-rows (if range 1 (file-line-display-rows prev)))
+               (prev-idx  (if range (car range) prev)))
+          (if (fx>? (fx+ rows prev-rows) budget-above)
+              i
+              (loop prev-idx (fx+ rows prev-rows))))))))
 
   (define (recenter-cycle!)
     (let ((h (content-pane-height))
