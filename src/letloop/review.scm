@@ -856,7 +856,8 @@
         (let ((range (folded-range-at *content-cursor*)))
           (when range
             (let ((next (if (fx>? dir 0)
-                            (fxmin (fx+ (cdr range) 1) (fx- n 1))
+                            (let ((fe+1 (fx+ (cdr range) 1)))
+                              (if (fx>=? fe+1 n) (car range) fe+1))
                             (car range))))
               (when (not (fx=? next *content-cursor*))
                 (set! *content-cursor* next)
