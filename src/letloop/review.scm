@@ -309,7 +309,7 @@
                               (if (fx=? o2 0)
                                   (begin (vector-set! ends i j) (scan j o2 #f #t))
                                   (char-loop (fx+ k 1) o2 #f))))
-                           (else (char-loop (fx+ k 1) o #f)))))))))))
+                           (else (char-loop (fx+ k 1) o #f))))))))))))
           (loop (fx+ i 1))))
       ends))
 
@@ -1101,4 +1101,3 @@
       (event-loop)))
 
   )
-)
