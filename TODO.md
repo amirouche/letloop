@@ -4,6 +4,14 @@ References:
 - https://bun.com/reference
 - https://codeberg.org/amirouche/letloop
 
+## letloop review — Known Bugs
+
+- [ ] **Scroll jump when fold slides off top** — when a folded `(define ...)` is at
+  the top of the viewport and the cursor reaches the viewport bottom, scroll jumps
+  by the entire fold size (N raw lines) in one keypress because advancing past a
+  fold-start requires skipping to `fold-end+1`. Visually jarring; no clean fix
+  without auto-expanding folds on scroll.
+
 ## Builtin Core Features
 
 - [ ] **Node.js compatibility** — drop-in replacement for Node.js apps
