@@ -623,6 +623,36 @@
               (begin (tb-print cx y fg bg (substring text 0 avail))
                      (loop '() max-x)))))))
 
+  (define (close-paren-char? ch)
+    (or (char=? ch #\)) (char=? ch #\]) (char=? ch #\})))
+
+  (define (find-paren-tail-start text)
+    (let ((n (string-length text)))
+      (if (fx<? n 2) n
+          (let loop ((i (fx- n 1)) (count 0))
+            (cond
+             ((fx<? i 0)
+              (if (fx>=? count 2) 0 n))
+             ((close-paren-char? (string-ref text i))
+              (loop (fx- i 1) (fx+ count 1)))
+             ((fx>=? count 2) (fx+ i 1))
+             (else n))))))
+
+  (define (spans-skip spans n)
+    (cond
+     ((null? spans) '())
+     ((fx<=? n 0) spans)
+     (else
+      (let* ((span (car spans))
+             (text (car span))
+             (fg   (cadr span))
+             (len  (string-length text)))
+        (cond
+         ((fx>? len n)
+          (cons (list (substring text n len) fg) (cdr spans)))
+         (else
+          (spans-skip (cdr spans) (fx- n len))))))))
+
   (define (render-file-pane!)
     (let* ((h (tb-height))
            (content-h (fx- h 2))
@@ -735,25 +765,28 @@
                            (text (vector-ref *file-lines* line-num))
                            (text-len (string-length text))
                            (avail (fxmax (fx- cw gutter-w) 1))
+                           (main-end (if (fx>? text-len avail)
+                                         (find-paren-tail-start text)
+                                         text-len))
                            (cont-prefix (make-string gutter-w #\space))
                            (new-row
                             (let emit ((chunk-idx 0) (off 0) (r row))
                               (if (or (fx>=? r (fx+ content-h 1))
                                       (and (fx>? chunk-idx 0) (fx>=? off text-len)))
                                   r
-                                  (let* ((chunk-end (fxmin (fx+ off avail) text-len))
+                                  (let* ((chunk-end
+                                          (if (fx<? off main-end)
+                                              (fxmin (fx+ off avail) main-end)
+                                              (fxmin (fx+ off avail) text-len)))
+                                         (chunk-len (fx- chunk-end off))
                                          (pfx (if (fx=? chunk-idx 0) num-str cont-prefix)))
                                     (tb-print cx r fg bg (make-string cw #\space))
                                     (tb-print cx r fg bg pfx)
-                                    (if (fx=? chunk-idx 0)
-                                        (render-spans!
-                                         (fx+ cx gutter-w) r
-                                         spans
-                                         (fx+ cx cw)
-                                         bg)
-                                        (tb-print (fx+ cx gutter-w) r
-                                                  (if cursor? fg TB-DEFAULT) bg
-                                                  (substring text off chunk-end)))
+                                    (render-spans!
+                                     (fx+ cx gutter-w) r
+                                     (spans-skip spans off)
+                                     (fx+ (fx+ cx gutter-w) chunk-len)
+                                     bg)
                                     (if (fx>=? chunk-end text-len)
                                         (fx+ r 1)
                                         (emit (fx+ chunk-idx 1) chunk-end (fx+ r 1))))))))
