@@ -88,6 +88,7 @@
   (define *fold-ends* '#())
   (define *content-cursor* 0)
   (define *content-scroll* 0)
+  (define *recenter-state* 'none)
 
   (define *annotations* (make-hashtable equal-hash equal?))
   (define *resolved*    (make-hashtable equal-hash equal?))
@@ -876,10 +877,13 @@
   ;; Walk backward from `cursor` to find scroll s such that cursor sits at
   ;; visual row h-1 from s.  Never returns a line inside a fold body.
   (define (scroll-for-bottom cursor h)
+    (scroll-for-row cursor (fx- h 1)))
+
+  (define (scroll-for-row cursor target-rows)
     (let loop ((i cursor) (rows 0))
       (cond
        ((fx<=? i 0) 0)
-       ((fx>=? rows (fx- h 1))
+       ((fx>=? rows target-rows)
         (let ((range (folded-range-at i)))
           (if range (car range) i)))
        (else
@@ -887,6 +891,21 @@
           (if range
               (loop (car range) (fx+ rows 1))
               (loop (fx- i 1) (fx+ rows 1))))))))
+
+  (define (recenter-cycle!)
+    (let ((h (content-pane-height))
+          (cursor *content-cursor*))
+      (case *recenter-state*
+        ((middle)
+         (set! *content-scroll* (scroll-for-bottom cursor h))
+         (set! *recenter-state* 'bottom))
+        ((bottom)
+         (set! *content-scroll* cursor)
+         (set! *recenter-state* 'top))
+        (else
+         (set! *content-scroll* (scroll-for-row cursor (fxdiv h 2)))
+         (set! *recenter-state* 'middle)))
+      (snap-scroll-out-of-folds!)))
 
   (define (content-move-cursor! delta)
     (let ((n (vector-length *file-lines*)))
@@ -991,11 +1010,14 @@
      ((fx=? ch (char->integer #\q)) (tb-shutdown) (exit))))
 
   (define (handle-key-content-pane key ch)
+    (unless (fx=? ch (char->integer #\l))
+      (set! *recenter-state* 'none))
     (cond
      ((or (fx=? key TB-KEY-ARROW-DOWN) (fx=? ch (char->integer #\j))) (content-move-cursor! 1))
      ((or (fx=? key TB-KEY-ARROW-UP)   (fx=? ch (char->integer #\k))) (content-move-cursor! -1))
      ((fx=? key TB-KEY-PGDN) (content-move-cursor! (content-pane-height)))
      ((fx=? key TB-KEY-PGUP) (content-move-cursor! (fx- (content-pane-height))))
+     ((fx=? ch (char->integer #\l)) (recenter-cycle!))
      ((fx=? key TB-KEY-TAB) (set! *mode* 'file-pane))
      ((fx=? ch (char->integer #\a))
       (set! *mode* 'annotating)
