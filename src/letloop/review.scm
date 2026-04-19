@@ -1301,7 +1301,9 @@
           (let ((e (vector-ref *tree-entries* *tree-cursor*)))
             (if (tree-entry-is-dir e)
                 (begin (toggle-entry-expand! e) (build-tree-entries!))
-                (begin (load-file! (tree-entry-path e)) (set! *mode* 'content-pane)))))))
+                (begin (push-jump!)
+                       (load-file! (tree-entry-path e))
+                       (set! *mode* 'content-pane)))))))
      ((fx=? key TB-KEY-TAB) (set! *mode* 'content-pane))
      ((fx=? ch (char->integer #\q)) (tb-shutdown) (exit))))
 
