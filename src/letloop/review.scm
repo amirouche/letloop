@@ -70,6 +70,7 @@
 
   (define TREE-WIDTH 26)
   (define INPUT-MAX-LINES 5)
+  (define MENU-MAX-LINES 10)
 
   ;; ---- Global State ----
 
@@ -100,6 +101,16 @@
   (define *input-cursor* 0)
   (define *input-target-line* 0)
   (define *kill-ring* "")
+
+  (define *jump-history* '())
+  (define *menu-mode* #f)
+  (define *menu-title* "")
+  (define *menu-items* '#())
+  (define *menu-data*  '#())
+  (define *menu-cursor* 0)
+  (define *menu-scroll* 0)
+  (define *menu-callback* #f)
+  (define *flash* "")
 
   ;; ---- Tree Entry Record ----
 
@@ -591,9 +602,12 @@
   (define (input-mode?)
     (or (eq? *mode* 'annotating) (eq? *mode* 'editing)))
 
+  (define (menu-mode?) (not (eq? *menu-mode* #f)))
+
   (define (content-pane-height)
     (fx- (tb-height) 2
-         (if (input-mode?) INPUT-MAX-LINES 0)))
+         (if (input-mode?) INPUT-MAX-LINES 0)
+         (if (menu-mode?)  MENU-MAX-LINES  0)))
 
   (define (render-spans! x y spans max-x bg)
     (let loop ((spans spans) (cx x))
@@ -789,6 +803,20 @@
            (h (tb-height))
            (y (fx- h 1)))
       (cond
+       ((not (string=? *flash* ""))
+        (let* ((bar *flash*)
+               (padded (let ((l (string-length bar)))
+                         (if (fx<? l w)
+                             (string-append bar (make-string (fx- w l) #\space))
+                             (substring bar 0 w)))))
+          (tb-print 0 y TB-YELLOW TB-DEFAULT padded)))
+       ((menu-mode?)
+        (let* ((bar "  [↑↓]move [Enter]select [Esc]cancel")
+               (padded (let ((l (string-length bar)))
+                         (if (fx<? l w)
+                             (string-append bar (make-string (fx- w l) #\space))
+                             (substring bar 0 w)))))
+          (tb-print 0 y TB-BLACK TB-CYAN padded)))
        ((input-mode?)
         (let* ((bar "  ↵ commit  C-j newline  Esc cancel  C-a/e home/end  C-b/f move  C-k kill  C-w del-word  C-y yank")
                (padded (let ((l (string-length bar)))
@@ -812,7 +840,7 @@
                              (substring bar 0 w)))))
           (tb-print 0 y TB-BLACK TB-WHITE padded)))
        (else
-        (let* ((bar "[j/k]move [Tab]switch [a]nnotate [e]dit [d]el [r]esolve [n/N]next [z]fold [q]uit")
+        (let* ((bar "[j/k]move [Tab]switch [a]nnotate [e]dit [d]el [r]esolve [n/N]next [z]fold [g]oto [⌫]back [q]uit")
                (padded (let ((l (string-length bar)))
                          (if (fx<? l w)
                              (string-append bar (make-string (fx- w l) #\space))
@@ -824,6 +852,7 @@
     (render-file-pane!)
     (render-content-pane!)
     (when (input-mode?) (render-input-area!))
+    (when (menu-mode?)  (render-menu!))
     (render-status-bar!)
     (tb-present))
 
@@ -993,6 +1022,273 @@
           (set! *content-cursor* target)
           (set! *content-scroll* (max 0 (fx- target 5)))))))
 
+  ;; ---- Jump to Definition ----
+
+  (define (ident-char? ch)
+    (or (char-alphabetic? ch)
+        (char-numeric? ch)
+        (memv ch '(#\- #\_ #\! #\? #\* #\+ #\/ #\< #\> #\= #\$ #\% #\:))))
+
+  (define (ident-start-char? ch)
+    (and (ident-char? ch)
+         (not (char-numeric? ch))))
+
+  (define (extract-identifiers str)
+    (let* ((n (string-length str))
+           (out (open-output-string)))
+      (let loop ((i 0) (start -1) (seen '()) (acc '()))
+        (cond
+         ((fx>=? i n)
+          (let ((acc (if (fx>=? start 0)
+                         (let ((tok (substring str start i)))
+                           (if (member tok seen) acc (cons tok acc)))
+                         acc)))
+            (reverse acc)))
+         ((ident-char? (string-ref str i))
+          (if (fx>=? start 0)
+              (loop (fx+ i 1) start seen acc)
+              (if (ident-start-char? (string-ref str i))
+                  (loop (fx+ i 1) i seen acc)
+                  (loop (fx+ i 1) -1 seen acc))))
+         (else
+          (if (fx>=? start 0)
+              (let ((tok (substring str start i)))
+                (if (member tok seen)
+                    (loop (fx+ i 1) -1 seen acc)
+                    (loop (fx+ i 1) -1 (cons tok seen) (cons tok acc))))
+              (loop (fx+ i 1) -1 seen acc)))))))
+
+  (define (shell-quote s)
+    (let* ((out (open-output-string))
+           (n (string-length s)))
+      (put-char out #\')
+      (let loop ((i 0))
+        (cond
+         ((fx>=? i n) (put-char out #\') (get-output-string out))
+         ((char=? (string-ref s i) #\')
+          (put-string out "'\\''") (loop (fx+ i 1)))
+         (else (put-char out (string-ref s i)) (loop (fx+ i 1)))))))
+
+  (define (regex-escape s)
+    (let* ((out (open-output-string))
+           (n (string-length s)))
+      (let loop ((i 0))
+        (cond
+         ((fx>=? i n) (get-output-string out))
+         (else
+          (let ((ch (string-ref s i)))
+            (when (memv ch '(#\. #\* #\+ #\? #\( #\) #\[ #\] #\{ #\} #\^ #\$ #\| #\\))
+              (put-char out #\\))
+            (put-char out ch)
+            (loop (fx+ i 1))))))))
+
+  (define GREP-TMP "/tmp/letloop-review.grep.out")
+
+  (define (run-capture cmd)
+    (system (string-append cmd " > " GREP-TMP " 2>/dev/null"))
+    (if (file-exists? GREP-TMP)
+        (let ((lines (read-file-lines GREP-TMP)))
+          (delete-file GREP-TMP)
+          lines)
+        '#()))
+
+  (define (git-root)
+    (let ((lines (run-capture "git rev-parse --show-toplevel")))
+      (if (and (fx>? (vector-length lines) 0)
+               (fx>? (string-length (vector-ref lines 0)) 0))
+          (vector-ref lines 0)
+          ".")))
+
+  (define (split-grep-line line)
+    (let* ((n (string-length line))
+           (p1 (string-search-forward ":" line 0)))
+      (and p1
+           (let ((p2 (string-search-forward ":" line (fx+ p1 1))))
+             (and p2
+                  (let ((path (substring line 0 p1))
+                        (lnum (string->number (substring line (fx+ p1 1) p2)))
+                        (text (substring line (fx+ p2 1) n)))
+                    (and lnum (list path (fx- lnum 1) text))))))))
+
+  (define (git-grep-pattern root pattern)
+    (let ((cmd (string-append "cd " (shell-quote root)
+                              " && git grep -nE --no-color -- "
+                              (shell-quote pattern))))
+      (let ((lines (run-capture cmd))
+            (results '()))
+        (vector-for-each
+         (lambda (l)
+           (let ((parsed (split-grep-line l)))
+             (when parsed
+               (set! results (cons (cons root parsed) results)))))
+         lines)
+        (reverse results))))
+
+  (define (find-definitions ident)
+    (let* ((root (git-root))
+           (escaped (regex-escape ident))
+           (def-pattern (string-append "\\((define|define-syntax)[[:space:]]+"
+                                       escaped
+                                       "([[:space:]]|$)"))
+           (defs (git-grep-pattern root def-pattern)))
+      (if (pair? defs)
+          defs
+          (git-grep-pattern root
+                            (string-append "(^|[^A-Za-z0-9!?*+/<>=_$%:-])"
+                                           escaped
+                                           "([^A-Za-z0-9!?*+/<>=_$%:-]|$)")))))
+
+  (define (push-jump!)
+    (when *current-file*
+      (set! *jump-history*
+            (cons (list *current-file* *content-cursor* *content-scroll*)
+                  *jump-history*))))
+
+  (define (pop-jump!)
+    (if (pair? *jump-history*)
+        (let ((entry (car *jump-history*)))
+          (set! *jump-history* (cdr *jump-history*))
+          (load-file! (car entry))
+          (set! *content-cursor* (cadr entry))
+          (set! *content-scroll* (caddr entry))
+          (set! *recenter-state* 'none))
+        (set! *flash* "no previous location")))
+
+  (define (jump-to-file-line! path line)
+    (push-jump!)
+    (load-file! path)
+    (set! *content-cursor* (min line (fxmax 0 (fx- (vector-length *file-lines*) 1))))
+    (set! *content-scroll* (max 0 (fx- *content-cursor* 5)))
+    (set! *recenter-state* 'none))
+
+  ;; ---- Menu ----
+
+  (define (menu-open! mode title items data callback)
+    (set! *menu-mode* mode)
+    (set! *menu-title* title)
+    (set! *menu-items* items)
+    (set! *menu-data* data)
+    (set! *menu-cursor* 0)
+    (set! *menu-scroll* 0)
+    (set! *menu-callback* callback))
+
+  (define (menu-close!)
+    (set! *menu-mode* #f)
+    (set! *menu-title* "")
+    (set! *menu-items* '#())
+    (set! *menu-data* '#())
+    (set! *menu-callback* #f))
+
+  (define (menu-move! delta)
+    (let ((n (vector-length *menu-items*)))
+      (when (fx>? n 0)
+        (set! *menu-cursor* (clamp (fx+ *menu-cursor* delta) 0 (fx- n 1)))
+        (let ((h (fx- MENU-MAX-LINES 1)))
+          (when (fx<? *menu-cursor* *menu-scroll*)
+            (set! *menu-scroll* *menu-cursor*))
+          (when (fx>=? *menu-cursor* (fx+ *menu-scroll* h))
+            (set! *menu-scroll* (fx- *menu-cursor* (fx- h 1))))))))
+
+  (define (menu-commit!)
+    (let ((n (vector-length *menu-items*))
+          (cb *menu-callback*))
+      (when (and (fx>? n 0) cb (fx<? *menu-cursor* n))
+        (let ((data (vector-ref *menu-data* *menu-cursor*)))
+          (menu-close!)
+          (cb data)))))
+
+  (define (pick-definition ident)
+    (let ((results (find-definitions ident)))
+      (cond
+       ((null? results)
+        (set! *flash* (string-append "no definition found for " ident)))
+       ((null? (cdr results))
+        (let* ((r (car results))
+               (root (car r))
+               (path (cadr r))
+               (line (caddr r)))
+          (jump-to-file-line!
+           (string-append root "/" path) line)))
+       (else
+        (let* ((items (list->vector
+                       (map (lambda (r)
+                              (string-append (cadr r) ":"
+                                             (number->string (fx+ (caddr r) 1))
+                                             ": "
+                                             (string-trim-left (cadddr r))))
+                            results)))
+               (data (list->vector
+                      (map (lambda (r)
+                             (cons (string-append (car r) "/" (cadr r))
+                                   (caddr r)))
+                           results))))
+          (menu-open! 'definition
+                      (string-append "definitions of " ident
+                                     " (" (number->string (vector-length items)) ")")
+                      items data
+                      (lambda (entry)
+                        (jump-to-file-line! (car entry) (cdr entry)))))))))
+
+  (define (jump-to-definition!)
+    (when (and *current-file* (fx>? (vector-length *file-lines*) 0))
+      (let* ((line (vector-ref *file-lines* *content-cursor*))
+             (idents (extract-identifiers line)))
+        (cond
+         ((null? idents)
+          (set! *flash* "no identifier on this line"))
+         ((null? (cdr idents))
+          (pick-definition (car idents)))
+         (else
+          (let* ((items (list->vector idents))
+                 (data  items))
+            (menu-open! 'symbol
+                        "pick identifier"
+                        items data
+                        pick-definition)))))))
+
+  (define (handle-key-menu key ch)
+    (cond
+     ((fx=? key TB-KEY-ESC) (menu-close!))
+     ((or (fx=? key TB-KEY-ARROW-DOWN) (fx=? ch (char->integer #\j)))
+      (menu-move! 1))
+     ((or (fx=? key TB-KEY-ARROW-UP) (fx=? ch (char->integer #\k)))
+      (menu-move! -1))
+     ((or (fx=? key TB-KEY-ENTER) (fx=? ch 13))
+      (menu-commit!))))
+
+  (define (render-menu!)
+    (let* ((w (tb-width))
+           (h (tb-height))
+           (start-row (fx- h 1 MENU-MAX-LINES))
+           (title (string-append " ▸ " *menu-title*))
+           (title-padded
+            (let ((l (string-length title)))
+              (if (fx<? l w)
+                  (string-append title (make-string (fx- w l) #\space))
+                  (substring title 0 w)))))
+      (tb-print 0 start-row TB-BLACK TB-CYAN title-padded)
+      (let ((rows (fx- MENU-MAX-LINES 1))
+            (n (vector-length *menu-items*)))
+        (let loop ((i 0))
+          (when (fx<? i rows)
+            (let* ((idx (fx+ *menu-scroll* i))
+                   (y (fx+ start-row 1 i))
+                   (selected? (fx=? idx *menu-cursor*))
+                   (text (if (and (fx>=? idx 0) (fx<? idx n))
+                             (vector-ref *menu-items* idx)
+                             ""))
+                   (marker (if selected? " ▸ " "   "))
+                   (full (string-append marker text))
+                   (fg (if selected? TB-BLACK TB-DEFAULT))
+                   (bg (if selected? TB-YELLOW TB-DEFAULT))
+                   (padded
+                    (let ((l (string-length full)))
+                      (if (fx<? l w)
+                          (string-append full (make-string (fx- w l) #\space))
+                          (substring full 0 w)))))
+              (tb-print 0 y fg bg padded))
+            (loop (fx+ i 1)))))))
+
   ;; ---- Event Handling ----
 
   (define (handle-key-file-pane key ch)
@@ -1018,6 +1314,9 @@
      ((fx=? key TB-KEY-PGDN) (content-move-cursor! (content-pane-height)))
      ((fx=? key TB-KEY-PGUP) (content-move-cursor! (fx- (content-pane-height))))
      ((fx=? ch (char->integer #\l)) (recenter-cycle!))
+     ((fx=? ch (char->integer #\g)) (jump-to-definition!))
+     ((or (fx=? key TB-KEY-BACKSPACE) (fx=? key TB-KEY-BACKSPACE2))
+      (pop-jump!))
      ((fx=? key TB-KEY-TAB) (set! *mode* 'file-pane))
      ((fx=? ch (char->integer #\a))
       (set! *mode* 'annotating)
@@ -1098,7 +1397,9 @@
             (cond
              ((fx=? type TB-EVENT-RESIZE) #f)
              ((fx=? type TB-EVENT-KEY)
+              (set! *flash* "")
               (cond
+               ((menu-mode?)               (handle-key-menu key ch))
                ((eq? *mode* 'file-pane)    (handle-key-file-pane key ch))
                ((eq? *mode* 'content-pane) (handle-key-content-pane key ch))
                ((input-mode?)              (handle-key-input key ch mod))))))))
