@@ -4,7 +4,8 @@
    (chezscheme)
    (letloop cli base)
    (letloop desktop seat)
-   (letloop desktop drm))
+   (letloop desktop drm)
+   (letloop desktop vulkan))
 
   (define (pk . args)
     (when (getenv "LETLOOP_DEBUG")
@@ -45,6 +46,7 @@
                (seat-vt-number seat)
                (seat-drm-fd seat))
        (drm-describe-connectors (seat-drm-fd seat) (current-error-port))
+       (vulkan-describe          (current-error-port))
        (flush-output-port (current-error-port))
        (park-forever))))
 
