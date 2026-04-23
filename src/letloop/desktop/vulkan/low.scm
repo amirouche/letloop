@@ -86,6 +86,8 @@
    ;; command buffer
    VK_COMMAND_BUFFER_LEVEL_PRIMARY
    VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+   VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
+   VK_FENCE_CREATE_SIGNALED_BIT
 
    ;; extension name strings
    VK_KHR_SURFACE_EXTENSION_NAME
@@ -258,8 +260,10 @@
   (define VK_COLOR_SPACE_SRGB_NONLINEAR_KHR      0)
   (define VK_DISPLAY_PLANE_ALPHA_OPAQUE_BIT_KHR #x01)
 
-  (define VK_COMMAND_BUFFER_LEVEL_PRIMARY                0)
-  (define VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT   #x01)
+  (define VK_COMMAND_BUFFER_LEVEL_PRIMARY                 0)
+  (define VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT    #x01)
+  (define VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT #x02)
+  (define VK_FENCE_CREATE_SIGNALED_BIT                   #x01)
 
   ;; ----------------------------------------------------------------
   ;; Extension name strings (Vulkan headers use them as #define literals).
