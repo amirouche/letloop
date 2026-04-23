@@ -9,6 +9,7 @@ Usage:
   letloop root exec DIRECTORY TARGET-DIRECTORY -- COMMAND ...
   letloop desktop
   letloop review [DIRECTORY ...]
+  letloop desktop
 
 The following flags are available:
 

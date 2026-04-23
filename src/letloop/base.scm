@@ -952,6 +952,7 @@
         ((root) (letloop-root (cdr args)))
         ;; ((desktop) (letloop-desktop (cdr args)))
         ((review) (letloop-review (cdr args)))
+        ;; ((desktop) (letloop-desktop (cdr args)))
         (else (letloop-usage) (exit 1)))))
 
   (define ftw*
