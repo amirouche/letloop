@@ -19,6 +19,28 @@
    vulkan-queue-family-indices
    vulkan-display-properties
    vulkan-display-modes
+   vulkan-display-plane-properties
+   vulkan-display-plane?
+   vulkan-display-plane-index
+   vulkan-display-plane-current-display
+   vulkan-display-plane-current-stack-index
+   vulkan-pick-graphics-queue-family
+
+   ;; display record accessors
+   vulkan-display?
+   vulkan-display-handle
+   vulkan-display-name
+   vulkan-display-physical-width-mm
+   vulkan-display-physical-height-mm
+   vulkan-display-width-px
+   vulkan-display-height-px
+
+   ;; mode record accessors
+   vulkan-display-mode?
+   vulkan-display-mode-handle
+   vulkan-display-mode-width
+   vulkan-display-mode-height
+   vulkan-display-mode-refresh-rate-millihz
 
    ;; high-level
    vulkan-describe)
@@ -368,6 +390,60 @@
                                         out))))))
                   (lambda () (foreign-free arr)))))))
        (lambda () (foreign-free count-p)))))
+
+  ;; ----------------------------------------------------------------
+  ;; Display plane enumeration
+  ;; ----------------------------------------------------------------
+
+  (define-record-type vulkan-display-plane
+    (fields
+     (immutable index)             ; plane index (position in returned array)
+     (immutable current-display)   ; u64 VkDisplayKHR, or 0 if unattached
+     (immutable current-stack-index)))
+
+  (define (vulkan-display-plane-properties pd)
+    (let ((count-p (foreign-alloc/zero 4)))
+      (dynamic-wind
+       void
+       (lambda ()
+         (vk-check 'vulkan-display-plane-properties/count
+                   (vkGetPhysicalDeviceDisplayPlanePropertiesKHR pd count-p 0))
+         (let ((n (foreign-ref 'unsigned-32 count-p 0)))
+           (if (zero? n)
+               '()
+               (let* ((sz  (ftype-sizeof <VkDisplayPlanePropertiesKHR>))
+                      (arr (foreign-alloc/zero (* n sz))))
+                 (dynamic-wind
+                  void
+                  (lambda ()
+                    (vk-check 'vulkan-display-plane-properties/fill
+                              (vkGetPhysicalDeviceDisplayPlanePropertiesKHR pd count-p arr))
+                    (let loop ((i 0) (out '()))
+                      (if (= i n)
+                          (reverse out)
+                          (let* ((base (+ arr (* i sz)))
+                                 (fp   (make-ftype-pointer
+                                        <VkDisplayPlanePropertiesKHR> base))
+                                 (disp (ftype-ref <VkDisplayPlanePropertiesKHR>
+                                                  (currentDisplay) fp))
+                                 (idx  (ftype-ref <VkDisplayPlanePropertiesKHR>
+                                                  (currentStackIndex) fp)))
+                            (loop (+ i 1)
+                                  (cons (make-vulkan-display-plane i disp idx) out))))))
+                  (lambda () (foreign-free arr)))))))
+       (lambda () (foreign-free count-p)))))
+
+  ;; ----------------------------------------------------------------
+  ;; Convenience: find a queue family that supports graphics.
+  ;; ----------------------------------------------------------------
+
+  (define (vulkan-pick-graphics-queue-family pd)
+    (let loop ((qfs (vulkan-queue-family-indices pd)))
+      (cond
+       ((null? qfs) #f)
+       ((not (zero? (bitwise-and (cadr (car qfs)) VK_QUEUE_GRAPHICS_BIT)))
+        (car (car qfs)))
+       (else (loop (cdr qfs))))))
 
   ;; ----------------------------------------------------------------
   ;; vulkan-describe — high-level dump, used by M2.1 deliverable.

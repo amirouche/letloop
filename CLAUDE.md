@@ -8,6 +8,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Main branch for PRs: `dev`
 
+## System Dependencies
+
+### Build-time (shared objects dlopen'd at library load)
+- **libvulkan.so.1** (`libvulkan1` on Debian/Ubuntu) — required by `(letloop desktop vulkan low)`. Load fails at startup without it.
+- **libtls.so** — required by `(letloop tls low)`, which is imported transitively via `(letloop www)` → `(letloop root)` → `(letloop base)`, so every letloop build touches it. Upstream doesn't ship a target to build it. If your distro lacks it, stub it with:
+  ```bash
+  grep -oP '"tls_\w+"' src/letloop/tls/low.scm | sort -u | sed 's/"//g' |
+    awk '{ print "void* " $1 "() { return (void*)0; }" }' > /tmp/libtls_stub.c
+  cc -shared -fPIC -o local/lib/libtls.so /tmp/libtls_stub.c
+  ```
+  The stub satisfies dlopen + symbol lookup but aborts at first TLS use; fine for non-TLS targets like `letloop desktop`.
+- **liburing, libsodium, libargon2, libblake3, libpicohttpparser** — only loaded on demand from their respective modules. Not required for `letloop desktop`.
+
+### Runtime-only (for `letloop desktop`)
+- **A Vulkan ICD** — on headless machines install `mesa-vulkan-drivers` for software rendering via `llvmpipe`. Without any ICD, `vkCreateInstance` returns `VK_ERROR_INCOMPATIBLE_DRIVER`.
+- **A real TTY + GPU for the full M2.x path** — `/dev/tty0` (requires `CAP_SYS_ADMIN` to issue `KDSETMODE`) and `/dev/dri/card0` (requires DRM master, i.e. root or seat-managed session). Sandbox runs will fail at `DRM_IOCTL_SET_MASTER` or earlier; the seat-take rollback handles this cleanly.
+
+### Optional (developer cross-checking)
+- **libvulkan-dev** — only needed if you want to verify Chez ftype sizes against `sizeof()` from Vulkan headers. See `src/letloop/desktop/vulkan/low.scm` for the ftype definitions; struct sizes are recorded in comments.
+
 ## Build Commands
 
 **Critical:** Always run `make` inside the `./venv` environment. The `makefile` auto-detects `SCHEME=$(shell which scheme)`, which picks up the system Chez (e.g. 9.5.8) instead of the local 10.x build. Running outside `./venv` causes `Exception: attempt to reference unbound identifier scheme-pre-release`.
