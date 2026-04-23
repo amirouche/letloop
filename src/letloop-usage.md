@@ -7,6 +7,7 @@ Usage:
   letloop root available
   letloop root create DISTRIBUTION VERSION MACHINE DIRECTORY
   letloop root exec DIRECTORY TARGET-DIRECTORY -- COMMAND ...
+  letloop desktop
 
 The following flags are available:
 
