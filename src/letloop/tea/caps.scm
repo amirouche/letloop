@@ -36,6 +36,7 @@
    xterm-mod-keys
    ;; lookup
    caps-for-term
+   caps-for-term/strict
    all-cap-sets)
   (import (chezscheme))
 
@@ -367,13 +368,18 @@
           xterm-caps))
 
   (define (caps-for-term term)
-    (or (and term
-             (let exact ((cs all-cap-sets))
+    ;; Returns the matching built-in cap-set, or xterm-caps as a final
+    ;; fallback so callers always get a usable instance.  A separate
+    ;; strict form is exposed for layered lookups (e.g., terminfo first).
+    (or (caps-for-term/strict term) xterm-caps))
+
+  (define (caps-for-term/strict term)
+    (and term
+         (or (let exact ((cs all-cap-sets))
                (cond
                 ((null? cs) #f)
                 ((string=? term (cap-set-name (car cs))) (car cs))
-                (else (exact (cdr cs))))))
-        (and term
+                (else (exact (cdr cs)))))
              (let prefix ((cs all-cap-sets))
                (cond
                 ((null? cs) #f)
@@ -381,6 +387,5 @@
                    (and (fx>=? (string-length term) (string-length n))
                         (string=? n (substring term 0 (string-length n)))))
                  (car cs))
-                (else (prefix (cdr cs))))))
-        xterm-caps))
+                (else (prefix (cdr cs))))))))
   )

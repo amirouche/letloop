@@ -41,6 +41,7 @@
           (letloop tea sgr)
           (letloop tea cell)
           (letloop tea caps)
+          (letloop tea terminfo)
           (letloop tea input)
           (letloop tea loop))
 
@@ -97,7 +98,11 @@
              (hide-cursor? (let ((p (assq 'hide-cursor? opts)))
                              (if p (cdr p) #t)))
              (term         (getenv "TERM"))
-             (caps         (caps-for-term term))
+             ;; Three-tier cap lookup: built-in match first, then the
+             ;; binary terminfo database, then xterm as a final fallback.
+             (caps         (or (caps-for-term/strict term)
+                               (terminfo-cap-set    term)
+                               (caps-for-term       term)))
              (fd           (open-tty tty-path)))
         (unless (isatty? fd)
           (close-fd fd)
