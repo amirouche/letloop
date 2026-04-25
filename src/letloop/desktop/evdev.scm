@@ -59,8 +59,14 @@
    ;; syscall wrappers
    open-evdev
    close-evdev
-   read-input-event)
-  (import (chezscheme))
+   read-input-event
+
+   ;; classification — EVIOCGBIT
+   evdev-keyboard?
+   find-keyboard-path)
+  (import
+   (chezscheme)
+   (letloop desktop ioctl))
 
   ;; ----------------------------------------------------------------
   ;; Constants
@@ -211,9 +217,7 @@
   ;; (debugging, fallback when liburing is unavailable). The hot path
   ;; in (letloop desktop input) uses io_uring instead.
 
-  (define O_RDONLY   #o000)
-  (define O_NONBLOCK #o4000)
-  (define O_CLOEXEC  #o2000000)
+  ;; O_RDONLY / O_NONBLOCK / O_CLOEXEC come from (letloop desktop ioctl).
 
   (define stdlib (load-shared-object #f))
 
@@ -233,6 +237,81 @@
 
   (define (close-evdev fd)
     (libc-close fd))
+
+  ;; ----------------------------------------------------------------
+  ;; Device classification via EVIOCGBIT
+  ;; ----------------------------------------------------------------
+  ;;
+  ;; A real keyboard's bitmap has EV_KEY set in the type bitmap and
+  ;; the KEY_A..KEY_Z range set in its key bitmap. Mice and
+  ;; touchpads expose EV_KEY too (for buttons), but only sparse low-
+  ;; numbered codes (BTN_LEFT etc.) — checking KEY_A specifically
+  ;; rules them out without enumerating every alpha key.
+  ;;
+  ;;   EVIOCGBIT(ev, len) = _IOC(_IOC_READ, 'E', 0x20 + ev, len)
+
+  (define EVIOCGBIT-base #x20)
+  (define EV_TYPE_BITMAP-len 32)        ; bytes for max EV_* + slack
+  (define EV_KEY_BITMAP-len  96)        ; covers up to ~768 key codes
+
+  (define (eviocgbit-request ev len)
+    (_IOR (char->integer #\E) (+ EVIOCGBIT-base ev) len))
+
+  (define (bit-set? bv idx)
+    (let* ((byte-idx (quotient idx 8))
+           (bit-idx  (remainder idx 8)))
+      (and (< byte-idx (bytevector-length bv))
+           (not (zero?
+                 (bitwise-and (bytevector-u8-ref bv byte-idx)
+                              (bitwise-arithmetic-shift-left 1 bit-idx)))))))
+
+  (define (eviocgbit-bytes fd ev len)
+    ;; Returns a bytevector of length `len` populated by the ioctl.
+    (let ((p (foreign-alloc len)))
+      (dynamic-wind
+       void
+       (lambda ()
+         (do ((i 0 (+ i 1))) ((= i len))
+           (foreign-set! 'unsigned-8 p i 0))
+         (let-values (((ret errno)
+                       (sys-ioctl-ptr fd (eviocgbit-request ev len) p)))
+           (cond
+            ((negative? ret) #f)        ; ioctl failed → unclassifiable
+            (else
+             (let ((bv (make-bytevector len)))
+               (do ((i 0 (+ i 1))) ((= i len))
+                 (bytevector-u8-set! bv i (foreign-ref 'unsigned-8 p i)))
+               bv)))))
+       (lambda () (foreign-free p)))))
+
+  ;; Returns #t if the fd is *probably* a keyboard. False positives
+  ;; are unlikely — anything with EV_KEY + KEY_A is by definition a
+  ;; keyboard or close enough.
+  (define (evdev-keyboard? fd)
+    (let ((types (eviocgbit-bytes fd 0 EV_TYPE_BITMAP-len)))
+      (and types
+           (bit-set? types EV_KEY)
+           (let ((keys (eviocgbit-bytes fd EV_KEY EV_KEY_BITMAP-len)))
+             (and keys (bit-set? keys KEY_A))))))
+
+  ;; Walks /dev/input/event0..event<max>, opens each non-blocking,
+  ;; returns the first path that classifies as a keyboard. Caller
+  ;; opens it again with their preferred flags. Returns #f if nothing
+  ;; matches.
+  (define (find-keyboard-path)
+    (let loop ((i 0))
+      (cond
+       ((>= i 32) #f)
+       (else
+        (let ((path (format #f "/dev/input/event~a" i)))
+          (let ((fd (libc-open path
+                               (bitwise-ior O_RDONLY O_NONBLOCK O_CLOEXEC) 0)))
+            (cond
+             ((negative? fd) (loop (+ i 1)))
+             (else
+              (let ((kb? (evdev-keyboard? fd)))
+                (libc-close fd)
+                (if kb? path (loop (+ i 1))))))))))))
 
   ;; Read up to one event, returning either a parsed event or #f if
   ;; the FD is non-blocking and no data is available. Errors raise.

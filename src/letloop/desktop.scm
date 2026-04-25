@@ -8,6 +8,7 @@
    (letloop desktop vulkan)
    (letloop desktop window)
    (letloop desktop input)
+   (letloop desktop evdev)
    (letloop desktop repl))
 
   (define (pk . args)
@@ -68,21 +69,24 @@
                    (start-repl! w)))
                (window-run! w))))))))
 
-  ;; Best-effort: try /dev/input/event0..event9, attach the first one
-  ;; that opens. evdev classification (EVIOCGBIT) to find a real
-  ;; keyboard rather than e.g. a touchpad belongs to a future M2.x;
-  ;; for now we accept whatever the first numeric device hands us.
+  ;; Find a real keyboard via EVIOCGBIT (skips touchpads / mice /
+  ;; power buttons / etc. that also expose /dev/input/eventN nodes),
+  ;; open it, and attach. Returns the fd or #f.
   (define (try-attach-keyboard! w)
-    (let loop ((i 0))
+    (let ((path (find-keyboard-path)))
       (cond
-       ((>= i 10) #f)
+       ((not path)
+        (format (current-error-port) "input: no keyboard found~%")
+        #f)
        (else
-        (let ((path (format #f "/dev/input/event~a" i)))
-          (guard (e (#t (loop (+ i 1))))
-            (let ((fd (open-keyboard path)))
-              (window-attach-keyboard! w fd)
-              (format (current-error-port) "input: attached ~a~%" path)
-              fd)))))))
+        (guard (e (#t
+                   (format (current-error-port)
+                           "input: open of ~a failed~%" path)
+                   #f))
+          (let ((fd (open-keyboard path)))
+            (window-attach-keyboard! w fd)
+            (format (current-error-port) "input: attached ~a~%" path)
+            fd))))))
 
   ;; Parse "R G B" or "R G B A" as floats from LETLOOP_DESKTOP_COLOR.
   ;; Default is opaque magenta — visible against any boot console.
