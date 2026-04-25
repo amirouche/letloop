@@ -57,6 +57,9 @@
                  (window-clear-color! w
                                       (car rgba) (cadr rgba)
                                       (caddr rgba) (cadddr rgba)))
+               (window-fg-color! w 1.0 1.0 1.0 1.0)
+               (window-draw-text! w "letloop desktop" 40 40)
+               (window-draw-text! w "press Ctrl-C to exit" 40 80)
                (window-run! w))))))))
 
   ;; Parse "R G B" or "R G B A" as floats from LETLOOP_DESKTOP_COLOR.
