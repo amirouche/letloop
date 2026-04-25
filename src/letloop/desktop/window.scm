@@ -21,6 +21,9 @@
    window-run!
    window-render-frame!
    window-clear-color!
+   window-draw-text!
+   window-clear-text!
+   window-fg-color!
    window?
    window-released?
    window-extent-width
@@ -616,6 +619,128 @@
     (window-b-set! w (exact->inexact b))
     (window-a-set! w (exact->inexact a)))
 
+  (define (window-fg-color! w r g b a)
+    (window-fg-r-set! w (exact->inexact r))
+    (window-fg-g-set! w (exact->inexact g))
+    (window-fg-b-set! w (exact->inexact b))
+    (window-fg-a-set! w (exact->inexact a)))
+
+  ;; Append a text draw to the persistent list. Each entry is rendered
+  ;; on every subsequent frame until window-clear-text! is called.
+  (define (window-draw-text! w text x y)
+    (window-pending-text-set!
+     w (append (window-pending-text w)
+               (list (list text (exact->inexact x) (exact->inexact y))))))
+
+  (define (window-clear-text! w)
+    (window-pending-text-set! w '()))
+
+  ;; Build the per-frame instance list from pending text. Each character
+  ;; that has a glyph in the atlas becomes an 8-element float list:
+  ;;   (x y w h u v uw uh)
+  ;; advancing x by glyph-width per character. Characters without
+  ;; glyphs are skipped (e.g. zero-width or unsupported codepoints).
+  (define (build-instance-list w)
+    (let* ((tp    (window-text-pipeline w))
+           (font  (text-pipeline-font tp))
+           (gw    (font-glyph-width font))
+           (gh    (font-glyph-height font)))
+      (let loop ((draws (window-pending-text w)) (acc '()))
+        (if (null? draws)
+            (reverse acc)
+            (let* ((d   (car draws))
+                   (txt (car d))
+                   (ox  (cadr d))
+                   (oy  (caddr d)))
+              (loop (cdr draws)
+                    (append (reverse (build-instances-for-text font txt ox oy gw gh))
+                            acc)))))))
+
+  (define (build-instances-for-text font txt x0 y0 gw gh)
+    (let loop ((chars (string->list txt))
+               (x x0)
+               (acc '()))
+      (cond
+       ((null? chars) (reverse acc))
+       (else
+        (let ((info (font-glyph-info font (char->integer (car chars)))))
+          (if info
+              (loop (cdr chars)
+                    (+ x gw)
+                    (cons (list (exact->inexact x)
+                                (exact->inexact y0)
+                                (exact->inexact gw)
+                                (exact->inexact gh)
+                                (glyph-info-uv-x info)
+                                (glyph-info-uv-y info)
+                                (glyph-info-uv-w info)
+                                (glyph-info-uv-h info))
+                          acc))
+              ;; Unmapped char — still advance cursor so layout looks
+              ;; like a missing-glyph "space".
+              (loop (cdr chars) (+ x gw) acc)))))))
+
+  ;; Record the text draws inside the active render pass.
+  (define (record-text-draws! w cmd)
+    (let* ((tp           (window-text-pipeline w))
+           (instances    (build-instance-list w))
+           (count        (text-pipeline-write-instances! tp instances)))
+      (when (positive? count)
+        (let* ((ext-w (window-extent-width w))
+               (ext-h (window-extent-height w))
+               (vp    (foreign-alloc/zero (ftype-sizeof <VkViewport>)))
+               (sc    (foreign-alloc/zero (ftype-sizeof <VkRect2D>)))
+               (push  (foreign-alloc/zero 32))    ; vec2 + vec2 + vec4
+               (vbuf  (foreign-alloc/zero 8))
+               (voff  (foreign-alloc/zero 8))
+               (ds    (foreign-alloc/zero 8))
+               (vp-ptr (make-ftype-pointer <VkViewport> vp))
+               (sc-ptr (make-ftype-pointer <VkRect2D> sc)))
+          (dynamic-wind
+           void
+           (lambda ()
+             ;; Dynamic viewport + scissor for the swapchain extent.
+             (ftype-set! <VkViewport> (x) vp-ptr 0.0)
+             (ftype-set! <VkViewport> (y) vp-ptr 0.0)
+             (ftype-set! <VkViewport> (width)  vp-ptr (exact->inexact ext-w))
+             (ftype-set! <VkViewport> (height) vp-ptr (exact->inexact ext-h))
+             (ftype-set! <VkViewport> (minDepth) vp-ptr 0.0)
+             (ftype-set! <VkViewport> (maxDepth) vp-ptr 1.0)
+             (ftype-set! <VkRect2D> (extent width)  sc-ptr ext-w)
+             (ftype-set! <VkRect2D> (extent height) sc-ptr ext-h)
+             ;; Push constants: vec2 viewport (offset 0), vec2 pad (8),
+             ;; vec4 fg_color (offset 16).
+             (foreign-set! 'float push 0  (exact->inexact ext-w))
+             (foreign-set! 'float push 4  (exact->inexact ext-h))
+             (foreign-set! 'float push 16 (window-fg-r w))
+             (foreign-set! 'float push 20 (window-fg-g w))
+             (foreign-set! 'float push 24 (window-fg-b w))
+             (foreign-set! 'float push 28 (window-fg-a w))
+             (foreign-set! 'unsigned-64 vbuf 0 (text-pipeline-instance-buffer tp))
+             (foreign-set! 'unsigned-64 voff 0 0)
+             (foreign-set! 'unsigned-64 ds 0 (text-pipeline-descriptor-set tp))
+             (vkCmdSetViewport cmd 0 1 vp)
+             (vkCmdSetScissor  cmd 0 1 sc)
+             (vkCmdBindPipeline cmd VK_PIPELINE_BIND_POINT_GRAPHICS
+                                (text-pipeline-pipeline tp))
+             (vkCmdBindDescriptorSets cmd VK_PIPELINE_BIND_POINT_GRAPHICS
+                                      (text-pipeline-pipeline-layout tp)
+                                      0 1 ds 0 0)
+             (vkCmdBindVertexBuffers cmd 0 1 vbuf voff)
+             (vkCmdPushConstants cmd
+                                 (text-pipeline-pipeline-layout tp)
+                                 (bitwise-ior VK_SHADER_STAGE_VERTEX_BIT
+                                              VK_SHADER_STAGE_FRAGMENT_BIT)
+                                 0 32 push)
+             (vkCmdDraw cmd 6 count 0 0))
+           (lambda ()
+             (foreign-free ds)
+             (foreign-free voff)
+             (foreign-free vbuf)
+             (foreign-free push)
+             (foreign-free sc)
+             (foreign-free vp)))))))
+
   ;; ----------------------------------------------------------------
   ;; window-render-frame!
   ;; ----------------------------------------------------------------
@@ -700,7 +825,7 @@
            (ftype-set! <VkRenderPassBeginInfo> (clearValueCount) rb 1)
            (ftype-set! <VkRenderPassBeginInfo> (pClearValues) rb clear-value))
          (vkCmdBeginRenderPass cmd rp-begin VK_SUBPASS_CONTENTS_INLINE)
-         ;; (no draws yet — chunk D-2 keeps the magenta-clear deliverable)
+         (record-text-draws! w cmd)
          (vkCmdEndRenderPass cmd)
          (vk-check 'vkEndCommandBuffer
                    (vkEndCommandBuffer cmd))
