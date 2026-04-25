@@ -1,4 +1,4 @@
-.PHONY: help letloop argon2 blake3 sodium oprf opaque liburing check shaders
+.PHONY: help letloop argon2 blake3 sodium oprf opaque liburing check shaders font-bundle
 
 SCHEME=$(shell which scheme)
 PWD=$(shell pwd)
@@ -26,6 +26,15 @@ letloop: clean src/letloop-program.c src/letloop-usage.md src/letloop/base.scm #
 	echo '(generate-wpo-files #t)(import (letloop base)) (letloop-compile (list "./src/" "src/letloop/base.scm" "letloop-main"))' | $(SCHEME) --quiet --libdirs ./src/ --compile-imported-libraries
 	cp a.out $(PREFIX)/bin/letloop
 	@echo What is done is not to be done!
+
+font-bundle: ## Regenerate font-bundled.scm from FullCyrAsia-DejaVu30x16.psf.gz (PSF2, ~32K, ASCII coverage)
+	@command -v gunzip >/dev/null || { echo "gunzip required"; exit 1; }
+	@FONT=/usr/share/consolefonts/FullCyrAsia-DejaVu30x16.psf.gz; \
+	  test -e "$$FONT" || { echo "$$FONT not found — install console-setup-linux"; exit 1; }; \
+	  gunzip -c "$$FONT" > /tmp/letloop-bundled.psf
+	python3 scripts/psf-to-scheme.py /tmp/letloop-bundled.psf bundled-psf2 \
+	  > src/letloop/desktop/font-bundled.scm
+	@echo "Regenerated src/letloop/desktop/font-bundled.scm"
 
 shaders: ## Recompile desktop SPIR-V from GLSL into shader.scm (needs glslangValidator)
 	@command -v glslangValidator >/dev/null || { \
