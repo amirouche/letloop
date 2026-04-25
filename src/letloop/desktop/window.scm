@@ -22,6 +22,7 @@
    window-render-frame!
    window-clear-color!
    window-draw-text!
+   window-draw-text/color!
    window-clear-text!
    window-fg-color!
    window-attach-keyboard!
@@ -649,10 +650,19 @@
 
   ;; Append a text draw to the persistent list. Each entry is rendered
   ;; on every subsequent frame until window-clear-text! is called.
+  ;; The 4-arg form uses the current foreground color; the 8-arg
+  ;; window-draw-text/color! form pins an explicit RGBA tint per draw.
   (define (window-draw-text! w text x y)
     (window-pending-text-set!
      w (append (window-pending-text w)
                (list (list text (exact->inexact x) (exact->inexact y))))))
+
+  (define (window-draw-text/color! w text x y r g b a)
+    (window-pending-text-set!
+     w (append (window-pending-text w)
+               (list (list text (exact->inexact x) (exact->inexact y)
+                           (exact->inexact r) (exact->inexact g)
+                           (exact->inexact b) (exact->inexact a))))))
 
   (define (window-clear-text! w)
     (window-pending-text-set! w '()))
@@ -707,7 +717,10 @@
            (font  (text-pipeline-font tp))
            (gw    (font-glyph-width font))
            (gh    (font-glyph-height font))
-           ;; Prompt + line buffer treated as one extra draw.
+           (default-color (list (window-fg-r w) (window-fg-g w)
+                                (window-fg-b w) (window-fg-a w)))
+           ;; pending-text entries are either (string x y) — uses fg —
+           ;; or (string x y r g b a) — explicit color
            (line-text (string-append (window-line-prompt w)
                                      (window-line-buffer w)))
            (extras (if (zero? (string-length line-text))
@@ -722,12 +735,15 @@
             (let* ((d   (car draws))
                    (txt (car d))
                    (ox  (cadr d))
-                   (oy  (caddr d)))
+                   (oy  (caddr d))
+                   (col (if (= (length d) 7)
+                            (cdddr d)
+                            default-color)))
               (loop (cdr draws)
-                    (append (reverse (build-instances-for-text font txt ox oy gw gh))
+                    (append (reverse (build-instances-for-text font txt ox oy gw gh col))
                             acc)))))))
 
-  (define (build-instances-for-text font txt x0 y0 gw gh)
+  (define (build-instances-for-text font txt x0 y0 gw gh color)
     (let loop ((chars (string->list txt))
                (x x0)
                (acc '()))
@@ -738,14 +754,16 @@
           (if info
               (loop (cdr chars)
                     (+ x gw)
-                    (cons (list (exact->inexact x)
-                                (exact->inexact y0)
-                                (exact->inexact gw)
-                                (exact->inexact gh)
-                                (glyph-info-uv-x info)
-                                (glyph-info-uv-y info)
-                                (glyph-info-uv-w info)
-                                (glyph-info-uv-h info))
+                    (cons (append
+                           (list (exact->inexact x)
+                                 (exact->inexact y0)
+                                 (exact->inexact gw)
+                                 (exact->inexact gh)
+                                 (glyph-info-uv-x info)
+                                 (glyph-info-uv-y info)
+                                 (glyph-info-uv-w info)
+                                 (glyph-info-uv-h info))
+                           color)
                           acc))
               ;; Unmapped char — still advance cursor so layout looks
               ;; like a missing-glyph "space".
@@ -761,7 +779,7 @@
                (ext-h (window-extent-height w))
                (vp    (foreign-alloc/zero (ftype-sizeof <VkViewport>)))
                (sc    (foreign-alloc/zero (ftype-sizeof <VkRect2D>)))
-               (push  (foreign-alloc/zero 32))    ; vec2 + vec2 + vec4
+               (push  (foreign-alloc/zero 8))     ; vec2 viewport_size
                (vbuf  (foreign-alloc/zero 8))
                (voff  (foreign-alloc/zero 8))
                (ds    (foreign-alloc/zero 8))
@@ -779,14 +797,11 @@
              (ftype-set! <VkViewport> (maxDepth) vp-ptr 1.0)
              (ftype-set! <VkRect2D> (extent width)  sc-ptr ext-w)
              (ftype-set! <VkRect2D> (extent height) sc-ptr ext-h)
-             ;; Push constants: vec2 viewport (offset 0), vec2 pad (8),
-             ;; vec4 fg_color (offset 16).
+             ;; Push constants: vec2 viewport_size (8 bytes, vertex-only).
+             ;; Per-instance color now travels through the vertex
+             ;; attribute at location 2.
              (foreign-set! 'float push 0  (exact->inexact ext-w))
              (foreign-set! 'float push 4  (exact->inexact ext-h))
-             (foreign-set! 'float push 16 (window-fg-r w))
-             (foreign-set! 'float push 20 (window-fg-g w))
-             (foreign-set! 'float push 24 (window-fg-b w))
-             (foreign-set! 'float push 28 (window-fg-a w))
              (foreign-set! 'unsigned-64 vbuf 0 (text-pipeline-instance-buffer tp))
              (foreign-set! 'unsigned-64 voff 0 0)
              (foreign-set! 'unsigned-64 ds 0 (text-pipeline-descriptor-set tp))
@@ -800,9 +815,8 @@
              (vkCmdBindVertexBuffers cmd 0 1 vbuf voff)
              (vkCmdPushConstants cmd
                                  (text-pipeline-pipeline-layout tp)
-                                 (bitwise-ior VK_SHADER_STAGE_VERTEX_BIT
-                                              VK_SHADER_STAGE_FRAGMENT_BIT)
-                                 0 32 push)
+                                 VK_SHADER_STAGE_VERTEX_BIT
+                                 0 8 push)
              (vkCmdDraw cmd 6 count 0 0))
            (lambda ()
              (foreign-free ds)
