@@ -81,6 +81,7 @@
    VK_FORMAT_R32G32B32A32_SFLOAT
 
    VK_IMAGE_LAYOUT_UNDEFINED
+   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
@@ -364,7 +365,8 @@
    vkCmdSetViewport
    vkCmdSetScissor
    vkCmdPushConstants
-   vkCmdCopyBufferToImage)
+   vkCmdCopyBufferToImage
+   vkCmdCopyImageToBuffer)
   (import (chezscheme))
 
   (define libvulkan (load-shared-object "libvulkan.so.1"))
@@ -456,6 +458,7 @@
   (define VK_IMAGE_LAYOUT_UNDEFINED                0)
   (define VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL 2)
   (define VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL 5)
+  (define VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL     6)
   (define VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL     7)
   (define VK_IMAGE_LAYOUT_PRESENT_SRC_KHR          1000001002)
 
@@ -1519,4 +1522,8 @@
   (define vkCmdCopyBufferToImage
     (foreign-procedure "vkCmdCopyBufferToImage"
                        (uptr unsigned-64 unsigned-64
-                             unsigned-32 unsigned-32 uptr) void)))
+                             unsigned-32 unsigned-32 uptr) void))
+  (define vkCmdCopyImageToBuffer
+    (foreign-procedure "vkCmdCopyImageToBuffer"
+                       (uptr unsigned-64 unsigned-32
+                             unsigned-64 unsigned-32 uptr) void)))
