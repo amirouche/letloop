@@ -68,8 +68,10 @@
   (define VT_AUTO    0)   ; kernel handles VT switches
   (define VT_PROCESS 1)   ; we handle VT switches ourselves
 
-  ;; SIGUSR1 — POSIX signal number 10 on Linux/x86_64. Matches the
-  ;; convention kmscon and wlroots use for VT release notification.
+  ;; POSIX signal numbers on Linux/x86_64.
+  (define SIGTERM 15)
+  (define SIGSEGV 11)
+  ;; SIGUSR1 — convention kmscon and wlroots use for VT release.
   (define SIGUSR1 10)
 
   ;; Linux KD ioctls (linux/kd.h) — also legacy magic.
@@ -136,6 +138,22 @@
   ;; because Chez's deferred signal dispatch may run on a thread that
   ;; doesn't share the parameterize binding.
   (define vt-process-tty-fd #f)
+
+  ;; The currently-live seat, exposed to global signal handlers
+  ;; (SIGTERM / SIGSEGV) so they can drop KD_GRAPHICS before _exit.
+  ;; SIGKILL is uncatchable — there's no software fix for `kill -9`.
+  (define active-seat #f)
+
+  (define (fatal-signal-handler signum)
+    ;; Best-effort cleanup. Chez's register-signal-handler runs us
+    ;; deferred at the next safe point; if the runtime is too far
+    ;; gone (typical SEGV) this never fires, but worst case the
+    ;; user's next chvt resets the console anyway. Ordering here is
+    ;; the same as seat-release: drop master, KD_TEXT, restore VT.
+    (when active-seat
+      (guard (_ [#t #f])
+        (seat-release active-seat)))
+    (exit (+ 128 signum)))
 
   (define (vt-refuse-switch!)
     ;; Called from the SIGUSR1 handler — tells the kernel "no, we
@@ -262,7 +280,12 @@
       (ioctl-int-or-die 'seat-take/setmaster drm-fd DRM_IOCTL_SET_MASTER 0)
       (set! master? #t)
 
-      (make-seat vt-num tty0-fd tty-vt-fd drm-fd orig-kd-mode orig-vt)))
+      (let ((s (make-seat vt-num tty0-fd tty-vt-fd drm-fd orig-kd-mode orig-vt)))
+        ;; Stash the seat where SIGTERM / SIGSEGV handlers can find it.
+        (set! active-seat s)
+        (register-signal-handler SIGTERM fatal-signal-handler)
+        (register-signal-handler SIGSEGV fatal-signal-handler)
+        s)))
 
   ;; ---------- seat-release ----------
 
@@ -290,16 +313,18 @@
         (sys-ioctl-int (seat-tty0-fd seat) VT_ACTIVATE (seat-original-vt seat))
         (sys-ioctl-int (seat-tty0-fd seat) VT_WAITACTIVE (seat-original-vt seat)))
       (safe-close (seat-tty-vt-fd seat))
-      (safe-close (seat-tty0-fd seat))))
+      (safe-close (seat-tty0-fd seat))
+      (set! active-seat #f)))
 
   ;; ---------- call-with-seat ----------
   ;;
-  ;; Runs PROC with a live seat, installing a SIGINT trap so Ctrl-C tears
-  ;; the seat down cleanly. SIGTERM and SIGSEGV are not trapped here — if
-  ;; the process is killed with -9 or segfaults, the kernel releases DRM
-  ;; master on fd close, but KD_GRAPHICS mode will leak until the next
-  ;; chvt. Upstream wlroots solves this with VT_SIGNAL + VT_RELDISP; we
-  ;; leave it as M2.1+ work.
+  ;; Runs PROC with a live seat. seat-take installs three signal traps:
+  ;; SIGINT (Ctrl-C, via keyboard-interrupt-handler), SIGTERM (kill),
+  ;; SIGSEGV (best-effort — Chez's deferred dispatch may not survive a
+  ;; corrupt heap). Each fires fatal-signal-handler → seat-release →
+  ;; exit. SIGKILL (kill -9) remains uncatchable; the kernel releases
+  ;; DRM master on fd close, and KD_GRAPHICS mode leaks until the next
+  ;; chvt. There is no software fix for that path.
   (define (call-with-seat proc)
     (let ((seat (seat-take)))
       (dynamic-wind
