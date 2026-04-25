@@ -59,6 +59,127 @@
 
   (define UINT64_MAX #xFFFFFFFFFFFFFFFF)
 
+  ;; ----------------------------------------------------------------
+  ;; Render pass / image view / framebuffer helpers
+  ;; ----------------------------------------------------------------
+
+  (define (create-color-render-pass device color-format)
+    (let* ((att   (foreign-alloc/zero
+                   (ftype-sizeof <VkAttachmentDescription>)))
+           (ref   (foreign-alloc/zero
+                   (ftype-sizeof <VkAttachmentReference>)))
+           (sub   (foreign-alloc/zero
+                   (ftype-sizeof <VkSubpassDescription>)))
+           (dep   (foreign-alloc/zero
+                   (ftype-sizeof <VkSubpassDependency>)))
+           (info  (foreign-alloc/zero
+                   (ftype-sizeof <VkRenderPassCreateInfo>)))
+           (out   (foreign-alloc/zero 8))
+           (afp   (make-ftype-pointer <VkAttachmentDescription> att))
+           (rfp   (make-ftype-pointer <VkAttachmentReference> ref))
+           (sfp   (make-ftype-pointer <VkSubpassDescription> sub))
+           (dfp   (make-ftype-pointer <VkSubpassDependency> dep))
+           (ifp   (make-ftype-pointer <VkRenderPassCreateInfo> info)))
+      (dynamic-wind
+       void
+       (lambda ()
+         (ftype-set! <VkAttachmentDescription> (format) afp color-format)
+         (ftype-set! <VkAttachmentDescription> (samples) afp VK_SAMPLE_COUNT_1_BIT)
+         (ftype-set! <VkAttachmentDescription> (loadOp) afp
+                     VK_ATTACHMENT_LOAD_OP_CLEAR)
+         (ftype-set! <VkAttachmentDescription> (storeOp) afp
+                     VK_ATTACHMENT_STORE_OP_STORE)
+         (ftype-set! <VkAttachmentDescription> (stencilLoadOp) afp
+                     VK_ATTACHMENT_LOAD_OP_DONT_CARE)
+         (ftype-set! <VkAttachmentDescription> (stencilStoreOp) afp
+                     VK_ATTACHMENT_STORE_OP_DONT_CARE)
+         (ftype-set! <VkAttachmentDescription> (initialLayout) afp
+                     VK_IMAGE_LAYOUT_UNDEFINED)
+         (ftype-set! <VkAttachmentDescription> (finalLayout) afp
+                     VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
+         (ftype-set! <VkAttachmentReference> (attachment) rfp 0)
+         (ftype-set! <VkAttachmentReference> (layout) rfp
+                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+         (ftype-set! <VkSubpassDescription> (pipelineBindPoint) sfp
+                     VK_PIPELINE_BIND_POINT_GRAPHICS)
+         (ftype-set! <VkSubpassDescription> (colorAttachmentCount) sfp 1)
+         (ftype-set! <VkSubpassDescription> (pColorAttachments) sfp ref)
+         (ftype-set! <VkSubpassDependency> (srcSubpass) dfp VK_SUBPASS_EXTERNAL)
+         (ftype-set! <VkSubpassDependency> (dstSubpass) dfp 0)
+         (ftype-set! <VkSubpassDependency> (srcStageMask) dfp
+                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+         (ftype-set! <VkSubpassDependency> (dstStageMask) dfp
+                     VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+         (ftype-set! <VkSubpassDependency> (srcAccessMask) dfp 0)
+         (ftype-set! <VkSubpassDependency> (dstAccessMask) dfp
+                     VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
+         (ftype-set! <VkRenderPassCreateInfo> (sType) ifp
+                     VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO)
+         (ftype-set! <VkRenderPassCreateInfo> (attachmentCount) ifp 1)
+         (ftype-set! <VkRenderPassCreateInfo> (pAttachments) ifp att)
+         (ftype-set! <VkRenderPassCreateInfo> (subpassCount) ifp 1)
+         (ftype-set! <VkRenderPassCreateInfo> (pSubpasses) ifp sub)
+         (ftype-set! <VkRenderPassCreateInfo> (dependencyCount) ifp 1)
+         (ftype-set! <VkRenderPassCreateInfo> (pDependencies) ifp dep)
+         (vk-check 'vkCreateRenderPass
+                   (vkCreateRenderPass device info 0 out))
+         (foreign-ref 'unsigned-64 out 0))
+       (lambda ()
+         (foreign-free out) (foreign-free info)
+         (foreign-free dep) (foreign-free sub)
+         (foreign-free ref) (foreign-free att)))))
+
+  (define (create-color-image-view device image format)
+    (let* ((info (foreign-alloc/zero
+                  (ftype-sizeof <VkImageViewCreateInfo>)))
+           (out  (foreign-alloc/zero 8))
+           (fp   (make-ftype-pointer <VkImageViewCreateInfo> info)))
+      (dynamic-wind
+       void
+       (lambda ()
+         (ftype-set! <VkImageViewCreateInfo> (sType) fp
+                     VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO)
+         (ftype-set! <VkImageViewCreateInfo> (image) fp image)
+         (ftype-set! <VkImageViewCreateInfo> (viewType) fp VK_IMAGE_VIEW_TYPE_2D)
+         (ftype-set! <VkImageViewCreateInfo> (format) fp format)
+         ;; components: VK_COMPONENT_SWIZZLE_IDENTITY = 0, struct already zeroed
+         (ftype-set! <VkImageViewCreateInfo> (subresourceRange aspectMask) fp
+                     VK_IMAGE_ASPECT_COLOR_BIT)
+         (ftype-set! <VkImageViewCreateInfo> (subresourceRange baseMipLevel) fp 0)
+         (ftype-set! <VkImageViewCreateInfo> (subresourceRange levelCount) fp 1)
+         (ftype-set! <VkImageViewCreateInfo> (subresourceRange baseArrayLayer) fp 0)
+         (ftype-set! <VkImageViewCreateInfo> (subresourceRange layerCount) fp 1)
+         (vk-check 'vkCreateImageView
+                   (vkCreateImageView device info 0 out))
+         (foreign-ref 'unsigned-64 out 0))
+       (lambda ()
+         (foreign-free out) (foreign-free info)))))
+
+  (define (create-framebuffer device render-pass view width height)
+    (let* ((view-arr (foreign-alloc/zero 8))
+           (info     (foreign-alloc/zero
+                      (ftype-sizeof <VkFramebufferCreateInfo>)))
+           (out      (foreign-alloc/zero 8))
+           (fp       (make-ftype-pointer <VkFramebufferCreateInfo> info)))
+      (dynamic-wind
+       void
+       (lambda ()
+         (foreign-set! 'unsigned-64 view-arr 0 view)
+         (ftype-set! <VkFramebufferCreateInfo> (sType) fp
+                     VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO)
+         (ftype-set! <VkFramebufferCreateInfo> (renderPass) fp render-pass)
+         (ftype-set! <VkFramebufferCreateInfo> (attachmentCount) fp 1)
+         (ftype-set! <VkFramebufferCreateInfo> (pAttachments) fp view-arr)
+         (ftype-set! <VkFramebufferCreateInfo> (width) fp width)
+         (ftype-set! <VkFramebufferCreateInfo> (height) fp height)
+         (ftype-set! <VkFramebufferCreateInfo> (layers) fp 1)
+         (vk-check 'vkCreateFramebuffer
+                   (vkCreateFramebuffer device info 0 out))
+         (foreign-ref 'unsigned-64 out 0))
+       (lambda ()
+         (foreign-free out) (foreign-free info)
+         (foreign-free view-arr)))))
+
   (define (make-semaphore device)
     (let* ((info (foreign-alloc/zero
                   (ftype-sizeof <VkSemaphoreCreateInfo>)))
@@ -87,7 +208,10 @@
      device queue
      surface swapchain
      format extent-width extent-height
+     render-pass
      images                ; list of u64 VkImage
+     image-views           ; list of u64 VkImageView, parallel to images
+     framebuffers          ; list of u64 VkFramebuffer, parallel to images
      command-pool command-buffer
      image-available-sem render-finished-sem in-flight-fence
      ;; pre-allocated scratch foreign buffers, freed in window-close
@@ -312,7 +436,7 @@
              (ftype-set! <VkSwapchainCreateInfoKHR> (imageExtent height) fp extent-h)
              (ftype-set! <VkSwapchainCreateInfoKHR> (imageArrayLayers) fp 1)
              (ftype-set! <VkSwapchainCreateInfoKHR> (imageUsage) fp
-                         VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+                         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
              (ftype-set! <VkSwapchainCreateInfoKHR> (imageSharingMode) fp
                          VK_SHARING_MODE_EXCLUSIVE)
              (ftype-set! <VkSwapchainCreateInfoKHR> (preTransform) fp cap-cur-transform)
@@ -355,6 +479,32 @@
                                       out)))))
                   (lambda () (foreign-free arr))))))
            (lambda () (foreign-free count-p)))))
+            ;; 13a. Render pass — single color attachment, clear-on-load,
+            ;; transitions UNDEFINED → COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR.
+            (render-pass (create-color-render-pass device fmt-format))
+            (_track-rp
+             (begin (track! (lambda () (vkDestroyRenderPass device render-pass 0))) #f))
+            ;; 13b. One image view per swapchain image.
+            (image-views
+             (map (lambda (img) (create-color-image-view device img fmt-format))
+                  images))
+            (_track-views
+             (begin (track!
+                     (lambda ()
+                       (for-each (lambda (v) (vkDestroyImageView device v 0))
+                                 image-views)))
+                    #f))
+            ;; 13c. One framebuffer per image view.
+            (framebuffers
+             (map (lambda (view)
+                    (create-framebuffer device render-pass view extent-w extent-h))
+                  image-views))
+            (_track-fbs
+             (begin (track!
+                     (lambda ()
+                       (for-each (lambda (fb) (vkDestroyFramebuffer device fb 0))
+                                 framebuffers)))
+                    #f))
             ;; 14. Command pool with reset bit.
             (command-pool
         (let* ((info (foreign-alloc/zero
@@ -434,7 +584,8 @@
         device queue
         surface swapchain
         fmt-format extent-w extent-h
-        images
+        render-pass
+        images image-views framebuffers
         command-pool command-buffer
         image-available-sem render-finished-sem in-flight-fence
         scratch
@@ -463,23 +614,22 @@
     (define queue           (window-queue w))
     (define swapchain       (window-swapchain w))
     (define cmd             (window-command-buffer w))
-    (define images          (window-images w))
+    (define framebuffers    (window-framebuffers w))
+    (define render-pass     (window-render-pass w))
     (define ia-sem          (window-image-available-sem w))
     (define rf-sem          (window-render-finished-sem w))
     (define fence           (window-in-flight-fence w))
+    (define ext-w           (window-extent-width w))
+    (define ext-h           (window-extent-height w))
 
     (define fence-arr        (foreign-alloc/zero 8))
     (define image-index-out  (foreign-alloc/zero 4))
     (define begin-info       (foreign-alloc/zero
                               (ftype-sizeof <VkCommandBufferBeginInfo>)))
-    (define barrier1         (foreign-alloc/zero
-                              (ftype-sizeof <VkImageMemoryBarrier>)))
-    (define barrier2         (foreign-alloc/zero
-                              (ftype-sizeof <VkImageMemoryBarrier>)))
-    (define clear-color      (foreign-alloc/zero
-                              (ftype-sizeof <VkClearColorValue>)))
-    (define range            (foreign-alloc/zero
-                              (ftype-sizeof <VkImageSubresourceRange>)))
+    (define rp-begin         (foreign-alloc/zero
+                              (ftype-sizeof <VkRenderPassBeginInfo>)))
+    (define clear-value      (foreign-alloc/zero
+                              (ftype-sizeof <VkClearValue>)))
     (define wait-sem-arr     (foreign-alloc/zero 8))
     (define signal-sem-arr   (foreign-alloc/zero 8))
     (define stage-mask-arr   (foreign-alloc/zero 4))
@@ -502,8 +652,8 @@
                  (vkAcquireNextImageKHR device swapchain UINT64_MAX
                                         ia-sem 0 image-index-out))
        (let* ((image-index (foreign-ref 'unsigned-32 image-index-out 0))
-              (image       (list-ref images image-index)))
-         ;; 3. Reset + record command buffer.
+              (framebuffer (list-ref framebuffers image-index)))
+         ;; 3. Begin command buffer.
          (let ((bp (make-ftype-pointer <VkCommandBufferBeginInfo> begin-info)))
            (ftype-set! <VkCommandBufferBeginInfo> (sType) bp
                        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO)
@@ -511,92 +661,39 @@
                        VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT))
          (vk-check 'vkBeginCommandBuffer
                    (vkBeginCommandBuffer cmd begin-info))
-         ;; UNDEFINED → TRANSFER_DST_OPTIMAL
-         (let ((bp (make-ftype-pointer <VkImageMemoryBarrier> barrier1)))
-           (ftype-set! <VkImageMemoryBarrier> (sType) bp
-                       VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER)
-           (ftype-set! <VkImageMemoryBarrier> (srcAccessMask) bp 0)
-           (ftype-set! <VkImageMemoryBarrier> (dstAccessMask) bp
-                       VK_ACCESS_TRANSFER_WRITE_BIT)
-           (ftype-set! <VkImageMemoryBarrier> (oldLayout) bp
-                       VK_IMAGE_LAYOUT_UNDEFINED)
-           (ftype-set! <VkImageMemoryBarrier> (newLayout) bp
-                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-           (ftype-set! <VkImageMemoryBarrier> (srcQueueFamilyIndex) bp
-                       VK_QUEUE_FAMILY_IGNORED)
-           (ftype-set! <VkImageMemoryBarrier> (dstQueueFamilyIndex) bp
-                       VK_QUEUE_FAMILY_IGNORED)
-           (ftype-set! <VkImageMemoryBarrier> (image) bp image)
-           (ftype-set! <VkImageMemoryBarrier> (subresourceRange aspectMask) bp
-                       VK_IMAGE_ASPECT_COLOR_BIT)
-           (ftype-set! <VkImageMemoryBarrier> (subresourceRange baseMipLevel) bp 0)
-           (ftype-set! <VkImageMemoryBarrier> (subresourceRange levelCount) bp 1)
-           (ftype-set! <VkImageMemoryBarrier> (subresourceRange baseArrayLayer) bp 0)
-           (ftype-set! <VkImageMemoryBarrier> (subresourceRange layerCount) bp 1))
-         (vkCmdPipelineBarrier cmd
-                               VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
-                               VK_PIPELINE_STAGE_TRANSFER_BIT
-                               0
-                               0 0
-                               0 0
-                               1 barrier1)
-         ;; clear color
-         (let ((cp (make-ftype-pointer <VkClearColorValue> clear-color))
-               (rp (make-ftype-pointer <VkImageSubresourceRange> range)))
-           (ftype-set! <VkClearColorValue> (float32 0) cp
+         ;; 4. Begin render pass with the configured clear color. The
+         ;; render pass takes care of UNDEFINED → COLOR_ATTACHMENT_OPTIMAL
+         ;; → PRESENT_SRC_KHR transitions implicitly.
+         (let ((cv (make-ftype-pointer <VkClearValue> clear-value))
+               (rb (make-ftype-pointer <VkRenderPassBeginInfo> rp-begin)))
+           (ftype-set! <VkClearValue> (color float32 0) cv
                        (exact->inexact (window-r w)))
-           (ftype-set! <VkClearColorValue> (float32 1) cp
+           (ftype-set! <VkClearValue> (color float32 1) cv
                        (exact->inexact (window-g w)))
-           (ftype-set! <VkClearColorValue> (float32 2) cp
+           (ftype-set! <VkClearValue> (color float32 2) cv
                        (exact->inexact (window-b w)))
-           (ftype-set! <VkClearColorValue> (float32 3) cp
+           (ftype-set! <VkClearValue> (color float32 3) cv
                        (exact->inexact (window-a w)))
-           (ftype-set! <VkImageSubresourceRange> (aspectMask) rp
-                       VK_IMAGE_ASPECT_COLOR_BIT)
-           (ftype-set! <VkImageSubresourceRange> (baseMipLevel) rp 0)
-           (ftype-set! <VkImageSubresourceRange> (levelCount) rp 1)
-           (ftype-set! <VkImageSubresourceRange> (baseArrayLayer) rp 0)
-           (ftype-set! <VkImageSubresourceRange> (layerCount) rp 1))
-         (vkCmdClearColorImage cmd image
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
-                               clear-color
-                               1 range)
-         ;; TRANSFER_DST_OPTIMAL → PRESENT_SRC_KHR
-         (let ((bp (make-ftype-pointer <VkImageMemoryBarrier> barrier2)))
-           (ftype-set! <VkImageMemoryBarrier> (sType) bp
-                       VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER)
-           (ftype-set! <VkImageMemoryBarrier> (srcAccessMask) bp
-                       VK_ACCESS_TRANSFER_WRITE_BIT)
-           (ftype-set! <VkImageMemoryBarrier> (dstAccessMask) bp
-                       VK_ACCESS_MEMORY_READ_BIT)
-           (ftype-set! <VkImageMemoryBarrier> (oldLayout) bp
-                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
-           (ftype-set! <VkImageMemoryBarrier> (newLayout) bp
-                       VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
-           (ftype-set! <VkImageMemoryBarrier> (srcQueueFamilyIndex) bp
-                       VK_QUEUE_FAMILY_IGNORED)
-           (ftype-set! <VkImageMemoryBarrier> (dstQueueFamilyIndex) bp
-                       VK_QUEUE_FAMILY_IGNORED)
-           (ftype-set! <VkImageMemoryBarrier> (image) bp image)
-           (ftype-set! <VkImageMemoryBarrier> (subresourceRange aspectMask) bp
-                       VK_IMAGE_ASPECT_COLOR_BIT)
-           (ftype-set! <VkImageMemoryBarrier> (subresourceRange baseMipLevel) bp 0)
-           (ftype-set! <VkImageMemoryBarrier> (subresourceRange levelCount) bp 1)
-           (ftype-set! <VkImageMemoryBarrier> (subresourceRange baseArrayLayer) bp 0)
-           (ftype-set! <VkImageMemoryBarrier> (subresourceRange layerCount) bp 1))
-         (vkCmdPipelineBarrier cmd
-                               VK_PIPELINE_STAGE_TRANSFER_BIT
-                               VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT
-                               0
-                               0 0
-                               0 0
-                               1 barrier2)
+           (ftype-set! <VkRenderPassBeginInfo> (sType) rb
+                       VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO)
+           (ftype-set! <VkRenderPassBeginInfo> (renderPass) rb render-pass)
+           (ftype-set! <VkRenderPassBeginInfo> (framebuffer) rb framebuffer)
+           (ftype-set! <VkRenderPassBeginInfo> (renderArea offset x) rb 0)
+           (ftype-set! <VkRenderPassBeginInfo> (renderArea offset y) rb 0)
+           (ftype-set! <VkRenderPassBeginInfo> (renderArea extent width) rb ext-w)
+           (ftype-set! <VkRenderPassBeginInfo> (renderArea extent height) rb ext-h)
+           (ftype-set! <VkRenderPassBeginInfo> (clearValueCount) rb 1)
+           (ftype-set! <VkRenderPassBeginInfo> (pClearValues) rb clear-value))
+         (vkCmdBeginRenderPass cmd rp-begin VK_SUBPASS_CONTENTS_INLINE)
+         ;; (no draws yet — chunk D-2 keeps the magenta-clear deliverable)
+         (vkCmdEndRenderPass cmd)
          (vk-check 'vkEndCommandBuffer
                    (vkEndCommandBuffer cmd))
-         ;; 4. Submit.
+         ;; 5. Submit, waiting on image-available at COLOR_ATTACHMENT_OUTPUT.
          (foreign-set! 'unsigned-64 wait-sem-arr   0 ia-sem)
          (foreign-set! 'unsigned-64 signal-sem-arr 0 rf-sem)
-         (foreign-set! 'unsigned-32 stage-mask-arr 0 VK_PIPELINE_STAGE_TRANSFER_BIT)
+         (foreign-set! 'unsigned-32 stage-mask-arr 0
+                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
          (foreign-set! 'uptr        cmdbuf-arr     0 cmd)
          (let ((sp (make-ftype-pointer <VkSubmitInfo> submit-info)))
            (ftype-set! <VkSubmitInfo> (sType) sp VK_STRUCTURE_TYPE_SUBMIT_INFO)
@@ -609,7 +706,7 @@
            (ftype-set! <VkSubmitInfo> (pSignalSemaphores)    sp signal-sem-arr))
          (vk-check 'vkQueueSubmit
                    (vkQueueSubmit queue 1 submit-info fence))
-         ;; 5. Present.
+         ;; 6. Present.
          (foreign-set! 'unsigned-64 swapchain-arr 0 swapchain)
          (let ((pp (make-ftype-pointer <VkPresentInfoKHR> present-info)))
            (ftype-set! <VkPresentInfoKHR> (sType) pp
@@ -620,8 +717,6 @@
            (ftype-set! <VkPresentInfoKHR> (pSwapchains) pp swapchain-arr)
            (ftype-set! <VkPresentInfoKHR> (pImageIndices) pp image-index-out))
          (let ((r (vkQueuePresentKHR queue present-info)))
-           ;; SUBOPTIMAL is acceptable; OUT_OF_DATE means the surface
-           ;; needs a new swapchain. We don't recreate yet — re-raise.
            (unless (or (= r VK_SUCCESS) (= r VK_SUBOPTIMAL_KHR))
              (vk-check 'vkQueuePresentKHR r)))))
      (lambda ()
@@ -632,10 +727,8 @@
        (foreign-free stage-mask-arr)
        (foreign-free signal-sem-arr)
        (foreign-free wait-sem-arr)
-       (foreign-free range)
-       (foreign-free clear-color)
-       (foreign-free barrier2)
-       (foreign-free barrier1)
+       (foreign-free clear-value)
+       (foreign-free rp-begin)
        (foreign-free begin-info)
        (foreign-free image-index-out)
        (foreign-free fence-arr))))
@@ -677,6 +770,19 @@
       ;; Command buffers are freed automatically by the pool destroy.
       (silent (lambda () (vkDestroyCommandPool (window-device w)
                                                (window-command-pool w) 0)))
+      ;; Framebuffers must outlive only the render pass; views must
+      ;; outlive only the framebuffers; render pass must outlive the
+      ;; pipeline (none yet) and the framebuffers.
+      (for-each
+       (lambda (fb)
+         (silent (lambda () (vkDestroyFramebuffer (window-device w) fb 0))))
+       (window-framebuffers w))
+      (for-each
+       (lambda (v)
+         (silent (lambda () (vkDestroyImageView (window-device w) v 0))))
+       (window-image-views w))
+      (silent (lambda () (vkDestroyRenderPass (window-device w)
+                                              (window-render-pass w) 0)))
       (silent (lambda () (vkDestroySwapchainKHR (window-device w)
                                                 (window-swapchain w) 0)))
       (silent (lambda () (vkDestroyDevice (window-device w) 0)))
