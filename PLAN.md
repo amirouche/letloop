@@ -23,7 +23,14 @@ A handoff-friendly map of what's done, what's immediately next, and what's beyon
 | M2.3 chunk E-3 | Keyboard event pump (sync, io_uring deferred)                    | Done     | ed182f1   |
 | M2.3 chunk E-4 | Line editor + keyboard wiring in window                          | Done     | b42a1ec   |
 | M2.4        | Graphical REPL via window line editor (no port redirection yet)    | Done     | a9ab14a   |
-| M2.x follow-ups | io_uring kbd, EVIOCGBIT classification, per-line color, libtls   | Pending  | —         |
+| M2.x F-1    | Per-instance color, REPL errors render in red                      | Done     | f3cdcbd   |
+| M2.x F-2    | Draw-path llvmpipe smoke harness                                  | Done     | a10eef3   |
+| M2.x F-3    | Draw-smoke verifies pixels (vkCmdCopyImageToBuffer + asserts)     | Done     | a2ae365   |
+| M2.x F-4    | VT_PROCESS handling refuses Alt+Fn switches                       | Done     | f45fc92   |
+| M2.x F-5    | SIGTERM / SIGSEGV trap to release the seat                        | Done     | 07257f8   |
+| M2.x F-6    | io_uring single-shot keyboard variant                              | Done     | 48cc612   |
+| M2.x F-7    | EVIOCGBIT keyboard classification                                  | Done     | 48cb388   |
+| libtls.so   | LibreTLS — handled at the distro level (see CLAUDE.md update)      | Pending  | —         |
 
 ## Immediate next: M2.1 chunk C — `desktop/window.scm`
 
