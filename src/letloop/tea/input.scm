@@ -61,8 +61,12 @@
     (fields ch key mods))
 
   (define-record-type paste-event
-    (fields data       ; codepoint of one byte of pasted content, or #f at end
-            end?))     ; #t if this signals end-of-paste
+    ;; Two records per paste cycle:
+    ;;   (paste-event #f   #f)  — paste-start, no data yet
+    ;;   (paste-event TEXT #t)  — paste-end, TEXT is the full pasted content
+    ;;                            as a string
+    (fields data       ; #f for start, complete string for end
+            end?))
 
   (define-record-type focus-event
     (fields in?))      ; #t = focus gained, #f = lost
@@ -77,7 +81,8 @@
             (mutable trie-state)    ; for normal trie matching
             (mutable utf8-decoder)
             (mutable params)        ; reverse list of integers for CSI parsing
-            (mutable accum))        ; integer accumulator for current param
+            (mutable accum)         ; integer accumulator for current param
+            (mutable paste-data))   ; forward list of confirmed paste bytes
     (protocol
      (lambda (new)
        (lambda (caps)
@@ -92,7 +97,7 @@
                 (all (append (cap-set-input-keys caps) extra-keys))
                 (t   (make-trie all)))
            (new t 'normal '() (make-trie-state t)
-                (make-utf8-decoder) '() 0))))))
+                (make-utf8-decoder) '() 0 '()))))))
 
   ;; ----- helpers ----------------------------------------------------------
 
@@ -218,8 +223,11 @@
        #f)
       ((__paste-start)
        (input-parser-state-set! p 'paste)
+       ;; buf accumulates the raw paste bytes until the closing sentinel;
+       ;; we emit a paste-start marker now so consumers can switch input
+       ;; modes if they need to.
        (input-parser-buf-set! p '())
-       #f)
+       (make-paste-event #f #f))
       ((__focus-in)
        (input-parser-state-set! p 'normal)
        (make-focus-event #t))
@@ -271,50 +279,58 @@
 
   ;; ----- paste -----------------------------------------------------------
 
-  (define (feed-paste! p b)
-    ;; Emit each byte as a paste-data event UNLESS we see the start of
-    ;; \e[201~ (paste-end).  We implement detection inline rather than via
-    ;; the trie because pasted content can itself contain ESC.
+  (define PASTE-END-SENTINEL
+    ;; \e[201~ as a fixnum vector for indexed lookup.
+    (vector #x1B (char->integer #\[)
+            (char->integer #\2) (char->integer #\0) (char->integer #\1)
+            (char->integer #\~)))
+
+  (define (paste-data-bytes->string bytes)
+    (utf8->string (u8-list->bytevector bytes)))
+
+  (define (paste-flush-buf! p)
+    ;; Move any in-progress sentinel buf bytes back into paste-data.  Buf is
+    ;; reverse-order (most recent first) since we cons.
     (let ((buf (input-parser-buf p)))
+      (unless (null? buf)
+        (input-parser-paste-data-set!
+         p (append (input-parser-paste-data p) (reverse buf)))
+        (input-parser-buf-set! p '()))))
+
+  (define (feed-paste! p b)
+    ;; Aggregate paste data into one event.  Sentinel detection: track how
+    ;; many consecutive bytes of \e[201~ we've seen; on full match emit a
+    ;; single paste-event with all collected text.  On any mismatch we
+    ;; flush the partial sentinel match into paste-data and try again
+    ;; with the current byte (which itself may start a new match).
+    (let* ((buf (input-parser-buf p))
+           (pos (length buf)))
       (cond
-       ((and (null? buf) (fx=? b #x1B))
-        (input-parser-buf-set! p '(#x1B))
-        #f)
-       ((and (equal? buf '(#x1B)) (fx=? b (char->integer #\[)))
-        (input-parser-buf-set! p (cons b buf))
-        #f)
-       ((and (equal? buf (list (char->integer #\[) #x1B))
-             (fx=? b (char->integer #\2)))
-        (input-parser-buf-set! p (cons b buf))
-        #f)
-       ((and (equal? buf (list (char->integer #\2) (char->integer #\[) #x1B))
-             (fx=? b (char->integer #\0)))
-        (input-parser-buf-set! p (cons b buf))
-        #f)
-       ((and (equal? buf
-                     (list (char->integer #\0)
-                           (char->integer #\2)
-                           (char->integer #\[) #x1B))
-             (fx=? b (char->integer #\1)))
-        (input-parser-buf-set! p (cons b buf))
-        #f)
-       ((and (equal? buf
-                     (list (char->integer #\1)
-                           (char->integer #\0)
-                           (char->integer #\2)
-                           (char->integer #\[) #x1B))
-             (fx=? b (char->integer #\~)))
-        ;; matched \e[201~ — paste-end
-        (input-parser-buf-set! p '())
-        (input-parser-state-set! p 'normal)
-        (make-paste-event #f #t))
+       ((and (fx<? pos 6) (fx=? b (vector-ref PASTE-END-SENTINEL pos)))
+        (cond
+         ((fx=? pos 5)
+          ;; full close — emit
+          (let ((data (paste-data-bytes->string (input-parser-paste-data p))))
+            (input-parser-buf-set!        p '())
+            (input-parser-paste-data-set! p '())
+            (input-parser-state-set!      p 'normal)
+            (make-paste-event data #t)))
+         (else
+          (input-parser-buf-set! p (cons b buf))
+          #f)))
        (else
-        ;; Mismatch in our \e[201~ scan: flush any buffered bytes as paste
-        ;; data first (one per call would be cleanest, but here we collapse
-        ;; to a single event for the current byte and ignore the partial
-        ;; — termbox2 tolerates this as paste data is opaque text).
-        (input-parser-buf-set! p '())
-        (make-paste-event b #f)))))
+        ;; Sentinel match aborted.  Push everything in buf, plus this byte,
+        ;; into the paste-data accumulator — unless this byte itself starts
+        ;; a fresh sentinel match (b == ESC).
+        (paste-flush-buf! p)
+        (cond
+         ((fx=? b #x1B)
+          (input-parser-buf-set! p (list b))
+          #f)
+         (else
+          (input-parser-paste-data-set!
+           p (append (input-parser-paste-data p) (list b)))
+          #f))))))
 
   ;; ----- utf-8 ------------------------------------------------------------
 
