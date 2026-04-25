@@ -18,8 +18,12 @@ A handoff-friendly map of what's done, what's immediately next, and what's beyon
 | M2.2 chunk D-2 | Render pass replaces clear-image loop                            | Done     | 508345d   |
 | M2.2 chunk D-3 | Atlas, descriptor, pipeline construction (llvmpipe-verified)    | Done     | ff3ca29   |
 | M2.2 chunk D-4 | window-draw-text! + per-frame draw (compile-only, GPU-untested) | Done     | c8a8a62   |
-| M2.3        | io_uring evdev keyboard input                                     | **Next** | —         |
-| M2.4        | Graphical REPL via redirected current-input/output ports          | Pending  | —         |
+| M2.3 chunk E-1 | evdev input_event parser + sync read wrapper                     | Done     | 2b05e83   |
+| M2.3 chunk E-2 | US-QWERTY scancode→char mapping                                  | Done     | afd1a58   |
+| M2.3 chunk E-3 | Keyboard event pump (sync, io_uring deferred)                    | Done     | ed182f1   |
+| M2.3 chunk E-4 | Line editor + keyboard wiring in window                          | Done     | b42a1ec   |
+| M2.4        | Graphical REPL via window line editor (no port redirection yet)    | Done     | a9ab14a   |
+| M2.x follow-ups | io_uring kbd, EVIOCGBIT classification, per-line color, libtls   | Pending  | —         |
 
 ## Immediate next: M2.1 chunk C — `desktop/window.scm`
 
