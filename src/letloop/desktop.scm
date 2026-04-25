@@ -5,7 +5,8 @@
    (letloop cli base)
    (letloop desktop seat)
    (letloop desktop drm)
-   (letloop desktop vulkan))
+   (letloop desktop vulkan)
+   (letloop desktop window))
 
   (define (pk . args)
     (when (getenv "LETLOOP_DEBUG")
@@ -48,11 +49,45 @@
        (drm-describe-connectors (seat-drm-fd seat) (current-error-port))
        (vulkan-describe          (current-error-port))
        (flush-output-port (current-error-port))
-       (park-forever))))
+       (call-with-vulkan-instance "letloop-desktop"
+         (lambda (instance)
+           (call-with-window instance
+             (lambda (w)
+               (let ((rgba (parse-clear-color (getenv "LETLOOP_DESKTOP_COLOR"))))
+                 (window-clear-color! w
+                                      (car rgba) (cadr rgba)
+                                      (caddr rgba) (cadddr rgba)))
+               (window-run! w))))))))
 
-  (define park-forever
-    (let ((pause (foreign-procedure "pause" () int)))
-      (lambda ()
-        (let loop ()
-          (pause)
-          (loop))))))
+  ;; Parse "R G B" or "R G B A" as floats from LETLOOP_DESKTOP_COLOR.
+  ;; Default is opaque magenta — visible against any boot console.
+  (define (parse-clear-color s)
+    (define default '(1.0 0.0 1.0 1.0))
+    (cond
+     ((or (not s) (zero? (string-length s)))
+      default)
+     (else
+      (guard (e (#t default))
+        (let* ((normalized
+                (list->string
+                 (map (lambda (c) (if (char=? c #\,) #\space c))
+                      (string->list s))))
+               (parts (filter (lambda (p) (not (zero? (string-length p))))
+                              (split-on-space normalized))))
+          (let ((vals (map (lambda (p) (exact->inexact (string->number p)))
+                           parts)))
+            (cond
+             ((= (length vals) 3) (append vals (list 1.0)))
+             ((= (length vals) 4) vals)
+             (else default))))))))
+
+  (define (split-on-space s)
+    (let loop ((chars (string->list s)) (acc '()) (out '()))
+      (cond
+       ((null? chars)
+        (reverse (if (null? acc) out (cons (list->string (reverse acc)) out))))
+       ((char=? (car chars) #\space)
+        (loop (cdr chars) '()
+              (if (null? acc) out (cons (list->string (reverse acc)) out))))
+       (else
+        (loop (cdr chars) (cons (car chars) acc) out))))))
