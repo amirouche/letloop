@@ -28,7 +28,9 @@
   (import
    (chezscheme)
    (letloop desktop vulkan)
-   (letloop desktop vulkan low))
+   (letloop desktop vulkan low)
+   (letloop desktop text-pipeline)
+   (letloop desktop font))
 
   (define (pk . args)
     (when (getenv "LETLOOP_DEBUG")
@@ -214,9 +216,12 @@
      framebuffers          ; list of u64 VkFramebuffer, parallel to images
      command-pool command-buffer
      image-available-sem render-finished-sem in-flight-fence
+     text-pipeline         ; (letloop desktop text-pipeline) record
+     (mutable pending-text); list of (string x y) — drawn next render
      ;; pre-allocated scratch foreign buffers, freed in window-close
      scratch               ; list of foreign-alloc'd addresses
-     (mutable r) (mutable g) (mutable b) (mutable a)))
+     (mutable r) (mutable g) (mutable b) (mutable a)
+     (mutable fg-r) (mutable fg-g) (mutable fg-b) (mutable fg-a)))
 
   ;; ----------------------------------------------------------------
   ;; window-open
@@ -575,7 +580,14 @@
              (foreign-free out)
              (foreign-free info)))))
             (_track-fence
-             (begin (track! (lambda () (vkDestroyFence device in-flight-fence 0))) #f)))
+             (begin (track! (lambda () (vkDestroyFence device in-flight-fence 0))) #f))
+            ;; D-3: text rendering pipeline (atlas + descriptor + pipeline + instance buf).
+            (text-pipeline
+             (build-text-pipeline device pd render-pass queue command-pool))
+            (_track-tp
+             (begin (track!
+                     (lambda () (destroy-text-pipeline! device text-pipeline)))
+                    #f)))
        ;; All built — clear rollback so window-close is the sole owner.
        (set! rollback '())
        (make-window
@@ -588,8 +600,11 @@
         images image-views framebuffers
         command-pool command-buffer
         image-available-sem render-finished-sem in-flight-fence
+        text-pipeline
+        '()                              ; pending-text
         scratch
-        1.0 0.0 1.0 1.0))))
+        0.05 0.05 0.10 1.0               ; bg dark blue
+        1.0 1.0 1.0 1.0))))              ; fg white
 
   ;; ----------------------------------------------------------------
   ;; window-clear-color!
@@ -761,6 +776,10 @@
       ;; Ignore individual destroy failures so we always reach
       ;; the foreign-free pass.
       (silent (lambda () (vkDeviceWaitIdle (window-device w))))
+      ;; Tear down the text pipeline first — its objects sit on top of
+      ;; the render pass / device that we're about to destroy.
+      (silent (lambda () (destroy-text-pipeline! (window-device w)
+                                                 (window-text-pipeline w))))
       (silent (lambda () (vkDestroyFence (window-device w)
                                          (window-in-flight-fence w) 0)))
       (silent (lambda () (vkDestroySemaphore (window-device w)
