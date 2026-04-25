@@ -223,3 +223,103 @@ Type in the desktop window, characters appear in a line buffer; Enter fires a ca
 - **Single render thread**: the Chez engine scheduler is cooperative. With one window we yield between frames and the REPL stays responsive. With two windows we'll need a dedicated render thread consuming damage commands over a channel — out of scope for M2.x.
 - **No Scheme→SPIR-V compiler**: shaders stay handwritten GLSL → SPIR-V (offline). Embedded as bytevectors. M2.2 will introduce two; future milestones will accumulate more, which raises the question of an in-tree shader build step.
 - **libtls.so dependency**: pre-existing, unrelated to desktop. Documented in `CLAUDE.md` with a stub-build snippet. Worth fixing upstream eventually with a `make tls` target.
+
+## Further work — what an HTML render engine (no animation) would need
+
+The current framework is a textured-quad text renderer, not a 2D
+rendering engine. Mapping HTML-without-animation onto what's there
+turns up a substantial gap list. Captured here so future contributors
+inherit the analysis instead of redoing it.
+
+### Reusable from M2.x
+- Instanced-quad pipeline + per-instance color (extends naturally to
+  more attributes: clip rect, texture index, corner radius).
+- Atlas + sampler infra (becomes the glyph-atlas case of a more
+  general texture cache).
+- HTML parsing (`htmlprag` → SXML), HTTP, TLS, SXPath, JSON.
+- Window + line editor + REPL (natural debug shell: load URL, print
+  computed-style tree, sample boxes).
+
+### Engine layer — none of this exists yet
+- **CSS parser + selector matching + cascade.** Tokenizer, selector
+  matcher, specificity, computed-style resolution, inheritance.
+  ~1500 LOC of pure Scheme.
+- **Box / layout tree.** Block layout (margins, padding, borders,
+  widths/heights, margin-collapse), inline layout (line boxes,
+  baselines, word wrap), float positioning, `position:
+  relative/absolute/fixed`. Flex/grid pushed to v2. ~2000 LOC.
+- **Unicode line breaking (UAX #14)** for word wrap, **bidi (UAX #9)**
+  for RTL, **basic shaping** (kerning, ligatures — HarfBuzz typical).
+  Without these, only ASCII LTR ever looks right.
+
+### Text — PSF2 isn't enough
+- **TrueType / OpenType outline rasterization.** PSF2 is a fixed-cell
+  bitmap; CSS needs `font-family`, `font-size` (per pixel),
+  `font-weight`, `font-style`. FreeType FFI is the cheapest route.
+  Each (face, size, weight) feeds a separate atlas — or one SDF
+  atlas for fast resize.
+- **Multi-font / atlas management.** Today's atlas is one font, sized
+  once at startup. Need an atlas allocator that grows or evicts.
+- **Subpixel-accurate quad positioning.** Vertex shader takes floats
+  already; the layout engine has to *produce* those floats with
+  correct advance / kerning.
+
+### Vector / 2D primitives — only axis-aligned quads today
+- **Filled rectangles** for backgrounds — already trivially
+  expressible through the existing instanced-quad pipeline (treat
+  atlas alpha as 1).
+- **Borders + border-radius.** Stroke + rounded corners. Either an
+  SDF-per-quad shader or analytical rounded-rect coverage. Out of the
+  box: nothing.
+- **Lines / arbitrary paths** for `<hr>`, `text-decoration:
+  underline`, etc. Thin-quad emitters or a real path tessellator
+  (Lyon-style).
+- **Images.** No PNG/JPEG decoder, no general RGBA texture pipeline.
+  stb_image FFI is the small option. Per-image VkImage upload + a
+  way to bind multiple textures per draw (descriptor-array,
+  bindless, or draw-per-image).
+
+### GPU plumbing — single-purpose right now
+- **Multiple textures.** Descriptor pool sized for 1 set; no
+  per-image descriptor allocation machinery.
+- **Off-screen render targets.** Needed for stacking contexts,
+  opacity layers, `overflow:hidden` antialiasing, `box-shadow` blur.
+- **Clipping.** No scissor stack. `overflow:hidden` either needs
+  `vkCmdSetScissor` per node or fragment-shader rect clipping.
+- **Z-order / paint order.** Pure paint-order is fine for static
+  HTML, but the renderer must walk the box tree in the right order.
+  Currently we flatten everything into one instance buffer in
+  arbitrary order.
+- **Multiple draw calls / state changes per frame.** One `vkCmdDraw`
+  per frame today. HTML wants distinct draws per (texture, clip,
+  blend) combination. The frame-record path needs to take a list of
+  "draw items" and bake bind/scissor changes between them.
+- **Resize handling.** Swapchain isn't recreated when the surface
+  size changes. Static page reflow on resize won't work.
+
+### Resource & I/O
+- **Async fetch + caching** for `<img>`, `<link rel=stylesheet>`,
+  web fonts. We have sync `(letloop www)`; "render the document I
+  have so far while images stream in" doesn't exist.
+- **URL resolver** with relative-path resolution + redirects.
+
+### Minimum-viable static HTML renderer — dependency order
+1. **stb_image FFI + RGBA image upload** (~200 LOC + FFI) — unblocks
+   `<img>` and CSS background-image.
+2. **Multi-texture binding** (descriptor-array OR bindless OR
+   draw-per-texture) — unblocks anything beyond the single atlas.
+3. **FreeType FFI + scalable glyph atlas** (~500 LOC + FFI) —
+   replaces PSF2, unblocks variable fonts.
+4. **CSS parser + cascade** (~1500 LOC of pure Scheme).
+5. **Box tree + block / inline layout** (~2000 LOC).
+6. **Frame-record API** that emits a list of draw items (rect,
+   glyph-run, image, clip-rect, color) — unifies the rendering
+   surface so the layout engine doesn't poke Vulkan.
+7. **Rounded-rect / border / clipping shader** (one new pipeline +
+   fragment shader).
+8. **Resize-on-extent-change** in `window-render-frame!`.
+
+Roughly: ~5–8k LOC of new code, two new shader pipelines, three FFI
+libraries (FreeType, stb_image, optionally HarfBuzz), and a frame-
+graph rewrite of `record-text-draws!`. Achievable, but multi-month,
+not an M2.x sprint.
