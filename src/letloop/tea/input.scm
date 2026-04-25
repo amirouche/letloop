@@ -47,7 +47,8 @@
    make-input-parser
    input-parser?
    input-parser-feed!
-   input-parser-flush!)
+   input-parser-flush!
+   input-parser-state)
   (import (chezscheme)
           (letloop tea utf8)
           (letloop tea trie)
