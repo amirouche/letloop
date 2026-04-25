@@ -17,7 +17,7 @@ A handoff-friendly map of what's done, what's immediately next, and what's beyon
 | M2.2 chunk D-1 | Bundle FullCyrAsia-DejaVu30x16 PSF2                              | Done     | ab67824   |
 | M2.2 chunk D-2 | Render pass replaces clear-image loop                            | Done     | 508345d   |
 | M2.2 chunk D-3 | Atlas, descriptor, pipeline construction (llvmpipe-verified)    | Done     | ff3ca29   |
-| M2.2 chunk D-4 | window-draw-text! + per-frame draw (compile-only, GPU-untested) | Done     | c8a8a62   |
+| M2.2 chunk D-4 | window-draw-text! + per-frame draw (llvmpipe-verified)         | Done     | c8a8a62   |
 | M2.3 chunk E-1 | evdev input_event parser + sync read wrapper                     | Done     | 2b05e83   |
 | M2.3 chunk E-2 | US-QWERTY scancode→char mapping                                  | Done     | afd1a58   |
 | M2.3 chunk E-3 | Keyboard event pump (sync, io_uring deferred)                    | Done     | ed182f1   |
