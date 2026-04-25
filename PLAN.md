@@ -9,8 +9,8 @@ A handoff-friendly map of what's done, what's immediately next, and what's beyon
 | M2.0        | Seat acquisition + DRM connector enumeration                      | Done     | 325eb57   |
 | M2.1 chunk A | Vulkan FFI bindings + instance/device/display enumeration         | Done     | 8529cb2   |
 | M2.1 chunk B | Display-plane enumeration + graphics-queue picker + system deps   | Done     | cb4f78f   |
-| M2.1 chunk C | Surface + swapchain + magenta clear loop (the deliverable)        | **Next** | —         |
-| M2.2        | PSF2 glyph rendering, instanced quad pipeline                     | Pending  | —         |
+| M2.1 chunk C | Surface + swapchain + magenta clear loop (the deliverable)        | Done     | cd0b1cf   |
+| M2.2        | PSF2 glyph rendering, instanced quad pipeline                     | **Next** | —         |
 | M2.3        | io_uring evdev keyboard input                                     | Pending  | —         |
 | M2.4        | Graphical REPL via redirected current-input/output ports          | Pending  | —         |
 
