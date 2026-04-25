@@ -14,7 +14,9 @@
    ~check-input-focus-in
    ~check-input-paste-end-roundtrip
    ~check-input-paste-with-stray-esc
-   ~check-input-paste-utf8)
+   ~check-input-paste-utf8
+   ~check-input-ctrl-arrow-up
+   ~check-input-shift-home)
 
   (import (chezscheme)
           (letloop tea input)
@@ -139,4 +141,19 @@
     (let* ((p (make-input-parser xterm-caps))
            (es (feed-str p "\x1b;[200~héllo\x1b;[201~")))
       (and (= (length es) 2)
-           (string=? (paste-event-data (cadr es)) "héllo")))))
+           (string=? (paste-event-data (cadr es)) "héllo"))))
+
+  (define (~check-input-ctrl-arrow-up)
+    ;; Modifier-key sequence \e[1;5A = ctrl + arrow-up
+    (let* ((p (make-input-parser xterm-caps))
+           (es (feed-str p "\x1b;[1;5A")))
+      (and (= (length es) 1)
+           (eq? (key-event-key (car es)) 'arrow-up)
+           (equal? (key-event-mods (car es)) '(ctrl)))))
+
+  (define (~check-input-shift-home)
+    (let* ((p (make-input-parser xterm-caps))
+           (es (feed-str p "\x1b;[1;2H")))
+      (and (= (length es) 1)
+           (eq? (key-event-key (car es)) 'home)
+           (equal? (key-event-mods (car es)) '(shift))))))
