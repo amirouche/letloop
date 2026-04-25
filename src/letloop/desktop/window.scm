@@ -24,6 +24,11 @@
    window-draw-text!
    window-clear-text!
    window-fg-color!
+   window-attach-keyboard!
+   window-set-prompt!
+   window-set-line-handler!
+   window-set-line-position!
+   window-line-buffer
    window?
    window-released?
    window-extent-width
@@ -33,7 +38,10 @@
    (letloop desktop vulkan)
    (letloop desktop vulkan low)
    (letloop desktop text-pipeline)
-   (letloop desktop font))
+   (letloop desktop font)
+   (letloop desktop evdev)
+   (letloop desktop input)
+   (letloop desktop keymap))
 
   (define (pk . args)
     (when (getenv "LETLOOP_DEBUG")
@@ -221,6 +229,14 @@
      image-available-sem render-finished-sem in-flight-fence
      text-pipeline         ; (letloop desktop text-pipeline) record
      (mutable pending-text); list of (string x y) — drawn next render
+     ;; line editor state — fed by the keyboard pump in window-run!.
+     (mutable kbd-fd)      ; -1 if no keyboard attached
+     (mutable shift?)
+     (mutable line-buffer) ; string — current edit line
+     (mutable line-prompt) ; string — drawn before the line
+     (mutable line-handler); proc taking the completed line on Enter
+     (mutable line-x)      ; pixel position of the prompt
+     (mutable line-y)
      ;; pre-allocated scratch foreign buffers, freed in window-close
      scratch               ; list of foreign-alloc'd addresses
      (mutable r) (mutable g) (mutable b) (mutable a)
@@ -605,6 +621,12 @@
         image-available-sem render-finished-sem in-flight-fence
         text-pipeline
         '()                              ; pending-text
+        -1                               ; kbd-fd (none until attached)
+        #f                               ; shift?
+        ""                               ; line-buffer
+        "> "                             ; line-prompt
+        (lambda (line) (void))           ; line-handler — no-op default
+        40 200                           ; line-x, line-y
         scratch
         0.05 0.05 0.10 1.0               ; bg dark blue
         1.0 1.0 1.0 1.0))))              ; fg white
@@ -635,6 +657,46 @@
   (define (window-clear-text! w)
     (window-pending-text-set! w '()))
 
+  ;; ----------------------------------------------------------------
+  ;; Line editor wiring
+  ;; ----------------------------------------------------------------
+
+  (define (window-attach-keyboard! w fd)
+    (window-kbd-fd-set! w fd))
+
+  (define (window-set-prompt! w str)
+    (window-line-prompt-set! w str))
+
+  (define (window-set-line-handler! w proc)
+    (window-line-handler-set! w proc))
+
+  (define (window-set-line-position! w x y)
+    (window-line-x-set! w x)
+    (window-line-y-set! w y))
+
+  (define (handle-key-event! w code value)
+    (cond
+     ;; Modifier tracking — track press/repeat as down, release as up.
+     ((or (= code KEY_LEFTSHIFT) (= code KEY_RIGHTSHIFT))
+      (window-shift?-set! w (not (= value KEY_VALUE_RELEASE))))
+     ;; Anything else only matters on press / repeat.
+     ((or (= value KEY_VALUE_PRESS) (= value KEY_VALUE_REPEAT))
+      (cond
+       ((= code KEY_BACKSPACE)
+        (let* ((b (window-line-buffer w))
+               (n (string-length b)))
+          (when (positive? n)
+            (window-line-buffer-set! w (substring b 0 (- n 1))))))
+       ((= code KEY_ENTER)
+        (let ((line (window-line-buffer w)))
+          (window-line-buffer-set! w "")
+          ((window-line-handler w) line)))
+       (else
+        (let ((ch (keymap-printable code (window-shift? w))))
+          (when ch
+            (window-line-buffer-set!
+             w (string-append (window-line-buffer w) (string ch))))))))))
+
   ;; Build the per-frame instance list from pending text. Each character
   ;; that has a glyph in the atlas becomes an 8-element float list:
   ;;   (x y w h u v uw uh)
@@ -644,8 +706,17 @@
     (let* ((tp    (window-text-pipeline w))
            (font  (text-pipeline-font tp))
            (gw    (font-glyph-width font))
-           (gh    (font-glyph-height font)))
-      (let loop ((draws (window-pending-text w)) (acc '()))
+           (gh    (font-glyph-height font))
+           ;; Prompt + line buffer treated as one extra draw.
+           (line-text (string-append (window-line-prompt w)
+                                     (window-line-buffer w)))
+           (extras (if (zero? (string-length line-text))
+                       '()
+                       (list (list line-text
+                                   (window-line-x w)
+                                   (window-line-y w))))))
+      (let loop ((draws (append (window-pending-text w) extras))
+                 (acc '()))
         (if (null? draws)
             (reverse acc)
             (let* ((d   (car draws))
@@ -885,6 +956,11 @@
     (let loop ()
       (when (window-released? w)
         (error 'window-run! "window has been released"))
+      (let ((fd (window-kbd-fd w)))
+        (when (>= fd 0)
+          (pump-keyboard-events!
+           fd
+           (lambda (code value) (handle-key-event! w code value)))))
       (window-render-frame! w)
       (loop)))
 
@@ -898,6 +974,12 @@
   (define (window-close w)
     (unless (window-released? w)
       (window-released?-set! w #t)
+      ;; Close the keyboard fd before tearing down GPU state — this
+      ;; doesn't block on Vulkan, just releases the input file.
+      (let ((fd (window-kbd-fd w)))
+        (when (>= fd 0)
+          (silent (lambda () (close-keyboard fd)))
+          (window-kbd-fd-set! w -1)))
       ;; Ignore individual destroy failures so we always reach
       ;; the foreign-free pass.
       (silent (lambda () (vkDeviceWaitIdle (window-device w))))
