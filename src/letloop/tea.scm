@@ -1,13 +1,11 @@
 #!chezscheme
 ;; (letloop tea) — public API of the Scheme termbox2 port.
 ;;
-;; Stage 1: synchronous renderer.  Opens a tty, flips raw mode, manages a
-;; double-buffered cell grid, and produces frames via cellbuf-diff! flushed
-;; to the tty with write(2).  Input handling and the io_uring event loop
-;; arrive in stage 2 and stage 3.
-;;
 ;; A tea instance is opaque; pass it as the first argument to every
-;; non-constructor procedure.
+;; non-constructor procedure.  Output is double-buffered (cellbuf-diff!
+;; produces minimal escape sequences); input is parsed by a state machine
+;; fed bytes from an io_uring-driven event loop, with SIGWINCH delivered
+;; via signalfd as just another fd to poll.
 (library (letloop tea)
   (export
    ;; lifecycle
@@ -29,6 +27,10 @@
    tea-set-cursor
    ;; output mode (live switch — forces a full repaint on next present)
    tea-set-output-mode
+   ;; events
+   tea-poll
+   tea-events
+   tea-on-event
    ;; introspection
    tea-output-mode
    tea-fd
@@ -38,7 +40,9 @@
           (letloop tea syscall)
           (letloop tea sgr)
           (letloop tea cell)
-          (letloop tea caps))
+          (letloop tea caps)
+          (letloop tea input)
+          (letloop tea loop))
 
   (define-record-type tea
     (fields fd
@@ -49,7 +53,10 @@
             (mutable front)
             (mutable cursor-x)
             (mutable cursor-y)
-            (mutable cursor-visible?)))
+            (mutable cursor-visible?)
+            (mutable parser)
+            (mutable loop)
+            (mutable on-event-cb)))   ; #f or proc(event)
 
   ;; ----- lifecycle ---------------------------------------------------------
 
@@ -104,10 +111,13 @@
           (let-values (((w h) (read-winsize fd)))
             (let* ((w* (if (fx=? w 0) 80 w))
                    (h* (if (fx=? h 0) 24 h))
-                   (back  (make-cellbuf w* h*))
-                   (front (make-cellbuf w* h*))
+                   (back   (make-cellbuf w* h*))
+                   (front  (make-cellbuf w* h*))
+                   (parser (make-input-parser caps))
+                   (loop   (make-tea-loop fd parser))
                    (instance (make-tea fd saved caps output-mode
-                                       back front 0 0 (not hide-cursor?))))
+                                       back front 0 0 (not hide-cursor?)
+                                       parser loop #f)))
               ;; init: alt screen, hide cursor, clear, keypad on
               (when alt-screen?
                 (write-string-fd fd (cap-set-init-string caps)))
@@ -117,10 +127,13 @@
   (define (tea-close tea)
     (let ((fd   (tea-fd tea))
           (caps (tea-caps tea))
-          (saved (tea-saved-termios tea)))
+          (saved (tea-saved-termios tea))
+          (loop (tea-loop tea)))
       ;; cosmetic: leave keypad mode, send shutdown
       (write-string-fd fd (cap-set-keypad-off caps))
       (write-string-fd fd (cap-set-shutdown-string caps))
+      ;; tear down the iouring loop (frees ring, sigfd, buffers)
+      (when loop (tea-loop-shutdown! loop))
       ;; restore termios
       (tcsetattr fd TCSAFLUSH saved)
       (foreign-free saved)
@@ -186,9 +199,61 @@
 
   (define (tea-set-output-mode tea mode)
     (tea-output-mode-set! tea mode)
-    ;; Force a full repaint by zeroing the front buffer's chars to a
-    ;; sentinel that mismatches every real cell.  Easiest: wipe front to
-    ;; "empty + impossible attr" so every back cell looks dirty.  Cheaper:
-    ;; just clear front via cellbuf-clear! — diff will repaint everything.
+    ;; Force a full repaint by clearing the front buffer.
     (cellbuf-clear! (tea-front tea)))
+
+  ;; ----- events -----------------------------------------------------------
+
+  (define (handle-resize-marker! tea)
+    ;; The loop puts 'resize-event in the queue when SIGWINCH arrives.  We
+    ;; translate it to a real resize record and update both buffers.
+    (let-values (((w h) (tea-resize tea)))
+      (tea-loop-clear-resize-pending! (tea-loop tea))
+      (cons 'resize (cons w h))))
+
+  (define (next-event! tea)
+    (let* ((loop (tea-loop tea))
+           (e    (tea-loop-pop-event! loop)))
+      (cond
+       ((eq? e 'resize-event) (handle-resize-marker! tea))
+       (else                  e))))
+
+  (define tea-poll
+    (case-lambda
+     ((tea)         (tea-poll tea #f))
+     ((tea timeout-ms)
+      (let ((loop (tea-loop tea)))
+        (let drive ()
+          (let ((e (next-event! tea)))
+            (cond
+             (e e)
+             (else
+              (let ((produced (tea-loop-run-once! loop timeout-ms)))
+                (cond
+                 ((fx>? produced 0) (drive))
+                 (timeout-ms        #f)
+                 (else              (drive))))))))))))
+
+  (define (tea-events tea)
+    ;; Pull-style stream: returns a thunk that yields the next event each
+    ;; call, blocking the io_uring loop until one arrives.  This composes
+    ;; with (letloop generator) — wrapping it with make-iterator gives a
+    ;; proper generator if the caller wants one.
+    (lambda () (tea-poll tea)))
+
+  (define (tea-on-event tea proc)
+    ;; Push-style: register a single callback.  Each iteration of the
+    ;; internal loop fires it with every event drained that round.
+    (tea-on-event-cb-set! tea proc)
+    ;; Drive the loop forever, dispatching every event to proc.  Returns
+    ;; only if proc throws.
+    (let drive ()
+      (let ((loop (tea-loop tea)))
+        (tea-loop-run-once! loop #f)
+        (let drain ()
+          (let ((e (next-event! tea)))
+            (when e
+              (proc e)
+              (drain))))
+        (drive))))
   )
