@@ -12,7 +12,9 @@
    ~check-input-mouse-sgr-press
    ~check-input-mouse-x10
    ~check-input-focus-in
-   ~check-input-paste-end-roundtrip)
+   ~check-input-paste-end-roundtrip
+   ~check-input-paste-with-stray-esc
+   ~check-input-paste-utf8)
 
   (import (chezscheme)
           (letloop tea input)
@@ -107,11 +109,34 @@
 
   (define (~check-input-paste-end-roundtrip)
     ;; Bracketed paste of "Hi": \e[200~Hi\e[201~
+    ;; Expect 2 events: paste-start, paste-end with data="Hi".
     (let* ((p (make-input-parser xterm-caps))
            (es (feed-str p "\x1b;[200~Hi\x1b;[201~")))
-      ;; Expect: data H, data i, paste-end.
-      (and (= (length es) 3)
+      (and (= (length es) 2)
            (paste-event? (car es))
-           (= (paste-event-data (car es)) 72)
-           (paste-event? (caddr es))
-           (paste-event-end? (caddr es))))))
+           (not (paste-event-data (car es)))
+           (not (paste-event-end? (car es)))
+           (paste-event? (cadr es))
+           (paste-event-end? (cadr es))
+           (string=? (paste-event-data (cadr es)) "Hi"))))
+
+  (define (~check-input-paste-with-stray-esc)
+    ;; Pasted content that contains ESC + non-sentinel bytes must round-trip
+    ;; verbatim — this is the case the byte-by-byte parser had to get
+    ;; right when the inline sentinel scan partially matched.
+    (let* ((p (make-input-parser xterm-caps))
+           ;; \e[200~  X \e Y  \e[201~ — content is "X\eY"
+           (es (feed-bytes p
+                 (append
+                  (bytevector->u8-list (string->utf8 "\x1b;[200~"))
+                  '(88 #x1B 89)   ; "X\eY"
+                  (bytevector->u8-list (string->utf8 "\x1b;[201~"))))))
+      (and (= (length es) 2)
+           (string=? (paste-event-data (cadr es)) "X\x1b;Y"))))
+
+  (define (~check-input-paste-utf8)
+    ;; Pasted multibyte text returns as a proper UTF-8 string.
+    (let* ((p (make-input-parser xterm-caps))
+           (es (feed-str p "\x1b;[200~héllo\x1b;[201~")))
+      (and (= (length es) 2)
+           (string=? (paste-event-data (cadr es)) "héllo")))))
