@@ -47,23 +47,59 @@
    VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR
    VK_STRUCTURE_TYPE_PRESENT_INFO_KHR
    VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR
+   VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO
+   VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO
+   VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO
+   VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO
+   VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO
+   VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
+   VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO
+   VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO
+   VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO
+   VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO
+   VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO
+   VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO
+   VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO
+   VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO
+   VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO
+   VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO
+   VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO
+   VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET
+   VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO
+   VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO
+   VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO
+   VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO
+   VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO
 
    ;; format / image layout / usage / sharing
    VK_FORMAT_UNDEFINED
+   VK_FORMAT_R8_UNORM
    VK_FORMAT_B8G8R8A8_UNORM
    VK_FORMAT_B8G8R8A8_SRGB
    VK_FORMAT_R8G8B8A8_UNORM
+   VK_FORMAT_R32G32_SFLOAT
+   VK_FORMAT_R32G32B32A32_SFLOAT
 
    VK_IMAGE_LAYOUT_UNDEFINED
    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
    VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
 
+   VK_IMAGE_USAGE_TRANSFER_SRC_BIT
    VK_IMAGE_USAGE_TRANSFER_DST_BIT
+   VK_IMAGE_USAGE_SAMPLED_BIT
    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+
+   VK_IMAGE_TYPE_2D
+   VK_IMAGE_VIEW_TYPE_2D
+   VK_IMAGE_TILING_OPTIMAL
+   VK_IMAGE_TILING_LINEAR
 
    VK_IMAGE_ASPECT_COLOR_BIT
 
    VK_SHARING_MODE_EXCLUSIVE
+   VK_SAMPLE_COUNT_1_BIT
 
    ;; access / pipeline stages
    VK_ACCESS_MEMORY_READ_BIT
@@ -89,6 +125,60 @@
    VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
    VK_FENCE_CREATE_SIGNALED_BIT
 
+   ;; render pass / pipeline / descriptor / shader / blend / sampler
+   VK_ATTACHMENT_LOAD_OP_LOAD
+   VK_ATTACHMENT_LOAD_OP_CLEAR
+   VK_ATTACHMENT_LOAD_OP_DONT_CARE
+   VK_ATTACHMENT_STORE_OP_STORE
+   VK_ATTACHMENT_STORE_OP_DONT_CARE
+
+   VK_PIPELINE_BIND_POINT_GRAPHICS
+   VK_SUBPASS_EXTERNAL
+   VK_SUBPASS_CONTENTS_INLINE
+
+   VK_VERTEX_INPUT_RATE_VERTEX
+   VK_VERTEX_INPUT_RATE_INSTANCE
+   VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+   VK_POLYGON_MODE_FILL
+   VK_CULL_MODE_NONE
+   VK_FRONT_FACE_COUNTER_CLOCKWISE
+
+   VK_BLEND_FACTOR_ZERO
+   VK_BLEND_FACTOR_ONE
+   VK_BLEND_FACTOR_SRC_ALPHA
+   VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA
+   VK_BLEND_OP_ADD
+   VK_COLOR_COMPONENT_R_BIT
+   VK_COLOR_COMPONENT_G_BIT
+   VK_COLOR_COMPONENT_B_BIT
+   VK_COLOR_COMPONENT_A_BIT
+
+   VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+
+   VK_SHADER_STAGE_VERTEX_BIT
+   VK_SHADER_STAGE_FRAGMENT_BIT
+
+   VK_FILTER_NEAREST
+   VK_FILTER_LINEAR
+   VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
+   VK_SAMPLER_ADDRESS_MODE_REPEAT
+   VK_SAMPLER_MIPMAP_MODE_NEAREST
+   VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK
+
+   VK_DYNAMIC_STATE_VIEWPORT
+   VK_DYNAMIC_STATE_SCISSOR
+
+   VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+   VK_BUFFER_USAGE_TRANSFER_DST_BIT
+   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT
+   VK_BUFFER_USAGE_INDEX_BUFFER_BIT
+   VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
+   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+
+   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+
    ;; extension name strings
    VK_KHR_SURFACE_EXTENSION_NAME
    VK_KHR_DISPLAY_EXTENSION_NAME
@@ -97,8 +187,13 @@
    ;; ftypes — small
    <VkExtent2D>
    <VkExtent3D>
+   <VkOffset2D>
    <VkOffset3D>
+   <VkRect2D>
+   <VkViewport>
+   <VkComponentMapping>
    <VkImageSubresourceRange>
+   <VkImageSubresourceLayers>
    <VkSurfaceFormatKHR>
    <VkDisplayModeParametersKHR>
    <VkDisplayModePropertiesKHR>
@@ -107,6 +202,13 @@
    <VkQueueFamilyProperties>
    <VkSurfaceCapabilitiesKHR>
    <VkClearColorValue>
+   <VkClearValue>
+   <VkBufferImageCopy>
+   <VkPushConstantRange>
+   <VkMemoryRequirements>
+   <VkMemoryType>
+   <VkMemoryHeap>
+   <VkPhysicalDeviceMemoryProperties>
 
    ;; ftypes — create-info / submit / barrier
    <VkApplicationInfo>
@@ -124,6 +226,40 @@
    <VkPresentInfoKHR>
    <VkImageMemoryBarrier>
    <VkPhysicalDeviceProperties>
+   <VkBufferCreateInfo>
+   <VkImageCreateInfo>
+   <VkImageViewCreateInfo>
+   <VkSamplerCreateInfo>
+   <VkShaderModuleCreateInfo>
+   <VkMemoryAllocateInfo>
+   <VkAttachmentDescription>
+   <VkAttachmentReference>
+   <VkSubpassDescription>
+   <VkSubpassDependency>
+   <VkRenderPassCreateInfo>
+   <VkRenderPassBeginInfo>
+   <VkFramebufferCreateInfo>
+   <VkPipelineLayoutCreateInfo>
+   <VkPipelineShaderStageCreateInfo>
+   <VkVertexInputBindingDescription>
+   <VkVertexInputAttributeDescription>
+   <VkPipelineVertexInputStateCreateInfo>
+   <VkPipelineInputAssemblyStateCreateInfo>
+   <VkPipelineViewportStateCreateInfo>
+   <VkPipelineRasterizationStateCreateInfo>
+   <VkPipelineMultisampleStateCreateInfo>
+   <VkPipelineColorBlendAttachmentState>
+   <VkPipelineColorBlendStateCreateInfo>
+   <VkPipelineDynamicStateCreateInfo>
+   <VkGraphicsPipelineCreateInfo>
+   <VkDescriptorSetLayoutBinding>
+   <VkDescriptorSetLayoutCreateInfo>
+   <VkDescriptorPoolSize>
+   <VkDescriptorPoolCreateInfo>
+   <VkDescriptorSetAllocateInfo>
+   <VkDescriptorImageInfo>
+   <VkDescriptorBufferInfo>
+   <VkWriteDescriptorSet>
 
    ;; vk procedures — instance / device lifecycle
    vkCreateInstance
@@ -169,7 +305,62 @@
    vkEndCommandBuffer
    vkCmdPipelineBarrier
    vkCmdClearColorImage
-   vkQueueSubmit)
+   vkQueueSubmit
+
+   ;; render pass / framebuffer
+   vkCreateRenderPass
+   vkDestroyRenderPass
+   vkCreateFramebuffer
+   vkDestroyFramebuffer
+
+   ;; image / view / sampler
+   vkCreateImage
+   vkDestroyImage
+   vkCreateImageView
+   vkDestroyImageView
+   vkCreateSampler
+   vkDestroySampler
+   vkGetImageMemoryRequirements
+   vkBindImageMemory
+
+   ;; shader / pipeline
+   vkCreateShaderModule
+   vkDestroyShaderModule
+   vkCreatePipelineLayout
+   vkDestroyPipelineLayout
+   vkCreateGraphicsPipelines
+   vkDestroyPipeline
+
+   ;; descriptors
+   vkCreateDescriptorSetLayout
+   vkDestroyDescriptorSetLayout
+   vkCreateDescriptorPool
+   vkDestroyDescriptorPool
+   vkAllocateDescriptorSets
+   vkUpdateDescriptorSets
+
+   ;; buffers + memory
+   vkCreateBuffer
+   vkDestroyBuffer
+   vkGetBufferMemoryRequirements
+   vkBindBufferMemory
+   vkAllocateMemory
+   vkFreeMemory
+   vkMapMemory
+   vkUnmapMemory
+   vkGetPhysicalDeviceMemoryProperties
+
+   ;; record-time graphics commands
+   vkCmdBeginRenderPass
+   vkCmdEndRenderPass
+   vkCmdBindPipeline
+   vkCmdBindVertexBuffers
+   vkCmdBindDescriptorSets
+   vkCmdDraw
+   vkCmdSetViewport
+   vkCmdSetScissor
+   vkCmdPushConstants
+   vkCmdCopyBufferToImage)
   (import (chezscheme))
 
   (define libvulkan (load-shared-object "libvulkan.so.1"))
@@ -223,25 +414,61 @@
   (define VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR       1000001000)
   (define VK_STRUCTURE_TYPE_PRESENT_INFO_KHR                1000001001)
   (define VK_STRUCTURE_TYPE_DISPLAY_SURFACE_CREATE_INFO_KHR 1000002000)
+  (define VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO                            12)
+  (define VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO                             14)
+  (define VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO                        15)
+  (define VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO                     16)
+  (define VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO             18)
+  (define VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO       19)
+  (define VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO     20)
+  (define VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO           22)
+  (define VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO      23)
+  (define VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO        24)
+  (define VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO        26)
+  (define VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO            27)
+  (define VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO                 28)
+  (define VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO                   30)
+  (define VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO                           31)
+  (define VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO             32)
+  (define VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO                   33)
+  (define VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO                  34)
+  (define VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET                          35)
+  (define VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO                       37)
+  (define VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO                       38)
+  (define VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO                           5)
+  (define VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO                        43)
 
   ;; ----------------------------------------------------------------
   ;; Enums / flags
   ;; ----------------------------------------------------------------
-  (define VK_FORMAT_UNDEFINED     0)
-  (define VK_FORMAT_B8G8R8A8_UNORM  44)
-  (define VK_FORMAT_B8G8R8A8_SRGB   50)
-  (define VK_FORMAT_R8G8B8A8_UNORM  37)
+  (define VK_FORMAT_UNDEFINED            0)
+  (define VK_FORMAT_R8_UNORM             9)
+  (define VK_FORMAT_R8G8B8A8_UNORM      37)
+  (define VK_FORMAT_B8G8R8A8_UNORM      44)
+  (define VK_FORMAT_B8G8R8A8_SRGB       50)
+  (define VK_FORMAT_R32G32_SFLOAT      103)
+  (define VK_FORMAT_R32G32B32A32_SFLOAT 109)
 
-  (define VK_IMAGE_LAYOUT_UNDEFINED              0)
-  (define VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL   7)
-  (define VK_IMAGE_LAYOUT_PRESENT_SRC_KHR        1000001002)
+  (define VK_IMAGE_LAYOUT_UNDEFINED                0)
+  (define VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL 2)
+  (define VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL 5)
+  (define VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL     7)
+  (define VK_IMAGE_LAYOUT_PRESENT_SRC_KHR          1000001002)
 
-  (define VK_IMAGE_USAGE_TRANSFER_DST_BIT       #x02)
-  (define VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT   #x10)
+  (define VK_IMAGE_USAGE_TRANSFER_SRC_BIT      #x01)
+  (define VK_IMAGE_USAGE_TRANSFER_DST_BIT      #x02)
+  (define VK_IMAGE_USAGE_SAMPLED_BIT           #x04)
+  (define VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT  #x10)
+
+  (define VK_IMAGE_TYPE_2D                      1)
+  (define VK_IMAGE_VIEW_TYPE_2D                 1)
+  (define VK_IMAGE_TILING_OPTIMAL               0)
+  (define VK_IMAGE_TILING_LINEAR                1)
 
   (define VK_IMAGE_ASPECT_COLOR_BIT             #x01)
 
   (define VK_SHARING_MODE_EXCLUSIVE              0)
+  (define VK_SAMPLE_COUNT_1_BIT                  1)
 
   (define VK_ACCESS_MEMORY_READ_BIT             #x00008000)
   (define VK_ACCESS_TRANSFER_WRITE_BIT          #x00001000)
@@ -266,6 +493,63 @@
   (define VK_FENCE_CREATE_SIGNALED_BIT                   #x01)
 
   ;; ----------------------------------------------------------------
+  ;; Render pass / pipeline / descriptor / shader / blend / sampler
+  ;; ----------------------------------------------------------------
+
+  (define VK_ATTACHMENT_LOAD_OP_LOAD          0)
+  (define VK_ATTACHMENT_LOAD_OP_CLEAR         1)
+  (define VK_ATTACHMENT_LOAD_OP_DONT_CARE     2)
+  (define VK_ATTACHMENT_STORE_OP_STORE        0)
+  (define VK_ATTACHMENT_STORE_OP_DONT_CARE    1)
+
+  (define VK_PIPELINE_BIND_POINT_GRAPHICS     0)
+  (define VK_SUBPASS_EXTERNAL                 #xFFFFFFFF)
+  (define VK_SUBPASS_CONTENTS_INLINE          0)
+
+  (define VK_VERTEX_INPUT_RATE_VERTEX         0)
+  (define VK_VERTEX_INPUT_RATE_INSTANCE       1)
+  (define VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST 3)
+  (define VK_POLYGON_MODE_FILL                0)
+  (define VK_CULL_MODE_NONE                   0)
+  (define VK_FRONT_FACE_COUNTER_CLOCKWISE     0)
+
+  (define VK_BLEND_FACTOR_ZERO                0)
+  (define VK_BLEND_FACTOR_ONE                 1)
+  (define VK_BLEND_FACTOR_SRC_ALPHA           6)
+  (define VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA 7)
+  (define VK_BLEND_OP_ADD                     0)
+  (define VK_COLOR_COMPONENT_R_BIT           #x01)
+  (define VK_COLOR_COMPONENT_G_BIT           #x02)
+  (define VK_COLOR_COMPONENT_B_BIT           #x04)
+  (define VK_COLOR_COMPONENT_A_BIT           #x08)
+
+  (define VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER 1)
+
+  (define VK_SHADER_STAGE_VERTEX_BIT         #x01)
+  (define VK_SHADER_STAGE_FRAGMENT_BIT       #x10)
+
+  (define VK_FILTER_NEAREST                   0)
+  (define VK_FILTER_LINEAR                    1)
+  (define VK_SAMPLER_ADDRESS_MODE_REPEAT          0)
+  (define VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE   2)
+  (define VK_SAMPLER_MIPMAP_MODE_NEAREST      0)
+  (define VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK  3)
+
+  (define VK_DYNAMIC_STATE_VIEWPORT           0)
+  (define VK_DYNAMIC_STATE_SCISSOR            1)
+
+  (define VK_BUFFER_USAGE_TRANSFER_SRC_BIT    #x001)
+  (define VK_BUFFER_USAGE_TRANSFER_DST_BIT    #x002)
+  (define VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT  #x010)
+  (define VK_BUFFER_USAGE_STORAGE_BUFFER_BIT  #x020)
+  (define VK_BUFFER_USAGE_INDEX_BUFFER_BIT    #x040)
+  (define VK_BUFFER_USAGE_VERTEX_BUFFER_BIT   #x080)
+
+  (define VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT     #x01)
+  (define VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT     #x02)
+  (define VK_MEMORY_PROPERTY_HOST_COHERENT_BIT    #x04)
+
+  ;; ----------------------------------------------------------------
   ;; Extension name strings (Vulkan headers use them as #define literals).
   ;; ----------------------------------------------------------------
   (define VK_KHR_SURFACE_EXTENSION_NAME   "VK_KHR_surface")
@@ -287,11 +571,97 @@
      (height unsigned-32)
      (depth  unsigned-32)))
 
+  (define-ftype <VkOffset2D>
+    (struct
+     (x integer-32)
+     (y integer-32)))
+
   (define-ftype <VkOffset3D>
     (struct
      (x integer-32)
      (y integer-32)
      (z integer-32)))
+
+  (define-ftype <VkRect2D>
+    (struct
+     (offset (struct (x integer-32) (y integer-32)))
+     (extent (struct (width unsigned-32) (height unsigned-32)))))
+
+  (define-ftype <VkViewport>
+    (struct
+     (x        float)
+     (y        float)
+     (width    float)
+     (height   float)
+     (minDepth float)
+     (maxDepth float)))
+
+  (define-ftype <VkComponentMapping>
+    (struct
+     (r unsigned-32)
+     (g unsigned-32)
+     (b unsigned-32)
+     (a unsigned-32)))
+
+  (define-ftype <VkImageSubresourceLayers>
+    (struct
+     (aspectMask     unsigned-32)
+     (mipLevel       unsigned-32)
+     (baseArrayLayer unsigned-32)
+     (layerCount     unsigned-32)))
+
+  (define-ftype <VkPushConstantRange>
+    (struct
+     (stageFlags unsigned-32)
+     (offset     unsigned-32)
+     (size       unsigned-32)))
+
+  (define-ftype <VkBufferImageCopy>
+    (struct
+     (bufferOffset      unsigned-64)
+     (bufferRowLength   unsigned-32)
+     (bufferImageHeight unsigned-32)
+     (imageSubresource  (struct
+                         (aspectMask     unsigned-32)
+                         (mipLevel       unsigned-32)
+                         (baseArrayLayer unsigned-32)
+                         (layerCount     unsigned-32)))
+     (imageOffset       (struct (x integer-32) (y integer-32) (z integer-32)))
+     (imageExtent       (struct (width unsigned-32) (height unsigned-32) (depth unsigned-32)))))
+
+  (define-ftype <VkMemoryRequirements>
+    (struct
+     (size           unsigned-64)
+     (alignment      unsigned-64)
+     (memoryTypeBits unsigned-32)))
+
+  (define-ftype <VkMemoryType>
+    (struct
+     (propertyFlags unsigned-32)
+     (heapIndex     unsigned-32)))
+
+  (define-ftype <VkMemoryHeap>
+    (struct
+     (size  unsigned-64)
+     (flags unsigned-32)))
+
+  ;; VK_MAX_MEMORY_TYPES = 32, VK_MAX_MEMORY_HEAPS = 16
+  (define-ftype <VkPhysicalDeviceMemoryProperties>
+    (struct
+     (memoryTypeCount unsigned-32)
+     (memoryTypes     (array 32 (struct
+                                 (propertyFlags unsigned-32)
+                                 (heapIndex     unsigned-32))))
+     (memoryHeapCount unsigned-32)
+     (memoryHeaps     (array 16 (struct
+                                 (size  unsigned-64)
+                                 (flags unsigned-32))))))
+
+  ;; VkClearValue is a union of color (16 bytes) and depthStencil (8 bytes);
+  ;; we only ever use it as color.
+  (define-ftype <VkClearValue>
+    (struct
+     (color (struct (float32 (array 4 float))))))
 
   (define-ftype <VkImageSubresourceRange>
     (struct
@@ -361,6 +731,370 @@
     ;; write float values, so declare as float[4].
     (struct
      (float32 (array 4 float))))
+
+  (define-ftype <VkBufferCreateInfo>
+    (struct
+     (sType                 unsigned-32)
+     (pNext                 uptr)
+     (flags                 unsigned-32)
+     (size                  unsigned-64)
+     (usage                 unsigned-32)
+     (sharingMode           unsigned-32)
+     (queueFamilyIndexCount unsigned-32)
+     (pQueueFamilyIndices   uptr)))
+
+  (define-ftype <VkImageCreateInfo>
+    (struct
+     (sType                 unsigned-32)
+     (pNext                 uptr)
+     (flags                 unsigned-32)
+     (imageType             unsigned-32)
+     (format                unsigned-32)
+     (extent                (struct (width  unsigned-32)
+                                    (height unsigned-32)
+                                    (depth  unsigned-32)))
+     (mipLevels             unsigned-32)
+     (arrayLayers           unsigned-32)
+     (samples               unsigned-32)
+     (tiling                unsigned-32)
+     (usage                 unsigned-32)
+     (sharingMode           unsigned-32)
+     (queueFamilyIndexCount unsigned-32)
+     (pQueueFamilyIndices   uptr)
+     (initialLayout         unsigned-32)))
+
+  (define-ftype <VkImageViewCreateInfo>
+    (struct
+     (sType            unsigned-32)
+     (pNext            uptr)
+     (flags            unsigned-32)
+     (image            unsigned-64)
+     (viewType         unsigned-32)
+     (format           unsigned-32)
+     (components       (struct (r unsigned-32) (g unsigned-32)
+                               (b unsigned-32) (a unsigned-32)))
+     (subresourceRange (struct
+                        (aspectMask     unsigned-32)
+                        (baseMipLevel   unsigned-32)
+                        (levelCount     unsigned-32)
+                        (baseArrayLayer unsigned-32)
+                        (layerCount     unsigned-32)))))
+
+  (define-ftype <VkSamplerCreateInfo>
+    (struct
+     (sType                  unsigned-32)
+     (pNext                  uptr)
+     (flags                  unsigned-32)
+     (magFilter              unsigned-32)
+     (minFilter              unsigned-32)
+     (mipmapMode             unsigned-32)
+     (addressModeU           unsigned-32)
+     (addressModeV           unsigned-32)
+     (addressModeW           unsigned-32)
+     (mipLodBias             float)
+     (anisotropyEnable       unsigned-32)
+     (maxAnisotropy          float)
+     (compareEnable          unsigned-32)
+     (compareOp              unsigned-32)
+     (minLod                 float)
+     (maxLod                 float)
+     (borderColor            unsigned-32)
+     (unnormalizedCoordinates unsigned-32)))
+
+  (define-ftype <VkShaderModuleCreateInfo>
+    (struct
+     (sType    unsigned-32)
+     (pNext    uptr)
+     (flags    unsigned-32)
+     (codeSize unsigned-64)            ; size_t — 8 bytes on x86_64
+     (pCode    uptr)))
+
+  (define-ftype <VkMemoryAllocateInfo>
+    (struct
+     (sType           unsigned-32)
+     (pNext           uptr)
+     (allocationSize  unsigned-64)
+     (memoryTypeIndex unsigned-32)))
+
+  (define-ftype <VkAttachmentDescription>
+    (struct
+     (flags          unsigned-32)
+     (format         unsigned-32)
+     (samples        unsigned-32)
+     (loadOp         unsigned-32)
+     (storeOp        unsigned-32)
+     (stencilLoadOp  unsigned-32)
+     (stencilStoreOp unsigned-32)
+     (initialLayout  unsigned-32)
+     (finalLayout    unsigned-32)))
+
+  (define-ftype <VkAttachmentReference>
+    (struct
+     (attachment unsigned-32)
+     (layout     unsigned-32)))
+
+  (define-ftype <VkSubpassDescription>
+    (struct
+     (flags                   unsigned-32)
+     (pipelineBindPoint       unsigned-32)
+     (inputAttachmentCount    unsigned-32)
+     (pInputAttachments       uptr)
+     (colorAttachmentCount    unsigned-32)
+     (pColorAttachments       uptr)
+     (pResolveAttachments     uptr)
+     (pDepthStencilAttachment uptr)
+     (preserveAttachmentCount unsigned-32)
+     (pPreserveAttachments    uptr)))
+
+  (define-ftype <VkSubpassDependency>
+    (struct
+     (srcSubpass      unsigned-32)
+     (dstSubpass      unsigned-32)
+     (srcStageMask    unsigned-32)
+     (dstStageMask    unsigned-32)
+     (srcAccessMask   unsigned-32)
+     (dstAccessMask   unsigned-32)
+     (dependencyFlags unsigned-32)))
+
+  (define-ftype <VkRenderPassCreateInfo>
+    (struct
+     (sType           unsigned-32)
+     (pNext           uptr)
+     (flags           unsigned-32)
+     (attachmentCount unsigned-32)
+     (pAttachments    uptr)
+     (subpassCount    unsigned-32)
+     (pSubpasses      uptr)
+     (dependencyCount unsigned-32)
+     (pDependencies   uptr)))
+
+  (define-ftype <VkRenderPassBeginInfo>
+    (struct
+     (sType           unsigned-32)
+     (pNext           uptr)
+     (renderPass      unsigned-64)
+     (framebuffer     unsigned-64)
+     (renderArea      (struct
+                       (offset (struct (x integer-32) (y integer-32)))
+                       (extent (struct (width unsigned-32) (height unsigned-32)))))
+     (clearValueCount unsigned-32)
+     (pClearValues    uptr)))
+
+  (define-ftype <VkFramebufferCreateInfo>
+    (struct
+     (sType           unsigned-32)
+     (pNext           uptr)
+     (flags           unsigned-32)
+     (renderPass      unsigned-64)
+     (attachmentCount unsigned-32)
+     (pAttachments    uptr)
+     (width           unsigned-32)
+     (height          unsigned-32)
+     (layers          unsigned-32)))
+
+  (define-ftype <VkPipelineLayoutCreateInfo>
+    (struct
+     (sType                  unsigned-32)
+     (pNext                  uptr)
+     (flags                  unsigned-32)
+     (setLayoutCount         unsigned-32)
+     (pSetLayouts            uptr)
+     (pushConstantRangeCount unsigned-32)
+     (pPushConstantRanges    uptr)))
+
+  (define-ftype <VkPipelineShaderStageCreateInfo>
+    (struct
+     (sType               unsigned-32)
+     (pNext               uptr)
+     (flags               unsigned-32)
+     (stage               unsigned-32)
+     (module              unsigned-64)
+     (pName               uptr)
+     (pSpecializationInfo uptr)))
+
+  (define-ftype <VkVertexInputBindingDescription>
+    (struct
+     (binding   unsigned-32)
+     (stride    unsigned-32)
+     (inputRate unsigned-32)))
+
+  (define-ftype <VkVertexInputAttributeDescription>
+    (struct
+     (location unsigned-32)
+     (binding  unsigned-32)
+     (format   unsigned-32)
+     (offset   unsigned-32)))
+
+  (define-ftype <VkPipelineVertexInputStateCreateInfo>
+    (struct
+     (sType                          unsigned-32)
+     (pNext                          uptr)
+     (flags                          unsigned-32)
+     (vertexBindingDescriptionCount  unsigned-32)
+     (pVertexBindingDescriptions     uptr)
+     (vertexAttributeDescriptionCount unsigned-32)
+     (pVertexAttributeDescriptions   uptr)))
+
+  (define-ftype <VkPipelineInputAssemblyStateCreateInfo>
+    (struct
+     (sType                  unsigned-32)
+     (pNext                  uptr)
+     (flags                  unsigned-32)
+     (topology               unsigned-32)
+     (primitiveRestartEnable unsigned-32)))
+
+  (define-ftype <VkPipelineViewportStateCreateInfo>
+    (struct
+     (sType         unsigned-32)
+     (pNext         uptr)
+     (flags         unsigned-32)
+     (viewportCount unsigned-32)
+     (pViewports    uptr)
+     (scissorCount  unsigned-32)
+     (pScissors     uptr)))
+
+  (define-ftype <VkPipelineRasterizationStateCreateInfo>
+    (struct
+     (sType                   unsigned-32)
+     (pNext                   uptr)
+     (flags                   unsigned-32)
+     (depthClampEnable        unsigned-32)
+     (rasterizerDiscardEnable unsigned-32)
+     (polygonMode             unsigned-32)
+     (cullMode                unsigned-32)
+     (frontFace               unsigned-32)
+     (depthBiasEnable         unsigned-32)
+     (depthBiasConstantFactor float)
+     (depthBiasClamp          float)
+     (depthBiasSlopeFactor    float)
+     (lineWidth               float)))
+
+  (define-ftype <VkPipelineMultisampleStateCreateInfo>
+    (struct
+     (sType                 unsigned-32)
+     (pNext                 uptr)
+     (flags                 unsigned-32)
+     (rasterizationSamples  unsigned-32)
+     (sampleShadingEnable   unsigned-32)
+     (minSampleShading      float)
+     (pSampleMask           uptr)
+     (alphaToCoverageEnable unsigned-32)
+     (alphaToOneEnable      unsigned-32)))
+
+  (define-ftype <VkPipelineColorBlendAttachmentState>
+    (struct
+     (blendEnable         unsigned-32)
+     (srcColorBlendFactor unsigned-32)
+     (dstColorBlendFactor unsigned-32)
+     (colorBlendOp        unsigned-32)
+     (srcAlphaBlendFactor unsigned-32)
+     (dstAlphaBlendFactor unsigned-32)
+     (alphaBlendOp        unsigned-32)
+     (colorWriteMask      unsigned-32)))
+
+  (define-ftype <VkPipelineColorBlendStateCreateInfo>
+    (struct
+     (sType           unsigned-32)
+     (pNext           uptr)
+     (flags           unsigned-32)
+     (logicOpEnable   unsigned-32)
+     (logicOp         unsigned-32)
+     (attachmentCount unsigned-32)
+     (pAttachments    uptr)
+     (blendConstants  (array 4 float))))
+
+  (define-ftype <VkPipelineDynamicStateCreateInfo>
+    (struct
+     (sType             unsigned-32)
+     (pNext             uptr)
+     (flags             unsigned-32)
+     (dynamicStateCount unsigned-32)
+     (pDynamicStates    uptr)))
+
+  (define-ftype <VkGraphicsPipelineCreateInfo>
+    (struct
+     (sType               unsigned-32)
+     (pNext               uptr)
+     (flags               unsigned-32)
+     (stageCount          unsigned-32)
+     (pStages             uptr)
+     (pVertexInputState   uptr)
+     (pInputAssemblyState uptr)
+     (pTessellationState  uptr)
+     (pViewportState      uptr)
+     (pRasterizationState uptr)
+     (pMultisampleState   uptr)
+     (pDepthStencilState  uptr)
+     (pColorBlendState    uptr)
+     (pDynamicState       uptr)
+     (layout              unsigned-64)
+     (renderPass          unsigned-64)
+     (subpass             unsigned-32)
+     (basePipelineHandle  unsigned-64)
+     (basePipelineIndex   integer-32)))
+
+  (define-ftype <VkDescriptorSetLayoutBinding>
+    (struct
+     (binding            unsigned-32)
+     (descriptorType     unsigned-32)
+     (descriptorCount    unsigned-32)
+     (stageFlags         unsigned-32)
+     (pImmutableSamplers uptr)))
+
+  (define-ftype <VkDescriptorSetLayoutCreateInfo>
+    (struct
+     (sType        unsigned-32)
+     (pNext        uptr)
+     (flags        unsigned-32)
+     (bindingCount unsigned-32)
+     (pBindings    uptr)))
+
+  (define-ftype <VkDescriptorPoolSize>
+    (struct
+     (type            unsigned-32)
+     (descriptorCount unsigned-32)))
+
+  (define-ftype <VkDescriptorPoolCreateInfo>
+    (struct
+     (sType         unsigned-32)
+     (pNext         uptr)
+     (flags         unsigned-32)
+     (maxSets       unsigned-32)
+     (poolSizeCount unsigned-32)
+     (pPoolSizes    uptr)))
+
+  (define-ftype <VkDescriptorSetAllocateInfo>
+    (struct
+     (sType              unsigned-32)
+     (pNext              uptr)
+     (descriptorPool     unsigned-64)
+     (descriptorSetCount unsigned-32)
+     (pSetLayouts        uptr)))
+
+  (define-ftype <VkDescriptorImageInfo>
+    (struct
+     (sampler     unsigned-64)
+     (imageView   unsigned-64)
+     (imageLayout unsigned-32)))
+
+  (define-ftype <VkDescriptorBufferInfo>
+    (struct
+     (buffer unsigned-64)
+     (offset unsigned-64)
+     (range  unsigned-64)))
+
+  (define-ftype <VkWriteDescriptorSet>
+    (struct
+     (sType            unsigned-32)
+     (pNext            uptr)
+     (dstSet           unsigned-64)
+     (dstBinding       unsigned-32)
+     (dstArrayElement  unsigned-32)
+     (descriptorCount  unsigned-32)
+     (descriptorType   unsigned-32)
+     (pImageInfo       uptr)
+     (pBufferInfo      uptr)
+     (pTexelBufferView uptr)))
 
   ;; VkPhysicalDeviceProperties — sizeof 824 on x86_64 (verified via
   ;; sizeof against libvulkan-dev 1.3.275). We only read the first 276
@@ -641,4 +1375,140 @@
                        (uptr unsigned-64 unsigned-32 uptr unsigned-32 uptr) void))
   (define vkQueueSubmit
     (foreign-procedure "vkQueueSubmit"
-                       (uptr unsigned-32 uptr unsigned-64) int)))
+                       (uptr unsigned-32 uptr unsigned-64) int))
+
+  ;; ----------------------------------------------------------------
+  ;; M2.2 — render pass / framebuffer / image / view / sampler /
+  ;;         shader / pipeline / descriptors / buffers / memory
+  ;; ----------------------------------------------------------------
+
+  (define vkCreateRenderPass
+    (foreign-procedure "vkCreateRenderPass" (uptr uptr uptr uptr) int))
+  (define vkDestroyRenderPass
+    (foreign-procedure "vkDestroyRenderPass"
+                       (uptr unsigned-64 uptr) void))
+
+  (define vkCreateFramebuffer
+    (foreign-procedure "vkCreateFramebuffer" (uptr uptr uptr uptr) int))
+  (define vkDestroyFramebuffer
+    (foreign-procedure "vkDestroyFramebuffer"
+                       (uptr unsigned-64 uptr) void))
+
+  (define vkCreateImage
+    (foreign-procedure "vkCreateImage" (uptr uptr uptr uptr) int))
+  (define vkDestroyImage
+    (foreign-procedure "vkDestroyImage"
+                       (uptr unsigned-64 uptr) void))
+  (define vkCreateImageView
+    (foreign-procedure "vkCreateImageView" (uptr uptr uptr uptr) int))
+  (define vkDestroyImageView
+    (foreign-procedure "vkDestroyImageView"
+                       (uptr unsigned-64 uptr) void))
+  (define vkCreateSampler
+    (foreign-procedure "vkCreateSampler" (uptr uptr uptr uptr) int))
+  (define vkDestroySampler
+    (foreign-procedure "vkDestroySampler"
+                       (uptr unsigned-64 uptr) void))
+  (define vkGetImageMemoryRequirements
+    (foreign-procedure "vkGetImageMemoryRequirements"
+                       (uptr unsigned-64 uptr) void))
+  (define vkBindImageMemory
+    (foreign-procedure "vkBindImageMemory"
+                       (uptr unsigned-64 unsigned-64 unsigned-64) int))
+
+  (define vkCreateShaderModule
+    (foreign-procedure "vkCreateShaderModule" (uptr uptr uptr uptr) int))
+  (define vkDestroyShaderModule
+    (foreign-procedure "vkDestroyShaderModule"
+                       (uptr unsigned-64 uptr) void))
+  (define vkCreatePipelineLayout
+    (foreign-procedure "vkCreatePipelineLayout" (uptr uptr uptr uptr) int))
+  (define vkDestroyPipelineLayout
+    (foreign-procedure "vkDestroyPipelineLayout"
+                       (uptr unsigned-64 uptr) void))
+  (define vkCreateGraphicsPipelines
+    (foreign-procedure "vkCreateGraphicsPipelines"
+                       (uptr unsigned-64 unsigned-32 uptr uptr uptr) int))
+  (define vkDestroyPipeline
+    (foreign-procedure "vkDestroyPipeline"
+                       (uptr unsigned-64 uptr) void))
+
+  (define vkCreateDescriptorSetLayout
+    (foreign-procedure "vkCreateDescriptorSetLayout"
+                       (uptr uptr uptr uptr) int))
+  (define vkDestroyDescriptorSetLayout
+    (foreign-procedure "vkDestroyDescriptorSetLayout"
+                       (uptr unsigned-64 uptr) void))
+  (define vkCreateDescriptorPool
+    (foreign-procedure "vkCreateDescriptorPool"
+                       (uptr uptr uptr uptr) int))
+  (define vkDestroyDescriptorPool
+    (foreign-procedure "vkDestroyDescriptorPool"
+                       (uptr unsigned-64 uptr) void))
+  (define vkAllocateDescriptorSets
+    (foreign-procedure "vkAllocateDescriptorSets" (uptr uptr uptr) int))
+  (define vkUpdateDescriptorSets
+    (foreign-procedure "vkUpdateDescriptorSets"
+                       (uptr unsigned-32 uptr unsigned-32 uptr) void))
+
+  (define vkCreateBuffer
+    (foreign-procedure "vkCreateBuffer" (uptr uptr uptr uptr) int))
+  (define vkDestroyBuffer
+    (foreign-procedure "vkDestroyBuffer"
+                       (uptr unsigned-64 uptr) void))
+  (define vkGetBufferMemoryRequirements
+    (foreign-procedure "vkGetBufferMemoryRequirements"
+                       (uptr unsigned-64 uptr) void))
+  (define vkBindBufferMemory
+    (foreign-procedure "vkBindBufferMemory"
+                       (uptr unsigned-64 unsigned-64 unsigned-64) int))
+  (define vkAllocateMemory
+    (foreign-procedure "vkAllocateMemory" (uptr uptr uptr uptr) int))
+  (define vkFreeMemory
+    (foreign-procedure "vkFreeMemory"
+                       (uptr unsigned-64 uptr) void))
+  (define vkMapMemory
+    (foreign-procedure "vkMapMemory"
+                       (uptr unsigned-64 unsigned-64 unsigned-64
+                             unsigned-32 uptr) int))
+  (define vkUnmapMemory
+    (foreign-procedure "vkUnmapMemory"
+                       (uptr unsigned-64) void))
+  (define vkGetPhysicalDeviceMemoryProperties
+    (foreign-procedure "vkGetPhysicalDeviceMemoryProperties"
+                       (uptr uptr) void))
+
+  (define vkCmdBeginRenderPass
+    (foreign-procedure "vkCmdBeginRenderPass"
+                       (uptr uptr unsigned-32) void))
+  (define vkCmdEndRenderPass
+    (foreign-procedure "vkCmdEndRenderPass" (uptr) void))
+  (define vkCmdBindPipeline
+    (foreign-procedure "vkCmdBindPipeline"
+                       (uptr unsigned-32 unsigned-64) void))
+  (define vkCmdBindVertexBuffers
+    (foreign-procedure "vkCmdBindVertexBuffers"
+                       (uptr unsigned-32 unsigned-32 uptr uptr) void))
+  (define vkCmdBindDescriptorSets
+    (foreign-procedure "vkCmdBindDescriptorSets"
+                       (uptr unsigned-32 unsigned-64
+                             unsigned-32 unsigned-32 uptr
+                             unsigned-32 uptr) void))
+  (define vkCmdDraw
+    (foreign-procedure "vkCmdDraw"
+                       (uptr unsigned-32 unsigned-32
+                             unsigned-32 unsigned-32) void))
+  (define vkCmdSetViewport
+    (foreign-procedure "vkCmdSetViewport"
+                       (uptr unsigned-32 unsigned-32 uptr) void))
+  (define vkCmdSetScissor
+    (foreign-procedure "vkCmdSetScissor"
+                       (uptr unsigned-32 unsigned-32 uptr) void))
+  (define vkCmdPushConstants
+    (foreign-procedure "vkCmdPushConstants"
+                       (uptr unsigned-64 unsigned-32
+                             unsigned-32 unsigned-32 uptr) void))
+  (define vkCmdCopyBufferToImage
+    (foreign-procedure "vkCmdCopyBufferToImage"
+                       (uptr unsigned-64 unsigned-64
+                             unsigned-32 unsigned-32 uptr) void)))
