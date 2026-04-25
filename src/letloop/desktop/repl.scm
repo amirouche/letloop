@@ -40,17 +40,21 @@
       (window-draw-text! w "letloop desktop" 40 40)
       (window-draw-text! w "press Ctrl-C to exit" 40 80)
       (window-draw-text! w "REPL: type Scheme + Enter, results below" 40 120)
-      ;; History — newest at the top.
+      ;; History — newest at the top. Each entry is (text . red?).
       (let loop ((h history) (i 0))
         (cond
          ((null? h) (void))
          (else
-          (let ((entry (car h)))
-            (window-draw-text! w entry base-x
-                               (+ base-y (* i HISTORY-LINE-HEIGHT)))
+          (let* ((entry (car h))
+                 (txt   (car entry))
+                 (red?  (cdr entry))
+                 (y     (+ base-y (* i HISTORY-LINE-HEIGHT))))
+            (if red?
+                (window-draw-text/color! w txt base-x y 1.0 0.3 0.3 1.0)
+                (window-draw-text!       w txt base-x y))
             (loop (cdr h) (+ i 1)))))))
-    (define (push-history! line)
-      (set! history (cons line history))
+    (define (push-history! line red?)
+      (set! history (cons (cons line red?) history))
       (when (> (length history) HISTORY-CAP)
         (set! history (list-head history HISTORY-CAP)))
       (refresh-display!))
@@ -62,20 +66,22 @@
      (lambda (line)
        (cond
         ((zero? (string-length line))
-         (push-history! "letloop> "))
+         (push-history! "letloop> " #f))
         (else
-         (push-history! (string-append "letloop> " line))
-         (let ((result
-                (guard (e (#t (string-append "ERROR: " (format-error e))))
-                  (let* ((p (open-string-input-port line))
-                         (datum (read p)))
-                    (cond
-                     ((eof-object? datum) "")
-                     (else
-                      (format #f "~a"
-                              (eval datum (interaction-environment)))))))))
+         (push-history! (string-append "letloop> " line) #f)
+         (let* ((error? #f)
+                (result
+                 (guard (e (#t (set! error? #t)
+                               (string-append "ERROR: " (format-error e))))
+                   (let* ((p (open-string-input-port line))
+                          (datum (read p)))
+                     (cond
+                      ((eof-object? datum) "")
+                      (else
+                       (format #f "~a"
+                               (eval datum (interaction-environment)))))))))
            (unless (zero? (string-length result))
-             (push-history! result))))))))
+             (push-history! result error?))))))))
 
   (define (format-error e)
     (cond
