@@ -27,7 +27,17 @@
 
 **Getting started**
 
-Requires `uuid` headers for using `letloop compile`.
+Requires `uuid` headers for using `letloop compile`, and `libtls-dev`
+(LibreTLS) for the TLS module that `(letloop www)` and friends pull in
+transitively. On Debian / Ubuntu:
+
+```shell
+sudo apt install uuid-dev libtls-dev libtls28t64
+```
+
+On Fedora / RHEL: `sudo dnf install libuuid-devel libretls libretls-devel`.
+On Arch: `sudo pacman -S util-linux-libs libretls`. On Alpine:
+`apk add util-linux-dev libretls libretls-dev`.
 
 ```shell
 ./venv
