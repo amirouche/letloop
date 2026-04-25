@@ -94,17 +94,6 @@ blake3: ## Build libblake3 from source
 	cp $(PREFIX)/src/blake3/c/libblake3.so $(PREFIX)/lib/
 	cp $(PREFIX)/src/blake3/c/libblake3.a $(PREFIX)/lib/
 
-termbox2: ## Build libtermbox2 from source
-	rm -rf $(PWD)/local/src/termbox2
-	mkdir -p $(PWD)/local/src $(PWD)/local/lib $(PWD)/local/include
-	cd $(PWD)/local/src && git clone https://github.com/termbox/termbox2
-	cp $(PWD)/src/letloop/termbox2_wrapper.c $(PWD)/local/src/termbox2/
-	cd $(PWD)/local/src/termbox2 && gcc -shared -O2 -o libtermbox2.so -fPIC termbox2_wrapper.c
-	cd $(PWD)/local/src/termbox2 && gcc -c -O2 -fPIC termbox2_wrapper.c && ar rcs libtermbox2.a termbox2_wrapper.o
-	cp $(PWD)/local/src/termbox2/libtermbox2.so $(PWD)/local/lib/
-	cp $(PWD)/local/src/termbox2/libtermbox2.a $(PWD)/local/lib/
-	cp $(PWD)/local/src/termbox2/termbox2.h $(PWD)/local/include/
-
 picohttpparser: ## Build libpicohttpparser from source
 	rm -rf $(PWD)/local/src/picohttpparser
 	mkdir -p $(PWD)/local/src $(PWD)/local/lib
