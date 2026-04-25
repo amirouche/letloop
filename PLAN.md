@@ -10,8 +10,15 @@ A handoff-friendly map of what's done, what's immediately next, and what's beyon
 | M2.1 chunk A | Vulkan FFI bindings + instance/device/display enumeration         | Done     | 8529cb2   |
 | M2.1 chunk B | Display-plane enumeration + graphics-queue picker + system deps   | Done     | cb4f78f   |
 | M2.1 chunk C | Surface + swapchain + magenta clear loop (the deliverable)        | Done     | cd0b1cf   |
-| M2.2        | PSF2 glyph rendering, instanced quad pipeline                     | **Next** | —         |
-| M2.3        | io_uring evdev keyboard input                                     | Pending  | —         |
+| M2.2 chunk A | FFI for graphics pipeline + descriptors + buffers + memory        | Done     | 0803768   |
+| M2.2 chunk B | PSF2 reader with Unicode table                                    | Done     | f1ace5d   |
+| M2.2 chunk C-1 | Atlas builder for PSF2 glyphs                                    | Done     | 875998e   |
+| M2.2 chunk C-2 | Text pipeline GLSL + embedded SPIR-V                             | Done     | 4959f76   |
+| M2.2 chunk D-1 | Bundle FullCyrAsia-DejaVu30x16 PSF2                              | Done     | ab67824   |
+| M2.2 chunk D-2 | Render pass replaces clear-image loop                            | Done     | 508345d   |
+| M2.2 chunk D-3 | Atlas, descriptor, pipeline construction                         | Done     | ff3ca29   |
+| M2.2 chunk D-4 | window-draw-text! + per-frame draw                               | Done     | c8a8a62   |
+| M2.3        | io_uring evdev keyboard input                                     | **Next** | —         |
 | M2.4        | Graphical REPL via redirected current-input/output ports          | Pending  | —         |
 
 ## Immediate next: M2.1 chunk C — `desktop/window.scm`
