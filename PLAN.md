@@ -16,8 +16,8 @@ A handoff-friendly map of what's done, what's immediately next, and what's beyon
 | M2.2 chunk C-2 | Text pipeline GLSL + embedded SPIR-V                             | Done     | 4959f76   |
 | M2.2 chunk D-1 | Bundle FullCyrAsia-DejaVu30x16 PSF2                              | Done     | ab67824   |
 | M2.2 chunk D-2 | Render pass replaces clear-image loop                            | Done     | 508345d   |
-| M2.2 chunk D-3 | Atlas, descriptor, pipeline construction                         | Done     | ff3ca29   |
-| M2.2 chunk D-4 | window-draw-text! + per-frame draw                               | Done     | c8a8a62   |
+| M2.2 chunk D-3 | Atlas, descriptor, pipeline construction (llvmpipe-verified)    | Done     | ff3ca29   |
+| M2.2 chunk D-4 | window-draw-text! + per-frame draw (compile-only, GPU-untested) | Done     | c8a8a62   |
 | M2.3        | io_uring evdev keyboard input                                     | **Next** | —         |
 | M2.4        | Graphical REPL via redirected current-input/output ports          | Pending  | —         |
 

@@ -129,6 +129,17 @@
     (list VK_KHR_SURFACE_EXTENSION_NAME
           VK_KHR_DISPLAY_EXTENSION_NAME))
 
+  ;; LETLOOP_VULKAN_VALIDATE=1 turns on the standard Khronos validation
+  ;; layer for instance + device. The layer manifest must be visible to
+  ;; the loader (VK_LAYER_PATH or /usr/share/vulkan/explicit_layer.d) —
+  ;; on Debian-derivatives that's `apt install vulkan-validationlayers`.
+  ;; vkCreateInstance returns VK_ERROR_LAYER_NOT_PRESENT if missing.
+  (define (validation-layer-names)
+    (let ((d (getenv "LETLOOP_VULKAN_VALIDATE")))
+      (if (and d (not (zero? (string-length d))))
+          (list "VK_LAYER_KHRONOS_validation")
+          '())))
+
   ;; Vulkan API version helper: uint32 packed as (major<<22)|(minor<<12)|patch
   (define (make-api-version major minor patch)
     (bitwise-ior
@@ -160,13 +171,19 @@
 
        (with-cstring-array DEFAULT_INSTANCE_EXTENSIONS
          (lambda (exts-arr count)
-           (ftype-set! <VkInstanceCreateInfo> (sType)             info-ptr
-                       VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO)
-           (ftype-set! <VkInstanceCreateInfo> (pApplicationInfo)  info-ptr app-info)
-           (ftype-set! <VkInstanceCreateInfo> (enabledExtensionCount)   info-ptr count)
-           (ftype-set! <VkInstanceCreateInfo> (ppEnabledExtensionNames) info-ptr exts-arr)
-           (vk-check 'vulkan-create-instance
-                     (vkCreateInstance info 0 out-handle))))
+           (with-cstring-array (validation-layer-names)
+             (lambda (layer-arr layer-count)
+               (ftype-set! <VkInstanceCreateInfo> (sType)             info-ptr
+                           VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO)
+               (ftype-set! <VkInstanceCreateInfo> (pApplicationInfo)  info-ptr app-info)
+               (ftype-set! <VkInstanceCreateInfo> (enabledLayerCount)      info-ptr
+                           layer-count)
+               (ftype-set! <VkInstanceCreateInfo> (ppEnabledLayerNames)    info-ptr
+                           layer-arr)
+               (ftype-set! <VkInstanceCreateInfo> (enabledExtensionCount)   info-ptr count)
+               (ftype-set! <VkInstanceCreateInfo> (ppEnabledExtensionNames) info-ptr exts-arr)
+               (vk-check 'vulkan-create-instance
+                         (vkCreateInstance info 0 out-handle))))))
        (pk 'vulkan-create-instance 'handle (foreign-ref 'uptr out-handle 0))
        (foreign-ref 'uptr out-handle 0))
      (lambda ()
