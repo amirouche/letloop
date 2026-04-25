@@ -15,7 +15,8 @@
 (import (chezscheme)
         (letloop desktop vulkan)
         (letloop desktop vulkan low)
-        (letloop desktop text-pipeline))
+        (letloop desktop text-pipeline)
+        (letloop desktop font))
 
 (define (foreign-alloc/zero n)
   (let ((p (foreign-alloc n)))
@@ -115,7 +116,9 @@
                    (ftype-set! <VkImageCreateInfo> (arrayLayers) ifp 1)
                    (ftype-set! <VkImageCreateInfo> (samples) ifp VK_SAMPLE_COUNT_1_BIT)
                    (ftype-set! <VkImageCreateInfo> (tiling) ifp VK_IMAGE_TILING_OPTIMAL)
-                   (ftype-set! <VkImageCreateInfo> (usage) ifp VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
+                   (ftype-set! <VkImageCreateInfo> (usage) ifp
+                               (bitwise-ior VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                                            VK_IMAGE_USAGE_TRANSFER_SRC_BIT))
                    (ftype-set! <VkImageCreateInfo> (sharingMode) ifp VK_SHARING_MODE_EXCLUSIVE)
                    (ftype-set! <VkImageCreateInfo> (initialLayout) ifp VK_IMAGE_LAYOUT_UNDEFINED)
                    (vk-check 'vkCreateImage (vkCreateImage device img-info 0 imgout))
@@ -176,11 +179,65 @@
            (framebuffer (foreign-ref 'unsigned-64 fbout 0))
            ;; --- Build text pipeline + write a few instances -------
            (tp (build-text-pipeline device pd render-pass queue command-pool))
+           (font (text-pipeline-font tp))
+           (gw (font-glyph-width font))
+           (gh (font-glyph-height font))
+           ;; Use a known-mapped glyph ('A') so we know exactly what
+           ;; pixels to expect in the readback. The 3 instances are
+           ;; placed (100,100), (100+gw,100), (100+2gw,100) in
+           ;; white / red / green respectively.
+           (info-A (or (font-glyph-info font (char->integer #\A))
+                       (error 'draw-smoke "bundled font missing 'A'")))
            (n-written
             (text-pipeline-write-instances! tp
-              '((10.0  10.0 16.0 30.0  0.0 0.0 0.1 0.1  1.0 1.0 1.0 1.0)
-                (30.0  10.0 16.0 30.0  0.1 0.0 0.1 0.1  1.0 0.3 0.3 1.0)
-                (50.0  10.0 16.0 30.0  0.2 0.0 0.1 0.1  0.3 1.0 0.3 1.0))))
+              (list
+               (list 100.0 100.0 (exact->inexact gw) (exact->inexact gh)
+                     (glyph-info-uv-x info-A) (glyph-info-uv-y info-A)
+                     (glyph-info-uv-w info-A) (glyph-info-uv-h info-A)
+                     1.0 1.0 1.0 1.0)
+               (list (+ 100.0 gw) 100.0 (exact->inexact gw) (exact->inexact gh)
+                     (glyph-info-uv-x info-A) (glyph-info-uv-y info-A)
+                     (glyph-info-uv-w info-A) (glyph-info-uv-h info-A)
+                     1.0 0.3 0.3 1.0)
+               (list (+ 100.0 (* 2 gw)) 100.0 (exact->inexact gw) (exact->inexact gh)
+                     (glyph-info-uv-x info-A) (glyph-info-uv-y info-A)
+                     (glyph-info-uv-w info-A) (glyph-info-uv-h info-A)
+                     0.3 1.0 0.3 1.0))))
+           ;; --- Readback buffer (host-visible) ---------------------
+           (readback-bytes (* 800 600 4))
+           (rbi (foreign-alloc/zero (ftype-sizeof <VkBufferCreateInfo>)))
+           (rbifp (make-ftype-pointer <VkBufferCreateInfo> rbi))
+           (rbout (foreign-alloc/zero 8))
+           (_rb (begin
+                  (ftype-set! <VkBufferCreateInfo> (sType) rbifp
+                              VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO)
+                  (ftype-set! <VkBufferCreateInfo> (size) rbifp readback-bytes)
+                  (ftype-set! <VkBufferCreateInfo> (usage) rbifp
+                              VK_BUFFER_USAGE_TRANSFER_DST_BIT)
+                  (ftype-set! <VkBufferCreateInfo> (sharingMode) rbifp
+                              VK_SHARING_MODE_EXCLUSIVE)
+                  (vk-check 'vkCreateBuffer
+                            (vkCreateBuffer device rbi 0 rbout))
+                  #f))
+           (readback-buffer (foreign-ref 'unsigned-64 rbout 0))
+           (rb-mai (foreign-alloc/zero (ftype-sizeof <VkMemoryAllocateInfo>)))
+           (rb-mp  (make-ftype-pointer <VkMemoryAllocateInfo> rb-mai))
+           (rb-memout (foreign-alloc/zero 8))
+           (_rbmem (begin
+                     (ftype-set! <VkMemoryAllocateInfo> (sType) rb-mp
+                                 VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO)
+                     (ftype-set! <VkMemoryAllocateInfo> (allocationSize) rb-mp
+                                 readback-bytes)
+                     ;; llvmpipe type 0 is host-visible+coherent.
+                     (ftype-set! <VkMemoryAllocateInfo> (memoryTypeIndex) rb-mp 0)
+                     (vk-check 'vkAllocateMemory
+                               (vkAllocateMemory device rb-mai 0 rb-memout))
+                     (vk-check 'vkBindBufferMemory
+                               (vkBindBufferMemory device readback-buffer
+                                                   (foreign-ref 'unsigned-64 rb-memout 0)
+                                                   0))
+                     #f))
+           (readback-mem (foreign-ref 'unsigned-64 rb-memout 0))
            ;; --- Allocate + record + submit one command buffer -----
            (cb-info (foreign-alloc/zero (ftype-sizeof <VkCommandBufferAllocateInfo>)))
            (cbp (make-ftype-pointer <VkCommandBufferAllocateInfo> cb-info))
@@ -247,6 +304,46 @@
                                   VK_SHADER_STAGE_VERTEX_BIT 0 8 push)
               (vkCmdDraw cmd 6 n-written 0 0)
               (vkCmdEndRenderPass cmd)
+              ;; --- Readback: COLOR_ATTACHMENT_OPTIMAL → TRANSFER_SRC
+              ;; → vkCmdCopyImageToBuffer ----------------------------
+              (let ((bar  (foreign-alloc/zero (ftype-sizeof <VkImageMemoryBarrier>)))
+                    (region (foreign-alloc/zero (ftype-sizeof <VkBufferImageCopy>))))
+                (let ((bp (make-ftype-pointer <VkImageMemoryBarrier> bar))
+                      (rp (make-ftype-pointer <VkBufferImageCopy> region)))
+                  (ftype-set! <VkImageMemoryBarrier> (sType) bp
+                              VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER)
+                  (ftype-set! <VkImageMemoryBarrier> (srcAccessMask) bp
+                              VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
+                  (ftype-set! <VkImageMemoryBarrier> (dstAccessMask) bp
+                              VK_ACCESS_MEMORY_READ_BIT)
+                  (ftype-set! <VkImageMemoryBarrier> (oldLayout) bp
+                              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+                  (ftype-set! <VkImageMemoryBarrier> (newLayout) bp
+                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
+                  (ftype-set! <VkImageMemoryBarrier> (srcQueueFamilyIndex) bp
+                              VK_QUEUE_FAMILY_IGNORED)
+                  (ftype-set! <VkImageMemoryBarrier> (dstQueueFamilyIndex) bp
+                              VK_QUEUE_FAMILY_IGNORED)
+                  (ftype-set! <VkImageMemoryBarrier> (image) bp color-image)
+                  (ftype-set! <VkImageMemoryBarrier> (subresourceRange aspectMask) bp
+                              VK_IMAGE_ASPECT_COLOR_BIT)
+                  (ftype-set! <VkImageMemoryBarrier> (subresourceRange levelCount) bp 1)
+                  (ftype-set! <VkImageMemoryBarrier> (subresourceRange layerCount) bp 1)
+                  (vkCmdPipelineBarrier cmd
+                                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                                        VK_PIPELINE_STAGE_TRANSFER_BIT
+                                        0 0 0 0 0 1 bar)
+                  (ftype-set! <VkBufferImageCopy> (imageSubresource aspectMask) rp
+                              VK_IMAGE_ASPECT_COLOR_BIT)
+                  (ftype-set! <VkBufferImageCopy> (imageSubresource layerCount) rp 1)
+                  (ftype-set! <VkBufferImageCopy> (imageExtent width) rp 800)
+                  (ftype-set! <VkBufferImageCopy> (imageExtent height) rp 600)
+                  (ftype-set! <VkBufferImageCopy> (imageExtent depth) rp 1)
+                  (vkCmdCopyImageToBuffer cmd color-image
+                                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+                                          readback-buffer 1 region))
+                (foreign-free region)
+                (foreign-free bar))
               (vk-check 'vkEndCommandBuffer (vkEndCommandBuffer cmd))
               (foreign-set! 'uptr cmdarr 0 cmd)
               (ftype-set! <VkSubmitInfo> (sType) sip VK_STRUCTURE_TYPE_SUBMIT_INFO)
@@ -255,9 +352,58 @@
               (vk-check 'vkQueueSubmit (vkQueueSubmit queue 1 si 0))
               (vk-check 'vkDeviceWaitIdle (vkDeviceWaitIdle device))
               #f)))
-      (display (list 'drew n-written 'instances 'cleanly)) (newline)
+      ;; --- Verify pixels: clear color outside, glyph drawn inside.
+      ;; B8G8R8A8_UNORM: byte0=B, byte1=G, byte2=R, byte3=A.
+      (let* ((mapped-out (foreign-alloc/zero 8))
+             (_ (vk-check 'vkMapMemory
+                          (vkMapMemory device readback-mem 0
+                                       readback-bytes 0 mapped-out)))
+             (px (foreign-ref 'uptr mapped-out 0))
+             (pix-at (lambda (x y)
+                       (let ((off (* 4 (+ (* y 800) x))))
+                         (list (foreign-ref 'unsigned-8 px (+ off 2))
+                               (foreign-ref 'unsigned-8 px (+ off 1))
+                               (foreign-ref 'unsigned-8 px off)
+                               (foreign-ref 'unsigned-8 px (+ off 3))))))
+             ;; Outside-the-glyphs pixel — should match clear color.
+             ;; Clear was (0.05, 0.05, 0.10, 1.0). Allow ±5 byte tolerance.
+             (clear-px (pix-at 5 5))
+             (clear-ok? (and (<= (abs (- (car   clear-px) 13)) 6)   ; R≈13
+                             (<= (abs (- (cadr  clear-px) 13)) 6)   ; G≈13
+                             (<= (abs (- (caddr clear-px) 26)) 6)   ; B≈26
+                             (= (cadddr clear-px) 255)))
+             ;; In the rect (100..100+gw, 100..100+gh) the white 'A'
+             ;; should leave at least one pixel where R > 200.
+             (saw-white-A?
+              (let scan ((y 100) (found #f))
+                (cond
+                 (found #t)
+                 ((= y (+ 100 gh)) #f)
+                 (else
+                  (let inner ((x 100) (f #f))
+                    (cond
+                     (f (scan (+ y 1) #t))
+                     ((= x (+ 100 gw))
+                      (scan (+ y 1) #f))
+                     (else
+                      (let ((p (pix-at x y)))
+                        (inner (+ x 1)
+                               (and (> (car p) 200)
+                                    (> (cadr p) 200)
+                                    (> (caddr p) 200))))))))))))
+        (vkUnmapMemory device readback-mem)
+        (foreign-free mapped-out)
+        (display (list 'drew n-written 'instances
+                       'clear-px-at-5-5 clear-px
+                       'clear-ok? clear-ok?
+                       'saw-white-A? saw-white-A?))
+        (newline)
+        (unless (and clear-ok? saw-white-A?)
+          (error 'draw-smoke "pixel-level verification failed")))
       ;; Teardown — order matters: text-pipeline first (uses render pass).
       (destroy-text-pipeline! device tp)
+      (vkDestroyBuffer device readback-buffer 0)
+      (vkFreeMemory device readback-mem 0)
       (vkDestroyFramebuffer device framebuffer 0)
       (vkDestroyImageView device color-view 0)
       (vkFreeMemory device color-mem 0)
