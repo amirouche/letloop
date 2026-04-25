@@ -94,7 +94,11 @@
                    ("\x1b;[200~" . __paste-start)
                    ("\x1b;[I"    . __focus-in)
                    ("\x1b;[O"    . __focus-out)))
-                (all (append (cap-set-input-keys caps) extra-keys))
+                ;; xterm modifier-key sequences resolve to (key . mods)
+                ;; pairs which handle-trie-match! recognizes.
+                (all (append (cap-set-input-keys caps)
+                             xterm-mod-keys
+                             extra-keys))
                 (t   (make-trie all)))
            (new t 'normal '() (make-trie-state t)
                 (make-utf8-decoder) '() 0 '()))))))
@@ -236,7 +240,12 @@
        (make-focus-event #f))
       (else
        (input-parser-state-set! p 'normal)
-       (make-key-event #f val '()))))
+       (cond
+        ((pair? val)
+         ;; modifier-key entry: (key-symbol . mods)
+         (make-key-event #f (car val) (cdr val)))
+        (else
+         (make-key-event #f val '()))))))
 
   ;; ----- mouse-X10 --------------------------------------------------------
 
