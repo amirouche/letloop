@@ -1,19 +1,21 @@
 #version 450
 
 // Per-instance attributes — one quad per glyph instance.
-//   in_xywh   = (x, y, width, height) in pixel coords, top-left origin.
+//   in_xywh    = (x, y, width, height) in pixel coords, top-left origin.
 //   in_uv_rect = (u, v, uw, uh) in atlas UV space, [0,1].
+//   in_color   = per-instance RGBA tint, multiplied by atlas coverage
+//                in the fragment stage. Lets the REPL paint errors red,
+//                normal output white, etc., without pipeline rebinds.
 layout(location = 0) in vec4 in_xywh;
 layout(location = 1) in vec4 in_uv_rect;
+layout(location = 2) in vec4 in_color;
 
 layout(push_constant) uniform Push {
     vec2 viewport_size;   // pixels — matches the swapchain extent
-    vec2 _pad0;
-    vec4 fg_color;        // unused here, but the block is shared with the
-                          // fragment stage so the layout must agree.
 } push;
 
 layout(location = 0) out vec2 v_uv;
+layout(location = 1) out vec4 v_color;
 
 // 6 vertices per quad, two CCW triangles in pixel-coord space:
 //  (0,0)  (0,1)  (1,1)  (0,0)  (1,1)  (1,0)
@@ -34,5 +36,6 @@ void main() {
     vec2 ndc = pixel / push.viewport_size * 2.0 - 1.0;
     gl_Position = vec4(ndc, 0.0, 1.0);
 
-    v_uv = in_uv_rect.xy + corner * in_uv_rect.zw;
+    v_uv    = in_uv_rect.xy + corner * in_uv_rect.zw;
+    v_color = in_color;
 }

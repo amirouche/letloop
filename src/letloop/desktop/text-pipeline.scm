@@ -77,8 +77,8 @@
           (reverse acc)
           (loop (+ i 1) (cons i acc)))))
 
-  ;; Per-instance data is two vec4s: xywh + uv-rect = 32 bytes.
-  (define INSTANCE-STRIDE 32)
+  ;; Per-instance data is three vec4s: xywh + uv-rect + color = 48 bytes.
+  (define INSTANCE-STRIDE 48)
 
   ;; ----------------------------------------------------------------
   ;; The record
@@ -105,8 +105,8 @@
      instance-stride))
 
   (define (text-pipeline-write-instances! tp instances)
-    ;; instances is a list/vector of 8-element float lists:
-    ;;   (x y w h u v uw uh)
+    ;; instances is a list of 12-element float lists:
+    ;;   (x y w h  u v uw uh  cr cg cb ca)
     ;; Returns the number of instances actually written, capped at
     ;; max-instances. Caller passes that count to vkCmdDraw.
     (let* ((cap   (text-pipeline-max-instances tp))
@@ -120,7 +120,7 @@
                 (off (* i st)))
             (do ((j 0 (+ j 1))
                  (vs row (cdr vs)))
-                ((= j 8))
+                ((= j 12))
               (foreign-set! 'float m (+ off (* j 4))
                             (exact->inexact (car vs)))))
           (loop (cdr ins) (+ i 1)))))))
@@ -679,10 +679,9 @@
        (lambda ()
          (foreign-set! 'unsigned-64 dsl-arr 0 dsl)
          (ftype-set! <VkPushConstantRange> (stageFlags) pp
-                     (bitwise-ior VK_SHADER_STAGE_VERTEX_BIT
-                                  VK_SHADER_STAGE_FRAGMENT_BIT))
+                     VK_SHADER_STAGE_VERTEX_BIT)
          (ftype-set! <VkPushConstantRange> (offset) pp 0)
-         (ftype-set! <VkPushConstantRange> (size) pp 32)
+         (ftype-set! <VkPushConstantRange> (size) pp 8)
          (ftype-set! <VkPipelineLayoutCreateInfo> (sType) ip
                      VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO)
          (ftype-set! <VkPipelineLayoutCreateInfo> (setLayoutCount) ip 1)
@@ -726,7 +725,7 @@
            (vbinding (foreign-alloc/zero
                       (ftype-sizeof <VkVertexInputBindingDescription>)))
            (vattr (foreign-alloc/zero
-                   (* 2 (ftype-sizeof <VkVertexInputAttributeDescription>))))
+                   (* 3 (ftype-sizeof <VkVertexInputAttributeDescription>))))
            (vinfo (foreign-alloc/zero
                    (ftype-sizeof <VkPipelineVertexInputStateCreateInfo>)))
            (iainfo (foreign-alloc/zero
@@ -795,6 +794,14 @@
            (ftype-set! <VkVertexInputAttributeDescription> (format)   ap
                        VK_FORMAT_R32G32B32A32_SFLOAT)
            (ftype-set! <VkVertexInputAttributeDescription> (offset)   ap 16))
+         (let ((ap (make-ftype-pointer <VkVertexInputAttributeDescription>
+                                       (+ vattr
+                                          (* 2 (ftype-sizeof <VkVertexInputAttributeDescription>))))))
+           (ftype-set! <VkVertexInputAttributeDescription> (location) ap 2)
+           (ftype-set! <VkVertexInputAttributeDescription> (binding)  ap 0)
+           (ftype-set! <VkVertexInputAttributeDescription> (format)   ap
+                       VK_FORMAT_R32G32B32A32_SFLOAT)
+           (ftype-set! <VkVertexInputAttributeDescription> (offset)   ap 32))
          ;; vertex input state
          (let ((vp (make-ftype-pointer <VkPipelineVertexInputStateCreateInfo> vinfo)))
            (ftype-set! <VkPipelineVertexInputStateCreateInfo> (sType) vp
@@ -804,7 +811,7 @@
            (ftype-set! <VkPipelineVertexInputStateCreateInfo>
                        (pVertexBindingDescriptions) vp vbinding)
            (ftype-set! <VkPipelineVertexInputStateCreateInfo>
-                       (vertexAttributeDescriptionCount) vp 2)
+                       (vertexAttributeDescriptionCount) vp 3)
            (ftype-set! <VkPipelineVertexInputStateCreateInfo>
                        (pVertexAttributeDescriptions) vp vattr))
          ;; input assembly
