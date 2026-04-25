@@ -6,7 +6,8 @@
    (letloop desktop seat)
    (letloop desktop drm)
    (letloop desktop vulkan)
-   (letloop desktop window))
+   (letloop desktop window)
+   (letloop desktop input))
 
   (define (pk . args)
     (when (getenv "LETLOOP_DEBUG")
@@ -60,7 +61,31 @@
                (window-fg-color! w 1.0 1.0 1.0 1.0)
                (window-draw-text! w "letloop desktop" 40 40)
                (window-draw-text! w "press Ctrl-C to exit" 40 80)
+               (let ((kbd (try-attach-keyboard! w)))
+                 (when kbd
+                   (window-set-prompt! w "> ")
+                   (window-set-line-position! w 40 200)
+                   (window-set-line-handler!
+                    w (lambda (line)
+                        (format (current-error-port)
+                                "letloop> ~a~%" line)))))
                (window-run! w))))))))
+
+  ;; Best-effort: try /dev/input/event0..event9, attach the first one
+  ;; that opens. evdev classification (EVIOCGBIT) to find a real
+  ;; keyboard rather than e.g. a touchpad belongs to a future M2.x;
+  ;; for now we accept whatever the first numeric device hands us.
+  (define (try-attach-keyboard! w)
+    (let loop ((i 0))
+      (cond
+       ((>= i 10) #f)
+       (else
+        (let ((path (format #f "/dev/input/event~a" i)))
+          (guard (e (#t (loop (+ i 1))))
+            (let ((fd (open-keyboard path)))
+              (window-attach-keyboard! w fd)
+              (format (current-error-port) "input: attached ~a~%" path)
+              fd)))))))
 
   ;; Parse "R G B" or "R G B A" as floats from LETLOOP_DESKTOP_COLOR.
   ;; Default is opaque magenta — visible against any boot console.
