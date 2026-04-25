@@ -7,7 +7,8 @@
    (letloop desktop drm)
    (letloop desktop vulkan)
    (letloop desktop window)
-   (letloop desktop input))
+   (letloop desktop input)
+   (letloop desktop repl))
 
   (define (pk . args)
     (when (getenv "LETLOOP_DEBUG")
@@ -63,12 +64,8 @@
                (window-draw-text! w "press Ctrl-C to exit" 40 80)
                (let ((kbd (try-attach-keyboard! w)))
                  (when kbd
-                   (window-set-prompt! w "> ")
                    (window-set-line-position! w 40 200)
-                   (window-set-line-handler!
-                    w (lambda (line)
-                        (format (current-error-port)
-                                "letloop> ~a~%" line)))))
+                   (start-repl! w)))
                (window-run! w))))))))
 
   ;; Best-effort: try /dev/input/event0..event9, attach the first one
