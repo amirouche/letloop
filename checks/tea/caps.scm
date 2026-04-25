@@ -8,7 +8,11 @@
    ~check-caps-for-term-exact
    ~check-caps-for-term-prefix
    ~check-caps-for-term-fallback
-   ~check-caps-for-term-empty)
+   ~check-caps-for-term-empty
+   ~check-caps-linux-no-altscreen
+   ~check-caps-tmux-aliased
+   ~check-caps-rxvt-fkeys
+   ~check-caps-mod-keys-shape)
 
   (import (chezscheme)
           (letloop tea caps))
@@ -50,6 +54,29 @@
 
   (define (~check-caps-for-term-empty)
     (eq? (caps-for-term #f) xterm-caps))
+
+  (define (~check-caps-linux-no-altscreen)
+    ;; linux console doesn't support \e[?1049h — verify init doesn't include it
+    (let ((s (cap-set-init-string linux-caps)))
+      (not (string-contains s "\x1b;[?1049h"))))
+
+  (define (~check-caps-tmux-aliased)
+    ;; tmux* TERM values pick up the tmux table (which mirrors screen)
+    (and (eq? (caps-for-term "tmux") tmux-caps)
+         (eq? (caps-for-term "tmux-256color") tmux-caps)))
+
+  (define (~check-caps-rxvt-fkeys)
+    ;; rxvt's F1 is \e[11~, not the xterm \eOP
+    (let ((keys (cap-set-input-keys rxvt-unicode-caps)))
+      (and (assoc "\x1b;[11~" keys)
+           (not (assoc "\x1b;OP" keys)))))
+
+  (define (~check-caps-mod-keys-shape)
+    ;; Each entry is (escape-string . (key-symbol . mod-list))
+    (let ((entry (assoc "\x1b;[1;5A" xterm-mod-keys)))
+      (and entry
+           (eq?    (cadr entry) 'arrow-up)
+           (equal? (cddr entry) '(ctrl)))))
 
   ;; ----- helper: substring search -----------------------------------------
 
