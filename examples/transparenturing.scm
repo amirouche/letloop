@@ -3,6 +3,7 @@
 
   (export transparent json html xml match
           loop-new loop-run loop-sleep loop-spawn loop-close loop-stop
+          loop-connect loop-read loop-write loop-socket-new
           www-request)
 
   (import (chezscheme))
