@@ -38,7 +38,14 @@
    ;; wire helpers (for tests)
    md5-digest
    pg-make-message
-   pg-make-startup-message)
+   pg-make-startup-message
+
+   ;; crypto (useful standalone)
+   sha256-digest
+   hmac-sha256
+   pbkdf2-hmac-sha256
+   base64-encode
+   base64-decode)
 
   (import (chezscheme)
           (letloop r999)
@@ -455,6 +462,372 @@
         (string-append "md5" (bv->hex outer)))))
 
   ;;============================================================
+  ;; Section 9a: Base64
+  ;;============================================================
+
+  (define base64-alphabet
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+
+  (define base64-encode
+    (lambda (bv)
+      (let* ((len  (bytevector-length bv))
+             (full (quotient len 3))
+             (rem  (remainder len 3))
+             (out  (make-string (+ (* full 4) (if (= rem 0) 0 4)))))
+        (let loop ((i 0) (j 0))
+          (when (< i full)
+            (let* ((b0 (bytevector-u8-ref bv (* i 3)))
+                   (b1 (bytevector-u8-ref bv (+ (* i 3) 1)))
+                   (b2 (bytevector-u8-ref bv (+ (* i 3) 2))))
+              (string-set! out j     (string-ref base64-alphabet (bitwise-arithmetic-shift-right b0 2)))
+              (string-set! out (+ j 1) (string-ref base64-alphabet
+                                          (bitwise-ior (bitwise-arithmetic-shift-left (bitwise-and b0 3) 4)
+                                                       (bitwise-arithmetic-shift-right b1 4))))
+              (string-set! out (+ j 2) (string-ref base64-alphabet
+                                          (bitwise-ior (bitwise-arithmetic-shift-left (bitwise-and b1 #xf) 2)
+                                                       (bitwise-arithmetic-shift-right b2 6))))
+              (string-set! out (+ j 3) (string-ref base64-alphabet (bitwise-and b2 #x3f)))
+              (loop (+ i 1) (+ j 4)))))
+        (let ((base (* full 3)))
+          (cond
+           ((= rem 1)
+            (let ((b0 (bytevector-u8-ref bv base)))
+              (string-set! out (* full 4)     (string-ref base64-alphabet (bitwise-arithmetic-shift-right b0 2)))
+              (string-set! out (+ (* full 4) 1) (string-ref base64-alphabet
+                                                   (bitwise-arithmetic-shift-left (bitwise-and b0 3) 4)))
+              (string-set! out (+ (* full 4) 2) #\=)
+              (string-set! out (+ (* full 4) 3) #\=)))
+           ((= rem 2)
+            (let ((b0 (bytevector-u8-ref bv base))
+                  (b1 (bytevector-u8-ref bv (+ base 1))))
+              (string-set! out (* full 4)     (string-ref base64-alphabet (bitwise-arithmetic-shift-right b0 2)))
+              (string-set! out (+ (* full 4) 1) (string-ref base64-alphabet
+                                                   (bitwise-ior (bitwise-arithmetic-shift-left (bitwise-and b0 3) 4)
+                                                                (bitwise-arithmetic-shift-right b1 4))))
+              (string-set! out (+ (* full 4) 2) (string-ref base64-alphabet
+                                                   (bitwise-arithmetic-shift-left (bitwise-and b1 #xf) 2)))
+              (string-set! out (+ (* full 4) 3) #\=)))))
+        out)))
+
+  (define base64-char->val
+    (lambda (c)
+      (cond
+       ((and (char>=? c #\A) (char<=? c #\Z)) (- (char->integer c) (char->integer #\A)))
+       ((and (char>=? c #\a) (char<=? c #\z)) (+ 26 (- (char->integer c) (char->integer #\a))))
+       ((and (char>=? c #\0) (char<=? c #\9)) (+ 52 (- (char->integer c) (char->integer #\0))))
+       ((char=? c #\+) 62)
+       ((char=? c #\/) 63)
+       (else #f))))
+
+  (define base64-decode
+    (lambda (s)
+      (let* ((slen  (string-length s))
+             (pad   (cond ((and (> slen 0) (char=? (string-ref s (- slen 1)) #\=))
+                           (if (and (> slen 1) (char=? (string-ref s (- slen 2)) #\=)) 2 1))
+                          (else 0)))
+             (groups (/ slen 4))
+             (out   (make-bytevector (- (* groups 3) pad))))
+        (let loop ((g 0))
+          (when (< g groups)
+            (let* ((c0 (base64-char->val (string-ref s (* g 4))))
+                   (c1 (base64-char->val (string-ref s (+ (* g 4) 1))))
+                   (c2 (let ((ch (string-ref s (+ (* g 4) 2))))
+                         (if (char=? ch #\=) 0 (base64-char->val ch))))
+                   (c3 (let ((ch (string-ref s (+ (* g 4) 3))))
+                         (if (char=? ch #\=) 0 (base64-char->val ch))))
+                   (base (* g 3)))
+              (when (< base (bytevector-length out))
+                (bytevector-u8-set! out base
+                  (bitwise-ior (bitwise-arithmetic-shift-left c0 2)
+                               (bitwise-arithmetic-shift-right c1 4))))
+              (when (< (+ base 1) (bytevector-length out))
+                (bytevector-u8-set! out (+ base 1)
+                  (bitwise-and (bitwise-ior (bitwise-arithmetic-shift-left (bitwise-and c1 #xf) 4)
+                                            (bitwise-arithmetic-shift-right c2 2))
+                               #xff)))
+              (when (< (+ base 2) (bytevector-length out))
+                (bytevector-u8-set! out (+ base 2)
+                  (bitwise-and (bitwise-ior (bitwise-arithmetic-shift-left (bitwise-and c2 3) 6) c3)
+                               #xff)))
+              (loop (+ g 1)))))
+        out)))
+
+  ;;============================================================
+  ;; Section 9b: SHA-256 (FIPS 180-4)
+  ;;============================================================
+
+  (define sha256-K
+    '#(#x428a2f98 #x71374491 #xb5c0fbcf #xe9b5dba5
+       #x3956c25b #x59f111f1 #x923f82a4 #xab1c5ed5
+       #xd807aa98 #x12835b01 #x243185be #x550c7dc3
+       #x72be5d74 #x80deb1fe #x9bdc06a7 #xc19bf174
+       #xe49b69c1 #xefbe4786 #x0fc19dc6 #x240ca1cc
+       #x2de92c6f #x4a7484aa #x5cb0a9dc #x76f988da
+       #x983e5152 #xa831c66d #xb00327c8 #xbf597fc7
+       #xc6e00bf3 #xd5a79147 #x06ca6351 #x14292967
+       #x27b70a85 #x2e1b2138 #x4d2c6dfc #x53380d13
+       #x650a7354 #x766a0abb #x81c2c92e #x92722c85
+       #xa2bfe8a1 #xa81a664b #xc24b8b70 #xc76c51a3
+       #xd192e819 #xd6990624 #xf40e3585 #x106aa070
+       #x19a4c116 #x1e376c08 #x2748774c #x34b0bcb5
+       #x391c0cb3 #x4ed8aa4a #x5b9cca4f #x682e6ff3
+       #x748f82ee #x78a5636f #x84c87814 #x8cc70208
+       #x90befffa #xa4506ceb #xbef9a3f7 #xc67178f2))
+
+  (define sha256-rotr
+    (lambda (x n)
+      (bitwise-and
+       (bitwise-ior (bitwise-arithmetic-shift-right x n)
+                    (bitwise-arithmetic-shift-left  x (- 32 n)))
+       #xffffffff)))
+
+  (define sha256-pad
+    (lambda (bv)
+      (let* ((len     (bytevector-length bv))
+             (bit-len (* len 8))
+             (r1      (modulo (+ len 1) 64))
+             (pad-len (if (<= r1 56) (- 56 r1) (- 120 r1)))
+             (total   (+ len 1 pad-len 8))
+             (out     (make-bytevector total 0)))
+        (bytevector-copy! bv 0 out 0 len)
+        (bytevector-u8-set! out len #x80)
+        ;; 64-bit big-endian bit count
+        (let loop ((i 0))
+          (when (< i 8)
+            (bytevector-u8-set! out (- total (- 8 i))
+                                (bitwise-and
+                                 (bitwise-arithmetic-shift bit-len (- (* 8 (- 7 i))))
+                                 #xff))
+            (loop (+ i 1))))
+        out)))
+
+  (define sha256-process-block
+    (lambda (block off state)
+      (let ((W (make-vector 64)))
+        ;; Prepare message schedule (big-endian 32-bit words)
+        (let load ((i 0))
+          (when (< i 16)
+            (vector-set! W i
+              (+ (bitwise-arithmetic-shift-left (bytevector-u8-ref block (+ off (* i 4)))     24)
+                 (bitwise-arithmetic-shift-left (bytevector-u8-ref block (+ off (+ (* i 4) 1))) 16)
+                 (bitwise-arithmetic-shift-left (bytevector-u8-ref block (+ off (+ (* i 4) 2)))  8)
+                 (bytevector-u8-ref block (+ off (+ (* i 4) 3)))))
+            (load (+ i 1))))
+        (let expand ((i 16))
+          (when (< i 64)
+            (let* ((w15 (vector-ref W (- i 15)))
+                   (w2  (vector-ref W (- i 2)))
+                   (s0  (bitwise-xor (sha256-rotr w15 7)  (sha256-rotr w15 18)
+                                     (bitwise-arithmetic-shift-right w15 3)))
+                   (s1  (bitwise-xor (sha256-rotr w2 17) (sha256-rotr w2 19)
+                                     (bitwise-arithmetic-shift-right w2 10))))
+              (vector-set! W i
+                (bitwise-and (+ (vector-ref W (- i 16)) s0 (vector-ref W (- i 7)) s1) #xffffffff)))
+            (expand (+ i 1))))
+        (let ((a (vector-ref state 0)) (b (vector-ref state 1))
+              (c (vector-ref state 2)) (d (vector-ref state 3))
+              (e (vector-ref state 4)) (f (vector-ref state 5))
+              (g (vector-ref state 6)) (h (vector-ref state 7)))
+          (let rounds ((i 0) (a a) (b b) (c c) (d d) (e e) (f f) (g g) (h h))
+            (if (= i 64)
+                (begin
+                  (vector-set! state 0 (bitwise-and (+ (vector-ref state 0) a) #xffffffff))
+                  (vector-set! state 1 (bitwise-and (+ (vector-ref state 1) b) #xffffffff))
+                  (vector-set! state 2 (bitwise-and (+ (vector-ref state 2) c) #xffffffff))
+                  (vector-set! state 3 (bitwise-and (+ (vector-ref state 3) d) #xffffffff))
+                  (vector-set! state 4 (bitwise-and (+ (vector-ref state 4) e) #xffffffff))
+                  (vector-set! state 5 (bitwise-and (+ (vector-ref state 5) f) #xffffffff))
+                  (vector-set! state 6 (bitwise-and (+ (vector-ref state 6) g) #xffffffff))
+                  (vector-set! state 7 (bitwise-and (+ (vector-ref state 7) h) #xffffffff)))
+                (let* ((S1  (bitwise-xor (sha256-rotr e 6) (sha256-rotr e 11) (sha256-rotr e 25)))
+                       (ch  (bitwise-xor (bitwise-and e f) (bitwise-and (bitwise-not e) g)))
+                       (T1  (bitwise-and (+ h S1 ch (vector-ref sha256-K i) (vector-ref W i)) #xffffffff))
+                       (S0  (bitwise-xor (sha256-rotr a 2) (sha256-rotr a 13) (sha256-rotr a 22)))
+                       (maj (bitwise-xor (bitwise-and a b) (bitwise-and a c) (bitwise-and b c)))
+                       (T2  (bitwise-and (+ S0 maj) #xffffffff)))
+                  (rounds (+ i 1) (bitwise-and (+ T1 T2) #xffffffff) a b c (bitwise-and (+ d T1) #xffffffff) e f g))))))))
+
+  (define sha256-digest
+    (lambda (bv)
+      (let ((padded (sha256-pad bv))
+            (state  (vector #x6a09e667 #xbb67ae85 #x3c6ef372 #xa54ff53a
+                            #x510e527f #x9b05688c #x1f83d9ab #x5be0cd19)))
+        (let loop ((off 0))
+          (when (< off (bytevector-length padded))
+            (sha256-process-block padded off state)
+            (loop (+ off 64))))
+        (let ((out (make-bytevector 32)))
+          (let store ((w 0))
+            (when (< w 8)
+              (let ((word (vector-ref state w)))
+                (bytevector-u8-set! out (+ (* w 4) 0) (bitwise-and (bitwise-arithmetic-shift word -24) #xff))
+                (bytevector-u8-set! out (+ (* w 4) 1) (bitwise-and (bitwise-arithmetic-shift word -16) #xff))
+                (bytevector-u8-set! out (+ (* w 4) 2) (bitwise-and (bitwise-arithmetic-shift word  -8) #xff))
+                (bytevector-u8-set! out (+ (* w 4) 3) (bitwise-and word #xff)))
+              (store (+ w 1))))
+          out))))
+
+  ;;============================================================
+  ;; Section 9c: HMAC-SHA256 (RFC 2104) and PBKDF2
+  ;;============================================================
+
+  (define hmac-sha256
+    (lambda (key msg)
+      (let* ((k (if (> (bytevector-length key) 64)
+                    (sha256-digest key)
+                    key))
+             (kpad (let ((bv (make-bytevector 64 0)))
+                     (bytevector-copy! k 0 bv 0 (bytevector-length k))
+                     bv))
+             (ipad (make-bytevector 64 #x36))
+             (opad (make-bytevector 64 #x5c))
+             (ki   (make-bytevector 64))
+             (ko   (make-bytevector 64)))
+        (let xor-loop ((i 0))
+          (when (< i 64)
+            (bytevector-u8-set! ki i (bitwise-xor (bytevector-u8-ref kpad i) (bytevector-u8-ref ipad i)))
+            (bytevector-u8-set! ko i (bitwise-xor (bytevector-u8-ref kpad i) (bytevector-u8-ref opad i)))
+            (xor-loop (+ i 1))))
+        (sha256-digest (bv-append ko (sha256-digest (bv-append ki msg)))))))
+
+  (define pbkdf2-hmac-sha256
+    (lambda (password salt iterations)
+      (let* ((salt1 (bv-append salt #vu8(0 0 0 1)))
+             (u     (hmac-sha256 password salt1))
+             (out   (bytevector-copy u)))
+        (let loop ((i 1) (prev u))
+          (when (< i iterations)
+            (let ((ui (hmac-sha256 password prev)))
+              (let xor ((j 0))
+                (when (< j 32)
+                  (bytevector-u8-set! out j (bitwise-xor (bytevector-u8-ref out j)
+                                                          (bytevector-u8-ref ui  j)))
+                  (xor (+ j 1))))
+              (loop (+ i 1) ui))))
+        out)))
+
+  ;;============================================================
+  ;; Section 9d: SCRAM-SHA-256 helpers
+  ;;============================================================
+
+  (define scram-escape-username
+    (lambda (username)
+      (let* ((s (string->list username))
+             (escaped
+              (apply string-append
+                     (map (lambda (c)
+                            (cond ((char=? c #\=) "=3D")
+                                  ((char=? c #\,) "=2C")
+                                  (else (string c))))
+                          s))))
+        escaped)))
+
+  (define scram-make-nonce
+    (lambda ()
+      (let ((bv (make-bytevector 24)))
+        (let fill ((i 0))
+          (when (< i 24)
+            (bytevector-u8-set! bv i (random 256))
+            (fill (+ i 1))))
+        (base64-encode bv))))
+
+  (define scram-parse-server-first
+    ;; Returns (values combined-nonce salt iterations)
+    (lambda (msg)
+      (define (find-field s key)
+        (let* ((prefix (string-append key "="))
+               (plen   (string-length prefix))
+               (slen   (string-length s)))
+          (let scan ((i 0))
+            (if (>= i slen)
+                #f
+                (if (and (<= (+ i plen) slen)
+                         (string=? (substring s i (+ i plen)) prefix))
+                    ;; find end of field (next comma or end of string)
+                    (let end ((j (+ i plen)))
+                      (if (or (>= j slen) (char=? (string-ref s j) #\,))
+                          (substring s (+ i plen) j)
+                          (end (+ j 1))))
+                    (scan (+ i 1)))))))
+      (let ((r (find-field msg "r"))
+            (s (find-field msg "s"))
+            (i (find-field msg "i")))
+        (unless (and r s i)
+          (pg-raise "Malformed SCRAM server-first-message" msg))
+        (values r (base64-decode s) (string->number i)))))
+
+  (define pg-scram-sha256-auth
+    (lambda (conn username password mechanism-list)
+      (unless (member "SCRAM-SHA-256" mechanism-list)
+        (pg-raise "Server does not offer SCRAM-SHA-256" mechanism-list))
+      (let* ((fd          (pg-conn-fd conn))
+             (read-u8     (pg-conn-read-u8 conn))
+             (read-exact  (pg-conn-read-exact conn))
+             (nonce       (scram-make-nonce))
+             (user-esc    (scram-escape-username username))
+             (client-bare (string-append "n=" user-esc ",r=" nonce))
+             (client-first (string-append "n,," client-bare))
+             (cf-bv       (string->utf8 client-first))
+             (mech-bv     (encode-cstring "SCRAM-SHA-256"))
+             (len-bv      (encode-int32-be (bytevector-length cf-bv)))
+             (sasl-init   (pg-make-message #\p mech-bv len-bv cf-bv)))
+        (unless (loop-write fd sasl-init)
+          (pg-raise "Write failed during SCRAM initial response" 'write))
+        ;; Read server-first (auth-type 11)
+        (let-values (((type payload) (pg-read-message read-u8 read-exact)))
+          (unless (char=? type #\R)
+            (pg-raise "Expected AuthenticationSASLContinue" type))
+          (let ((atype (bv-ref-int32-be payload 0)))
+            (unless (= atype 11)
+              (pg-raise "Expected SASL continue (11)" atype)))
+          (let ((server-first (utf8->string (subbytevector payload 4 (bytevector-length payload)))))
+            (let-values (((combined-nonce salt iterations)
+                          (scram-parse-server-first server-first)))
+              ;; Verify nonce prefix
+              (unless (and (>= (string-length combined-nonce) (string-length nonce))
+                           (string=? (substring combined-nonce 0 (string-length nonce)) nonce))
+                (pg-raise "SCRAM nonce mismatch" combined-nonce))
+              (let* ((client-final-no-proof (string-append "c=biws,r=" combined-nonce))
+                     (auth-message (string-append client-bare "," server-first "," client-final-no-proof))
+                     (pass-bv      (string->utf8 password))
+                     (salted-pw    (pbkdf2-hmac-sha256 pass-bv salt iterations))
+                     (client-key   (hmac-sha256 salted-pw (string->utf8 "Client Key")))
+                     (stored-key   (sha256-digest client-key))
+                     (client-sig   (hmac-sha256 stored-key (string->utf8 auth-message)))
+                     (client-proof (let ((p (make-bytevector 32)))
+                                     (let xor ((i 0))
+                                       (when (< i 32)
+                                         (bytevector-u8-set! p i
+                                           (bitwise-xor (bytevector-u8-ref client-key i)
+                                                        (bytevector-u8-ref client-sig i)))
+                                         (xor (+ i 1))))
+                                     p))
+                     (server-key   (hmac-sha256 salted-pw (string->utf8 "Server Key")))
+                     (server-sig   (hmac-sha256 server-key (string->utf8 auth-message)))
+                     (client-final (string-append client-final-no-proof ",p=" (base64-encode client-proof)))
+                     (cf-bv2       (string->utf8 client-final))
+                     (sasl-resp    (pg-make-message #\p cf-bv2)))
+                (unless (loop-write fd sasl-resp)
+                  (pg-raise "Write failed during SCRAM final response" 'write))
+                ;; Read server-final (auth-type 12)
+                (let-values (((type2 payload2) (pg-read-message read-u8 read-exact)))
+                  (unless (char=? type2 #\R)
+                    (pg-raise "Expected AuthenticationSASLFinal" type2))
+                  (let ((atype2 (bv-ref-int32-be payload2 0)))
+                    (unless (= atype2 12)
+                      (pg-raise "Expected SASL final (12)" atype2)))
+                  ;; Verify server signature: payload after int32 is "v=<base64>"
+                  (let* ((sfinal (utf8->string (subbytevector payload2 4 (bytevector-length payload2))))
+                         (v-prefix "v=")
+                         (v-val (if (and (>= (string-length sfinal) 2)
+                                         (string=? (substring sfinal 0 2) v-prefix))
+                                    (substring sfinal 2 (string-length sfinal))
+                                    (pg-raise "Malformed SCRAM server-final" sfinal)))
+                         (got-sig (base64-decode v-val)))
+                    (unless (equal? got-sig server-sig)
+                      (pg-raise "SCRAM server signature mismatch" 'scram)))))))))))
+
+  ;;============================================================
   ;; Section 9: Authentication state machine
   ;;============================================================
 
@@ -489,6 +862,20 @@
                      (unless (loop-write fd msg)
                        (pg-raise "Write failed during MD5 auth" 'write)))
                    (auth-loop))
+
+                  ;; SASL (SCRAM-SHA-256)
+                  ((= auth-type 10)
+                   (let* ((mechanisms '())
+                          (bvlen (bytevector-length payload)))
+                     ;; Parse null-terminated mechanism names starting at offset 4
+                     (let parse ((off 4) (mechs '()))
+                       (if (>= off bvlen)
+                           (pg-scram-sha256-auth conn username password (reverse mechs))
+                           (let-values (((name next) (bv-read-cstring payload off)))
+                             (if (string=? name "")
+                                 (pg-scram-sha256-auth conn username password (reverse mechs))
+                                 (parse next (cons name mechs))))))
+                     (auth-loop)))
 
                   (else
                    (pg-raise "Unsupported authentication method"
