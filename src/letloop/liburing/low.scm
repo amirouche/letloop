@@ -1,3 +1,4 @@
+#!chezscheme
 (library (letloop liburing low)
   (export
 
@@ -332,9 +333,41 @@
 
    ;; constants: sync_file_range
    SYNC-FILE-RANGE-WRITE-AND-WAIT
+
+   ;; C stdlib + FFI helpers
+   stdlib bytevector-pointer with-lock strerror pointer->string memcpy
+
+   ;; socket constants
+   AF-INET SOCK-STREAM F-GETFL F-SETFL O-NONBLOCK POLLIN POLLOUT
+
+   ;; fcntl / non-blocking
+   fcntl fcntl! loop-nonblock!
+
+   ;; sockaddr_in ftype and helpers
+   <sockaddr-in> string->ipv4 make-sockaddr-in
+
+   ;; socket syscall wrappers
+   loop-socket-new loop-socket-option! loop-socket-error?
+   loop-bind loop-listen loop-getpeername
+
+   ;; bytevector utility
+   subbytevector
+
+   ;; event loop record type
+   <loop>
+
+   ;; time
+   jiffy-current
+
+   ;; event loop lifecycle
+   loop-new loop-run loop-run-once loop-stop loop-spawn
+
+   ;; async I/O operations
+   loop-connect loop-read loop-write loop-close loop-sleep
+   loop-accept loop-tcp-serve loop-poll-wait
    )
 
-  (import (chezscheme))
+  (import (chezscheme) (letloop r999))
 
   ;;------------------------------------------------------------
   ;; Load shared object
@@ -1636,5 +1669,607 @@
                                    (void* void* void*) void*)))
       (lambda (o msgh cmsg)
         (func o msgh cmsg))))
+
+
+  ;;------------------------------------------------------------
+  ;; C stdlib + FFI helpers
+  ;;------------------------------------------------------------
+
+  (define stdlib (load-shared-object #f))
+
+  (define-syntax with-lock
+    (syntax-rules ()
+      ((_ objects body ...)
+       (let ((objects* objects))
+         (dynamic-wind
+           (lambda () (for-each lock-object objects*))
+           (lambda () body ...)
+           (lambda () (for-each unlock-object objects*)))))))
+
+  (define (bytevector-pointer bv)
+    (#%$object-address bv (+ (foreign-sizeof 'void*) 1)))
+
+  (define strerror
+    (let ((func (foreign-procedure "strerror" (int) string)))
+      (lambda (code) (func code))))
+
+  (define %strlen (foreign-procedure "strlen" (void*) size_t))
+
+  (define (pointer->string p)
+    (if (zero? p)
+        #f
+        (let* ((len (%strlen p))
+               (bv (make-bytevector len)))
+          (let loop ((i 0))
+            (when (< i len)
+              (bytevector-u8-set! bv i (foreign-ref 'unsigned-8 p i))
+              (loop (+ i 1))))
+          (utf8->string bv))))
+
+  (define memcpy
+    (let ((func (foreign-procedure "memcpy" (void* void* size_t) void*)))
+      (lambda (dest src n) (func dest src n))))
+
+  ;;------------------------------------------------------------
+  ;; Socket constants
+  ;;------------------------------------------------------------
+
+  (define AF-INET 2)
+  (define SOCK-STREAM 1)
+  (define F-GETFL 3)
+  (define F-SETFL 4)
+  (define O-NONBLOCK 2048)
+  (define POLLIN 1)
+  (define POLLOUT 4)
+
+  ;;------------------------------------------------------------
+  ;; fcntl / non-blocking
+  ;;------------------------------------------------------------
+
+  (define fcntl!
+    (let ((func (foreign-procedure __atomic "fcntl" (int int int) int)))
+      (lambda (fd cmd arg) (func fd cmd arg))))
+
+  (define fcntl
+    (let ((func (foreign-procedure __atomic "fcntl" (int int) int)))
+      (lambda (fd cmd) (func fd cmd))))
+
+  (define loop-nonblock!
+    (lambda (fd)
+      (fcntl! fd F-SETFL
+              (fxlogior O-NONBLOCK (fcntl fd F-GETFL)))))
+
+  ;;------------------------------------------------------------
+  ;; sockaddr_in ftype and helpers
+  ;;------------------------------------------------------------
+
+  (define-ftype <sockaddr-in>
+    (struct (family unsigned-short)
+            (port (endian big unsigned-16))
+            (address (endian big unsigned-32))
+            (padding (array 8 char))))
+
+  (define string->ipv4
+    (lambda (str)
+      (define (ipv4 a b c d)
+        (+ (* a 256 256 256) (* b 256 256) (* c 256) d))
+      (define (split-dots s)
+        (define (maybe-add a b parts)
+          (if (= a b) parts (cons (substring s a b) parts)))
+        (let ((n (string-length s)))
+          (let loop ((a 0) (b 0) (parts '()))
+            (if (< b n)
+                (if (char=? (string-ref s b) #\.)
+                    (loop (+ b 1) (+ b 1) (maybe-add a b parts))
+                    (loop a (+ b 1) parts))
+                (reverse (maybe-add a b parts))))))
+      (apply ipv4 (map string->number (split-dots str)))))
+
+  ;; Returns (values foreign-ptr addrlen)
+  (define make-sockaddr-in
+    (lambda (a b c d port)
+      (let* ((ptr (foreign-alloc (ftype-sizeof <sockaddr-in>)))
+             (addr (make-ftype-pointer <sockaddr-in> ptr)))
+        (ftype-set! <sockaddr-in> (family) addr 2)
+        (ftype-set! <sockaddr-in> (port) addr port)
+        (ftype-set! <sockaddr-in> (address) addr
+                    (string->ipv4 (format #f "~a.~a.~a.~a" a b c d)))
+        (values ptr (ftype-sizeof <sockaddr-in>)))))
+
+  ;;------------------------------------------------------------
+  ;; bytevector utility
+  ;;------------------------------------------------------------
+
+  (define subbytevector
+    (case-lambda
+     ((bv start end)
+      (assert (bytevector? bv))
+      (unless (<= 0 start end (bytevector-length bv))
+        (error 'subbytevector "Invalid indices" bv start end))
+      (if (and (fxzero? start) (fx=? end (bytevector-length bv)))
+          bv
+          (let ((ret (make-bytevector (fx- end start))))
+            (bytevector-copy! bv start ret 0 (fx- end start))
+            ret)))
+     ((bv start)
+      (subbytevector bv start (bytevector-length bv)))))
+
+  ;;------------------------------------------------------------
+  ;; Socket syscall wrappers
+  ;;------------------------------------------------------------
+
+  (define loop-socket-new
+    (let ((func (foreign-procedure __atomic __disable_interrupts __errno
+                                   "socket" (int int int) int)))
+      (lambda (domain type protocol)
+        (call-with-values (lambda () (func domain type protocol))
+          (lambda (out errno)
+            (if (fx=? out -1) #f out))))))
+
+  (define loop-socket-option!
+    (let ((func (foreign-procedure __atomic __disable_interrupts __errno
+                                   "setsockopt" (int int int void* int) int)))
+      (lambda (fd level optname optval)
+        (define (doit opt-int)
+          (let* ((size (ftype-sizeof int))
+                 (ptr (foreign-alloc size)))
+            (foreign-set! 'int ptr 0 (if optval 1 0))
+            (call-with-values (lambda () (func fd level opt-int ptr size))
+              (lambda (out errno)
+                (foreign-free ptr)
+                (if (fxzero? out)
+                    #t
+                    (error 'loop-socket-option!
+                           (format #f "setsockopt errno ~a" (strerror errno))
+                           fd))))))
+        (case optname
+          ((socket-option/debug)     (doit 1))
+          ((socket-option/reuseaddr) (doit 2))
+          ((socket-option/dontroute) (doit 5))
+          ((socket-option/broadcast) (doit 6))
+          ((socket-option/keepalive) (doit 9))
+          ((socket-option/oobinline) (doit 10))
+          ((socket-option/reuseport) (doit 15))
+          ((tcp-option/nodelay)      (doit 1))
+          (else (error 'loop-socket-option! "Unknown socket option"
+                       fd level optname optval))))))
+
+  (define loop-socket-error?
+    (let ((func (foreign-procedure __atomic __disable_interrupts __errno
+                                   "getsockopt" (int int int void* void*) int)))
+      (lambda (fd)
+        (let* ((val-size (ftype-sizeof int))
+               (val-ptr (foreign-alloc val-size))
+               (len-ptr (foreign-alloc (ftype-sizeof int))))
+          (foreign-set! 'int val-ptr 0 0)
+          (foreign-set! 'int len-ptr 0 val-size)
+          (call-with-values (lambda () (func fd 1 4 val-ptr len-ptr))
+            (lambda (out errno)
+              (let ((so-error (foreign-ref 'int val-ptr 0)))
+                (foreign-free len-ptr)
+                (foreign-free val-ptr)
+                (not (fxzero? so-error)))))))))
+
+  (define loop-bind
+    (let ((func (foreign-procedure __atomic __disable_interrupts __errno
+                                   "bind" (int void* size_t) int)))
+      (lambda (fd ip port)
+        (loop-socket-option! fd 1 'socket-option/reuseaddr #t)
+        (loop-socket-option! fd 1 'socket-option/reuseport #t)
+        (let* ((ptr (foreign-alloc (ftype-sizeof <sockaddr-in>)))
+               (addr (make-ftype-pointer <sockaddr-in> ptr)))
+          (ftype-set! <sockaddr-in> (family) addr 2)
+          (ftype-set! <sockaddr-in> (port) addr port)
+          (ftype-set! <sockaddr-in> (address) addr (string->ipv4 ip))
+          (call-with-values
+              (lambda () (func fd ptr (ftype-sizeof <sockaddr-in>)))
+            (lambda (out errno)
+              (foreign-free ptr)
+              (unless (fxzero? out)
+                (error 'loop-bind
+                       (format #f "bind errno ~a" (strerror errno))))))))))
+
+  (define loop-listen
+    (let ((func (foreign-procedure __atomic __disable_interrupts __errno
+                                   "listen" (int int) int)))
+      (lambda (fd backlog)
+        (call-with-values (lambda () (func fd backlog))
+          (lambda (out errno)
+            (unless (fxzero? out)
+              (error 'loop-listen
+                     (format #f "listen errno ~a" (strerror errno)))))))))
+
+  (define loop-getpeername
+    (let ((func (foreign-procedure __atomic __disable_interrupts __errno
+                                   "getpeername" (int void* void*) int)))
+      (lambda (fd)
+        (let* ((ptr (foreign-alloc (ftype-sizeof <sockaddr-in>)))
+               (addr (make-ftype-pointer <sockaddr-in> ptr))
+               (len-ptr (foreign-alloc (foreign-sizeof 'unsigned-32))))
+          (foreign-set! 'unsigned-32 len-ptr 0 (ftype-sizeof <sockaddr-in>))
+          (call-with-values (lambda () (func fd ptr len-ptr))
+            (lambda (out errno)
+              (let ((ip (if (fxzero? out)
+                            (let ((raw (ftype-ref <sockaddr-in> (address) addr)))
+                              (format #f "~a.~a.~a.~a"
+                                      (fxsrl raw 24)
+                                      (fxand (fxsrl raw 16) #xff)
+                                      (fxand (fxsrl raw 8) #xff)
+                                      (fxand raw #xff)))
+                            #f)))
+                (foreign-free len-ptr)
+                (foreign-free ptr)
+                ip)))))))
+
+  ;;------------------------------------------------------------
+  ;; Event loop globals
+  ;;------------------------------------------------------------
+
+  (define %loop #f)
+  (define %multishots (make-eqv-hashtable))
+  (define %multishot-ids (make-eqv-hashtable))
+  (define %buf-ring-nentries 4096)
+  (define %buf-ring-buf-size 4096)
+  (define %buf-ring-bgid 0)
+  (define %buf-ring #f)
+  (define %buf-ring-base 0)
+  (define %buf-ring-mask 0)
+  (define %buf-data (make-eqv-hashtable))
+  (define %fd-handlers (make-eqv-hashtable))
+  (define %active-connections (make-eqv-hashtable))
+  (define %read-timeout-seconds 5)
+  (define %read-timeout-ts #f)
+  (define %wait-timeout #f)
+
+  ;;------------------------------------------------------------
+  ;; Event loop record
+  ;;------------------------------------------------------------
+
+  (define-record-type* <loop>
+    (loop-base-new jiffy sleeping running ring cqe-ptr handlers next-id thunks)
+    loop?
+    (jiffy %loop-jiffy %loop-jiffy!)
+    (sleeping loop-sleeping loop-sleeping!)
+    (running loop-running? loop-running!)
+    (ring loop-ring)
+    (cqe-ptr loop-cqe-ptr)
+    (handlers loop-handlers)
+    (next-id loop-next-id loop-next-id!)
+    (thunks loop-thunks loop-thunks!))
+
+  (define loop-alloc-id!
+    (lambda ()
+      (let ((id (loop-next-id %loop)))
+        (loop-next-id! %loop (fx+ id 1))
+        id)))
+
+  ;;------------------------------------------------------------
+  ;; Continuation machinery
+  ;;------------------------------------------------------------
+
+  (define loop-prompt-current #f)
+  (define loop-prompt-singleton '(loop-prompt-singleton))
+
+  (define call-with-loop-prompt
+    (lambda (thunk handlery)
+      (call-with-values
+          (lambda ()
+            (call/1cc
+             (lambda (k)
+               (set! loop-prompt-current k)
+               (thunk))))
+        (lambda out
+          (cond
+           ((and (pair? out) (eq? (car out) loop-prompt-singleton))
+            (apply handlery (cdr out)))
+           (else (apply values out)))))))
+
+  (define loop-abort
+    (lambda args
+      (call/1cc
+       (lambda (k)
+         (let ((prompt loop-prompt-current))
+           (set! loop-prompt-current #f)
+           (apply prompt (cons loop-prompt-singleton (cons k args))))))))
+
+  (define loop-apply
+    (lambda (thunk)
+      (guard (ex (else (void)))
+        (call-with-loop-prompt thunk (lambda (k handler) (handler k))))))
+
+  ;;------------------------------------------------------------
+  ;; Time
+  ;;------------------------------------------------------------
+
+  (define jiffy-current
+    (lambda ()
+      (let* ((time (current-time 'time-monotonic))
+             (seconds (time-second time))
+             (nanoseconds (time-nanosecond time)))
+        (+ (* seconds (expt 10 9)) nanoseconds))))
+
+  ;;------------------------------------------------------------
+  ;; Event loop lifecycle
+  ;;------------------------------------------------------------
+
+  (define loop-run-once
+    (lambda ()
+      (let ((thunks (loop-thunks %loop)))
+        (loop-thunks! %loop '())
+        (for-each (lambda (thunk) (loop-apply thunk)) thunks))
+
+      (let ((ring (loop-ring %loop))
+            (cqe-ptr (loop-cqe-ptr %loop)))
+        (let ((has-handlers? (not (fxzero? (hashtable-size (loop-handlers %loop)))))
+              (has-pending?  (not (fxzero? (io-uring-sq-ready ring)))))
+          (cond
+           (has-handlers?
+            (io-uring-submit ring)
+            (io-uring-wait-cqe-timeout ring cqe-ptr %wait-timeout))
+           (has-pending?
+            (io-uring-submit ring))
+           (else
+            (io-uring-wait-cqe-timeout ring cqe-ptr %wait-timeout))))
+
+        (let drain ()
+          (when (fxzero? (io-uring-peek-cqe ring cqe-ptr))
+            (let* ((cqe   (foreign-ref 'void* cqe-ptr 0))
+                   (id    (io-uring-cqe-get-data64 cqe))
+                   (res   (io-uring-cqe-get-res cqe))
+                   (flags (io-uring-cqe-get-flags cqe)))
+              (io-uring-cqe-seen ring cqe)
+              (when (fxzero? (fxlogand flags IORING-CQE-F-MORE))
+                (let ((ms-fd (hashtable-ref %multishot-ids id #f)))
+                  (when ms-fd
+                    (hashtable-delete! %multishot-ids id)
+                    (hashtable-delete! %multishots ms-fd))))
+              (when (and (fx>? res 0)
+                         (not (fxzero? (fxlogand flags IORING-CQE-F-BUFFER))))
+                (let* ((bid      (fxsrl (fxlogand flags #xFFFF0000) 16))
+                       (buf-addr (+ %buf-ring-base (* bid %buf-ring-buf-size)))
+                       (bv       (make-bytevector res)))
+                  (with-lock (list bv)
+                    (memcpy (bytevector-pointer bv) buf-addr res))
+                  (io-uring-buf-ring-add %buf-ring buf-addr %buf-ring-buf-size
+                                         bid %buf-ring-mask 0)
+                  (io-uring-buf-ring-advance %buf-ring 1)
+                  (hashtable-set! %buf-data id bv)))
+              (let ((handler (hashtable-ref (loop-handlers %loop) id #f)))
+                (hashtable-delete! (loop-handlers %loop) id)
+                (when handler
+                  (loop-apply (lambda () (handler res))))))
+            (drain)))
+
+        (when (not (fxzero? (io-uring-sq-ready ring)))
+          (io-uring-submit ring)))))
+
+  (define loop-run
+    (lambda ()
+      (let lp ()
+        (when (loop-running? %loop)
+          (guard (ex (else (loop-running! %loop #f)))
+            (loop-run-once))
+          (lp)))))
+
+  (define loop-spawn
+    (lambda (thunk)
+      (loop-thunks! %loop (cons thunk (loop-thunks %loop)))))
+
+  (define loop-new
+    (lambda ()
+      (let ((ring     (make-io-uring))
+            (cqe-ptr  (make-cqe-pointer))
+            (handlers (make-eqv-hashtable)))
+        (let ((ret (io-uring-queue-init 256 ring 0)))
+          (unless (fxzero? ret)
+            (error 'loop-new
+                   (format #f "io_uring_queue_init failed: ~a"
+                           (strerror (fx- 0 ret))))))
+        (set! %loop
+          (loop-base-new (jiffy-current) '() #t ring cqe-ptr handlers 0 '()))
+        (set! %read-timeout-ts  (make-timespec %read-timeout-seconds 0))
+        (set! %wait-timeout     (make-timespec 0 100000000))
+        (set! %multishots       (make-eqv-hashtable))
+        (set! %multishot-ids    (make-eqv-hashtable))
+        (set! %buf-data         (make-eqv-hashtable))
+        (set! %fd-handlers      (make-eqv-hashtable))
+        (set! %active-connections (make-eqv-hashtable))
+        (let ((err-ptr (foreign-alloc 4)))
+          (foreign-set! 'integer-32 err-ptr 0 0)
+          (let ((br (io-uring-setup-buf-ring ring %buf-ring-nentries
+                                             %buf-ring-bgid 0 err-ptr)))
+            (let ((err (foreign-ref 'integer-32 err-ptr 0)))
+              (foreign-free err-ptr)
+              (when (eqv? br 0)
+                (error 'loop-new
+                       (format #f "io_uring_setup_buf_ring failed: ~a"
+                               (strerror (fx- 0 err))))))
+            (let ((base (foreign-alloc (* %buf-ring-nentries %buf-ring-buf-size)))
+                  (mask (io-uring-buf-ring-mask %buf-ring-nentries)))
+              (let fill ((i 0))
+                (when (fx<? i %buf-ring-nentries)
+                  (io-uring-buf-ring-add br (+ base (* i %buf-ring-buf-size))
+                                          %buf-ring-buf-size i mask i)
+                  (fill (fx+ i 1))))
+              (io-uring-buf-ring-advance br %buf-ring-nentries)
+              (set! %buf-ring      br)
+              (set! %buf-ring-base base)
+              (set! %buf-ring-mask mask))))
+        %loop)))
+
+  (define loop-stop
+    (lambda ()
+      (loop-running! %loop #f)
+      (let-values (((keys vals) (hashtable-entries %multishots)))
+        (vector-for-each
+          (lambda (fd id)
+            (let ((sqe (io-uring-get-sqe (loop-ring %loop))))
+              (io-uring-prep-cancel64 sqe id 0)
+              (io-uring-sqe-set-data64 sqe (loop-alloc-id!))))
+          keys vals))
+      (when (not (fxzero? (io-uring-sq-ready (loop-ring %loop))))
+        (io-uring-submit (loop-ring %loop)))))
+
+  ;;------------------------------------------------------------
+  ;; Async I/O operations
+  ;;------------------------------------------------------------
+
+  (define loop-close
+    (lambda (fd)
+      (let ((ids (hashtable-ref %fd-handlers fd '())))
+        (for-each (lambda (id)
+                    (hashtable-delete! (loop-handlers %loop) id))
+                  ids)
+        (hashtable-delete! %fd-handlers fd))
+      (hashtable-delete! %active-connections fd)
+      (let* ((cancel-sqe (io-uring-get-sqe (loop-ring %loop)))
+             (cancel-id  (loop-alloc-id!)))
+        (io-uring-prep-cancel-fd cancel-sqe fd IORING-ASYNC-CANCEL-ALL)
+        (io-uring-sqe-set-data64 cancel-sqe cancel-id))
+      (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+             (id  (loop-alloc-id!)))
+        (io-uring-prep-close sqe fd)
+        (io-uring-sqe-set-data64 sqe id)
+        (let ((res (loop-abort
+                     (lambda (k)
+                       (hashtable-set! (loop-handlers %loop) id k)))))
+          res))))
+
+  (define loop-accept
+    (lambda (fd)
+      (let ((active-id (hashtable-ref %multishots fd #f)))
+        (unless active-id
+          (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+                 (id  (loop-alloc-id!)))
+            (io-uring-prep-multishot-accept sqe fd 0 0 0)
+            (io-uring-sqe-set-data64 sqe id)
+            (hashtable-set! %multishots fd id)
+            (hashtable-set! %multishot-ids id fd)
+            (set! active-id id)))
+        (let ((res (loop-abort
+                     (lambda (k)
+                       (hashtable-set! (loop-handlers %loop) active-id k)))))
+          (if (fx<? res 0)
+              (begin
+                (let ((mid (hashtable-ref %multishots fd #f)))
+                  (when mid
+                    (hashtable-delete! %multishots fd)
+                    (hashtable-delete! %multishot-ids mid)))
+                #f)
+              (begin
+                (loop-socket-option! res 6 'tcp-option/nodelay  #t)
+                (loop-socket-option! res 1 'socket-option/keepalive #t)
+                (hashtable-set! %active-connections res (jiffy-current))
+                res))))))
+
+  (define loop-read
+    (lambda (fd)
+      (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+             (id  (loop-alloc-id!)))
+        (io-uring-prep-recv sqe fd 0 %buf-ring-buf-size 0)
+        (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
+        (io-uring-sqe-set-buf-group sqe %buf-ring-bgid)
+        (io-uring-sqe-set-data64 sqe id)
+        (hashtable-set! %fd-handlers fd
+                        (cons id (hashtable-ref %fd-handlers fd '())))
+        (let ((res (loop-abort
+                     (lambda (k)
+                       (hashtable-set! (loop-handlers %loop) id k)))))
+          (hashtable-set! %fd-handlers fd
+                          (remq id (hashtable-ref %fd-handlers fd '())))
+          (cond
+           ((fx<? res 0)
+            (hashtable-delete! %buf-data id)
+            #f)
+           ((fxzero? res)
+            (hashtable-delete! %buf-data id)
+            #t)
+           (else
+            (hashtable-set! %active-connections fd (jiffy-current))
+            (let ((bv (hashtable-ref %buf-data id #f)))
+              (hashtable-delete! %buf-data id)
+              bv)))))))
+
+  (define loop-write
+    (lambda (fd bv)
+      (let write-loop ((bv bv))
+        (lock-object bv)
+        (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+               (id  (loop-alloc-id!)))
+          (io-uring-prep-send sqe fd (bytevector-pointer bv)
+                              (bytevector-length bv) 0)
+          (io-uring-sqe-set-data64 sqe id)
+          (hashtable-set! %fd-handlers fd
+                          (cons id (hashtable-ref %fd-handlers fd '())))
+          (let ((res (loop-abort
+                       (lambda (k)
+                         (hashtable-set! (loop-handlers %loop) id k)))))
+            (hashtable-set! %fd-handlers fd
+                            (remq id (hashtable-ref %fd-handlers fd '())))
+            (unlock-object bv)
+            (cond
+             ((fx<=? res 0) #f)
+             ((fx=? res (bytevector-length bv)) #t)
+             (else (write-loop (subbytevector bv res)))))))))
+
+  (define loop-connect
+    (lambda (addr addrlen)
+      (let ((fd (loop-socket-new AF-INET SOCK-STREAM 0)))
+        (unless fd (error 'loop-connect "socket() failed"))
+        (loop-nonblock! fd)
+        (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+               (id  (loop-alloc-id!)))
+          (io-uring-prep-connect sqe fd addr addrlen)
+          (io-uring-sqe-set-data64 sqe id)
+          (let ((res (loop-abort
+                       (lambda (k)
+                         (hashtable-set! (loop-handlers %loop) id k)))))
+            (if (fx<? res 0)
+                (begin (loop-close fd) #f)
+                fd))))))
+
+  (define loop-sleep
+    (lambda (seconds)
+      (let* ((ns  (exact (round (* seconds 1000000000))))
+             (sqe (io-uring-get-sqe (loop-ring %loop)))
+             (id  (loop-alloc-id!))
+             (ts  (make-timespec (div ns 1000000000)
+                                 (mod ns 1000000000))))
+        (io-uring-prep-timeout sqe (ftype-pointer-address ts) 0 0)
+        (io-uring-sqe-set-data64 sqe id)
+        (let ((res (loop-abort
+                     (lambda (k)
+                       (hashtable-set! (loop-handlers %loop) id k)))))
+          (foreign-free (ftype-pointer-address ts))
+          res))))
+
+  (define loop-tcp-serve
+    (lambda (ip port)
+      (define SOCKET-DOMAIN=AF-INET 2)
+      (define SOCKET-TYPE=STREAM 1)
+      (define fd (loop-socket-new SOCKET-DOMAIN=AF-INET SOCKET-TYPE=STREAM 0))
+      (define accept
+        (lambda ()
+          (define client (loop-accept fd))
+          (if (not client)
+              (values #f #f #f #f)
+              (let ((peer-ip (loop-getpeername client)))
+                (values (lambda ()      (loop-read client))
+                        (lambda (bv)    (loop-write client bv))
+                        (lambda ()      (loop-close client))
+                        peer-ip)))))
+      (loop-bind fd ip port)
+      (loop-listen fd 128)
+      (values accept (lambda () (loop-close fd)))))
+
+  (define loop-poll-wait
+    (lambda (fd poll-mask)
+      (let* ((sqe (io-uring-get-sqe (loop-ring %loop)))
+             (id  (loop-alloc-id!)))
+        (io-uring-prep-poll-add sqe fd poll-mask)
+        (io-uring-sqe-set-data64 sqe id)
+        (loop-abort
+          (lambda (k)
+            (hashtable-set! (loop-handlers %loop) id k))))))
 
   ) ;; end library
