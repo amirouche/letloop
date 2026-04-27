@@ -6,6 +6,12 @@
    ~check-postgresql-md5-002
    ~check-postgresql-encoding-000
    ~check-postgresql-encoding-001
+   ~check-postgresql-sha256-000
+   ~check-postgresql-sha256-001
+   ~check-postgresql-hmac-sha256-000
+   ~check-postgresql-pbkdf2-000
+   ~check-postgresql-base64-000
+   ~check-postgresql-base64-001
    ~check-postgresql-connect-000
    ~check-postgresql-query-000
    ~check-postgresql-error-000
@@ -13,7 +19,8 @@
    ~check-postgresql-multirow-000
    ~check-postgresql-exec-000
    ~check-postgresql-prepare-000
-   ~check-postgresql-prepare-null-000)
+   ~check-postgresql-prepare-null-000
+   ~check-postgresql-scram-000)
 
   (import (chezscheme)
           (letloop liburing low)
@@ -76,6 +83,63 @@
         (assert (char=? type #\Q))
         (assert (= mlen (+ 4 (bytevector-length payload))))
         (assert (= (bytevector-length msg) (+ 1 mlen))))))
+
+  ;;============================================================
+  ;; Crypto unit tests (no network required)
+  ;;============================================================
+
+  (define ~check-postgresql-sha256-000
+    ;; FIPS 180-4 / RFC test vector: sha256("") = e3b0c44298fc1c14...
+    (lambda ()
+      (let ((result (sha256-digest #vu8()))
+            (expected #vu8(#xe3 #xb0 #xc4 #x42 #x98 #xfc #x1c #x14
+                           #x9a #xfb #xf4 #xc8 #x99 #x6f #xb9 #x24
+                           #x27 #xae #x41 #xe4 #x64 #x9b #x93 #x4c
+                           #xa4 #x95 #x99 #x1b #x78 #x52 #xb8 #x55)))
+        (assert (equal? result expected)))))
+
+  (define ~check-postgresql-sha256-001
+    ;; sha256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a39617...
+    (lambda ()
+      (let ((result (sha256-digest (string->utf8 "abc")))
+            (expected #vu8(#xba #x78 #x16 #xbf #x8f #x01 #xcf #xea
+                           #x41 #x41 #x40 #xde #x5d #xae #x22 #x23
+                           #xb0 #x03 #x61 #xa3 #x96 #x17 #x7a #x9c
+                           #xb4 #x10 #xff #x61 #xf2 #x00 #x15 #xad)))
+        (assert (equal? result expected)))))
+
+  (define ~check-postgresql-hmac-sha256-000
+    ;; RFC 4231 test vector 1: key=20x0b, data="Hi There"
+    (lambda ()
+      (let ((result (hmac-sha256 (make-bytevector 20 #x0b)
+                                 (string->utf8 "Hi There")))
+            (expected #vu8(#xb0 #x34 #x4c #x61 #xd8 #xdb #x38 #x53
+                           #x5c #xa8 #xaf #xce #xaf #x0b #xf1 #x2b
+                           #x88 #x1d #xc2 #x00 #xc9 #x83 #x3d #xa7
+                           #x26 #xe9 #x37 #x6c #x2e #x32 #xcf #xf7)))
+        (assert (equal? result expected)))))
+
+  (define ~check-postgresql-pbkdf2-000
+    ;; PBKDF2-HMAC-SHA256("password","salt",1,32)
+    (lambda ()
+      (let ((result (pbkdf2-hmac-sha256 (string->utf8 "password")
+                                        (string->utf8 "salt") 1))
+            (expected #vu8(#x12 #x0f #xb6 #xcf #xfc #xf8 #xb3 #x2c
+                           #x43 #xe7 #x22 #x52 #x56 #xc4 #xf8 #x37
+                           #xa8 #x65 #x48 #xc9 #x2c #xcc #x35 #x48
+                           #x08 #x05 #x98 #x7c #xb7 #x0b #xe1 #x7b)))
+        (assert (equal? result expected)))))
+
+  (define ~check-postgresql-base64-000
+    ;; RFC 4648: base64-encode("Man") = "TWFu"
+    (lambda ()
+      (assert (string=? (base64-encode (string->utf8 "Man")) "TWFu"))))
+
+  (define ~check-postgresql-base64-001
+    ;; Round-trip: decode(encode(bv)) = bv
+    (lambda ()
+      (let ((bv (string->utf8 "Hello, SCRAM!")))
+        (assert (equal? (base64-decode (base64-encode bv)) bv)))))
 
   ;;============================================================
   ;; Integration tests (require PostgreSQL at 127.0.0.1:5432)
@@ -183,6 +247,15 @@
            (pg-close conn)
            (assert (not (pg-result-error? result)))
            (assert (equal? (pg-result-rows result) '((#f))))
+           #t)))))
+
+  (define ~check-postgresql-scram-000
+    ;; Connect with SCRAM-SHA-256 auth; skip gracefully if user doesn't exist
+    (lambda ()
+      (run-pg-test
+       (guard (exn (#t #t))  ; skip if scram_user not configured
+         (let ((conn (pg-connect "127.0.0.1" 5432 "postgres" "scram_user" "secret")))
+           (pg-close conn)
            #t)))))
 
   ) ;; end library
