@@ -134,9 +134,3 @@ Key flags: `--dev` (debug/profile), `--optimize-level=0-3`, `--disable-garbage-c
 The `venv` script sets up `LETLOOP_ROOT`, `SCHEME`, and `LD_LIBRARY_PATH`. Run `./venv` to enter a shell with these set, or `./venv COMMAND` to run a single command in that environment.
 
 Environment variables: `LETLOOP_DEBUG`, `LETLOOP_DEBUG_ROOT`, `SCHEME`, `LD_LIBRARY_PATH`, `LETLOOP_ROOT`, `LETLOOP_PREFIX`.
-
-## Known Chez Scheme Limitation
-
-Documented in `letloop-issue.md`: compiled libraries that `import` each other across boot-file boundaries can fail with "requires a different compilation instance". Workaround: use `include` instead of `import` for interdependent libraries within the same compilation unit.
-
-`src/letloop/base.scm` uses compile-time macros (`include-scheme-version`, `include-git-branch`, etc.) that call `scheme-pre-release` and `run/output` at macro-expansion time. These only work with Chez 10.x — another reason to always build inside `./venv`.
