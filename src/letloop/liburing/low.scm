@@ -598,10 +598,10 @@
         (func ring cqe-ptr wait-nr))))
 
   (define io-uring-wait-cqe-timeout
-    (let ((func (foreign-procedure "io_uring_wait_cqe_timeout"
+    (let ((func (foreign-procedure __collect_safe "io_uring_wait_cqe_timeout"
                                    (void* void* void*) int)))
       (lambda (ring cqe-ptr ts)
-        (func ring cqe-ptr ts))))
+        (func ring cqe-ptr (ftype-pointer-address ts)))))
 
   (define io-uring-wait-cqes
     (let ((func (foreign-procedure "io_uring_wait_cqes"
