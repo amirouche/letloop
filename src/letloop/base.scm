@@ -1,7 +1,7 @@
 #!chezscheme
 (library (letloop base)
   (export letloop-main letloop-compile letloop-exec letloop-repl letloop-check)
-  (import (chezscheme) (letloop match) (letloop cli base) (letloop root))
+  (import (chezscheme) (letloop match) (letloop cli base) (letloop root) (letloop desktop))
 
   (define pk
     (lambda args
@@ -950,6 +950,7 @@
         ((exec) (letloop-exec (cdr args)))
         ((repl) (letloop-repl (cdr args)))
         ((root) (letloop-root (cdr args)))
+        ((desktop) (letloop-desktop (cdr args)))
         (else (letloop-usage) (exit 1)))))
 
   (define ftw*
