@@ -1,4 +1,4 @@
-.PHONY: help build-scheme build-go build-rust build-fastapi build-flask build-js build-gleam build-h2o build-cl build-ruby build-java-loom build-java-vertx bench bench-perf report clean
+.PHONY: help build-scheme build-go build-rust build-bun-rust build-fastapi build-flask build-js build-gleam build-h2o build-cl build-ruby build-java-loom build-java-vertx bench bench-perf report clean
 
 ROOT := $(shell cd .. && pwd)
 
@@ -9,6 +9,7 @@ help:
 	@echo "  make build-scheme   Build Scheme server (picotransparenturing, requires ./venv)"
 	@echo "  make build-go       Build Go server (net/http stdlib)"
 	@echo "  make build-rust     Build Rust server (axum + tokio, release mode)"
+	@echo "  make build-bun-rust Check bun-rust binary availability"
 	@echo "  make build-h2o      Build C server (clones h2o, builds libh2o-evloop, installs to local/lib)"
 	@echo "  make build-gleam    Build Gleam server (mist + gleam_otp on BEAM)"
 	@echo "  make build-cl       Build Common Lisp server (Hunchentoot, SBCL standalone binary)"
@@ -108,6 +109,13 @@ build-rust:
 	@echo "Building Rust implementation..."
 	@cd rust && cargo build --release 2>&1 | grep -v "Compiling\|Finished" || true
 	@echo "✓ Rust built"
+
+build-bun-rust:
+	@if command -v bun-rust >/dev/null 2>&1; then \
+		echo "✓ bun-rust available: $$(bun-rust --version)"; \
+	else \
+		echo "✗ bun-rust not found"; exit 1; \
+	fi
 
 build-fastapi:
 	@echo "Setting up FastAPI environment..."
