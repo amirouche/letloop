@@ -163,6 +163,13 @@ if command -v bun &>/dev/null; then
     echo "✓ Bun"
 fi
 
+# Bun (Rust)
+if command -v bun-rust &>/dev/null; then
+    SERVERS[bun-rust]="Bun-rust"
+    COMMANDS[bun-rust]="bun-rust $BENCHMARK_DIR/bun/server.ts"
+    echo "✓ Bun (Rust)"
+fi
+
 # Deno
 if command -v deno &>/dev/null; then
     SERVERS[deno]="Deno"
