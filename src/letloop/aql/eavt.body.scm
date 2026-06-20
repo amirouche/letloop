@@ -1,3 +1,6 @@
+;; Copyright © 2024-2026 Amirouche A. BOUBEKKI <amirouche at hyper dev>
+;;
+
 (define-record-type* <eavt>
   (make-eavt% triplestore now)
   eavt?

@@ -1,3 +1,4 @@
+;; Copyright © 2026 Amirouche A. BOUBEKKI <amirouche at hyper dev>
 (library (letloop aql morton)
 
   (export make-morton morton? morton-dimensions morton-bits

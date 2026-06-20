@@ -1,4 +1,4 @@
-;; Copyright © 2019-2023 Amirouche BOUBEKKI <amirouche at hyper dev>
+;; Copyright © 2019-2026 Amirouche A. BOUBEKKI <amirouche at hyper dev>
 
 ;; Helpers
 

@@ -1,3 +1,5 @@
+;; Copyright © 2026 Amirouche A. BOUBEKKI <amirouche at hyper dev>
+
 ;; XZ-ordering: space-filling curve for objects with spatial extent
 ;; Based on Böhm, Klump, Kriegel (1999) and GeoMesa's XZ2SFC
 ;; Generalized to N dimensions (2, 3, 4)

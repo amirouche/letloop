@@ -1,3 +1,5 @@
+;; Copyright © 2026 Amirouche A. BOUBEKKI <amirouche at hyper dev>
+;;
 ;; Morton codes (Z-order curves) for multi-dimensional spatial indexing
 
 ;; Record type
