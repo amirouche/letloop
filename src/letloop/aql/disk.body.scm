@@ -1,4 +1,4 @@
-;; Copyright © 2024-2026 Amirouche BOUBEKKI <amirouche at hyper dev>
+;; Copyright © 2024-2026 Amirouche A. BOUBEKKI <amirouche at hyper dev>
 ;;
 ;; AQL Block Storage Layer — LSM tree with sorted runs on disk.
 ;;

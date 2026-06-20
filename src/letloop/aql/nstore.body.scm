@@ -1,3 +1,5 @@
+;; Copyright © 2023-2026 Amirouche A. BOUBEKKI <amirouche at hyper dev>
+
 (define any
   (lambda (p? objects)
     (let loop ((objects objects))

@@ -1,3 +1,5 @@
+;; Copyright © 2026 Amirouche A. BOUBEKKI <amirouche at hyper dev>
+
 (library (letloop aql xz)
 
   (export make-xzstore xzstore? xzstore-ndims xzstore-g

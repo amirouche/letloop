@@ -1,3 +1,5 @@
+;; Copyright © 2026 Amirouche A. BOUBEKKI <amirouche at hyper dev>
+
 (define ~check-xz-000
   (lambda ()
     ;; 2D point encoding: same code for same point
