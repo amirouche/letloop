@@ -1,111 +1,88 @@
 # TODO
 
-References:
-- https://bun.com/reference
-- https://codeberg.org/amirouche/letloop
-
-## letloop review — Known Bugs
-
-- [ ] **Scroll jump when fold slides off top** — when a folded `(define ...)` is at
-  the top of the viewport and the cursor reaches the viewport bottom, scroll jumps
-  by the entire fold size (N raw lines) in one keypress because advancing past a
-  fold-start requires skipping to `fold-end+1`. Visually jarring; no clean fix
-  without auto-expanding folds on scroll.
-
-## Builtin Core Features
-
-- [ ] **Node.js compatibility** — drop-in replacement for Node.js apps
-- [ ] **Web Standard APIs** — fetch, URL, EventTarget, Headers, etc.
-- [ ] **Native Addons / C interop** — call C-compatible native code from JavaScript
-- [ ] **TypeScript** — first-class support, including "paths" enum namespace
-- [ ] **JSX** — first-class support without configuration
-- [ ] **Module loader plugins** — plugin API for importing/requiring custom file types
-- [ ] **Async I/O** — bug-free epoll transparent async with network I/O (untangle), tested against httpbin
-
-## Builtin APIs
-
-- [ ] **PostgreSQL, MySQL, SQLite, and LMDB drivers** — fast, unified SQL/KV API
-- [ ] **S3 Cloud Storage driver** — upload/download from S3-compatible storage
-- [ ] **Redis client** — built-in with Pub/Sub support
-- [ ] **WebSocket server** — including pub/sub and backpressure handling
-- [ ] **HTTP server** — lightning-fast, built-in; robust reader and writer with full error handling
-- [ ] **HTTP router** — dynamic paths and wildcards
-- [ ] **Single-file executables** — compile to a standalone executable
-- [ ] **YAML** — first-class support, like JSON
-- [ ] **JSON** — parser review and improvements: correctness, readability, CLI
-- [ ] **Cookies API** — parse and set cookies with a Map-like API
-- [ ] **Encrypted Secrets Storage** — OS-native keychain integration
-
-## Builtin Tooling
-
-- [ ] **npm package management** — install, manage, and publish npm-compatible dependencies
-- [ ] **Bundler** — production-ready code for frontend & backend, works with packages
-- [ ] **Cross-platform $ shell API** — native bash-like shell for scripting
-- [ ] **Jest-compatible test runner** — compatible with Jest
-- [ ] **Hot reloading (server)** — reload backend without disconnecting connections
-- [ ] **Monorepo support** — workspaces and cross-workspace commands
-- [ ] **Frontend Development Server** — fully-featured dev server
-- [ ] **Formatter & Linter** — built-in
-- [ ] **Error messages** — source code locations, snippets, and explanations
-- [ ] **Language server** — IDE integration (go-to-definition, completions, etc.)
-- [ ] **Documentation source** — canonical reference that most libraries link to
-- [ ] **Project generator** — scaffold new projects
-- [ ] **Online playground** — run and share code in the browser
-- [ ] **Version manager** — install and switch between language versions
-
-## Builtin Utilities
-
-- [ ] **Password & Hashing APIs** — bcrypt, argon2, and non-cryptographic hashes
-- [ ] **String Width API** — calculate terminal display width of a string
-- [ ] **Glob API** — glob patterns for file matching
-- [ ] **Semver API** — compare and sort semver strings
-- [ ] **CSS color conversion API** — convert between CSS color formats
-- [ ] **CSRF API** — generate and verify CSRF tokens
-
-## Ecosystem Libraries
-
-- [ ] **Data structures** — standard collections beyond arrays and maps
-- [ ] **Serialization** — formats beyond JSON/YAML (MessagePack, CBOR, Protobuf, etc.)
-- [ ] **HTML parser** — with SXPath and CSS selector support, based on justhtml (https://github.com/EmilStenstrom/justhtml/)
-- [ ] **TLS / HTTP client** — openssl/libtls bindings for Chez Scheme, or libcurl bindings
-- [ ] **Authentication** — OAuth, sessions, JWT, etc.
-- [ ] **Error handling** — structured errors, result types, stack enrichment
-- [ ] **Regexes** — extended regex support or a dedicated library
-- [ ] **Cryptography** — symmetric/asymmetric encryption beyond hashing
-
-## Web Development
-
-- [ ] **Template engine** — server-side HTML rendering (Mustache/Jinja-style); composable, escapable, streaming-friendly
-- [ ] **Multipart / form-data** — parse `multipart/form-data` requests for file uploads and HTML form submissions
-- [ ] **Email (SMTP client)** — send transactional email; support TLS, AUTH, attachments
-- [ ] **Background jobs / task queues** — async workers, retry logic, scheduling, dead-letter queues
-- [ ] **Database migrations** — schema versioning tool; up/down migrations, state tracking
-- [ ] **Structured logging** — JSON log output, log levels, request-scoped context propagation
-- [ ] **Metrics + tracing** — OpenTelemetry-compatible instrumentation; counters, histograms, spans
-- [ ] **Config management** — TOML and dotenv parsing, layered config (env > file > defaults)
-- [ ] **Middleware pipeline** — composable request/response middleware with `next` chaining
-- [ ] **Rate limiting** — per-IP, per-user, and global limits; token-bucket and sliding-window algorithms
-- [ ] **i18n / l10n** — internationalization: message catalogs, plural rules, locale-aware formatting
-- [ ] **GraphQL** — server (schema + resolvers) and client (query execution)
-- [ ] **gRPC** — Protobuf code generation and streaming RPC over HTTP/2
-- [ ] **SSE (Server-Sent Events)** — lightweight alternative to WebSocket for server-push streams
-- [ ] **WASM target** — compile Scheme to WebAssembly for in-browser execution
-- [ ] **Headless browser control** — drive a browser via CDP/Playwright protocol for E2E and functional tests
-
-## Desktop Development
-
-- [ ] **GUI — webview** — embed a browser engine (Tauri/Electron model) for cross-platform HTML/CSS UI
-- [ ] **GUI — native toolkit** — GTK, Qt, or SDL2 bindings for native look-and-feel
-- [ ] **2D graphics** — Cairo or Skia bindings for custom rendering, canvas-style drawing
-- [ ] **Audio / media** — SDL_mixer, PipeWire, or PortAudio bindings for playback and recording
-- [ ] **File system watching** — unified abstraction over inotify (Linux), FSEvents (macOS), kqueue (BSD)
-- [ ] **IPC** — pipes, Unix domain sockets, named pipes; D-Bus on Linux
-- [ ] **System tray** — OS tray icon with context menu (libappindicator / systray)
-- [ ] **Native dialogs** — file picker, message boxes, color picker via OS-native APIs
-- [ ] **Clipboard** — read and write text/image data from the system clipboard
-- [ ] **Notifications** — OS push notifications (libnotify on Linux, UNUserNotificationCenter on macOS)
-- [ ] **App packaging** — produce .deb/.rpm, .dmg, .msi, AppImage, and Flatpak bundles
-- [ ] **Auto-updater** — delta updates with cryptographic signature verification
-- [ ] **OAuth2 PKCE** — desktop-specific auth flow using loopback redirect URI
-- [ ] **D-Bus** — Linux system/session bus integration for IPC with system services
-- [ ] **Hardware access** — camera, microphone, and GPU compute (OpenCL/Vulkan) bindings
+- api: cookies: parse and set cookies with a Map-like API.
+- api: http router: dynamic paths and wildcards.
+- api: http server: lightning-fast, built-in; robust reader and writer with full error handling.
+- api: json: parser review and improvements: correctness, readability, CLI.
+- api: redis: built-in client with Pub/Sub support.
+- api: s3: upload/download from S3-compatible cloud storage.
+- api: secrets: encrypted secrets storage with OS-native keychain integration.
+- api: single-file executables: compile to a standalone executable.
+- api: sql drivers: PostgreSQL, MySQL, SQLite, and LMDB with a fast, unified SQL/KV API.
+- api: websocket server: including pub/sub and backpressure handling.
+- api: yaml: first-class support, like JSON.
+- core: async i/o: bug-free epoll transparent async with network I/O (untangle), tested against httpbin.
+- core: jsx: first-class support without configuration.
+- core: module loader plugins: plugin API for importing/requiring custom file types.
+- core: native addons: call C-compatible native code from JavaScript.
+- core: node.js compatibility: drop-in replacement for Node.js apps.
+- core: typescript: first-class support, including "paths" enum namespace.
+- core: web standard apis: fetch, URL, EventTarget, Headers, etc.
+- desktop: 2d graphics: Cairo or Skia bindings for custom rendering, canvas-style drawing.
+- desktop: app packaging: produce .deb/.rpm, .dmg, .msi, AppImage, and Flatpak bundles.
+- desktop: audio / media: SDL_mixer, PipeWire, or PortAudio bindings for playback and recording.
+- desktop: auto-updater: delta updates with cryptographic signature verification.
+- desktop: clipboard: read and write text/image data from the system clipboard.
+- desktop: d-bus: Linux system/session bus integration for IPC with system services.
+- desktop: file system watching: unified abstraction over inotify (Linux), FSEvents (macOS), kqueue (BSD).
+- desktop: gui native toolkit: GTK, Qt, or SDL2 bindings for native look-and-feel.
+- desktop: gui webview: embed a browser engine (Tauri/Electron model) for cross-platform HTML/CSS UI.
+- desktop: hardware access: camera, microphone, and GPU compute (OpenCL/Vulkan) bindings.
+- desktop: ipc: pipes, Unix domain sockets, named pipes; D-Bus on Linux.
+- desktop: keymaps: the evdev keymap is US-QWERTY only; the scancode table has structure for swapping, add more layouts.
+- desktop: multi-window rendering: the render loop is a single cooperative thread; a second window needs a dedicated render thread consuming damage commands over a channel.
+- desktop: native dialogs: file picker, message boxes, color picker via OS-native APIs.
+- desktop: notifications: OS push notifications (libnotify on Linux, UNUserNotificationCenter on macOS).
+- desktop: oauth2 pkce: desktop-specific auth flow using loopback redirect URI.
+- desktop: repl port redirection: the graphical REPL reads only from its line editor; redirect current-input/output/error ports into the window so display/write from evaluated code renders there.
+- desktop: rtl shaping: Arabic glyphs render in logical order; real right-to-left shaping still pending.
+- desktop: shader build step: shaders are handwritten GLSL compiled to SPIR-V offline and embedded as bytevectors; as they accumulate, add an in-tree shader build step (or a Scheme→SPIR-V compiler).
+- desktop: system tray: OS tray icon with context menu (libappindicator / systray).
+- ecosystem: authentication: OAuth, sessions, JWT, etc.
+- ecosystem: cryptography: symmetric/asymmetric encryption beyond hashing.
+- ecosystem: data structures: standard collections beyond arrays and maps.
+- ecosystem: error handling: structured errors, result types, stack enrichment.
+- ecosystem: html parser: with SXPath and CSS selector support, based on justhtml (https://github.com/EmilStenstrom/justhtml/).
+- ecosystem: regexes: extended regex support or a dedicated library.
+- ecosystem: serialization: formats beyond JSON/YAML (MessagePack, CBOR, Protobuf, etc.).
+- ecosystem: tls / http client: openssl/libtls bindings for Chez Scheme, or libcurl bindings.
+- reference: bun: https://bun.com/reference
+- reference: codeberg: https://codeberg.org/amirouche/letloop
+- review: scroll jump on fold: when a folded (define ...) is at the top of the viewport and the cursor reaches the viewport bottom, scroll jumps by the entire fold size (N raw lines) in one keypress, because advancing past a fold-start requires skipping to fold-end+1; visually jarring, no clean fix without auto-expanding folds on scroll.
+- tls: make target: build libtls (LibreTLS) from a `make tls` target instead of relying on distro packages or the stub-.so workaround documented in CLAUDE.md.
+- tooling: bundler: production-ready code for frontend & backend, works with packages.
+- tooling: documentation source: canonical reference that most libraries link to.
+- tooling: error messages: source code locations, snippets, and explanations.
+- tooling: formatter & linter: built-in.
+- tooling: frontend development server: fully-featured dev server.
+- tooling: hot reloading (server): reload backend without disconnecting connections.
+- tooling: jest-compatible test runner: compatible with Jest.
+- tooling: language server: IDE integration (go-to-definition, completions, etc.).
+- tooling: monorepo support: workspaces and cross-workspace commands.
+- tooling: npm package management: install, manage, and publish npm-compatible dependencies.
+- tooling: online playground: run and share code in the browser.
+- tooling: project generator: scaffold new projects.
+- tooling: shell api: cross-platform $ shell, native bash-like scripting.
+- tooling: version manager: install and switch between language versions.
+- util: csrf: generate and verify CSRF tokens.
+- util: css color conversion: convert between CSS color formats.
+- util: glob: glob patterns for file matching.
+- util: password & hashing: bcrypt, argon2, and non-cryptographic hashes.
+- util: semver: compare and sort semver strings.
+- util: string width: calculate terminal display width of a string.
+- web: background jobs: async workers, retry logic, scheduling, dead-letter queues.
+- web: config management: TOML and dotenv parsing, layered config (env > file > defaults).
+- web: database migrations: schema versioning tool; up/down migrations, state tracking.
+- web: email (smtp client): send transactional email; support TLS, AUTH, attachments.
+- web: graphql: server (schema + resolvers) and client (query execution).
+- web: grpc: Protobuf code generation and streaming RPC over HTTP/2.
+- web: headless browser control: drive a browser via CDP/Playwright protocol for E2E and functional tests.
+- web: i18n / l10n: internationalization: message catalogs, plural rules, locale-aware formatting.
+- web: metrics + tracing: OpenTelemetry-compatible instrumentation; counters, histograms, spans.
+- web: middleware pipeline: composable request/response middleware with `next` chaining.
+- web: multipart / form-data: parse multipart/form-data requests for file uploads and HTML form submissions.
+- web: rate limiting: per-IP, per-user, and global limits; token-bucket and sliding-window algorithms.
+- web: sse (server-sent events): lightweight alternative to WebSocket for server-push streams.
+- web: structured logging: JSON log output, log levels, request-scoped context propagation.
+- web: template engine: server-side HTML rendering (Mustache/Jinja-style); composable, escapable, streaming-friendly.
+- web: wasm target: compile Scheme to WebAssembly for in-browser execution.
