@@ -362,6 +362,11 @@
    ;; event loop lifecycle
    loop-new loop-run loop-run-once loop-stop loop-spawn
 
+   ;; loop internals, for libraries extending the loop with new
+   ;; operations (e.g. (letloop dns)): current loop, its ring, the
+   ;; completion-handler table, id allocation, coroutine abort
+   loop-current loop-ring loop-handlers loop-alloc-id! loop-abort
+
    ;; async I/O operations
    loop-connect loop-read loop-write loop-close loop-sleep
    loop-accept loop-tcp-serve loop-poll-wait
@@ -1942,6 +1947,11 @@
       (let ((id (loop-next-id %loop)))
         (loop-next-id! %loop (fx+ id 1))
         id)))
+
+  ;; The loop installed by the latest loop-new, #f outside loop-run.
+  (define loop-current
+    (lambda ()
+      %loop))
 
   ;;------------------------------------------------------------
   ;; Continuation machinery
