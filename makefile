@@ -23,7 +23,7 @@ chezscheme: ## Compile latest chezscheme
 letloop: clean src/letloop-program.c src/letloop-usage.md src/letloop/base.scm ## Produce a.out from letloop/base.scm's procedure called letloop-main
 	echo $(SCHEME)
 	$(SCHEME) --version
-	echo '(generate-wpo-files #t)(import (letloop base)) (letloop-compile (list "./src/" "src/letloop/base.scm" "letloop-main"))' | $(SCHEME) --quiet --libdirs ./src/ --compile-imported-libraries
+	echo '(source-directories (list "./src/")) (generate-wpo-files #t)(import (letloop base)) (letloop-compile (list "./src/" "src/letloop/base.scm" "letloop-main"))' | $(SCHEME) --quiet --libdirs ./src/ --compile-imported-libraries
 	cp a.out $(PREFIX)/bin/letloop
 	@echo What is done is not to be done!
 
