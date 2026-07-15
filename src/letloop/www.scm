@@ -2,7 +2,8 @@
   (export www-request www-host-read www-uri-read www-query-read
           www-request-line-uri-split
           www-form-urlencoded-read
-          (rename (url-parse www-url-read))
+          (rename (url-parse www-url-read)
+                  (percent-decode www-percent-decode))
           ~check-www-000 ~check-www-001 ~check-www-002 ~check-www-002-bis
           ~check-www-003 ~check-www-url-read-000 ~check-www-url-read-001)
   (import (chezscheme) (letloop http) (letloop tls base) (letloop match))

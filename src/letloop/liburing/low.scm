@@ -366,6 +366,7 @@
    ;; operations (e.g. (letloop dns)): current loop, its ring, the
    ;; completion-handler table, id allocation, coroutine abort
    loop-current loop-ring loop-handlers loop-alloc-id! loop-abort
+   loop-running? loop-active-connections
 
    ;; async I/O operations
    loop-connect loop-read loop-write loop-close loop-sleep
@@ -1952,6 +1953,12 @@
   (define loop-current
     (lambda ()
       %loop))
+
+  ;; fd → jiffy of last read/write activity, maintained by the read
+  ;; and write paths; lets callers reap idle connections.
+  (define loop-active-connections
+    (lambda ()
+      %active-connections))
 
   ;;------------------------------------------------------------
   ;; Continuation machinery

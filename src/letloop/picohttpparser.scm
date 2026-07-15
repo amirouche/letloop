@@ -16,6 +16,8 @@
           phr-request-header-ref-as-integer
           phr-request-header-value-ci=?
           phr-request-body
+          phr-request-buffer
+          phr-request-path-range
           bytevector-range=?
           bytevector-range-ci=?
           phr-parse-response
@@ -234,6 +236,19 @@
                       (fx<? (bytevector-length buf) (fx+ consumed len)))
                   (bytevector)
                   (subbytevector buf consumed (fx+ consumed len))))))))
+
+  ;; The raw request bytevector and the path's (values offset len)
+  ;; within it: parse the request target in place (see uri-parse/range
+  ;; in (letloop http server)) without extracting the path string.
+  (define phr-request-buffer
+    (lambda (req)
+      (%phr-buf req)))
+
+  (define phr-request-path-range
+    (lambda (req)
+      (let ((out (%phr-out req)))
+        (values (bytevector-u64-ref out 16 %native)
+                (bytevector-u64-ref out 24 %native)))))
 
   ;; ---- Zero-allocation header/method primitives ----
 
