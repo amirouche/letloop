@@ -5,6 +5,7 @@
           tls-reader
           tls-writer
           tls-shutdown
+          url-parse
           https-request)
 
   (import (chezscheme)
@@ -108,7 +109,7 @@
       (tls-close ctx)
       (tls-free ctx)))
 
-  ;; URL parser (internal)
+  ;; URL parser, re-exported by (letloop www) as www-url-read.
   ;; Returns (values scheme host port request-target)
   (define url-parse
     (lambda (url)
