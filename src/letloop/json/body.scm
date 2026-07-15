@@ -22,9 +22,8 @@
 (define (expect value other)
   (when (eof-object? value)
     (raise (make-json-error "Unexpected end-of-file.")))
-  ;; (unless (char=? value other)
-  ;;   (raise (make-json-error "Unexpected character."))))
-  (void))
+  (unless (char=? value other)
+    (raise (make-json-error "Unexpected character."))))
 
 (define (port->generator port)
   (lambda ()
@@ -482,7 +481,7 @@
 (define json-write
   (lambda (obj . args)
     (if (null? args)
-        (json-write obj (current-input-port))
+        (json-write obj (current-output-port))
         (if (procedure? (car args))
             (%json-write obj (car args))
             (%json-write obj (port->accumulator (car args)))))))
