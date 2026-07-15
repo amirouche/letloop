@@ -8,6 +8,8 @@
           http-response-read
           http-response-write
 
+          ~check-http-header-value-case
+
           ;; XXX: Disable tests
           #;~check-letloop-http
           )
@@ -156,8 +158,10 @@
                 (raise-invalid 5)
                 (let ((char (car chars)))
                   (if (char=? char #\:)
+                      ;; Field names are case-insensitive, values are
+                      ;; not (RFC 9110): downcase only the key.
                       (cons (string->symbol (string-downcase (list->string (reverse (massage* key)))))
-                            (string-downcase (list->string (massage* (reverse (massage* (reverse (cdr chars))))))))
+                            (list->string (massage* (reverse (massage* (reverse (cdr chars)))))))
                       (loopx (cdr chars) (cons (car chars) key))))))))
 
       (let loopy ((out '()))
@@ -304,6 +308,23 @@
                  (header-str (apply string-append (map (lambda (x) (format #f "~a: ~a\r\n" (car x) (cdr x))) headers*))))
             (accumulator (string->utf8 (string-append response-line header-str "\r\n")))
             (for-each accumulator chunks))))))
+
+  (define ~check-http-header-value-case
+    (lambda ()
+      ;; Header keys are downcased, values keep their case.
+      (let ((chunks (list (string->utf8 "GET /hello HTTP/1.1\r\nX-Token: AbCdEf\r\nHost: EXAMPLE.com\r\n\r\n"))))
+        (define read
+          (lambda ()
+            (if (null? chunks)
+                (eof-object)
+                (let ((chunk (car chunks)))
+                  (set! chunks (cdr chunks))
+                  chunk))))
+        (call-with-values (lambda () (http-request-read read))
+          (lambda (method uri version headers body)
+            (and (eq? method 'GET)
+                 (equal? (assq 'x-token headers) '(x-token . "AbCdEf"))
+                 (equal? (assq 'host headers) '(host . "EXAMPLE.com"))))))))
 
   ;; there is simpler way to do the following, but I will need it later
 
