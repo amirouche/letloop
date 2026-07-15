@@ -2,8 +2,9 @@
   (export www-request www-host-read www-uri-read www-query-read
           www-request-line-uri-split
           www-form-urlencoded-read
+          (rename (url-parse www-url-read))
           ~check-www-000 ~check-www-001 ~check-www-002 ~check-www-002-bis
-          ~check-www-003)
+          ~check-www-003 ~check-www-url-read-000 ~check-www-url-read-001)
   (import (chezscheme) (letloop http) (letloop tls base) (letloop match))
 
   (define pk
@@ -26,6 +27,25 @@
         (call-with-values (lambda () (https-request method url headers body))
           (lambda (version code reason headers body)
             (values code headers body))))))
+
+  (define ~check-www-url-read-000
+    (lambda ()
+      (call-with-values (lambda () (url-parse "https://example.com:8443/a/b?q=1"))
+        (lambda (scheme host port target)
+          (and (string=? scheme "https")
+               (string=? host "example.com")
+               (= port 8443)
+               (string=? target "/a/b?q=1"))))))
+
+  (define ~check-www-url-read-001
+    (lambda ()
+      ;; No port, no path: port is #f, target defaults to /.
+      (call-with-values (lambda () (url-parse "http://example.com"))
+        (lambda (scheme host port target)
+          (and (string=? scheme "http")
+               (string=? host "example.com")
+               (not port)
+               (string=? target "/"))))))
 
   (define ~check-www-000
     (lambda ()
