@@ -33,7 +33,21 @@
    ;; attribute codes
    attr-symbol->code
    ;; helpers
-   write-csi)
+   write-csi
+
+   ~check-sgr-cursor
+   ~check-sgr-clear
+   ~check-sgr-reset
+   ~check-sgr-color-normal
+   ~check-sgr-color-bright
+   ~check-sgr-color-default
+   ~check-sgr-color-256
+   ~check-sgr-color-216
+   ~check-sgr-color-grayscale
+   ~check-sgr-color-truecolor
+   ~check-sgr-attrs
+   ~check-sgr-toggles
+   ~check-sgr-mouse-on)
   (import (chezscheme))
 
   (define ESC #\x1b)
@@ -208,4 +222,7 @@
     (write-decreset! port 1003)
     (write-decreset! port 1002)
     (write-decreset! port 1000))
+  
+
+  (include "letloop/tea/sgr.check.scm")
   )

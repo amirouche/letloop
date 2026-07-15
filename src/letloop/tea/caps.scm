@@ -37,7 +37,20 @@
    ;; lookup
    caps-for-term
    caps-for-term/strict
-   all-cap-sets)
+   all-cap-sets
+
+   ~check-caps-xterm-shape
+   ~check-caps-xterm-init-clears
+   ~check-caps-xterm-shutdown-restores
+   ~check-caps-xterm-input-keys-cover-arrows
+   ~check-caps-for-term-exact
+   ~check-caps-for-term-prefix
+   ~check-caps-for-term-fallback
+   ~check-caps-for-term-empty
+   ~check-caps-linux-no-altscreen
+   ~check-caps-tmux-aliased
+   ~check-caps-rxvt-fkeys
+   ~check-caps-mod-keys-shape)
   (import (chezscheme))
 
   (define-record-type cap-set
@@ -388,4 +401,7 @@
                         (string=? n (substring term 0 (string-length n)))))
                  (car cs))
                 (else (prefix (cdr cs))))))))
+  
+
+  (include "letloop/tea/caps.check.scm")
   )

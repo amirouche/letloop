@@ -1,18 +1,7 @@
-(library (tea width)
+;; Checks for (letloop tea width), driving the module through its exported
+;; API the way a caller would.  Included at the tail of the library;
+;; discovered by `make check` via the ~check- exports.
 
-  (export
-   ~check-width-ascii
-   ~check-width-control
-   ~check-width-combining
-   ~check-width-cjk
-   ~check-width-hangul
-   ~check-width-fullwidth
-   ~check-width-emoji
-   ~check-width-narrow-edges
-   ~check-width-monotone-binary-search)
-
-  (import (chezscheme)
-          (letloop tea width))
 
   (define (~check-width-ascii)
     (and (= (codepoint-width 65) 1)        ; A
@@ -64,4 +53,4 @@
       (or (null? cps)
           (let ((w (codepoint-width (car cps))))
             (and (memv w '(-1 0 1 2))
-                 (loop (cdr cps))))))))
+                 (loop (cdr cps)))))))

@@ -35,7 +35,11 @@
    tea-output-mode
    tea-fd
    ;; re-exports for callers (so they don't have to import (letloop tea cell))
-   attr-mask)
+   attr-mask
+
+   ~check-base-cellbuf-render-pipeline
+   ~check-base-attr-mask-export
+   ~check-base-output-mode-switch-repaints)
   (import (chezscheme)
           (letloop tea syscall)
           (letloop tea sgr)
@@ -261,4 +265,7 @@
               (proc e)
               (drain))))
         (drive))))
+  
+
+  (include "letloop/tea.check.scm")
   )

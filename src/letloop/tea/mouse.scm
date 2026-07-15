@@ -30,7 +30,18 @@
    mouse-event-mods
    decode-mouse-x10
    decode-mouse-sgr
-   decode-mouse-urxvt)
+   decode-mouse-urxvt
+
+   ~check-mouse-x10-left-press
+   ~check-mouse-x10-release
+   ~check-mouse-x10-with-mods
+   ~check-mouse-x10-motion
+   ~check-mouse-sgr-left-press
+   ~check-mouse-sgr-release
+   ~check-mouse-sgr-wheel-up
+   ~check-mouse-sgr-with-mods
+   ~check-mouse-urxvt-middle-press
+   ~check-mouse-zero-indexed-coords)
   (import (chezscheme))
 
   (define-record-type mouse-event
@@ -125,4 +136,7 @@
            pressed?
            motion
            mods)))))
+  
+
+  (include "letloop/tea/mouse.check.scm")
   )

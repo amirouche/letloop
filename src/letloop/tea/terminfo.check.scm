@@ -1,16 +1,7 @@
-(library (tea terminfo)
+;; Checks for (letloop tea terminfo), driving the module through its exported
+;; API the way a caller would.  Included at the tail of the library;
+;; discovered by `make check` via the ~check- exports.
 
-  (export
-   ~check-terminfo-paths-include-system
-   ~check-terminfo-load-xterm
-   ~check-terminfo-load-missing
-   ~check-terminfo-xterm-has-altscreen
-   ~check-terminfo-xterm-input-keys
-   ~check-terminfo-as-fallback)
-
-  (import (chezscheme)
-          (letloop tea caps)
-          (letloop tea terminfo))
 
   (define (~check-terminfo-paths-include-system)
     (let ((ps (terminfo-paths)))
@@ -52,4 +43,4 @@
       (or (and cs (cap-set? cs))
           ;; vt220 may not be installed everywhere — accept #f on systems
           ;; that don't ship it.
-          (not (file-exists? "/usr/share/terminfo/v/vt220"))))))
+          (not (file-exists? "/usr/share/terminfo/v/vt220")))))

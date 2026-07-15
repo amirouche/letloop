@@ -1,17 +1,7 @@
-(library (tea trie)
+;; Checks for (letloop tea trie), driving the module through its exported
+;; API the way a caller would.  Included at the tail of the library;
+;; discovered by `make check` via the ~check- exports.
 
-  (export
-   ~check-trie-single-key-match
-   ~check-trie-multiple-keys
-   ~check-trie-prefix-continue
-   ~check-trie-no-match
-   ~check-trie-state-reset
-   ~check-trie-bytes-tracked
-   ~check-trie-real-xterm-arrows
-   ~check-trie-shared-prefix-disambiguation)
-
-  (import (chezscheme)
-          (letloop tea trie))
 
   (define-syntax expect
     (syntax-rules ()
@@ -91,4 +81,4 @@
       (and (eq? (trie-feed! s #x1B) 'continue)
            (eq? (trie-feed! s (char->integer #\[)) 'continue)
            (eq? (trie-feed! s (char->integer #\5)) 'continue)
-           (eq? (trie-feed! s (char->integer #\;)) 'no-match)))))
+           (eq? (trie-feed! s (char->integer #\;)) 'no-match))))

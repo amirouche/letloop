@@ -1,19 +1,7 @@
-(library (tea mouse)
+;; Checks for (letloop tea mouse), driving the module through its exported
+;; API the way a caller would.  Included at the tail of the library;
+;; discovered by `make check` via the ~check- exports.
 
-  (export
-   ~check-mouse-x10-left-press
-   ~check-mouse-x10-release
-   ~check-mouse-x10-with-mods
-   ~check-mouse-x10-motion
-   ~check-mouse-sgr-left-press
-   ~check-mouse-sgr-release
-   ~check-mouse-sgr-wheel-up
-   ~check-mouse-sgr-with-mods
-   ~check-mouse-urxvt-middle-press
-   ~check-mouse-zero-indexed-coords)
-
-  (import (chezscheme)
-          (letloop tea mouse))
 
   (define (~check-mouse-x10-left-press)
     (let ((e (decode-mouse-x10 (fx+ 0 32) (fx+ 1 32 1) (fx+ 1 32 1))))
@@ -76,4 +64,4 @@
     (and (let ((e (decode-mouse-sgr '(0 1 1) #\M)))
            (and (= (mouse-event-x e) 0) (= (mouse-event-y e) 0)))
          (let ((e (decode-mouse-x10 (fx+ 0 32) 33 33)))
-           (and (= (mouse-event-x e) 0) (= (mouse-event-y e) 0))))))
+           (and (= (mouse-event-x e) 0) (= (mouse-event-y e) 0)))))

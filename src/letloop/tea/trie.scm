@@ -22,7 +22,16 @@
    make-trie-state
    trie-state-reset!
    trie-state-bytes
-   trie-feed!)
+   trie-feed!
+
+   ~check-trie-single-key-match
+   ~check-trie-multiple-keys
+   ~check-trie-prefix-continue
+   ~check-trie-no-match
+   ~check-trie-state-reset
+   ~check-trie-bytes-tracked
+   ~check-trie-real-xterm-arrows
+   ~check-trie-shared-prefix-disambiguation)
   (import (chezscheme))
 
   ;; ----- node type --------------------------------------------------------
@@ -106,4 +115,7 @@
         ;; trie-state-reset! (or feed bytes through a fallback decoder
         ;; using trie-state-bytes for what was consumed).
         'no-match))))
+  
+
+  (include "letloop/tea/trie.check.scm")
   )

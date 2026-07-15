@@ -25,7 +25,14 @@
   (export
    load-terminfo
    terminfo-paths
-   terminfo-cap-set)
+   terminfo-cap-set
+
+   ~check-terminfo-paths-include-system
+   ~check-terminfo-load-xterm
+   ~check-terminfo-load-missing
+   ~check-terminfo-xterm-has-altscreen
+   ~check-terminfo-xterm-input-keys
+   ~check-terminfo-as-fallback)
   (import (chezscheme)
           (letloop tea caps))
 
@@ -244,4 +251,7 @@
   ;; ----- public lookup ----------------------------------------------------
 
   (define (terminfo-cap-set term)
-    (and term (load-terminfo term))))
+    (and term (load-terminfo term)))
+
+  (include "letloop/tea/terminfo.check.scm")
+  )

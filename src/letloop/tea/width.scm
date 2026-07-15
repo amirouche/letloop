@@ -18,7 +18,17 @@
    codepoint-width
    codepoint-control?
    codepoint-combining?
-   codepoint-wide?)
+   codepoint-wide?
+
+   ~check-width-ascii
+   ~check-width-control
+   ~check-width-combining
+   ~check-width-cjk
+   ~check-width-hangul
+   ~check-width-fullwidth
+   ~check-width-emoji
+   ~check-width-narrow-edges
+   ~check-width-monotone-binary-search)
   (import (chezscheme))
 
   ;; ----- range search -----------------------------------------------------
@@ -125,4 +135,7 @@
      ((codepoint-combining? cp)  0)
      ((codepoint-wide?      cp)  2)
      (else                       1)))
+  
+
+  (include "letloop/tea/width.check.scm")
   )

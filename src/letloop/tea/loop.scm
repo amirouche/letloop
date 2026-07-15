@@ -22,13 +22,19 @@
    ;; resize signalling — the public renderer hooks into this so it can
    ;; cellbuf-resize! when the kernel says the geometry changed
    tea-loop-resize-pending?
-   tea-loop-clear-resize-pending!)
+   tea-loop-clear-resize-pending!
+
+   ~check-loop-pipe-arrow-key
+   ~check-loop-pipe-multibyte-utf8
+   ~check-loop-pipe-esc-flush)
   (import (chezscheme)
           ;; strerror, POLLIN, O-NONBLOCK also come from (letloop tea
           ;; syscall); keep the tea bindings.
           (except (letloop liburing low) strerror POLLIN O-NONBLOCK)
           (letloop tea syscall)
-          (letloop tea input))
+          (letloop tea input)
+          ;; xterm-caps, for the pipe-driven checks
+          (letloop tea caps))
 
   (define-ftype <ts>
     (struct (sec long-long) (nsec long-long)))
@@ -245,7 +251,8 @@
                (ts  (make-ftype-pointer <ts> raw)))
           (ftype-set! <ts> (sec)  ts (fxdiv timeout-ms 1000))
           (ftype-set! <ts> (nsec) ts (fx* (fxmod timeout-ms 1000) 1000000))
-          (io-uring-wait-cqe-timeout ring cqe-ptr raw)
+          ;; the wrapper takes the ftype pointer, not the raw address
+          (io-uring-wait-cqe-timeout ring cqe-ptr ts)
           (foreign-free raw)))
        (else
         (io-uring-wait-cqe ring cqe-ptr)))
@@ -275,4 +282,7 @@
     (foreign-free (tea-loop-sigfd-buf l))
     (foreign-free (tea-loop-timeout-ts l))
     (close-fd (tea-loop-sigfd l)))
+  
+
+  (include "letloop/tea/loop.check.scm")
   )

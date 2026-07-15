@@ -26,7 +26,11 @@
    TCSAFLUSH
    POLLIN
    ;; errno
-   errno strerror)
+   errno strerror
+
+   ~check-syscall-constants
+   ~check-syscall-sigwinch-fd
+   ~check-syscall-winsize-on-non-tty)
   (import (chezscheme))
 
   ;; ----- shared object -----------------------------------------------------
@@ -176,4 +180,7 @@
             (foreign-free buf)
             n)
            (else (loop (fx+ n 1))))))))
+  
+
+  (include "letloop/tea/syscall.check.scm")
   )

@@ -1,12 +1,7 @@
-(library (tea syscall)
+;; Checks for (letloop tea syscall), driving the module through its exported
+;; API the way a caller would.  Included at the tail of the library;
+;; discovered by `make check` via the ~check- exports.
 
-  (export
-   ~check-syscall-constants
-   ~check-syscall-sigwinch-fd
-   ~check-syscall-winsize-on-non-tty)
-
-  (import (chezscheme)
-          (letloop tea syscall))
 
   ;; Smoke: constants are integers and exported.
   (define (~check-syscall-constants)
@@ -33,4 +28,4 @@
         (ioctl-winsize 1 ws)
         ;; If stdout *is* a tty in the test runner, that's fine too.
         (and (fx>=? (winsize-rows ws) 0)
-             (fx>=? (winsize-cols ws) 0))))))
+             (fx>=? (winsize-cols ws) 0)))))

@@ -1,14 +1,7 @@
-(library (tea base)
+;; Checks for (letloop tea), driving the module through its exported
+;; API the way a caller would.  Included at the tail of the library;
+;; discovered by `make check` via the ~check- exports.
 
-  (export
-   ~check-base-cellbuf-render-pipeline
-   ~check-base-attr-mask-export
-   ~check-base-output-mode-switch-repaints)
-
-  (import (chezscheme)
-          (letloop tea sgr)
-          (letloop tea cell)
-          (letloop tea))
 
   ;; The renderer pipeline used by tea-present, exercised without a tty.
   ;; This is the core composition: write into back via tea-print/tea-set-cell
@@ -50,4 +43,4 @@
                  ;; on front is the right "force repaint" mechanism.
                  (cellbuf-clear! front)
                  (cellbuf-diff! p2 back front 'normal)
-                 (> (string-length (get2)) 0))))))))
+                 (> (string-length (get2)) 0)))))))

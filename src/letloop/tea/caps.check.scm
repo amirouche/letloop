@@ -1,21 +1,7 @@
-(library (tea caps)
+;; Checks for (letloop tea caps), driving the module through its exported
+;; API the way a caller would.  Included at the tail of the library;
+;; discovered by `make check` via the ~check- exports.
 
-  (export
-   ~check-caps-xterm-shape
-   ~check-caps-xterm-init-clears
-   ~check-caps-xterm-shutdown-restores
-   ~check-caps-xterm-input-keys-cover-arrows
-   ~check-caps-for-term-exact
-   ~check-caps-for-term-prefix
-   ~check-caps-for-term-fallback
-   ~check-caps-for-term-empty
-   ~check-caps-linux-no-altscreen
-   ~check-caps-tmux-aliased
-   ~check-caps-rxvt-fkeys
-   ~check-caps-mod-keys-shape)
-
-  (import (chezscheme)
-          (letloop tea caps))
 
   (define (~check-caps-xterm-shape)
     (and (cap-set? xterm-caps)
@@ -86,4 +72,4 @@
         (cond
          ((fx>? (fx+ i nl) hl) #f)
          ((string=? (substring hay i (fx+ i nl)) needle) i)
-         (else (loop (fx+ i 1))))))))
+         (else (loop (fx+ i 1)))))))
