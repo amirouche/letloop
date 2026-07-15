@@ -56,7 +56,7 @@ echo "  rounds=$ROUNDS  threads=$THREADS  conns=$CONNS  duration=$DURATION"
 echo ""
 
 # Start server
-$LETLOOP exec "$EXAMPLES_DIR/" "$EXAMPLES_DIR/transparenturing-example.scm" main -- $PORT &
+$LETLOOP http serve --port=$PORT "$EXAMPLES_DIR/" "$EXAMPLES_DIR/my-web-library.scm" &
 SERVER_PID=$!
 
 # Wait for server ready
