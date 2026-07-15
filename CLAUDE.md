@@ -110,10 +110,13 @@ src/letloop/cffi.scm         C FFI bindings
 
 Test files use the `letloop check` subcommand. Procedures prefixed `~check-` are test cases; `~benchmark-` are benchmarks. The test runner validates output via MD5 hash comparison.
 
-Test sources live in `checks/`:
-- `checks/check/*.scm` — success/failure/error/edge-case scenarios
-- `checks/codex/` — integration tests with library dependencies
+**Library checks live with their library** under `src/`: the library exports its `~check-*` procedures and `include`s a sibling `NAME.check.scm` fragment (see `src/letloop/aql/morton.scm` or `src/letloop/tea/cell.scm` for the pattern). `make check` discovers them by scanning `./src/`. Checks that want a live service (e.g. PostgreSQL) print a SKIP note and pass when the service is absent.
+
+The `checks/` directory is only for proving the test runner itself works:
+- `checks/check/*.scm` — success/failure/error/edge-case scenarios for `letloop check`
+- `checks/codex/` — compile/exec scenarios with library dependencies
 - `checks/example.scm` — simple compilation smoke test
+- `checks/*.sh` — shell-driven end-to-end tests of the CLI (serve, stress)
 
 ## CLI Usage
 
