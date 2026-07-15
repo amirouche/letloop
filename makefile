@@ -143,9 +143,10 @@ opaque: oprf ## Build libopaque from source
 	cp $(PREFIX)/src/libopaque/src/libopaque.a $(PREFIX)/lib/
 
 check: letloop-check.sh clean ## Hit the ground running!
-	LD_LIBRARY_PATH=$(PREFIX)/lib/ echo '(import (letloop base)) (letloop-check (list "./src/"))' | $(SCHEME) --quiet --libdirs ./src/
+	LD_LIBRARY_PATH=$(PREFIX)/lib/ echo '(source-directories (list "./src/")) (guard (ex (else (exit 1))) (eval (quote (import (letloop base))) (interaction-environment)) (eval (quote (letloop-check (list "./src/"))) (interaction-environment)) (exit 0))' | $(SCHEME) --quiet --libdirs ./src/
 	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) sh letloop-check.sh
 	LETLOOP=$(LETLOOP) bash checks/letloop/srp.sh
+	LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) bash checks/check-transparenturing.sh
 
 check-integration: ## Run integration tests (require live services, e.g. PostgreSQL at 127.0.0.1:5432)
 	LD_LIBRARY_PATH=$(PREFIX)/lib/ $(LETLOOP) check src/ checks/ checks/postgresql/ checks/postgresql/check-postgresql.scm
@@ -154,10 +155,11 @@ stress: clean ## check stress implementations
 	sh checks/stress-transparenturing.sh
 
 check-fail-fast: letloop-check.sh clean ## Hit the ground running!
-	LD_LIBRARY_PATH=$(PREFIX)/lib/ echo '(import (letloop base)) (letloop-check (list "./src/" "--fail-fast"))' | $(SCHEME) --quiet --libdirs ./src/
+	LD_LIBRARY_PATH=$(PREFIX)/lib/ echo '(source-directories (list "./src/")) (guard (ex (else (exit 1))) (eval (quote (import (letloop base))) (interaction-environment)) (eval (quote (letloop-check (list "./src/" "--fail-fast"))) (interaction-environment)) (exit 0))' | $(SCHEME) --quiet --libdirs ./src/
 	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) sh letloop-check.sh
 	LETLOOP=$(LETLOOP) bash checks/letloop/srp.sh
-	LETLOOP=$(LETLOOP) sh checks/stress-transparenturing.sh
+	LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) bash checks/check-transparenturing.sh
+	LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) sh checks/stress-transparenturing.sh
 
 clean:
 	$(shell find src/ -name "*.so" | xargs rm -f)

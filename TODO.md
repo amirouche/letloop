@@ -2,7 +2,7 @@
 
 - api: cookies: parse and set cookies with a Map-like API.
 - api: http router: dynamic paths and wildcards.
-- api: http server: lightning-fast, built-in; robust reader and writer with full error handling.
+- api: http server: harden (letloop http server) and `letloop http serve`: chunked request bodies, streaming responses, richer error handling.
 - api: json: parser review and improvements: correctness, readability, CLI.
 - api: redis: built-in client with Pub/Sub support.
 - api: s3: upload/download from S3-compatible cloud storage.
@@ -11,7 +11,7 @@
 - api: sql drivers: PostgreSQL, MySQL, SQLite, and LMDB with a fast, unified SQL/KV API.
 - api: websocket server: including pub/sub and backpressure handling.
 - api: yaml: first-class support, like JSON.
-- core: async i/o: bug-free epoll transparent async with network I/O (untangle), tested against httpbin.
+- core: async i/o: consolidate the untangle prototypes on the io_uring loop; the async HTTPS client (letloop tls uring) is tested against httpbin, epoll variants remain experimental.
 - core: jsx: first-class support without configuration.
 - core: module loader plugins: plugin API for importing/requiring custom file types.
 - core: native addons: call C-compatible native code from JavaScript.

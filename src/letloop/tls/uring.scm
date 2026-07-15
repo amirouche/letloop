@@ -186,19 +186,21 @@
                   (values code resp-headers resp-body)))))))))
 
   ;; End-to-end: async HTTPS GET inside the loop (needs network, like
-  ;; the ~check-www-* it mirrors).
+  ;; the ~check-www-* it mirrors). One retry to absorb httpbin flakes.
   (define ~check-tls-uring-000
     (lambda ()
-      (let ((result #f))
-        (loop-new)
-        (loop-spawn
-         (lambda ()
-           (call-with-values
-               (lambda () (www-request 'GET "https://httpbin.org/anything" '() (bytevector)))
-             (lambda (code headers body)
-               (set! result code)
-               (loop-stop)))))
-        (loop-run)
-        (equal? result 200))))
+      (define (attempt)
+        (let ((result #f))
+          (loop-new)
+          (loop-spawn
+           (lambda ()
+             (call-with-values
+                 (lambda () (www-request 'GET "https://httpbin.org/anything" '() (bytevector)))
+               (lambda (code headers body)
+                 (set! result code)
+                 (loop-stop)))))
+          (loop-run)
+          (equal? result 200)))
+      (or (attempt) (attempt))))
 
   )
