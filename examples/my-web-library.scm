@@ -1,9 +1,12 @@
+#!chezscheme
 ;; Serve with:
 ;;
-;;   letloop http serve [--port=8080] src/ examples/my-web-library.scm
+;;   letloop http serve [--port=8080] examples/ examples/my-web-library.scm
 ;;
 ;; Routes:
-;;   GET /            → HTML greeting
+;;   GET /            → HTML counter page
+;;   POST /increment  → 302 back to /
+;;   GET /sleep       → 200 after a 1s io_uring sleep
 ;;   GET /api?who=you → JSON echo of the query
 ;;   POST /api        → JSON with the request body length
 ;;   anything else    → 404
@@ -12,38 +15,45 @@
   (export application context dispatch)
 
   (import (chezscheme)
-          (letloop http server))
+          (letloop match)
+          (letloop http server)
+          (only (letloop liburing low) loop-sleep))
 
   ;; App-wide state, created once at startup.
-  (define application
-    (lambda ()
-      (let ((hits (box 0)))
-        hits)))
+  (define (application) (box 0))
 
   ;; Per-connection state, created on the first request; CLIENT is
   ;; the peer IP, REQ the parsed request.
-  (define context
-    (lambda (app client req)
-      client))
+  (define (context application client req) client)
 
-  (define dispatch
-    (lambda (app client method path params req)
-      (set-box! app (+ 1 (unbox app)))
-      (cond
-       ((and (eq? method 'GET) (null? path))
-        (values 200
-                (html `(html (body (h1 "hello, world")
-                                   (p "hits: " ,(number->string (unbox app))))))
-                '()))
-       ((and (eq? method 'GET) (equal? path '("api")))
-        (values 200
-                (json `((hello . ,(cond ((assq 'who params) => cdr)
-                                        (else "world")))
-                        (hits . ,(unbox app))))
-                '()))
-       ((and (eq? method 'POST) (equal? path '("api")))
-        (values 201
-                (json `((received . ,(bytevector-length (phr-request-body req)))))
-                '()))
-       (else
-        (values 404 (json '((error . "not found"))) '()))))))
+  (define (dispatch application request-state method path params req)
+    (match (cons method path)
+      ((GET)
+       (values 200
+               (html `(html (body
+                 (h1 ,(format #f "Count: ~a" (unbox application)))
+                 (p "Press Ctrl-C for graceful shutdown")
+                 (form (@ (method "POST") (action "/increment"))
+                   (button (@ (type "submit")) "Increment")))))
+               '()))
+      ((POST "increment")
+       (set-box! application (+ (unbox application) 1))
+       (values 302 (cons (bytevector) "text/plain") '((location . "/"))))
+      ((GET "sleep")
+       ;; Demo: io_uring-based sleep (1 second)
+       (loop-sleep 1)
+       (values 200
+               (html `(html (body (h1 "Slept 1 second (via io_uring timeout)"))))
+               '()))
+      ((GET "api")
+       (values 200
+               (json `((hello . ,(cond ((assq 'who params) => cdr)
+                                       (else "world")))
+                       (count . ,(unbox application))))
+               '()))
+      ((POST "api")
+       (values 201
+               (json `((received . ,(bytevector-length (phr-request-body req)))))
+               '()))
+      (,_
+       (values 404 (html `(html (body (h1 "Not Found")))) '())))))

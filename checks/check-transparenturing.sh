@@ -18,7 +18,7 @@ trap cleanup EXIT
 echo "=== transparenturing integration tests ==="
 
 # Start server in background
-$LETLOOP exec "$EXAMPLES_DIR/" "$EXAMPLES_DIR/transparenturing-example.scm" main -- $PORT &
+$LETLOOP http serve --port=$PORT "$EXAMPLES_DIR/" "$EXAMPLES_DIR/my-web-library.scm" &
 SERVER_PID=$!
 
 # Wait for server to be ready
