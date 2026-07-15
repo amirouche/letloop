@@ -3,10 +3,12 @@
   (export
    html-read
    html-write
+   string->html-string
    ~check-letloop-html-write-0
    ~check-letloop-html-write-1
    ~check-letloop-html-write-2
    ~check-letloop-html-write-3
+   ~check-letloop-html-write-4
   )
   (import (chezscheme) (letloop match) (letloop html htmlprag))
 
@@ -56,9 +58,15 @@
       (accumulator (format #f "<~a" tag))
       (for-each
        (lambda (attribute)
-         (accumulator (format #f " ~a=\"~a\""
-                              (car attribute)
-                              (cadr attribute))))
+         ;; Escape the value, otherwise a quote inside it breaks out
+         ;; of the attribute (injection).
+         (let ((value (cadr attribute)))
+           (accumulator (format #f " ~a=\"~a\""
+                                (car attribute)
+                                (string->html-string
+                                 (if (string? value)
+                                     value
+                                     (format #f "~a" value)))))))
        attributes)
       (if (html-element-no-end-tag? tag)
           (accumulator "/>")
@@ -129,9 +137,17 @@
   (define ~check-letloop-html-write-3
     (lambda ()
       (define html `(p "echo" (br) "bravo"))
-      
+
       (assert
        (string=? "<p>echo<br/>bravo</p>"
                  (html-write html)))))
-      
+
+  (define ~check-letloop-html-write-4
+    (lambda ()
+      ;; Attribute values are escaped; non-strings are coerced.
+      (define html `(input (@ (value "say \"hi\" & <bye>") (size 10))))
+      (assert
+       (string=? "<input value=\"say &quot;hi&quot; &amp; &lt;bye&gt;\" size=\"10\"/>"
+                 (html-write html)))))
+
   )
