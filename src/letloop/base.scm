@@ -1,7 +1,8 @@
 #!chezscheme
 (library (letloop base)
   (export letloop-main letloop-compile letloop-exec letloop-repl letloop-check letloop-review)
-  (import (chezscheme) (letloop match) (letloop cli base) (letloop root) (letloop review))
+  (import (chezscheme) (letloop match) (letloop cli base) (letloop root) (letloop review)
+          (only (letloop http server) transparent))
 
   (define pk
     (lambda args
@@ -723,6 +724,92 @@
           (when dev?
             (profile-dump-html)))))
 
+  (define (letloop-http-serve arguments)
+
+    ;; letloop http serve [--port=PORT] [DIRECTORY ...] LIBRARY.SCM
+    ;;
+    ;; LIBRARY.SCM must export three procedures:
+    ;;   (application) → app state, called once
+    ;;   (context app client req) → per-connection state
+    ;;   (dispatch app state method path params req)
+    ;;     → (values status (body . content-type) extra-headers)
+
+    (define extensions '())
+    (define directories '())
+    (define library.scm #f)
+    (define port-number 8080)
+
+    (define errors (make-accumulator))
+
+    (define massage-standalone!
+      (lambda (standalone)
+        (unless (null? standalone)
+          (call-with-values (lambda () (guess (car standalone)))
+            (lambda (type string*)
+              (case type
+                (directory (set! directories (cons string* directories)))
+                (extension (set! extensions (cons string* extensions)))
+                (file (if library.scm
+                          (errors (format #f "Already registred a library to serve, maybe remove: ~a" (car standalone)))
+                          (set! library.scm string*)))
+                (unknown (errors (format #f "Dubious argument: ~a" (car standalone)))))))
+          (massage-standalone! (cdr standalone)))))
+
+    (define massage-keywords!
+      (lambda (keywords)
+        (unless (null? keywords)
+          (let ((keyword (car keywords)))
+            (cond
+             ((and (eq? (car keyword) '--port)
+                   (string? (cdr keyword))
+                   (string->number (cdr keyword))
+                   (<= 1 (string->number (cdr keyword)) 65535))
+              (set! port-number (string->number (cdr keyword))))
+             (else (errors (format #f "Dubious keyword: ~a" (car keyword))))))
+          (massage-keywords! (cdr keywords)))))
+
+    (call-with-values (lambda () (cli-read arguments))
+      (lambda (keywords standalone extra*)
+        (massage-standalone! standalone)
+        (massage-keywords! keywords)
+        (unless (null? extra*)
+          (errors (format #f "No extra arguments expected after --, maybe remove: ~a" extra*)))))
+
+    (unless library.scm
+      (errors "The library to serve is missing, e.g: letloop http serve my-web-library.scm"))
+
+    (maybe-display-errors-then-exit errors)
+
+    (unless (null? directories)
+      (library-directories directories)
+      (source-directories directories))
+
+    (unless (null? extensions)
+      (library-extensions (append extensions (library-extensions))))
+
+    (let* ((library-name (maybe-library-name library.scm))
+           (exports (eval `(library-exports ',library-name) (environment '(chezscheme)))))
+      (for-each
+       (lambda (procedure)
+         (unless (memq procedure exports)
+           (errors (format #f "Library ~a does not export the procedure: ~a" library-name procedure))))
+       '(application context dispatch))
+      (maybe-display-errors-then-exit errors)
+      (let ((env (environment library-name)))
+        (transparent port-number
+                     (eval 'application env)
+                     (eval 'context env)
+                     (eval 'dispatch env)))))
+
+  (define (letloop-http arguments)
+    (if (null? arguments)
+        (begin
+          (display "Choose: serve.\nAs of yet, only: letloop http serve [--port=PORT] [DIRECTORY ...] LIBRARY.SCM\n")
+          (exit 1))
+        (case (string->symbol (car arguments))
+          ((serve) (letloop-http-serve (cdr arguments)))
+          (else (display "A typo? Almost, try: letloop http serve ...\n") (exit 1)))))
+
   (define letloop-check
     (lambda (arguments)
 
@@ -948,6 +1035,7 @@
         ((check) (letloop-check (cdr args)))
         ((compile) (letloop-compile (cdr args)))
         ((exec) (letloop-exec (cdr args)))
+        ((http) (letloop-http (cdr args)))
         ((repl) (letloop-repl (cdr args)))
         ((root) (letloop-root (cdr args)))
         ;; ((desktop) (letloop-desktop (cdr args)))
