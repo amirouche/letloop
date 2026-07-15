@@ -9,6 +9,8 @@
           jsonify
           unjson
           ~check-letloop-json
+          ~check-json-invalid-literal
+          ~check-json-write-default-port
           )
 
   (import (chezscheme))
@@ -25,6 +27,29 @@
       (car (reverse args))))
 
   (include "letloop/json/body.scm")
+
+  (define ~check-json-invalid-literal
+    (lambda ()
+      ;; Misspelled literals must raise, not silently parse: the
+      ;; character checks in expect used to be commented out.
+      (define (invalid? string)
+        (guard (exc ((json-error? exc) #t)
+                    (else #f))
+          (json-read (open-input-string string))
+          #f))
+      (and (invalid? "trxe")
+           (invalid? "falze")
+           (invalid? "nul1")
+           (equal? #t (json-read (open-input-string "true"))))))
+
+  (define ~check-json-write-default-port
+    (lambda ()
+      ;; json-write with no port targets current-output-port (used to
+      ;; be current-input-port).
+      (let ((port (open-output-string)))
+        (parameterize ((current-output-port port))
+          (json-write 42))
+        (equal? "42" (get-output-string port)))))
 
   (define ~check-letloop-json
     (lambda ()
