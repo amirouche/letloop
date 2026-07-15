@@ -45,7 +45,28 @@
    hmac-sha256
    pbkdf2-hmac-sha256
    base64-encode
-   base64-decode)
+   base64-decode
+
+   ~check-postgresql-md5-000
+   ~check-postgresql-md5-001
+   ~check-postgresql-md5-002
+   ~check-postgresql-encoding-000
+   ~check-postgresql-encoding-001
+   ~check-postgresql-sha256-000
+   ~check-postgresql-sha256-001
+   ~check-postgresql-hmac-sha256-000
+   ~check-postgresql-pbkdf2-000
+   ~check-postgresql-base64-000
+   ~check-postgresql-base64-001
+   ~check-postgresql-connect-000
+   ~check-postgresql-query-000
+   ~check-postgresql-error-000
+   ~check-postgresql-null-000
+   ~check-postgresql-multirow-000
+   ~check-postgresql-exec-000
+   ~check-postgresql-prepare-000
+   ~check-postgresql-prepare-null-000
+   ~check-postgresql-scram-000)
 
   (import (chezscheme)
           (letloop r999)
@@ -1107,5 +1128,7 @@
               (else
                (pg-raise "Unexpected message in extended query"
                           `(type ,type)))))))))
+
+  (include "letloop/postgresql/base.check.scm")
 
   ) ;; end library

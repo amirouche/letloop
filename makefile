@@ -148,8 +148,8 @@ check: letloop-check.sh clean ## Hit the ground running!
 	LETLOOP=$(LETLOOP) bash checks/letloop/srp.sh
 	LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) bash checks/check-transparenturing.sh
 
-check-integration: ## Run integration tests (require live services, e.g. PostgreSQL at 127.0.0.1:5432)
-	LD_LIBRARY_PATH=$(PREFIX)/lib/ $(LETLOOP) check src/ checks/ checks/postgresql/ checks/postgresql/check-postgresql.scm
+check-integration: ## Run the checks that want live services (PostgreSQL at 127.0.0.1:5432); they SKIP-pass without one
+	LD_LIBRARY_PATH=$(PREFIX)/lib/ $(LETLOOP) check src/ src/letloop/postgresql/base.scm
 
 stress: clean ## check stress implementations
 	sh checks/stress-transparenturing.sh
