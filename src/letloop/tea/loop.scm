@@ -24,7 +24,9 @@
    tea-loop-resize-pending?
    tea-loop-clear-resize-pending!)
   (import (chezscheme)
-          (letloop liburing low)
+          ;; strerror, POLLIN, O-NONBLOCK also come from (letloop tea
+          ;; syscall); keep the tea bindings.
+          (except (letloop liburing low) strerror POLLIN O-NONBLOCK)
           (letloop tea syscall)
           (letloop tea input))
 
