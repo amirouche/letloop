@@ -48,7 +48,24 @@
    input-parser?
    input-parser-feed!
    input-parser-flush!
-   input-parser-state)
+   input-parser-state
+
+   ~check-input-printable-ascii
+   ~check-input-control-tab-enter
+   ~check-input-ctrl-letter
+   ~check-input-arrow-key
+   ~check-input-pg-up
+   ~check-input-utf8-multibyte
+   ~check-input-lone-esc-flush
+   ~check-input-alt-letter
+   ~check-input-mouse-sgr-press
+   ~check-input-mouse-x10
+   ~check-input-focus-in
+   ~check-input-paste-end-roundtrip
+   ~check-input-paste-with-stray-esc
+   ~check-input-paste-utf8
+   ~check-input-ctrl-arrow-up
+   ~check-input-shift-home)
   (import (chezscheme)
           (letloop tea utf8)
           (letloop tea trie)
@@ -353,4 +370,7 @@
        (else
         (input-parser-state-set! p 'normal)
         (make-key-event r #f '())))))
+  
+
+  (include "letloop/tea/input.check.scm")
   )

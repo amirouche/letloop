@@ -26,7 +26,18 @@
    ;; attribute helpers
    attr-mask attr-mask->list list->attr-mask
    ATTR-BOLD ATTR-DIM ATTR-ITALIC ATTR-UNDERLINE ATTR-BLINK
-   ATTR-REVERSE ATTR-INVISIBLE ATTR-STRIKEOUT ATTR-UNDERLINE-2 ATTR-OVERLINE)
+   ATTR-REVERSE ATTR-INVISIBLE ATTR-STRIKEOUT ATTR-UNDERLINE-2 ATTR-OVERLINE
+
+   ~check-cell-make-clear
+   ~check-cell-set-ref
+   ~check-cell-set-string
+   ~check-cell-resize-shrink
+   ~check-cell-resize-grow
+   ~check-cell-attr-mask-roundtrip
+   ~check-cell-diff-empty
+   ~check-cell-diff-single
+   ~check-cell-diff-multi
+   ~check-cell-diff-state-tracking)
   (import (chezscheme)
           (letloop tea sgr))
 
@@ -244,4 +255,7 @@
                   (fxvector-set! front-attrs i a)))
               (col-loop (fx+ x 1))))
           (row-loop (fx+ y 1))))))
+  
+
+  (include "letloop/tea/cell.check.scm")
   )

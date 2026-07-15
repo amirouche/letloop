@@ -1,19 +1,7 @@
-(library (tea cell)
+;; Checks for (letloop tea cell), driving the module through its exported
+;; API the way a caller would.  Included at the tail of the library;
+;; discovered by `make check` via the ~check- exports.
 
-  (export
-   ~check-cell-make-clear
-   ~check-cell-set-ref
-   ~check-cell-set-string
-   ~check-cell-resize-shrink
-   ~check-cell-resize-grow
-   ~check-cell-attr-mask-roundtrip
-   ~check-cell-diff-empty
-   ~check-cell-diff-single
-   ~check-cell-diff-multi
-   ~check-cell-diff-state-tracking)
-
-  (import (chezscheme)
-          (letloop tea cell))
 
   (define (build f . args)
     (let-values (((p get) (open-string-output-port)))
@@ -107,4 +95,4 @@
       (cellbuf-set! back 0 0 (char->integer #\a) 1 #f 0)
       (cellbuf-set! back 3 0 (char->integer #\b) 1 #f 0)
       (let ((s (build cellbuf-diff! back front 'normal)))
-        (expect s "\x1b;[1;1H\x1b;[0;31;49ma\x1b;[1;4Hb")))))
+        (expect s "\x1b;[1;1H\x1b;[0;31;49ma\x1b;[1;4Hb"))))

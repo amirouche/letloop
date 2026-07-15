@@ -1,15 +1,7 @@
-(library (tea loop)
+;; Checks for (letloop tea loop), driving the module through its exported
+;; API the way a caller would.  Included at the tail of the library;
+;; discovered by `make check` via the ~check- exports.
 
-  (export
-   ~check-loop-pipe-arrow-key
-   ~check-loop-pipe-multibyte-utf8
-   ~check-loop-pipe-esc-flush)
-
-  (import (chezscheme)
-          (letloop tea syscall)
-          (letloop tea caps)
-          (letloop tea input)
-          (letloop tea loop))
 
   ;; ----- pipe-pair helper -------------------------------------------------
   ;;
@@ -94,4 +86,4 @@
           (tea-loop-shutdown! l)
           (close-fd rd)
           (and (key-event? e)
-               (eq? (key-event-key e) 'esc)))))))
+               (eq? (key-event-key e) 'esc))))))

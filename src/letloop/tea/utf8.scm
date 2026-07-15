@@ -21,7 +21,20 @@
    make-utf8-decoder
    utf8-decoder?
    utf8-decoder-feed!
-   utf8-decoder-reset!)
+   utf8-decoder-reset!
+
+   ~check-utf8-encode-ascii
+   ~check-utf8-encode-2byte
+   ~check-utf8-encode-3byte
+   ~check-utf8-encode-4byte
+   ~check-utf8-encode-roundtrip
+   ~check-utf8-decode-ascii
+   ~check-utf8-decode-multibyte
+   ~check-utf8-decode-byte-by-byte
+   ~check-utf8-decode-rejects-overlong
+   ~check-utf8-decode-rejects-surrogate
+   ~check-utf8-decode-rejects-stray-continuation
+   ~check-utf8-decode-string-roundtrip)
   (import (chezscheme))
 
   ;; ----- encoder -----------------------------------------------------------
@@ -142,4 +155,7 @@
            (else
             (utf8-decoder-reset! d)
             acc*))))))))
+  
+
+  (include "letloop/tea/utf8.check.scm")
   )

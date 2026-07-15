@@ -1,21 +1,7 @@
-(library (tea utf8)
+;; Checks for (letloop tea utf8), driving the module through its exported
+;; API the way a caller would.  Included at the tail of the library;
+;; discovered by `make check` via the ~check- exports.
 
-  (export
-   ~check-utf8-encode-ascii
-   ~check-utf8-encode-2byte
-   ~check-utf8-encode-3byte
-   ~check-utf8-encode-4byte
-   ~check-utf8-encode-roundtrip
-   ~check-utf8-decode-ascii
-   ~check-utf8-decode-multibyte
-   ~check-utf8-decode-byte-by-byte
-   ~check-utf8-decode-rejects-overlong
-   ~check-utf8-decode-rejects-surrogate
-   ~check-utf8-decode-rejects-stray-continuation
-   ~check-utf8-decode-string-roundtrip)
-
-  (import (chezscheme)
-          (letloop tea utf8))
 
   (define-syntax expect
     (syntax-rules ()
@@ -107,4 +93,3 @@
              ((eq? r 'incomplete) (loop (fx+ i 1) out))
              ((eq? r 'invalid)    #f)
              (else                (loop (fx+ i 1) (cons r out))))))))))
-  )

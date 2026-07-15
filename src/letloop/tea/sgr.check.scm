@@ -1,22 +1,7 @@
-(library (tea sgr)
+;; Checks for (letloop tea sgr), driving the module through its exported
+;; API the way a caller would.  Included at the tail of the library;
+;; discovered by `make check` via the ~check- exports.
 
-  (export
-   ~check-sgr-cursor
-   ~check-sgr-clear
-   ~check-sgr-reset
-   ~check-sgr-color-normal
-   ~check-sgr-color-bright
-   ~check-sgr-color-default
-   ~check-sgr-color-256
-   ~check-sgr-color-216
-   ~check-sgr-color-grayscale
-   ~check-sgr-color-truecolor
-   ~check-sgr-attrs
-   ~check-sgr-toggles
-   ~check-sgr-mouse-on)
-
-  (import (chezscheme)
-          (letloop tea sgr))
 
   (define (build f . args)
     (let-values (((p get) (open-string-output-port)))
@@ -93,4 +78,4 @@
   (define (~check-sgr-mouse-on)
     ;; X10 + button-event + any-event + SGR encoding, in that order
     (expect (build sgr-mouse-on!)
-            "\x1b;[?1000h\x1b;[?1002h\x1b;[?1003h\x1b;[?1006h")))
+            "\x1b;[?1000h\x1b;[?1002h\x1b;[?1003h\x1b;[?1006h"))

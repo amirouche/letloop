@@ -1,26 +1,7 @@
-(library (tea input)
+;; Checks for (letloop tea input), driving the module through its exported
+;; API the way a caller would.  Included at the tail of the library;
+;; discovered by `make check` via the ~check- exports.
 
-  (export
-   ~check-input-printable-ascii
-   ~check-input-control-tab-enter
-   ~check-input-ctrl-letter
-   ~check-input-arrow-key
-   ~check-input-pg-up
-   ~check-input-utf8-multibyte
-   ~check-input-lone-esc-flush
-   ~check-input-alt-letter
-   ~check-input-mouse-sgr-press
-   ~check-input-mouse-x10
-   ~check-input-focus-in
-   ~check-input-paste-end-roundtrip
-   ~check-input-paste-with-stray-esc
-   ~check-input-paste-utf8
-   ~check-input-ctrl-arrow-up
-   ~check-input-shift-home)
-
-  (import (chezscheme)
-          (letloop tea input)
-          (letloop tea caps))
 
   (define (feed-bytes p byte-list)
     (let loop ((bs byte-list) (events '()))
@@ -156,4 +137,4 @@
            (es (feed-str p "\x1b;[1;2H")))
       (and (= (length es) 1)
            (eq? (key-event-key (car es)) 'home)
-           (equal? (key-event-mods (car es)) '(shift))))))
+           (equal? (key-event-mods (car es)) '(shift)))))
