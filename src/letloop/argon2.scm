@@ -65,7 +65,7 @@
         (let ((hash (make-bytevector hash-length)))
           (if (argon2id-hash-raw cost-iterations cost-memory parallelism password salt hash)
               hash
-              (error 'letloop "Failed to do hashing" argon2id))))))
+              (error 'argon2id "Failed to do hashing"))))))
 
   (define argon2id-encoded
     (let ((func (lazy-foreign-procedure libargon2.so.1 "argon2id_hash_encoded"
@@ -99,10 +99,21 @@
   ;; ARGON2_PUBLIC int argon2id_verify(const char *encoded, const void *pwd,
   ;;                                   const size_t pwdlen);
 
+  ;; argon2id_verify parses ENCODED as a NUL-terminated C string;
+  ;; append the terminator when the caller's bytevector lacks one.
+  (define (bytevector-nul-terminate bv)
+    (let ((n (bytevector-length bv)))
+      (if (and (fx>? n 0) (fxzero? (bytevector-u8-ref bv (fx- n 1))))
+          bv
+          (let ((out (make-bytevector (fx+ n 1) 0)))
+            (bytevector-copy! bv 0 out 0 n)
+            out))))
+
   (define argon2id-verify
     (let ((func (lazy-foreign-procedure libargon2.so.1 "argon2id_verify" (void* void* size_t) int)))
       (lambda (encoded password)
-        (let ((code (with-lock (list encoded password)
+        (let* ((encoded (bytevector-nul-terminate encoded))
+               (code (with-lock (list encoded password)
                                (func (bytevector-pointer encoded)
                                      (bytevector-pointer password)
                                      (bytevector-length password)))))
@@ -154,16 +165,33 @@
                                                     ARGON2-ID))
              (out (make-bytevector encoded-length)))
         (if (argon2id-encoded cost-iterations cost-memory parallelism password salt hash-length out)
-            out
-            (error 'letloop "Error while hashing of password")))))
+            ;; drop the trailing NUL terminator C wrote, so the result
+            ;; compares equal to encoded hashes stored as text
+            (let* ((end (let loop ((n (bytevector-length out)))
+                          (if (or (fxzero? n)
+                                  (not (fxzero? (bytevector-u8-ref out (fx- n 1)))))
+                              n
+                              (loop (fx- n 1)))))
+                   (trimmed (make-bytevector end)))
+              (bytevector-copy! out 0 trimmed 0 end)
+              trimmed)
+            (error 'argon2id-encode "Error while hashing of password")))))
 
 
   (define ~check-argon2-0
     (lambda ()
       (check-skip-unless libargon2.so.1
-      (let ((salt (bytevector-random 256))
-            (password (bytevector-random 256)))
-        (assert (argon2id-verify (argon2id-encode salt password) password))))))
+      (let* ((salt (bytevector-random 256))
+             (password (bytevector-random 256))
+             (encoded (argon2id-encode salt password)))
+        ;; encode returns the encoded hash without the C NUL terminator
+        (assert (not (fxzero? (bytevector-u8-ref encoded
+                                                 (fx- (bytevector-length encoded) 1)))))
+        (assert (argon2id-verify encoded password))
+        ;; round-trip through text, as when stored in a database
+        (assert (argon2id-verify (string->utf8 (utf8->string encoded)) password))
+        (assert (not (argon2id-verify encoded (bytevector-random 32))))
+        #t))))
 
   (define bytevector-random
     (lambda (n)
