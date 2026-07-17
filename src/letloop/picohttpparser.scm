@@ -42,7 +42,7 @@
   (import (chezscheme)
           (letloop cffi))
 
-  (define libpicohttpparser (load-shared-object "libpicohttpparser.so"))
+  (define-shared-object libpicohttpparser "libpicohttpparser.so")
 
   (define-syntax define-syntax-rule
     (syntax-rules ()
@@ -52,7 +52,7 @@
            ((keyword args ...) body))))))
 
   (define-syntax-rule (foreign-procedure* return ptr args ...)
-    (foreign-procedure ptr (args ...) return))
+    (lazy-foreign-procedure libpicohttpparser ptr (args ...) return))
 
   ;; Maximum headers per request/response
   (define %phr-max-headers 100)
@@ -469,6 +469,7 @@
   ;; Basic GET request parsing
   (define ~check-phr-000
     (lambda ()
+      (check-skip-unless libpicohttpparser
       (let* ((raw "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
              (buf (string->utf8 raw))
              (req (phr-parse-request buf)))
@@ -478,11 +479,12 @@
         (assert (fx=? (phr-request-minor-version req) 1))
         (assert (fx=? (phr-request-header-count req) 1))
         (assert (string-ci=? (phr-request-header-name req 0) "Host"))
-        (assert (string=? (phr-request-header-value req 0) "example.com")))))
+        (assert (string=? (phr-request-header-value req 0) "example.com"))))))
 
   ;; Multiple headers, lazy individual access
   (define ~check-phr-001
     (lambda ()
+      (check-skip-unless libpicohttpparser
       (let* ((raw (string-append
                    "POST /api/data HTTP/1.1\r\n"
                    "Host: example.com\r\n"
@@ -499,18 +501,20 @@
         ;; Lazy lookup by name — only inspects headers until match
         (assert (string=? (phr-request-header-ref req "Content-Type") "application/json"))
         (assert (string=? (phr-request-header-ref req "x-custom") "hello"))
-        (assert (not (phr-request-header-ref req "nonexistent"))))))
+        (assert (not (phr-request-header-ref req "nonexistent")))))))
 
   ;; Incomplete request returns 'incomplete
   (define ~check-phr-002
     (lambda ()
+      (check-skip-unless libpicohttpparser
       (let* ((raw "GET / HTTP/1.1\r\nHost: ex")
              (buf (string->utf8 raw)))
-        (assert (eq? (phr-parse-request buf) 'incomplete)))))
+        (assert (eq? (phr-parse-request buf) 'incomplete))))))
 
   ;; Bytes consumed is correct
   (define ~check-phr-003
     (lambda ()
+      (check-skip-unless libpicohttpparser
       (let* ((raw "GET /hello HTTP/1.0\r\n\r\nextra body data")
              (buf (string->utf8 raw))
              (req (phr-parse-request buf)))
@@ -519,11 +523,12 @@
         (assert (fx=? (phr-request-minor-version req) 0))
         ;; bytes consumed should be the header portion only
         (assert (fx=? (phr-request-bytes-consumed req)
-                      (string-length "GET /hello HTTP/1.0\r\n\r\n"))))))
+                      (string-length "GET /hello HTTP/1.0\r\n\r\n")))))))
 
   ;; Response parsing
   (define ~check-phr-004
     (lambda ()
+      (check-skip-unless libpicohttpparser
       (let* ((raw (string-append
                    "HTTP/1.1 200 OK\r\n"
                    "Content-Type: text/html\r\n"
@@ -537,11 +542,12 @@
         (assert (string=? (phr-response-message resp) "OK"))
         (assert (fx=? (phr-response-header-count resp) 2))
         (assert (string=? (phr-response-header-ref resp "Content-Type") "text/html"))
-        (assert (string=? (phr-response-header-ref resp "content-length") "5")))))
+        (assert (string=? (phr-response-header-ref resp "content-length") "5"))))))
 
   ;; Reusable out buffer + in-place req vector (the server hot path)
   (define ~check-phr-005
     (lambda ()
+      (check-skip-unless libpicohttpparser
       (let ((out (make-phr-out))
             (req-vec (vector 'phr-request #f #f 0)))
         (let ((req (phr-parse-request
@@ -557,11 +563,12 @@
           (assert (string=? (phr-request-path req) "/b"))
           (assert (string=? (phr-request-header-ref req "host") "y")))
         (unlock-object out)
-        #t)))
+        #t))))
 
   ;; Zero-allocation primitives
   (define ~check-phr-006
     (lambda ()
+      (check-skip-unless libpicohttpparser
       (let* ((raw (string-append
                    "POST /api HTTP/1.1\r\n"
                    "Connection: Close\r\n"
@@ -574,17 +581,18 @@
         (assert (phr-request-header-value-ci=? req (string->utf8 "connection") (string->utf8 "close")))
         (assert (not (phr-request-header-ref/bv req (string->utf8 "x-missing"))))
         (assert (not (phr-request-header-ref-as-integer req (string->utf8 "connection"))))
-        #t)))
+        #t))))
 
   ;; Body extraction per content-length
   (define ~check-phr-007
     (lambda ()
+      (check-skip-unless libpicohttpparser
       (let* ((raw "POST /api HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello")
              (req (phr-parse-request (string->utf8 raw))))
         (assert (equal? (phr-request-body req) (string->utf8 "hello")))
         ;; Truncated body yields the empty bytevector
         (let ((req (phr-parse-request (string->utf8 "POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhi"))))
           (assert (equal? (phr-request-body req) (bytevector))))
-        #t)))
+        #t))))
 
   )
