@@ -10,16 +10,12 @@ Main branch for PRs: `dev`
 
 ## System Dependencies
 
-### Build-time (shared objects dlopen'd at library load)
-- **libvulkan.so.1** (`libvulkan1` on Debian/Ubuntu) — required by `(letloop desktop vulkan low)`. Load fails at startup without it.
-- **libtls.so** — required by `(letloop tls low)`, which is imported transitively via `(letloop www)` → `(letloop root)` → `(letloop base)`, so every letloop build touches it. Upstream doesn't ship a target to build it. If your distro lacks it, stub it with:
-  ```bash
-  grep -oP '"tls_\w+"' src/letloop/tls/low.scm | sort -u | sed 's/"//g' |
-    awk '{ print "void* " $1 "() { return (void*)0; }" }' > /tmp/libtls_stub.c
-  cc -shared -fPIC -o local/lib/libtls.so /tmp/libtls_stub.c
-  ```
-  The stub satisfies dlopen + symbol lookup but aborts at first TLS use; fine for non-TLS targets like `letloop desktop`.
-- **liburing, libsodium, libargon2, libblake3, libpicohttpparser** — only loaded on demand from their respective modules. Not required for `letloop desktop`.
+### Optional shared objects (dlopen'd lazily, on first use)
+FFI binding libraries (`tls`, `liburing`, `vulkan`, `sodium`, `argon2`, `blake3`, `picohttpparser`, `opaque`) load their shared object on the **first foreign call**, via `define-shared-object` / `lazy-foreign-procedure` from `(letloop cffi)`. Importing a binding library — and therefore building letloop itself — requires **no** optional `.so` to be installed. A missing shared object surfaces as `Exception in libfoo: cannot dlopen shared object, tried ...` at first use, and `~check-*` procedures print a `** SKIP` note and pass instead (see `check-skip-unless`).
+
+- **libvulkan.so.1** (`libvulkan1` on Debian/Ubuntu) — needed at runtime by `letloop desktop`.
+- **libtls.so** — needed at runtime for TLS features (`letloop serve` over https, `(letloop tls)`).
+- **liburing-ffi.so.2, libsodium, libargon2, libblake3, libpicohttpparser, libopaque** — needed at runtime by their respective modules; `make check` skips their checks when absent.
 
 ### Runtime-only (for `letloop desktop`)
 - **A Vulkan ICD** — on headless machines install `mesa-vulkan-drivers` for software rendering via `llvmpipe`. Without any ICD, `vkCreateInstance` returns `VK_ERROR_INCOMPATIBLE_DRIVER`.
