@@ -95,11 +95,10 @@
     (syntax-rules ()
       ((_ objects body ...)
        (let ((objects* objects))
-         (for-each lock-object objects*)
-         (call-with-values (lambda () body ...)
-           (lambda out
-             (for-each unlock-object objects*)
-             (apply values out)))))))
+         (dynamic-wind
+           (lambda () (for-each lock-object objects*))
+           (lambda () body ...)
+           (lambda () (for-each unlock-object objects*)))))))
 
   (define (bytevector-pointer bv)
     ;; TODO: understand what the + 1 increment does
