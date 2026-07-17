@@ -1,6 +1,6 @@
 #!chezscheme
 (library (letloop blake3)
-  (export blake3 make-blake3 blake3-update! blake3-finalize
+  (export blake3 make-blake3 blake3-update! blake3-finalize blake3-close!
           ~check-blake3-000
           ~check-blake3-001)
 
@@ -15,9 +15,6 @@
          (syntax-rules ()
            ((keyword args ...) body))))))
 
-  (define (bytevector->pointer bv)
-    (#%$object-address bv (+ (foreign-sizeof 'void*) 1)))
-
   (define-syntax-rule (foreign-procedure* return ptr args ...)
     (lazy-foreign-procedure libblake3 ptr (args ...) return))
 
@@ -26,30 +23,44 @@
       (lambda (hasher)
         (func hasher))))
 
+  ;; sizeof(blake3_hasher) is 1912 as of BLAKE3 1.x; allocate headroom
+  ;; so a larger struct in a future release does not overflow.
+  (define blake3-hasher-size 2048)
+
+  ;; The hasher lives outside the Scheme heap: the moving GC neither
+  ;; relocates nor reclaims it, so its address stays valid between
+  ;; calls. Call blake3-close! when done with a make-blake3 hasher.
   (define (make-blake3)
-    (define bv (make-bytevector 1912)) ;; sizeof blake3_hasher
-    (blake3-hasher-init (bytevector->pointer bv))
-    (bytevector->pointer bv))
+    (define hasher (foreign-alloc blake3-hasher-size))
+    (blake3-hasher-init hasher)
+    hasher)
+
+  (define (blake3-close! hasher)
+    (foreign-free hasher))
 
   (define blake3-update!
     (let ((func (foreign-procedure* void "blake3_hasher_update" void* void* size_t)))
       (lambda (hasher bytevector)
-        (func hasher
-              (bytevector->pointer bytevector)
-              (bytevector-length bytevector)))))
+        (with-lock (list bytevector)
+          (func hasher
+                (bytevector-pointer bytevector)
+                (bytevector-length bytevector))))))
 
   (define blake3-finalize
     (let ((func (foreign-procedure* void "blake3_hasher_finalize" void* void* size_t)))
       (lambda (hasher length)
         (define bytevector (make-bytevector length))
-        (func hasher (bytevector->pointer bytevector) length)
+        (with-lock (list bytevector)
+          (func hasher (bytevector-pointer bytevector) length))
         bytevector)))
 
   (define blake3
     (lambda (bytevector)
       (define hasher (make-blake3))
       (blake3-update! hasher bytevector)
-      (blake3-finalize hasher 32)))
+      (let ((digest (blake3-finalize hasher 32)))
+        (blake3-close! hasher)
+        digest)))
 
   (define ~check-blake3-000
     (lambda ()
@@ -61,9 +72,14 @@
     (lambda ()
       (check-skip-unless libblake3
       (let ((blake3 (make-blake3)))
+        ;; the hasher must survive garbage collections between calls
+        (collect (collect-maximum-generation))
         (blake3-update! blake3 (string->utf8 "azul dunith"))
+        (collect (collect-maximum-generation))
         (assert (bytevector=? (blake3-finalize blake3 16)
-                              (bytevector 147 96 202 209 250 91 234 79 148 175 155 40 42 42 163 180)))))))
+                              (bytevector 147 96 202 209 250 91 234 79 148 175 155 40 42 42 163 180)))
+        (blake3-close! blake3)
+        #t))))
 
   (define bytevector-random
     (lambda (n)
