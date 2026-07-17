@@ -13,12 +13,12 @@
   (import (chezscheme)
           (letloop cffi))
 
-  (define libsodium (load-shared-object "libsodium.so"))
+  (define-shared-object libsodium "libsodium.so" "libsodium.so.26" "libsodium.so.23")
 
   ;; int sodium_init(void);
   ;; Returns 0 on success, 1 if already initialized, -1 on failure.
   (define sodium-init
-    (let ((func (foreign-procedure "sodium_init" () int)))
+    (let ((func (lazy-foreign-procedure libsodium "sodium_init" () int)))
       (lambda ()
         (let ((rc (func)))
           (when (fx=? rc -1)
@@ -29,7 +29,7 @@
   ;;                        const unsigned char *in,
   ;;                        unsigned long long inlen);
   (define crypto-hash-sha256
-    (let ((func (foreign-procedure "crypto_hash_sha256"
+    (let ((func (lazy-foreign-procedure libsodium "crypto_hash_sha256"
                                    (void* void* unsigned-64)
                                    int)))
       (lambda (input)
@@ -42,7 +42,7 @@
 
   ;; void randombytes_buf(void * const buf, const size_t size);
   (define randombytes-buf
-    (let ((func (foreign-procedure "randombytes_buf"
+    (let ((func (lazy-foreign-procedure libsodium "randombytes_buf"
                                    (void* size_t)
                                    void)))
       (lambda (n)
@@ -56,7 +56,7 @@
   ;;                   size_t len);
   ;; Returns 0 if equal.
   (define sodium-memcmp
-    (let ((func (foreign-procedure "sodium_memcmp"
+    (let ((func (lazy-foreign-procedure libsodium "sodium_memcmp"
                                    (void* void* size_t)
                                    int)))
       (lambda (a b)
@@ -81,7 +81,7 @@
   ;;     const unsigned char *nsec,
   ;;     const unsigned char *npub, const unsigned char *k);
   (define crypto-aead-xchacha20poly1305-ietf-encrypt
-    (let ((func (foreign-procedure "crypto_aead_xchacha20poly1305_ietf_encrypt"
+    (let ((func (lazy-foreign-procedure libsodium "crypto_aead_xchacha20poly1305_ietf_encrypt"
                                    (void* void* void* unsigned-64
                                     void* unsigned-64
                                     void* void* void*)
@@ -113,7 +113,7 @@
   ;;     const unsigned char *ad, unsigned long long adlen,
   ;;     const unsigned char *npub, const unsigned char *k);
   (define crypto-aead-xchacha20poly1305-ietf-decrypt
-    (let ((func (foreign-procedure "crypto_aead_xchacha20poly1305_ietf_decrypt"
+    (let ((func (lazy-foreign-procedure libsodium "crypto_aead_xchacha20poly1305_ietf_decrypt"
                                    (void* void* void*
                                     void* unsigned-64
                                     void* unsigned-64
@@ -140,7 +140,7 @@
 
   ;; void crypto_aead_xchacha20poly1305_ietf_keygen(unsigned char k[32]);
   (define crypto-aead-xchacha20poly1305-ietf-keygen
-    (let ((func (foreign-procedure "crypto_aead_xchacha20poly1305_ietf_keygen"
+    (let ((func (lazy-foreign-procedure libsodium "crypto_aead_xchacha20poly1305_ietf_keygen"
                                    (void*) void)))
       (lambda ()
         (let ((key (make-bytevector 32)))
@@ -150,6 +150,7 @@
 
   (define ~check-sodium-0
     (lambda ()
+      (check-skip-unless libsodium
       (sodium-init)
       (let* ((data (string->bytevector "hello" (make-transcoder (utf-8-codec))))
              (hash1 (crypto-hash-sha256 data))
@@ -159,10 +160,11 @@
         (assert (= 32 (bytevector-length hash1)))
         (assert (sodium-memcmp hash1 hash2))
         (assert (= 32 (bytevector-length random1)))
-        (assert (not (sodium-memcmp random1 random2))))))
+        (assert (not (sodium-memcmp random1 random2)))))))
 
   (define ~check-sodium-1
     (lambda ()
+      (check-skip-unless libsodium
       ;; XChaCha20-Poly1305 encrypt/decrypt round-trip
       (sodium-init)
       (let* ((key (crypto-aead-xchacha20poly1305-ietf-keygen))
@@ -176,10 +178,11 @@
         (assert (= (bytevector-length ciphertext)
                    (+ (bytevector-length plaintext) 16)))
         (assert decrypted)
-        (assert (bytevector=? decrypted plaintext)))))
+        (assert (bytevector=? decrypted plaintext))))))
 
   (define ~check-sodium-2
     (lambda ()
+      (check-skip-unless libsodium
       ;; Decrypt with wrong key fails
       (sodium-init)
       (let* ((key (crypto-aead-xchacha20poly1305-ietf-keygen))
@@ -191,6 +194,6 @@
                            plaintext key nonce))
              (result (crypto-aead-xchacha20poly1305-ietf-decrypt
                        ciphertext wrong-key nonce)))
-        (assert (not result)))))
+        (assert (not result))))))
 
   )

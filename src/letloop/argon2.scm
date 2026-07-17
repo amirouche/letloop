@@ -6,7 +6,7 @@
   (import (chezscheme)
           (letloop cffi))
 
-  (define libargon2.so.1 (load-shared-object "libargon2.so.1"))
+  (define-shared-object libargon2.so.1 "libargon2.so.1" "libargon2.so")
 
   ;; /**
   ;;  * Hashes a password with Argon2i, producing a raw hash at @hash
@@ -31,7 +31,7 @@
   ;;                                     const size_t hashlen);
 
   (define argon2id-hash-raw
-    (let ((func (foreign-procedure "argon2id_hash_raw" (unsigned-32
+    (let ((func (lazy-foreign-procedure libargon2.so.1 "argon2id_hash_raw" (unsigned-32
                                                         unsigned-32
                                                         unsigned-32
                                                         void*
@@ -68,7 +68,7 @@
               (error 'letloop "Failed to do hashing" argon2id))))))
 
   (define argon2id-encoded
-    (let ((func (foreign-procedure "argon2id_hash_encoded"
+    (let ((func (lazy-foreign-procedure libargon2.so.1 "argon2id_hash_encoded"
                                    (unsigned-32 unsigned-32 unsigned-32
                                                 void* size_t
                                                 void* size_t
@@ -100,7 +100,7 @@
   ;;                                   const size_t pwdlen);
 
   (define argon2id-verify
-    (let ((func (foreign-procedure "argon2id_verify" (void* void* size_t) int)))
+    (let ((func (lazy-foreign-procedure libargon2.so.1 "argon2id_verify" (void* void* size_t) int)))
       (lambda (encoded password)
         (let ((code (with-lock (list encoded password)
                                (func (bytevector-pointer encoded)
@@ -127,7 +127,7 @@
   (define ARGON2-ID 2)
 
   (define argon2-encoded-length
-    (let ((func (foreign-procedure "argon2_encodedlen"
+    (let ((func (lazy-foreign-procedure libargon2.so.1 "argon2_encodedlen"
                                    (unsigned-32 unsigned-32 unsigned-32
                                                 unsigned-32 unsigned-32
                                                 int)
@@ -160,9 +160,10 @@
 
   (define ~check-argon2-0
     (lambda ()
+      (check-skip-unless libargon2.so.1
       (let ((salt (bytevector-random 256))
             (password (bytevector-random 256)))
-        (assert (argon2id-verify (argon2id-encode salt password) password)))))
+        (assert (argon2id-verify (argon2id-encode salt password) password))))))
 
   (define bytevector-random
     (lambda (n)
