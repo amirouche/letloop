@@ -52,20 +52,15 @@
   ;; TODO: move to (letloop bytevector)
 
   (define (byter-next-prefix bytevector)
-    "Return the first bytevector that is not prefix of BYTEVECTOR"
+    "Return the first bytevector that is not prefix of BYTEVECTOR, or #f
+when BYTEVECTOR has no successor i.e. it is empty or all bytes are #xFF"
     ;; See https://git.io/fj34F, TODO: OPTIMIZE
-    (let ((bytes (reverse (bytevector->u8-list bytevector))))
-      ;; strip #xFF
-      (let loop ((out bytes))
-        (when (null? out)
-          (error 'foundationdb
-                 "BYTEVECTOR must contain at least one byte not equal to #xFF."
-                 bytevector))
-        (if (= (car out) #xFF)
-            (loop (cdr out))
-            (set! bytes out)))
-      ;; increment first byte, reverse and return the bytevector
-      (u8-list->bytevector (reverse (cons (fx+ 1 (car bytes)) (cdr bytes))))))
+    (let loop ((bytes (reverse (bytevector->u8-list bytevector))))
+      ;; strip #xFF, increment first byte, reverse and return the bytevector
+      (cond
+       ((null? bytes) #f)
+       ((= (car bytes) #xFF) (loop (cdr bytes)))
+       (else (u8-list->bytevector (reverse (cons (fx+ 1 (car bytes)) (cdr bytes))))))))
 
   ;; TODO: rename bytevector-slice, and move to (letloop bytevector)
   (define subbytes
