@@ -158,11 +158,11 @@
   (import (chezscheme) (letloop cffi))
 
   ;; Load libtls (pulls in libssl/libcrypto as dependencies)
-  (define libtls (load-shared-object "libtls.so"))
+  (define-shared-object libtls "libtls.so" "libtls.so.28")
 
   ;; Helper: read a NUL-terminated C string from a pointer address.
   ;; Returns #f if pointer is 0 (NULL).
-  (define %strlen (foreign-procedure "strlen" (void*) size_t))
+  (define %strlen (lazy-foreign-procedure libtls "strlen" (void*) size_t))
 
   (define (pointer->string p)
     (if (zero? p)
@@ -231,7 +231,7 @@
   ;; ============================================================
 
   (define tls-init
-    (foreign-procedure "tls_init" () int))
+    (lazy-foreign-procedure libtls "tls_init" () int))
 
   ;; ============================================================
   ;; Error
@@ -239,12 +239,12 @@
 
   ;; Returns string or #f (NULL maps to #f via void* check)
   (define tls-config-error
-    (let ((func (foreign-procedure "tls_config_error" (void*) void*)))
+    (let ((func (lazy-foreign-procedure libtls "tls_config_error" (void*) void*)))
       (lambda (config)
         (pointer->string (func config)))))
 
   (define tls-error
-    (let ((func (foreign-procedure "tls_error" (void*) void*)))
+    (let ((func (lazy-foreign-procedure libtls "tls_error" (void*) void*)))
       (lambda (ctx)
         (pointer->string (func ctx)))))
 
@@ -253,55 +253,55 @@
   ;; ============================================================
 
   (define tls-config-new
-    (foreign-procedure "tls_config_new" () void*))
+    (lazy-foreign-procedure libtls "tls_config_new" () void*))
 
   (define tls-config-free
-    (foreign-procedure "tls_config_free" (void*) void))
+    (lazy-foreign-procedure libtls "tls_config_free" (void*) void))
 
   (define tls-config-clear-keys
-    (foreign-procedure "tls_config_clear_keys" (void*) void))
+    (lazy-foreign-procedure libtls "tls_config_clear_keys" (void*) void))
 
   ;; ============================================================
   ;; Default CA
   ;; ============================================================
 
   (define tls-default-ca-cert-file
-    (foreign-procedure "tls_default_ca_cert_file" () string))
+    (lazy-foreign-procedure libtls "tls_default_ca_cert_file" () string))
 
   ;; ============================================================
   ;; Config CA/certs/keys - file variants
   ;; ============================================================
 
   (define tls-config-set-ca-file
-    (foreign-procedure "tls_config_set_ca_file" (void* string) int))
+    (lazy-foreign-procedure libtls "tls_config_set_ca_file" (void* string) int))
 
   (define tls-config-set-ca-path
-    (foreign-procedure "tls_config_set_ca_path" (void* string) int))
+    (lazy-foreign-procedure libtls "tls_config_set_ca_path" (void* string) int))
 
   (define tls-config-set-cert-file
-    (foreign-procedure "tls_config_set_cert_file" (void* string) int))
+    (lazy-foreign-procedure libtls "tls_config_set_cert_file" (void* string) int))
 
   (define tls-config-set-key-file
-    (foreign-procedure "tls_config_set_key_file" (void* string) int))
+    (lazy-foreign-procedure libtls "tls_config_set_key_file" (void* string) int))
 
   (define tls-config-set-keypair-file
-    (foreign-procedure "tls_config_set_keypair_file" (void* string string) int))
+    (lazy-foreign-procedure libtls "tls_config_set_keypair_file" (void* string string) int))
 
   (define tls-config-set-crl-file
-    (foreign-procedure "tls_config_set_crl_file" (void* string) int))
+    (lazy-foreign-procedure libtls "tls_config_set_crl_file" (void* string) int))
 
   (define tls-config-set-ocsp-staple-file
-    (foreign-procedure "tls_config_set_ocsp_staple_file" (void* string) int))
+    (lazy-foreign-procedure libtls "tls_config_set_ocsp_staple_file" (void* string) int))
 
   (define tls-config-add-keypair-file
-    (foreign-procedure "tls_config_add_keypair_file" (void* string string) int))
+    (lazy-foreign-procedure libtls "tls_config_add_keypair_file" (void* string string) int))
 
   (define tls-config-add-keypair-ocsp-file
-    (foreign-procedure "tls_config_add_keypair_ocsp_file"
+    (lazy-foreign-procedure libtls "tls_config_add_keypair_ocsp_file"
                        (void* string string string) int))
 
   (define tls-config-set-keypair-ocsp-file
-    (foreign-procedure "tls_config_set_keypair_ocsp_file"
+    (lazy-foreign-procedure libtls "tls_config_set_keypair_ocsp_file"
                        (void* string string string) int))
 
   ;; ============================================================
@@ -309,32 +309,32 @@
   ;; ============================================================
 
   (define tls-config-set-ca-mem
-    (foreign-procedure "tls_config_set_ca_mem" (void* void* size_t) int))
+    (lazy-foreign-procedure libtls "tls_config_set_ca_mem" (void* void* size_t) int))
 
   (define tls-config-set-cert-mem
-    (foreign-procedure "tls_config_set_cert_mem" (void* void* size_t) int))
+    (lazy-foreign-procedure libtls "tls_config_set_cert_mem" (void* void* size_t) int))
 
   (define tls-config-set-key-mem
-    (foreign-procedure "tls_config_set_key_mem" (void* void* size_t) int))
+    (lazy-foreign-procedure libtls "tls_config_set_key_mem" (void* void* size_t) int))
 
   (define tls-config-set-keypair-mem
-    (foreign-procedure "tls_config_set_keypair_mem"
+    (lazy-foreign-procedure libtls "tls_config_set_keypair_mem"
                        (void* void* size_t void* size_t) int))
 
   (define tls-config-set-ocsp-staple-mem
-    (foreign-procedure "tls_config_set_ocsp_staple_mem"
+    (lazy-foreign-procedure libtls "tls_config_set_ocsp_staple_mem"
                        (void* void* size_t) int))
 
   (define tls-config-add-keypair-mem
-    (foreign-procedure "tls_config_add_keypair_mem"
+    (lazy-foreign-procedure libtls "tls_config_add_keypair_mem"
                        (void* void* size_t void* size_t) int))
 
   (define tls-config-add-keypair-ocsp-mem
-    (foreign-procedure "tls_config_add_keypair_ocsp_mem"
+    (lazy-foreign-procedure libtls "tls_config_add_keypair_ocsp_mem"
                        (void* void* size_t void* size_t void* size_t) int))
 
   (define tls-config-set-keypair-ocsp-mem
-    (foreign-procedure "tls_config_set_keypair_ocsp_mem"
+    (lazy-foreign-procedure libtls "tls_config_set_keypair_ocsp_mem"
                        (void* void* size_t void* size_t void* size_t) int))
 
   ;; ============================================================
@@ -342,80 +342,80 @@
   ;; ============================================================
 
   (define tls-config-set-alpn
-    (foreign-procedure "tls_config_set_alpn" (void* string) int))
+    (lazy-foreign-procedure libtls "tls_config_set_alpn" (void* string) int))
 
   (define tls-config-set-ciphers
-    (foreign-procedure "tls_config_set_ciphers" (void* string) int))
+    (lazy-foreign-procedure libtls "tls_config_set_ciphers" (void* string) int))
 
   (define tls-config-set-dheparams
-    (foreign-procedure "tls_config_set_dheparams" (void* string) int))
+    (lazy-foreign-procedure libtls "tls_config_set_dheparams" (void* string) int))
 
   (define tls-config-set-ecdhecurve
-    (foreign-procedure "tls_config_set_ecdhecurve" (void* string) int))
+    (lazy-foreign-procedure libtls "tls_config_set_ecdhecurve" (void* string) int))
 
   (define tls-config-set-ecdhecurves
-    (foreign-procedure "tls_config_set_ecdhecurves" (void* string) int))
+    (lazy-foreign-procedure libtls "tls_config_set_ecdhecurves" (void* string) int))
 
   (define tls-config-set-protocols
-    (foreign-procedure "tls_config_set_protocols" (void* unsigned-32) int))
+    (lazy-foreign-procedure libtls "tls_config_set_protocols" (void* unsigned-32) int))
 
   ;; tls_config_parse_protocols takes uint32_t* out param
   ;; Caller should allocate with (foreign-alloc 4), pass pointer,
   ;; then read result with (foreign-ref 'unsigned-32 ptr 0)
   (define tls-config-parse-protocols
-    (foreign-procedure "tls_config_parse_protocols" (void* string) int))
+    (lazy-foreign-procedure libtls "tls_config_parse_protocols" (void* string) int))
 
   (define tls-config-prefer-ciphers-client
-    (foreign-procedure "tls_config_prefer_ciphers_client" (void*) void))
+    (lazy-foreign-procedure libtls "tls_config_prefer_ciphers_client" (void*) void))
 
   (define tls-config-prefer-ciphers-server
-    (foreign-procedure "tls_config_prefer_ciphers_server" (void*) void))
+    (lazy-foreign-procedure libtls "tls_config_prefer_ciphers_server" (void*) void))
 
   ;; ============================================================
   ;; Config verification
   ;; ============================================================
 
   (define tls-config-verify
-    (foreign-procedure "tls_config_verify" (void*) void))
+    (lazy-foreign-procedure libtls "tls_config_verify" (void*) void))
 
   (define tls-config-insecure-noverifycert
-    (foreign-procedure "tls_config_insecure_noverifycert" (void*) void))
+    (lazy-foreign-procedure libtls "tls_config_insecure_noverifycert" (void*) void))
 
   (define tls-config-insecure-noverifyname
-    (foreign-procedure "tls_config_insecure_noverifyname" (void*) void))
+    (lazy-foreign-procedure libtls "tls_config_insecure_noverifyname" (void*) void))
 
   (define tls-config-insecure-noverifytime
-    (foreign-procedure "tls_config_insecure_noverifytime" (void*) void))
+    (lazy-foreign-procedure libtls "tls_config_insecure_noverifytime" (void*) void))
 
   (define tls-config-ocsp-require-stapling
-    (foreign-procedure "tls_config_ocsp_require_stapling" (void*) void))
+    (lazy-foreign-procedure libtls "tls_config_ocsp_require_stapling" (void*) void))
 
   (define tls-config-verify-client
-    (foreign-procedure "tls_config_verify_client" (void*) void))
+    (lazy-foreign-procedure libtls "tls_config_verify_client" (void*) void))
 
   (define tls-config-verify-client-optional
-    (foreign-procedure "tls_config_verify_client_optional" (void*) void))
+    (lazy-foreign-procedure libtls "tls_config_verify_client_optional" (void*) void))
 
   (define tls-config-set-verify-depth
-    (foreign-procedure "tls_config_set_verify_depth" (void* int) int))
+    (lazy-foreign-procedure libtls "tls_config_set_verify_depth" (void* int) int))
 
   ;; ============================================================
   ;; Config session
   ;; ============================================================
 
   (define tls-config-set-session-fd
-    (foreign-procedure "tls_config_set_session_fd" (void* int) int))
+    (lazy-foreign-procedure libtls "tls_config_set_session_fd" (void* int) int))
 
   ;; session_id is unsigned char* + size_t
   (define tls-config-set-session-id
-    (foreign-procedure "tls_config_set_session_id" (void* void* size_t) int))
+    (lazy-foreign-procedure libtls "tls_config_set_session_id" (void* void* size_t) int))
 
   (define tls-config-set-session-lifetime
-    (foreign-procedure "tls_config_set_session_lifetime" (void* int) int))
+    (lazy-foreign-procedure libtls "tls_config_set_session_lifetime" (void* int) int))
 
   ;; key is unsigned char* + size_t, keyrev is uint32_t
   (define tls-config-add-ticket-key
-    (foreign-procedure "tls_config_add_ticket_key"
+    (lazy-foreign-procedure libtls "tls_config_add_ticket_key"
                        (void* unsigned-32 void* size_t) int))
 
   ;; ============================================================
@@ -423,36 +423,36 @@
   ;; ============================================================
 
   (define tls-client
-    (foreign-procedure "tls_client" () void*))
+    (lazy-foreign-procedure libtls "tls_client" () void*))
 
   (define tls-server
-    (foreign-procedure "tls_server" () void*))
+    (lazy-foreign-procedure libtls "tls_server" () void*))
 
   (define tls-configure
-    (foreign-procedure "tls_configure" (void* void*) int))
+    (lazy-foreign-procedure libtls "tls_configure" (void* void*) int))
 
   (define tls-reset
-    (foreign-procedure "tls_reset" (void*) void))
+    (lazy-foreign-procedure libtls "tls_reset" (void*) void))
 
   (define tls-free
-    (foreign-procedure "tls_free" (void*) void))
+    (lazy-foreign-procedure libtls "tls_free" (void*) void))
 
   ;; ============================================================
   ;; Client connect
   ;; ============================================================
 
   (define tls-connect
-    (foreign-procedure "tls_connect" (void* string string) int))
+    (lazy-foreign-procedure libtls "tls_connect" (void* string string) int))
 
   (define tls-connect-fds
-    (foreign-procedure "tls_connect_fds" (void* int int string) int))
+    (lazy-foreign-procedure libtls "tls_connect_fds" (void* int int string) int))
 
   (define tls-connect-servername
-    (foreign-procedure "tls_connect_servername"
+    (lazy-foreign-procedure libtls "tls_connect_servername"
                        (void* string string string) int))
 
   (define tls-connect-socket
-    (foreign-procedure "tls_connect_socket" (void* int string) int))
+    (lazy-foreign-procedure libtls "tls_connect_socket" (void* int string) int))
 
   ;; ============================================================
   ;; Server accept
@@ -462,93 +462,93 @@
   ;; block with (foreign-alloc (foreign-sizeof 'void*)), passes it,
   ;; then reads back with (foreign-ref 'void* ptr 0).
   (define tls-accept-fds
-    (foreign-procedure "tls_accept_fds" (void* void* int int) int))
+    (lazy-foreign-procedure libtls "tls_accept_fds" (void* void* int int) int))
 
   (define tls-accept-socket
-    (foreign-procedure "tls_accept_socket" (void* void* int) int))
+    (lazy-foreign-procedure libtls "tls_accept_socket" (void* void* int) int))
 
   ;; ============================================================
   ;; I/O
   ;; ============================================================
 
   (define tls-handshake
-    (foreign-procedure "tls_handshake" (void*) int))
+    (lazy-foreign-procedure libtls "tls_handshake" (void*) int))
 
   ;; buf is void* - caller passes (bytevector-pointer bv) with
   ;; (with-lock (list bv) ...) to pin during call
   (define tls-read
-    (foreign-procedure "tls_read" (void* void* size_t) ssize_t))
+    (lazy-foreign-procedure libtls "tls_read" (void* void* size_t) ssize_t))
 
   (define tls-write
-    (foreign-procedure "tls_write" (void* void* size_t) ssize_t))
+    (lazy-foreign-procedure libtls "tls_write" (void* void* size_t) ssize_t))
 
   (define tls-close
-    (foreign-procedure "tls_close" (void*) int))
+    (lazy-foreign-procedure libtls "tls_close" (void*) int))
 
   ;; ============================================================
   ;; Peer cert inspection
   ;; ============================================================
 
   (define tls-peer-cert-provided
-    (foreign-procedure "tls_peer_cert_provided" (void*) int))
+    (lazy-foreign-procedure libtls "tls_peer_cert_provided" (void*) int))
 
   (define tls-peer-cert-contains-name
-    (foreign-procedure "tls_peer_cert_contains_name" (void* string) int))
+    (lazy-foreign-procedure libtls "tls_peer_cert_contains_name" (void* string) int))
 
   (define tls-peer-cert-hash
-    (let ((func (foreign-procedure "tls_peer_cert_hash" (void*) void*)))
+    (let ((func (lazy-foreign-procedure libtls "tls_peer_cert_hash" (void*) void*)))
       (lambda (ctx)
         (pointer->string (func ctx)))))
 
   (define tls-peer-cert-issuer
-    (let ((func (foreign-procedure "tls_peer_cert_issuer" (void*) void*)))
+    (let ((func (lazy-foreign-procedure libtls "tls_peer_cert_issuer" (void*) void*)))
       (lambda (ctx)
         (pointer->string (func ctx)))))
 
   (define tls-peer-cert-subject
-    (let ((func (foreign-procedure "tls_peer_cert_subject" (void*) void*)))
+    (let ((func (lazy-foreign-procedure libtls "tls_peer_cert_subject" (void*) void*)))
       (lambda (ctx)
         (pointer->string (func ctx)))))
 
   (define tls-peer-cert-notbefore
-    (foreign-procedure "tls_peer_cert_notbefore" (void*) long))
+    (lazy-foreign-procedure libtls "tls_peer_cert_notbefore" (void*) long))
 
   (define tls-peer-cert-notafter
-    (foreign-procedure "tls_peer_cert_notafter" (void*) long))
+    (lazy-foreign-procedure libtls "tls_peer_cert_notafter" (void*) long))
 
   ;; Returns uint8_t* (PEM data) and writes length to size_t* out param.
   ;; Caller allocates (foreign-alloc (foreign-sizeof 'size_t)) for len,
   ;; then reads with (foreign-ref 'size_t ptr 0).
   (define tls-peer-cert-chain-pem
-    (foreign-procedure "tls_peer_cert_chain_pem" (void* void*) void*))
+    (lazy-foreign-procedure libtls "tls_peer_cert_chain_pem" (void* void*) void*))
 
   ;; ============================================================
   ;; Connection info
   ;; ============================================================
 
   (define tls-conn-alpn-selected
-    (let ((func (foreign-procedure "tls_conn_alpn_selected" (void*) void*)))
+    (let ((func (lazy-foreign-procedure libtls "tls_conn_alpn_selected" (void*) void*)))
       (lambda (ctx)
         (pointer->string (func ctx)))))
 
   (define tls-conn-cipher
-    (let ((func (foreign-procedure "tls_conn_cipher" (void*) void*)))
+    (let ((func (lazy-foreign-procedure libtls "tls_conn_cipher" (void*) void*)))
       (lambda (ctx)
         (pointer->string (func ctx)))))
 
   (define tls-conn-cipher-strength
-    (foreign-procedure "tls_conn_cipher_strength" (void*) int))
+    (lazy-foreign-procedure libtls "tls_conn_cipher_strength" (void*) int))
 
   (define tls-conn-servername
-    (let ((func (foreign-procedure "tls_conn_servername" (void*) void*)))
+    (let ((func (lazy-foreign-procedure libtls "tls_conn_servername" (void*) void*)))
       (lambda (ctx)
         (pointer->string (func ctx)))))
 
   (define tls-conn-session-resumed
-    (foreign-procedure "tls_conn_session_resumed" (void*) int))
+    (lazy-foreign-procedure libtls "tls_conn_session_resumed" (void*) int))
 
   (define tls-conn-version
-    (let ((func (foreign-procedure "tls_conn_version" (void*) void*)))
+    (let ((func (lazy-foreign-procedure libtls "tls_conn_version" (void*) void*)))
       (lambda (ctx)
         (pointer->string (func ctx)))))
 
@@ -559,43 +559,43 @@
   ;; Returns uint8_t* (allocated buffer). Caller must free with tls-unload-file.
   ;; len is size_t* out param, password is char* (or pass 0 for NULL).
   (define tls-load-file
-    (foreign-procedure "tls_load_file" (string void* void*) void*))
+    (lazy-foreign-procedure libtls "tls_load_file" (string void* void*) void*))
 
   (define tls-unload-file
-    (foreign-procedure "tls_unload_file" (void* size_t) void))
+    (lazy-foreign-procedure libtls "tls_unload_file" (void* size_t) void))
 
   ;; ============================================================
   ;; OCSP
   ;; ============================================================
 
   (define tls-ocsp-process-response
-    (foreign-procedure "tls_ocsp_process_response" (void* void* size_t) int))
+    (lazy-foreign-procedure libtls "tls_ocsp_process_response" (void* void* size_t) int))
 
   (define tls-peer-ocsp-cert-status
-    (foreign-procedure "tls_peer_ocsp_cert_status" (void*) int))
+    (lazy-foreign-procedure libtls "tls_peer_ocsp_cert_status" (void*) int))
 
   (define tls-peer-ocsp-crl-reason
-    (foreign-procedure "tls_peer_ocsp_crl_reason" (void*) int))
+    (lazy-foreign-procedure libtls "tls_peer_ocsp_crl_reason" (void*) int))
 
   (define tls-peer-ocsp-next-update
-    (foreign-procedure "tls_peer_ocsp_next_update" (void*) long))
+    (lazy-foreign-procedure libtls "tls_peer_ocsp_next_update" (void*) long))
 
   (define tls-peer-ocsp-response-status
-    (foreign-procedure "tls_peer_ocsp_response_status" (void*) int))
+    (lazy-foreign-procedure libtls "tls_peer_ocsp_response_status" (void*) int))
 
   (define tls-peer-ocsp-result
-    (let ((func (foreign-procedure "tls_peer_ocsp_result" (void*) void*)))
+    (let ((func (lazy-foreign-procedure libtls "tls_peer_ocsp_result" (void*) void*)))
       (lambda (ctx)
         (pointer->string (func ctx)))))
 
   (define tls-peer-ocsp-revocation-time
-    (foreign-procedure "tls_peer_ocsp_revocation_time" (void*) long))
+    (lazy-foreign-procedure libtls "tls_peer_ocsp_revocation_time" (void*) long))
 
   (define tls-peer-ocsp-this-update
-    (foreign-procedure "tls_peer_ocsp_this_update" (void*) long))
+    (lazy-foreign-procedure libtls "tls_peer_ocsp_this_update" (void*) long))
 
   (define tls-peer-ocsp-url
-    (let ((func (foreign-procedure "tls_peer_ocsp_url" (void*) void*)))
+    (let ((func (lazy-foreign-procedure libtls "tls_peer_ocsp_url" (void*) void*)))
       (lambda (ctx)
         (pointer->string (func ctx)))))
 
