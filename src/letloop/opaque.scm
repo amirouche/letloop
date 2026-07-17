@@ -60,7 +60,7 @@
 
   (import (chezscheme) (letloop cffi))
 
-  (define libopaque (load-shared-object "libopaque.so"))
+  (define-shared-object libopaque "libopaque.so" "libopaque.so.0")
 
   ;; ============================================================
   ;; Constants
@@ -194,7 +194,7 @@
   ;; rec        - bytevector: output, OPAQUE_USER_RECORD_LEN bytes
   ;; export-key - bytevector: output, 64 bytes (or #f to skip)
   (define %opaque-register
-    (foreign-procedure "opaque_Register"
+    (lazy-foreign-procedure libopaque "opaque_Register"
                        (void* unsigned-16 void* void* void* void*)
                        int))
 
@@ -231,7 +231,7 @@
   ;; sec     - bytevector: output, OPAQUE_REGISTER_USER_SEC_LEN + pwdU_len
   ;; request - bytevector: output, 32 bytes (ristretto255 element)
   (define %opaque-create-registration-request
-    (foreign-procedure "opaque_CreateRegistrationRequest"
+    (lazy-foreign-procedure libopaque "opaque_CreateRegistrationRequest"
                        (void* unsigned-16 void* void*)
                        int))
 
@@ -252,7 +252,7 @@
   ;; sec     - bytevector: output, OPAQUE_REGISTER_SECRET_LEN
   ;; pub     - bytevector: output, OPAQUE_REGISTER_PUBLIC_LEN
   (define %opaque-create-registration-response
-    (foreign-procedure "opaque_CreateRegistrationResponse"
+    (lazy-foreign-procedure libopaque "opaque_CreateRegistrationResponse"
                        (void* void* void* void*)
                        int))
 
@@ -280,7 +280,7 @@
   ;; reg-rec    - bytevector: output, OPAQUE_REGISTRATION_RECORD_LEN
   ;; export-key - bytevector: output, 64 bytes (or #f to skip)
   (define %opaque-finalize-request
-    (foreign-procedure "opaque_FinalizeRequest"
+    (lazy-foreign-procedure libopaque "opaque_FinalizeRequest"
                        (void* void* void* void* void*)
                        int))
 
@@ -307,7 +307,7 @@
   ;; recU - bytevector: registration record from step 3
   ;; rec  - bytevector: output, OPAQUE_USER_RECORD_LEN
   (define %opaque-store-user-record
-    (foreign-procedure "opaque_StoreUserRecord"
+    (lazy-foreign-procedure libopaque "opaque_StoreUserRecord"
                        (void* void* void*)
                        void))
 
@@ -330,7 +330,7 @@
   ;; sec  - bytevector: output, OPAQUE_USER_SESSION_SECRET_LEN + pwdU_len
   ;; ke1  - bytevector: output, OPAQUE_USER_SESSION_PUBLIC_LEN
   (define %opaque-create-credential-request
-    (foreign-procedure "opaque_CreateCredentialRequest"
+    (lazy-foreign-procedure libopaque "opaque_CreateCredentialRequest"
                        (void* unsigned-16 void* void*)
                        int))
 
@@ -355,7 +355,7 @@
   ;; sk    - bytevector: output, OPAQUE_SHARED_SECRETBYTES (shared secret)
   ;; authU - bytevector: output, 64 bytes (or #f if no explicit auth)
   (define %opaque-create-credential-response
-    (foreign-procedure "opaque_CreateCredentialResponse"
+    (lazy-foreign-procedure libopaque "opaque_CreateCredentialResponse"
                        (void* void* void* void* unsigned-16
                         void* void* void*)
                        int))
@@ -396,7 +396,7 @@
   ;; authU      - bytevector: output, 64 bytes (or #f)
   ;; export-key - bytevector: output, 64 bytes (or #f)
   (define %opaque-recover-credentials
-    (foreign-procedure "opaque_RecoverCredentials"
+    (lazy-foreign-procedure libopaque "opaque_RecoverCredentials"
                        (void* void* void* unsigned-16 void*
                         void* void* void*)
                        int))
@@ -437,7 +437,7 @@
   ;; authU  - bytevector: client's copy from RecoverCredentials
   ;; Returns 0 if authentication succeeds.
   (define %opaque-user-auth
-    (foreign-procedure "opaque_UserAuth"
+    (lazy-foreign-procedure libopaque "opaque_UserAuth"
                        (void* void*)
                        int))
 
