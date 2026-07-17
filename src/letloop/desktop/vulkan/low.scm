@@ -367,9 +367,9 @@
    vkCmdPushConstants
    vkCmdCopyBufferToImage
    vkCmdCopyImageToBuffer)
-  (import (chezscheme))
+  (import (chezscheme) (letloop cffi))
 
-  (define libvulkan (load-shared-object "libvulkan.so.1"))
+  (define-shared-object libvulkan "libvulkan.so.1" "libvulkan.so")
 
   ;; ----------------------------------------------------------------
   ;; VkResult
@@ -1290,102 +1290,102 @@
   ;; carried as uptr.
 
   (define vkCreateInstance
-    (foreign-procedure "vkCreateInstance" (uptr uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkCreateInstance" (uptr uptr uptr) int))
   (define vkDestroyInstance
-    (foreign-procedure "vkDestroyInstance" (uptr uptr) void))
+    (lazy-foreign-procedure libvulkan "vkDestroyInstance" (uptr uptr) void))
   (define vkEnumeratePhysicalDevices
-    (foreign-procedure "vkEnumeratePhysicalDevices" (uptr uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkEnumeratePhysicalDevices" (uptr uptr uptr) int))
   (define vkGetPhysicalDeviceProperties
-    (foreign-procedure "vkGetPhysicalDeviceProperties" (uptr uptr) void))
+    (lazy-foreign-procedure libvulkan "vkGetPhysicalDeviceProperties" (uptr uptr) void))
   (define vkGetPhysicalDeviceQueueFamilyProperties
-    (foreign-procedure "vkGetPhysicalDeviceQueueFamilyProperties"
+    (lazy-foreign-procedure libvulkan "vkGetPhysicalDeviceQueueFamilyProperties"
                        (uptr uptr uptr) void))
 
   (define vkCreateDevice
-    (foreign-procedure "vkCreateDevice" (uptr uptr uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkCreateDevice" (uptr uptr uptr uptr) int))
   (define vkDestroyDevice
-    (foreign-procedure "vkDestroyDevice" (uptr uptr) void))
+    (lazy-foreign-procedure libvulkan "vkDestroyDevice" (uptr uptr) void))
   (define vkDeviceWaitIdle
-    (foreign-procedure "vkDeviceWaitIdle" (uptr) int))
+    (lazy-foreign-procedure libvulkan "vkDeviceWaitIdle" (uptr) int))
   (define vkGetDeviceQueue
-    (foreign-procedure "vkGetDeviceQueue" (uptr unsigned-32 unsigned-32 uptr) void))
+    (lazy-foreign-procedure libvulkan "vkGetDeviceQueue" (uptr unsigned-32 unsigned-32 uptr) void))
 
   (define vkGetPhysicalDeviceDisplayPropertiesKHR
-    (foreign-procedure "vkGetPhysicalDeviceDisplayPropertiesKHR"
+    (lazy-foreign-procedure libvulkan "vkGetPhysicalDeviceDisplayPropertiesKHR"
                        (uptr uptr uptr) int))
   (define vkGetDisplayModePropertiesKHR
-    (foreign-procedure "vkGetDisplayModePropertiesKHR"
+    (lazy-foreign-procedure libvulkan "vkGetDisplayModePropertiesKHR"
                        (uptr unsigned-64 uptr uptr) int))
   (define vkGetPhysicalDeviceDisplayPlanePropertiesKHR
-    (foreign-procedure "vkGetPhysicalDeviceDisplayPlanePropertiesKHR"
+    (lazy-foreign-procedure libvulkan "vkGetPhysicalDeviceDisplayPlanePropertiesKHR"
                        (uptr uptr uptr) int))
   (define vkCreateDisplayPlaneSurfaceKHR
-    (foreign-procedure "vkCreateDisplayPlaneSurfaceKHR"
+    (lazy-foreign-procedure libvulkan "vkCreateDisplayPlaneSurfaceKHR"
                        (uptr uptr uptr uptr) int))
   (define vkDestroySurfaceKHR
-    (foreign-procedure "vkDestroySurfaceKHR" (uptr unsigned-64 uptr) void))
+    (lazy-foreign-procedure libvulkan "vkDestroySurfaceKHR" (uptr unsigned-64 uptr) void))
 
   (define vkGetPhysicalDeviceSurfaceCapabilitiesKHR
-    (foreign-procedure "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"
+    (lazy-foreign-procedure libvulkan "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"
                        (uptr unsigned-64 uptr) int))
   (define vkGetPhysicalDeviceSurfaceFormatsKHR
-    (foreign-procedure "vkGetPhysicalDeviceSurfaceFormatsKHR"
+    (lazy-foreign-procedure libvulkan "vkGetPhysicalDeviceSurfaceFormatsKHR"
                        (uptr unsigned-64 uptr uptr) int))
   (define vkCreateSwapchainKHR
-    (foreign-procedure "vkCreateSwapchainKHR" (uptr uptr uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkCreateSwapchainKHR" (uptr uptr uptr uptr) int))
   (define vkDestroySwapchainKHR
-    (foreign-procedure "vkDestroySwapchainKHR"
+    (lazy-foreign-procedure libvulkan "vkDestroySwapchainKHR"
                        (uptr unsigned-64 uptr) void))
   (define vkGetSwapchainImagesKHR
-    (foreign-procedure "vkGetSwapchainImagesKHR"
+    (lazy-foreign-procedure libvulkan "vkGetSwapchainImagesKHR"
                        (uptr unsigned-64 uptr uptr) int))
   (define vkAcquireNextImageKHR
-    (foreign-procedure "vkAcquireNextImageKHR"
+    (lazy-foreign-procedure libvulkan "vkAcquireNextImageKHR"
                        (uptr unsigned-64 unsigned-64 unsigned-64 unsigned-64 uptr) int))
   (define vkQueuePresentKHR
-    (foreign-procedure "vkQueuePresentKHR" (uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkQueuePresentKHR" (uptr uptr) int))
 
   (define vkCreateSemaphore
-    (foreign-procedure "vkCreateSemaphore" (uptr uptr uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkCreateSemaphore" (uptr uptr uptr uptr) int))
   (define vkDestroySemaphore
-    (foreign-procedure "vkDestroySemaphore"
+    (lazy-foreign-procedure libvulkan "vkDestroySemaphore"
                        (uptr unsigned-64 uptr) void))
   (define vkCreateFence
-    (foreign-procedure "vkCreateFence" (uptr uptr uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkCreateFence" (uptr uptr uptr uptr) int))
   (define vkDestroyFence
-    (foreign-procedure "vkDestroyFence"
+    (lazy-foreign-procedure libvulkan "vkDestroyFence"
                        (uptr unsigned-64 uptr) void))
   (define vkWaitForFences
-    (foreign-procedure "vkWaitForFences"
+    (lazy-foreign-procedure libvulkan "vkWaitForFences"
                        (uptr unsigned-32 uptr unsigned-32 unsigned-64) int))
   (define vkResetFences
-    (foreign-procedure "vkResetFences" (uptr unsigned-32 uptr) int))
+    (lazy-foreign-procedure libvulkan "vkResetFences" (uptr unsigned-32 uptr) int))
 
   (define vkCreateCommandPool
-    (foreign-procedure "vkCreateCommandPool" (uptr uptr uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkCreateCommandPool" (uptr uptr uptr uptr) int))
   (define vkDestroyCommandPool
-    (foreign-procedure "vkDestroyCommandPool"
+    (lazy-foreign-procedure libvulkan "vkDestroyCommandPool"
                        (uptr unsigned-64 uptr) void))
   (define vkAllocateCommandBuffers
-    (foreign-procedure "vkAllocateCommandBuffers" (uptr uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkAllocateCommandBuffers" (uptr uptr uptr) int))
   (define vkFreeCommandBuffers
-    (foreign-procedure "vkFreeCommandBuffers"
+    (lazy-foreign-procedure libvulkan "vkFreeCommandBuffers"
                        (uptr unsigned-64 unsigned-32 uptr) void))
   (define vkBeginCommandBuffer
-    (foreign-procedure "vkBeginCommandBuffer" (uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkBeginCommandBuffer" (uptr uptr) int))
   (define vkEndCommandBuffer
-    (foreign-procedure "vkEndCommandBuffer" (uptr) int))
+    (lazy-foreign-procedure libvulkan "vkEndCommandBuffer" (uptr) int))
   (define vkCmdPipelineBarrier
-    (foreign-procedure "vkCmdPipelineBarrier"
+    (lazy-foreign-procedure libvulkan "vkCmdPipelineBarrier"
                        (uptr unsigned-32 unsigned-32 unsigned-32
                              unsigned-32 uptr
                              unsigned-32 uptr
                              unsigned-32 uptr) void))
   (define vkCmdClearColorImage
-    (foreign-procedure "vkCmdClearColorImage"
+    (lazy-foreign-procedure libvulkan "vkCmdClearColorImage"
                        (uptr unsigned-64 unsigned-32 uptr unsigned-32 uptr) void))
   (define vkQueueSubmit
-    (foreign-procedure "vkQueueSubmit"
+    (lazy-foreign-procedure libvulkan "vkQueueSubmit"
                        (uptr unsigned-32 uptr unsigned-64) int))
 
   ;; ----------------------------------------------------------------
@@ -1394,136 +1394,136 @@
   ;; ----------------------------------------------------------------
 
   (define vkCreateRenderPass
-    (foreign-procedure "vkCreateRenderPass" (uptr uptr uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkCreateRenderPass" (uptr uptr uptr uptr) int))
   (define vkDestroyRenderPass
-    (foreign-procedure "vkDestroyRenderPass"
+    (lazy-foreign-procedure libvulkan "vkDestroyRenderPass"
                        (uptr unsigned-64 uptr) void))
 
   (define vkCreateFramebuffer
-    (foreign-procedure "vkCreateFramebuffer" (uptr uptr uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkCreateFramebuffer" (uptr uptr uptr uptr) int))
   (define vkDestroyFramebuffer
-    (foreign-procedure "vkDestroyFramebuffer"
+    (lazy-foreign-procedure libvulkan "vkDestroyFramebuffer"
                        (uptr unsigned-64 uptr) void))
 
   (define vkCreateImage
-    (foreign-procedure "vkCreateImage" (uptr uptr uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkCreateImage" (uptr uptr uptr uptr) int))
   (define vkDestroyImage
-    (foreign-procedure "vkDestroyImage"
+    (lazy-foreign-procedure libvulkan "vkDestroyImage"
                        (uptr unsigned-64 uptr) void))
   (define vkCreateImageView
-    (foreign-procedure "vkCreateImageView" (uptr uptr uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkCreateImageView" (uptr uptr uptr uptr) int))
   (define vkDestroyImageView
-    (foreign-procedure "vkDestroyImageView"
+    (lazy-foreign-procedure libvulkan "vkDestroyImageView"
                        (uptr unsigned-64 uptr) void))
   (define vkCreateSampler
-    (foreign-procedure "vkCreateSampler" (uptr uptr uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkCreateSampler" (uptr uptr uptr uptr) int))
   (define vkDestroySampler
-    (foreign-procedure "vkDestroySampler"
+    (lazy-foreign-procedure libvulkan "vkDestroySampler"
                        (uptr unsigned-64 uptr) void))
   (define vkGetImageMemoryRequirements
-    (foreign-procedure "vkGetImageMemoryRequirements"
+    (lazy-foreign-procedure libvulkan "vkGetImageMemoryRequirements"
                        (uptr unsigned-64 uptr) void))
   (define vkBindImageMemory
-    (foreign-procedure "vkBindImageMemory"
+    (lazy-foreign-procedure libvulkan "vkBindImageMemory"
                        (uptr unsigned-64 unsigned-64 unsigned-64) int))
 
   (define vkCreateShaderModule
-    (foreign-procedure "vkCreateShaderModule" (uptr uptr uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkCreateShaderModule" (uptr uptr uptr uptr) int))
   (define vkDestroyShaderModule
-    (foreign-procedure "vkDestroyShaderModule"
+    (lazy-foreign-procedure libvulkan "vkDestroyShaderModule"
                        (uptr unsigned-64 uptr) void))
   (define vkCreatePipelineLayout
-    (foreign-procedure "vkCreatePipelineLayout" (uptr uptr uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkCreatePipelineLayout" (uptr uptr uptr uptr) int))
   (define vkDestroyPipelineLayout
-    (foreign-procedure "vkDestroyPipelineLayout"
+    (lazy-foreign-procedure libvulkan "vkDestroyPipelineLayout"
                        (uptr unsigned-64 uptr) void))
   (define vkCreateGraphicsPipelines
-    (foreign-procedure "vkCreateGraphicsPipelines"
+    (lazy-foreign-procedure libvulkan "vkCreateGraphicsPipelines"
                        (uptr unsigned-64 unsigned-32 uptr uptr uptr) int))
   (define vkDestroyPipeline
-    (foreign-procedure "vkDestroyPipeline"
+    (lazy-foreign-procedure libvulkan "vkDestroyPipeline"
                        (uptr unsigned-64 uptr) void))
 
   (define vkCreateDescriptorSetLayout
-    (foreign-procedure "vkCreateDescriptorSetLayout"
+    (lazy-foreign-procedure libvulkan "vkCreateDescriptorSetLayout"
                        (uptr uptr uptr uptr) int))
   (define vkDestroyDescriptorSetLayout
-    (foreign-procedure "vkDestroyDescriptorSetLayout"
+    (lazy-foreign-procedure libvulkan "vkDestroyDescriptorSetLayout"
                        (uptr unsigned-64 uptr) void))
   (define vkCreateDescriptorPool
-    (foreign-procedure "vkCreateDescriptorPool"
+    (lazy-foreign-procedure libvulkan "vkCreateDescriptorPool"
                        (uptr uptr uptr uptr) int))
   (define vkDestroyDescriptorPool
-    (foreign-procedure "vkDestroyDescriptorPool"
+    (lazy-foreign-procedure libvulkan "vkDestroyDescriptorPool"
                        (uptr unsigned-64 uptr) void))
   (define vkAllocateDescriptorSets
-    (foreign-procedure "vkAllocateDescriptorSets" (uptr uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkAllocateDescriptorSets" (uptr uptr uptr) int))
   (define vkUpdateDescriptorSets
-    (foreign-procedure "vkUpdateDescriptorSets"
+    (lazy-foreign-procedure libvulkan "vkUpdateDescriptorSets"
                        (uptr unsigned-32 uptr unsigned-32 uptr) void))
 
   (define vkCreateBuffer
-    (foreign-procedure "vkCreateBuffer" (uptr uptr uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkCreateBuffer" (uptr uptr uptr uptr) int))
   (define vkDestroyBuffer
-    (foreign-procedure "vkDestroyBuffer"
+    (lazy-foreign-procedure libvulkan "vkDestroyBuffer"
                        (uptr unsigned-64 uptr) void))
   (define vkGetBufferMemoryRequirements
-    (foreign-procedure "vkGetBufferMemoryRequirements"
+    (lazy-foreign-procedure libvulkan "vkGetBufferMemoryRequirements"
                        (uptr unsigned-64 uptr) void))
   (define vkBindBufferMemory
-    (foreign-procedure "vkBindBufferMemory"
+    (lazy-foreign-procedure libvulkan "vkBindBufferMemory"
                        (uptr unsigned-64 unsigned-64 unsigned-64) int))
   (define vkAllocateMemory
-    (foreign-procedure "vkAllocateMemory" (uptr uptr uptr uptr) int))
+    (lazy-foreign-procedure libvulkan "vkAllocateMemory" (uptr uptr uptr uptr) int))
   (define vkFreeMemory
-    (foreign-procedure "vkFreeMemory"
+    (lazy-foreign-procedure libvulkan "vkFreeMemory"
                        (uptr unsigned-64 uptr) void))
   (define vkMapMemory
-    (foreign-procedure "vkMapMemory"
+    (lazy-foreign-procedure libvulkan "vkMapMemory"
                        (uptr unsigned-64 unsigned-64 unsigned-64
                              unsigned-32 uptr) int))
   (define vkUnmapMemory
-    (foreign-procedure "vkUnmapMemory"
+    (lazy-foreign-procedure libvulkan "vkUnmapMemory"
                        (uptr unsigned-64) void))
   (define vkGetPhysicalDeviceMemoryProperties
-    (foreign-procedure "vkGetPhysicalDeviceMemoryProperties"
+    (lazy-foreign-procedure libvulkan "vkGetPhysicalDeviceMemoryProperties"
                        (uptr uptr) void))
 
   (define vkCmdBeginRenderPass
-    (foreign-procedure "vkCmdBeginRenderPass"
+    (lazy-foreign-procedure libvulkan "vkCmdBeginRenderPass"
                        (uptr uptr unsigned-32) void))
   (define vkCmdEndRenderPass
-    (foreign-procedure "vkCmdEndRenderPass" (uptr) void))
+    (lazy-foreign-procedure libvulkan "vkCmdEndRenderPass" (uptr) void))
   (define vkCmdBindPipeline
-    (foreign-procedure "vkCmdBindPipeline"
+    (lazy-foreign-procedure libvulkan "vkCmdBindPipeline"
                        (uptr unsigned-32 unsigned-64) void))
   (define vkCmdBindVertexBuffers
-    (foreign-procedure "vkCmdBindVertexBuffers"
+    (lazy-foreign-procedure libvulkan "vkCmdBindVertexBuffers"
                        (uptr unsigned-32 unsigned-32 uptr uptr) void))
   (define vkCmdBindDescriptorSets
-    (foreign-procedure "vkCmdBindDescriptorSets"
+    (lazy-foreign-procedure libvulkan "vkCmdBindDescriptorSets"
                        (uptr unsigned-32 unsigned-64
                              unsigned-32 unsigned-32 uptr
                              unsigned-32 uptr) void))
   (define vkCmdDraw
-    (foreign-procedure "vkCmdDraw"
+    (lazy-foreign-procedure libvulkan "vkCmdDraw"
                        (uptr unsigned-32 unsigned-32
                              unsigned-32 unsigned-32) void))
   (define vkCmdSetViewport
-    (foreign-procedure "vkCmdSetViewport"
+    (lazy-foreign-procedure libvulkan "vkCmdSetViewport"
                        (uptr unsigned-32 unsigned-32 uptr) void))
   (define vkCmdSetScissor
-    (foreign-procedure "vkCmdSetScissor"
+    (lazy-foreign-procedure libvulkan "vkCmdSetScissor"
                        (uptr unsigned-32 unsigned-32 uptr) void))
   (define vkCmdPushConstants
-    (foreign-procedure "vkCmdPushConstants"
+    (lazy-foreign-procedure libvulkan "vkCmdPushConstants"
                        (uptr unsigned-64 unsigned-32
                              unsigned-32 unsigned-32 uptr) void))
   (define vkCmdCopyBufferToImage
-    (foreign-procedure "vkCmdCopyBufferToImage"
+    (lazy-foreign-procedure libvulkan "vkCmdCopyBufferToImage"
                        (uptr unsigned-64 unsigned-64
                              unsigned-32 unsigned-32 uptr) void))
   (define vkCmdCopyImageToBuffer
-    (foreign-procedure "vkCmdCopyImageToBuffer"
+    (lazy-foreign-procedure libvulkan "vkCmdCopyImageToBuffer"
                        (uptr unsigned-64 unsigned-32
                              unsigned-64 unsigned-32 uptr) void)))

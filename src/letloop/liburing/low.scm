@@ -373,13 +373,15 @@
    loop-accept loop-tcp-serve loop-poll-wait
    )
 
-  (import (chezscheme) (letloop r999))
+  (import (chezscheme)
+          (only (letloop cffi) define-shared-object lazy-foreign-procedure)
+          (letloop r999))
 
   ;;------------------------------------------------------------
   ;; Load shared object
   ;;------------------------------------------------------------
 
-  (define liburing-ffi (load-shared-object "liburing-ffi.so.2"))
+  (define-shared-object liburing-ffi "liburing-ffi.so.2" "liburing-ffi.so")
 
   ;;------------------------------------------------------------
   ;; Struct sizes (x86_64)
@@ -529,24 +531,24 @@
   ;;------------------------------------------------------------
 
   (define io-uring-queue-init
-    (let ((func (foreign-procedure "io_uring_queue_init"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_queue_init"
                                    (unsigned void* unsigned) int)))
       (lambda (entries ring flags)
         (func entries ring flags))))
 
   (define io-uring-queue-init-params
-    (let ((func (foreign-procedure "io_uring_queue_init_params"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_queue_init_params"
                                    (unsigned void* void*) int)))
       (lambda (entries ring params)
         (func entries ring params))))
 
   (define io-uring-queue-exit
-    (let ((func (foreign-procedure "io_uring_queue_exit" (void*) void)))
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_queue_exit" (void*) void)))
       (lambda (ring)
         (func ring))))
 
   (define io-uring-queue-mmap
-    (let ((func (foreign-procedure "io_uring_queue_mmap"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_queue_mmap"
                                    (int void* void*) int)))
       (lambda (fd params ring)
         (func fd params ring))))
@@ -556,7 +558,7 @@
   ;;------------------------------------------------------------
 
   (define io-uring-get-sqe
-    (let ((func (foreign-procedure "io_uring_get_sqe" (void*) void*)))
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_get_sqe" (void*) void*)))
       (lambda (ring)
         (func ring))))
 
@@ -565,24 +567,24 @@
   ;;------------------------------------------------------------
 
   (define io-uring-submit
-    (let ((func (foreign-procedure "io_uring_submit" (void*) int)))
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_submit" (void*) int)))
       (lambda (ring)
         (func ring))))
 
   (define io-uring-submit-and-wait
-    (let ((func (foreign-procedure "io_uring_submit_and_wait"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_submit_and_wait"
                                    (void* unsigned) int)))
       (lambda (ring wait-nr)
         (func ring wait-nr))))
 
   (define io-uring-submit-and-wait-timeout
-    (let ((func (foreign-procedure "io_uring_submit_and_wait_timeout"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_submit_and_wait_timeout"
                                    (void* void* unsigned void* void*) int)))
       (lambda (ring cqe-ptr wait-nr ts sigmask)
         (func ring cqe-ptr wait-nr ts sigmask))))
 
   (define io-uring-submit-and-get-events
-    (let ((func (foreign-procedure "io_uring_submit_and_get_events"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_submit_and_get_events"
                                    (void*) int)))
       (lambda (ring)
         (func ring))))
@@ -592,37 +594,37 @@
   ;;------------------------------------------------------------
 
   (define io-uring-wait-cqe
-    (let ((func (foreign-procedure "io_uring_wait_cqe"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_wait_cqe"
                                    (void* void*) int)))
       (lambda (ring cqe-ptr)
         (func ring cqe-ptr))))
 
   (define io-uring-wait-cqe-nr
-    (let ((func (foreign-procedure "io_uring_wait_cqe_nr"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_wait_cqe_nr"
                                    (void* void* unsigned) int)))
       (lambda (ring cqe-ptr wait-nr)
         (func ring cqe-ptr wait-nr))))
 
   (define io-uring-wait-cqe-timeout
-    (let ((func (foreign-procedure __collect_safe "io_uring_wait_cqe_timeout"
+    (let ((func (lazy-foreign-procedure liburing-ffi __collect_safe "io_uring_wait_cqe_timeout"
                                    (void* void* void*) int)))
       (lambda (ring cqe-ptr ts)
         (func ring cqe-ptr (ftype-pointer-address ts)))))
 
   (define io-uring-wait-cqes
-    (let ((func (foreign-procedure "io_uring_wait_cqes"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_wait_cqes"
                                    (void* void* unsigned void* void*) int)))
       (lambda (ring cqe-ptr wait-nr ts sigmask)
         (func ring cqe-ptr wait-nr ts sigmask))))
 
   (define io-uring-peek-cqe
-    (let ((func (foreign-procedure "io_uring_peek_cqe"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_peek_cqe"
                                    (void* void*) int)))
       (lambda (ring cqe-ptr)
         (func ring cqe-ptr))))
 
   (define io-uring-peek-batch-cqe
-    (let ((func (foreign-procedure "io_uring_peek_batch_cqe"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_peek_batch_cqe"
                                    (void* void* unsigned) unsigned)))
       (lambda (ring cqes count)
         (func ring cqes count))))
@@ -632,25 +634,25 @@
   ;;------------------------------------------------------------
 
   (define io-uring-cqe-seen
-    (let ((func (foreign-procedure "io_uring_cqe_seen"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_cqe_seen"
                                    (void* void*) void)))
       (lambda (ring cqe)
         (func ring cqe))))
 
   (define io-uring-cq-advance
-    (let ((func (foreign-procedure "io_uring_cq_advance"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_cq_advance"
                                    (void* unsigned) void)))
       (lambda (ring nr)
         (func ring nr))))
 
   (define io-uring-cqe-get-data
-    (let ((func (foreign-procedure "io_uring_cqe_get_data"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_cqe_get_data"
                                    (void*) void*)))
       (lambda (cqe)
         (func cqe))))
 
   (define io-uring-cqe-get-data64
-    (let ((func (foreign-procedure "io_uring_cqe_get_data64"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_cqe_get_data64"
                                    (void*) unsigned-64)))
       (lambda (cqe)
         (func cqe))))
@@ -670,25 +672,25 @@
   ;;------------------------------------------------------------
 
   (define io-uring-sqe-set-data
-    (let ((func (foreign-procedure "io_uring_sqe_set_data"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_sqe_set_data"
                                    (void* void*) void)))
       (lambda (sqe data)
         (func sqe data))))
 
   (define io-uring-sqe-set-data64
-    (let ((func (foreign-procedure "io_uring_sqe_set_data64"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_sqe_set_data64"
                                    (void* unsigned-64) void)))
       (lambda (sqe data)
         (func sqe data))))
 
   (define io-uring-sqe-set-flags
-    (let ((func (foreign-procedure "io_uring_sqe_set_flags"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_sqe_set_flags"
                                    (void* unsigned) void)))
       (lambda (sqe flags)
         (func sqe flags))))
 
   (define io-uring-sqe-set-buf-group
-    (let ((func (foreign-procedure "io_uring_sqe_set_buf_group"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_sqe_set_buf_group"
                                    (void* int) void)))
       (lambda (sqe bgid)
         (func sqe bgid))))
@@ -698,31 +700,31 @@
   ;;------------------------------------------------------------
 
   (define io-uring-sq-ready
-    (let ((func (foreign-procedure "io_uring_sq_ready"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_sq_ready"
                                    (void*) unsigned)))
       (lambda (ring)
         (func ring))))
 
   (define io-uring-sq-space-left
-    (let ((func (foreign-procedure "io_uring_sq_space_left"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_sq_space_left"
                                    (void*) unsigned)))
       (lambda (ring)
         (func ring))))
 
   (define io-uring-cq-ready
-    (let ((func (foreign-procedure "io_uring_cq_ready"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_cq_ready"
                                    (void*) unsigned)))
       (lambda (ring)
         (func ring))))
 
   (define io-uring-cq-has-overflow
-    (let ((func (foreign-procedure "io_uring_cq_has_overflow"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_cq_has_overflow"
                                    (void*) boolean)))
       (lambda (ring)
         (func ring))))
 
   (define io-uring-get-events
-    (let ((func (foreign-procedure "io_uring_get_events"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_get_events"
                                    (void*) int)))
       (lambda (ring)
         (func ring))))
@@ -732,7 +734,7 @@
   ;;------------------------------------------------------------
 
   (define io-uring-prep-rw
-    (let ((func (foreign-procedure "io_uring_prep_rw"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_rw"
                                    (int void* int void* unsigned unsigned-64) void)))
       (lambda (op sqe fd addr len offset)
         (func op sqe fd addr len offset))))
@@ -742,7 +744,7 @@
   ;;------------------------------------------------------------
 
   (define io-uring-prep-nop
-    (let ((func (foreign-procedure "io_uring_prep_nop" (void*) void)))
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_nop" (void*) void)))
       (lambda (sqe)
         (func sqe))))
 
@@ -751,55 +753,55 @@
   ;;------------------------------------------------------------
 
   (define io-uring-prep-read
-    (let ((func (foreign-procedure "io_uring_prep_read"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_read"
                                    (void* int void* unsigned unsigned-64) void)))
       (lambda (sqe fd buf nbytes offset)
         (func sqe fd buf nbytes offset))))
 
   (define io-uring-prep-write
-    (let ((func (foreign-procedure "io_uring_prep_write"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_write"
                                    (void* int void* unsigned unsigned-64) void)))
       (lambda (sqe fd buf nbytes offset)
         (func sqe fd buf nbytes offset))))
 
   (define io-uring-prep-readv
-    (let ((func (foreign-procedure "io_uring_prep_readv"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_readv"
                                    (void* int void* unsigned unsigned-64) void)))
       (lambda (sqe fd iovecs nr-vecs offset)
         (func sqe fd iovecs nr-vecs offset))))
 
   (define io-uring-prep-writev
-    (let ((func (foreign-procedure "io_uring_prep_writev"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_writev"
                                    (void* int void* unsigned unsigned-64) void)))
       (lambda (sqe fd iovecs nr-vecs offset)
         (func sqe fd iovecs nr-vecs offset))))
 
   (define io-uring-prep-readv2
-    (let ((func (foreign-procedure "io_uring_prep_readv2"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_readv2"
                                    (void* int void* unsigned unsigned-64 int) void)))
       (lambda (sqe fd iovecs nr-vecs offset flags)
         (func sqe fd iovecs nr-vecs offset flags))))
 
   (define io-uring-prep-writev2
-    (let ((func (foreign-procedure "io_uring_prep_writev2"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_writev2"
                                    (void* int void* unsigned unsigned-64 int) void)))
       (lambda (sqe fd iovecs nr-vecs offset flags)
         (func sqe fd iovecs nr-vecs offset flags))))
 
   (define io-uring-prep-read-fixed
-    (let ((func (foreign-procedure "io_uring_prep_read_fixed"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_read_fixed"
                                    (void* int void* unsigned unsigned-64 int) void)))
       (lambda (sqe fd buf nbytes offset buf-index)
         (func sqe fd buf nbytes offset buf-index))))
 
   (define io-uring-prep-write-fixed
-    (let ((func (foreign-procedure "io_uring_prep_write_fixed"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_write_fixed"
                                    (void* int void* unsigned unsigned-64 int) void)))
       (lambda (sqe fd buf nbytes offset buf-index)
         (func sqe fd buf nbytes offset buf-index))))
 
   (define io-uring-prep-read-multishot
-    (let ((func (foreign-procedure "io_uring_prep_read_multishot"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_read_multishot"
                                    (void* int unsigned unsigned-64 int) void)))
       (lambda (sqe fd nbytes offset buf-group)
         (func sqe fd nbytes offset buf-group))))
@@ -809,67 +811,67 @@
   ;;------------------------------------------------------------
 
   (define io-uring-prep-socket
-    (let ((func (foreign-procedure "io_uring_prep_socket"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_socket"
                                    (void* int int int unsigned) void)))
       (lambda (sqe domain type protocol flags)
         (func sqe domain type protocol flags))))
 
   (define io-uring-prep-socket-direct
-    (let ((func (foreign-procedure "io_uring_prep_socket_direct"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_socket_direct"
                                    (void* int int int unsigned unsigned) void)))
       (lambda (sqe domain type protocol file-index flags)
         (func sqe domain type protocol file-index flags))))
 
   (define io-uring-prep-socket-direct-alloc
-    (let ((func (foreign-procedure "io_uring_prep_socket_direct_alloc"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_socket_direct_alloc"
                                    (void* int int int unsigned) void)))
       (lambda (sqe domain type protocol flags)
         (func sqe domain type protocol flags))))
 
   (define io-uring-prep-connect
-    (let ((func (foreign-procedure "io_uring_prep_connect"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_connect"
                                    (void* int void* unsigned) void)))
       (lambda (sqe fd addr addrlen)
         (func sqe fd addr addrlen))))
 
   (define io-uring-prep-bind
-    (let ((func (foreign-procedure "io_uring_prep_bind"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_bind"
                                    (void* int void* unsigned) void)))
       (lambda (sqe fd addr addrlen)
         (func sqe fd addr addrlen))))
 
   (define io-uring-prep-listen
-    (let ((func (foreign-procedure "io_uring_prep_listen"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_listen"
                                    (void* int int) void)))
       (lambda (sqe fd backlog)
         (func sqe fd backlog))))
 
   (define io-uring-prep-accept
-    (let ((func (foreign-procedure "io_uring_prep_accept"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_accept"
                                    (void* int void* void* int) void)))
       (lambda (sqe fd addr addrlen flags)
         (func sqe fd addr addrlen flags))))
 
   (define io-uring-prep-accept-direct
-    (let ((func (foreign-procedure "io_uring_prep_accept_direct"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_accept_direct"
                                    (void* int void* void* int unsigned) void)))
       (lambda (sqe fd addr addrlen flags file-index)
         (func sqe fd addr addrlen flags file-index))))
 
   (define io-uring-prep-multishot-accept
-    (let ((func (foreign-procedure "io_uring_prep_multishot_accept"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_multishot_accept"
                                    (void* int void* void* int) void)))
       (lambda (sqe fd addr addrlen flags)
         (func sqe fd addr addrlen flags))))
 
   (define io-uring-prep-multishot-accept-direct
-    (let ((func (foreign-procedure "io_uring_prep_multishot_accept_direct"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_multishot_accept_direct"
                                    (void* int void* void* int) void)))
       (lambda (sqe fd addr addrlen flags)
         (func sqe fd addr addrlen flags))))
 
   (define io-uring-prep-shutdown
-    (let ((func (foreign-procedure "io_uring_prep_shutdown"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_shutdown"
                                    (void* int int) void)))
       (lambda (sqe fd how)
         (func sqe fd how))))
@@ -879,73 +881,73 @@
   ;;------------------------------------------------------------
 
   (define io-uring-prep-send
-    (let ((func (foreign-procedure "io_uring_prep_send"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_send"
                                    (void* int void* size_t int) void)))
       (lambda (sqe sockfd buf len flags)
         (func sqe sockfd buf len flags))))
 
   (define io-uring-prep-send-bundle
-    (let ((func (foreign-procedure "io_uring_prep_send_bundle"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_send_bundle"
                                    (void* int size_t int) void)))
       (lambda (sqe sockfd len flags)
         (func sqe sockfd len flags))))
 
   (define io-uring-prep-send-set-addr
-    (let ((func (foreign-procedure "io_uring_prep_send_set_addr"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_send_set_addr"
                                    (void* void* unsigned-16) void)))
       (lambda (sqe dest-addr addr-len)
         (func sqe dest-addr addr-len))))
 
   (define io-uring-prep-sendto
-    (let ((func (foreign-procedure "io_uring_prep_sendto"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_sendto"
                                    (void* int void* size_t int void* unsigned) void)))
       (lambda (sqe sockfd buf len flags addr addrlen)
         (func sqe sockfd buf len flags addr addrlen))))
 
   (define io-uring-prep-send-zc
-    (let ((func (foreign-procedure "io_uring_prep_send_zc"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_send_zc"
                                    (void* int void* size_t int unsigned) void)))
       (lambda (sqe sockfd buf len flags zc-flags)
         (func sqe sockfd buf len flags zc-flags))))
 
   (define io-uring-prep-send-zc-fixed
-    (let ((func (foreign-procedure "io_uring_prep_send_zc_fixed"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_send_zc_fixed"
                                    (void* int void* size_t int unsigned unsigned) void)))
       (lambda (sqe sockfd buf len flags zc-flags buf-index)
         (func sqe sockfd buf len flags zc-flags buf-index))))
 
   (define io-uring-prep-recv
-    (let ((func (foreign-procedure "io_uring_prep_recv"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_recv"
                                    (void* int void* size_t int) void)))
       (lambda (sqe sockfd buf len flags)
         (func sqe sockfd buf len flags))))
 
   (define io-uring-prep-recv-multishot
-    (let ((func (foreign-procedure "io_uring_prep_recv_multishot"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_recv_multishot"
                                    (void* int void* size_t int) void)))
       (lambda (sqe sockfd buf len flags)
         (func sqe sockfd buf len flags))))
 
   (define io-uring-prep-sendmsg
-    (let ((func (foreign-procedure "io_uring_prep_sendmsg"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_sendmsg"
                                    (void* int void* unsigned) void)))
       (lambda (sqe fd msg flags)
         (func sqe fd msg flags))))
 
   (define io-uring-prep-sendmsg-zc
-    (let ((func (foreign-procedure "io_uring_prep_sendmsg_zc"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_sendmsg_zc"
                                    (void* int void* unsigned) void)))
       (lambda (sqe fd msg flags)
         (func sqe fd msg flags))))
 
   (define io-uring-prep-recvmsg
-    (let ((func (foreign-procedure "io_uring_prep_recvmsg"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_recvmsg"
                                    (void* int void* unsigned) void)))
       (lambda (sqe fd msg flags)
         (func sqe fd msg flags))))
 
   (define io-uring-prep-recvmsg-multishot
-    (let ((func (foreign-procedure "io_uring_prep_recvmsg_multishot"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_recvmsg_multishot"
                                    (void* int void* unsigned) void)))
       (lambda (sqe fd msg flags)
         (func sqe fd msg flags))))
@@ -955,92 +957,92 @@
   ;;------------------------------------------------------------
 
   (define io-uring-prep-openat
-    (let ((func (foreign-procedure "io_uring_prep_openat"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_openat"
                                    (void* int string int unsigned) void)))
       (lambda (sqe dfd path flags mode)
         (func sqe dfd path flags mode))))
 
   (define io-uring-prep-openat-direct
-    (let ((func (foreign-procedure "io_uring_prep_openat_direct"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_openat_direct"
                                    (void* int string int unsigned unsigned) void)))
       (lambda (sqe dfd path flags mode file-index)
         (func sqe dfd path flags mode file-index))))
 
   (define io-uring-prep-open
-    (let ((func (foreign-procedure "io_uring_prep_open"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_open"
                                    (void* string int unsigned) void)))
       (lambda (sqe path flags mode)
         (func sqe path flags mode))))
 
   (define io-uring-prep-open-direct
-    (let ((func (foreign-procedure "io_uring_prep_open_direct"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_open_direct"
                                    (void* string int unsigned unsigned) void)))
       (lambda (sqe path flags mode file-index)
         (func sqe path flags mode file-index))))
 
   (define io-uring-prep-close
-    (let ((func (foreign-procedure "io_uring_prep_close"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_close"
                                    (void* int) void)))
       (lambda (sqe fd)
         (func sqe fd))))
 
   (define io-uring-prep-close-direct
-    (let ((func (foreign-procedure "io_uring_prep_close_direct"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_close_direct"
                                    (void* unsigned) void)))
       (lambda (sqe file-index)
         (func sqe file-index))))
 
   (define io-uring-prep-fsync
-    (let ((func (foreign-procedure "io_uring_prep_fsync"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_fsync"
                                    (void* int unsigned) void)))
       (lambda (sqe fd fsync-flags)
         (func sqe fd fsync-flags))))
 
   (define io-uring-prep-sync-file-range
-    (let ((func (foreign-procedure "io_uring_prep_sync_file_range"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_sync_file_range"
                                    (void* int unsigned unsigned-64 int) void)))
       (lambda (sqe fd len offset flags)
         (func sqe fd len offset flags))))
 
   (define io-uring-prep-fallocate
-    (let ((func (foreign-procedure "io_uring_prep_fallocate"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_fallocate"
                                    (void* int int unsigned-64 unsigned-64) void)))
       (lambda (sqe fd mode offset len)
         (func sqe fd mode offset len))))
 
   (define io-uring-prep-ftruncate
-    (let ((func (foreign-procedure "io_uring_prep_ftruncate"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_ftruncate"
                                    (void* int unsigned-64) void)))
       (lambda (sqe fd len)
         (func sqe fd len))))
 
   (define io-uring-prep-statx
-    (let ((func (foreign-procedure "io_uring_prep_statx"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_statx"
                                    (void* int string int unsigned void*) void)))
       (lambda (sqe dfd path flags mask statxbuf)
         (func sqe dfd path flags mask statxbuf))))
 
   (define io-uring-prep-fadvise
-    (let ((func (foreign-procedure "io_uring_prep_fadvise"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_fadvise"
                                    (void* int unsigned-64 unsigned-32 int) void)))
       (lambda (sqe fd offset len advice)
         (func sqe fd offset len advice))))
 
   (define io-uring-prep-madvise
-    (let ((func (foreign-procedure "io_uring_prep_madvise"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_madvise"
                                    (void* void* unsigned-32 int) void)))
       (lambda (sqe addr length advice)
         (func sqe addr length advice))))
 
   (define io-uring-prep-splice
-    (let ((func (foreign-procedure "io_uring_prep_splice"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_splice"
                                    (void* int integer-64 int integer-64
                                           unsigned unsigned) void)))
       (lambda (sqe fd-in off-in fd-out off-out nbytes splice-flags)
         (func sqe fd-in off-in fd-out off-out nbytes splice-flags))))
 
   (define io-uring-prep-tee
-    (let ((func (foreign-procedure "io_uring_prep_tee"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_tee"
                                    (void* int int unsigned unsigned) void)))
       (lambda (sqe fd-in fd-out nbytes splice-flags)
         (func sqe fd-in fd-out nbytes splice-flags))))
@@ -1050,61 +1052,61 @@
   ;;------------------------------------------------------------
 
   (define io-uring-prep-renameat
-    (let ((func (foreign-procedure "io_uring_prep_renameat"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_renameat"
                                    (void* int string int string unsigned) void)))
       (lambda (sqe olddfd oldpath newdfd newpath flags)
         (func sqe olddfd oldpath newdfd newpath flags))))
 
   (define io-uring-prep-rename
-    (let ((func (foreign-procedure "io_uring_prep_rename"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_rename"
                                    (void* string string) void)))
       (lambda (sqe oldpath newpath)
         (func sqe oldpath newpath))))
 
   (define io-uring-prep-unlinkat
-    (let ((func (foreign-procedure "io_uring_prep_unlinkat"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_unlinkat"
                                    (void* int string int) void)))
       (lambda (sqe dfd path flags)
         (func sqe dfd path flags))))
 
   (define io-uring-prep-unlink
-    (let ((func (foreign-procedure "io_uring_prep_unlink"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_unlink"
                                    (void* string int) void)))
       (lambda (sqe path flags)
         (func sqe path flags))))
 
   (define io-uring-prep-mkdirat
-    (let ((func (foreign-procedure "io_uring_prep_mkdirat"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_mkdirat"
                                    (void* int string unsigned) void)))
       (lambda (sqe dfd path mode)
         (func sqe dfd path mode))))
 
   (define io-uring-prep-mkdir
-    (let ((func (foreign-procedure "io_uring_prep_mkdir"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_mkdir"
                                    (void* string unsigned) void)))
       (lambda (sqe path mode)
         (func sqe path mode))))
 
   (define io-uring-prep-symlinkat
-    (let ((func (foreign-procedure "io_uring_prep_symlinkat"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_symlinkat"
                                    (void* string int string) void)))
       (lambda (sqe target newdirfd linkpath)
         (func sqe target newdirfd linkpath))))
 
   (define io-uring-prep-symlink
-    (let ((func (foreign-procedure "io_uring_prep_symlink"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_symlink"
                                    (void* string string) void)))
       (lambda (sqe target linkpath)
         (func sqe target linkpath))))
 
   (define io-uring-prep-linkat
-    (let ((func (foreign-procedure "io_uring_prep_linkat"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_linkat"
                                    (void* int string int string int) void)))
       (lambda (sqe olddfd oldpath newdfd newpath flags)
         (func sqe olddfd oldpath newdfd newpath flags))))
 
   (define io-uring-prep-link
-    (let ((func (foreign-procedure "io_uring_prep_link"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_link"
                                    (void* string string int) void)))
       (lambda (sqe oldpath newpath flags)
         (func sqe oldpath newpath flags))))
@@ -1114,25 +1116,25 @@
   ;;------------------------------------------------------------
 
   (define io-uring-prep-getxattr
-    (let ((func (foreign-procedure "io_uring_prep_getxattr"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_getxattr"
                                    (void* string void* string unsigned) void)))
       (lambda (sqe name value path len)
         (func sqe name value path len))))
 
   (define io-uring-prep-setxattr
-    (let ((func (foreign-procedure "io_uring_prep_setxattr"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_setxattr"
                                    (void* string string string int unsigned) void)))
       (lambda (sqe name value path flags len)
         (func sqe name value path flags len))))
 
   (define io-uring-prep-fgetxattr
-    (let ((func (foreign-procedure "io_uring_prep_fgetxattr"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_fgetxattr"
                                    (void* int string void* unsigned) void)))
       (lambda (sqe fd name value len)
         (func sqe fd name value len))))
 
   (define io-uring-prep-fsetxattr
-    (let ((func (foreign-procedure "io_uring_prep_fsetxattr"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_fsetxattr"
                                    (void* int string string int unsigned) void)))
       (lambda (sqe fd name value flags len)
         (func sqe fd name value flags len))))
@@ -1142,25 +1144,25 @@
   ;;------------------------------------------------------------
 
   (define io-uring-prep-timeout
-    (let ((func (foreign-procedure "io_uring_prep_timeout"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_timeout"
                                    (void* void* unsigned unsigned) void)))
       (lambda (sqe ts count flags)
         (func sqe ts count flags))))
 
   (define io-uring-prep-timeout-remove
-    (let ((func (foreign-procedure "io_uring_prep_timeout_remove"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_timeout_remove"
                                    (void* unsigned-64 unsigned) void)))
       (lambda (sqe user-data flags)
         (func sqe user-data flags))))
 
   (define io-uring-prep-timeout-update
-    (let ((func (foreign-procedure "io_uring_prep_timeout_update"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_timeout_update"
                                    (void* void* unsigned-64 unsigned) void)))
       (lambda (sqe ts user-data flags)
         (func sqe ts user-data flags))))
 
   (define io-uring-prep-link-timeout
-    (let ((func (foreign-procedure "io_uring_prep_link_timeout"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_link_timeout"
                                    (void* void* unsigned) void)))
       (lambda (sqe ts flags)
         (func sqe ts flags))))
@@ -1170,19 +1172,19 @@
   ;;------------------------------------------------------------
 
   (define io-uring-prep-cancel
-    (let ((func (foreign-procedure "io_uring_prep_cancel"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_cancel"
                                    (void* void* int) void)))
       (lambda (sqe user-data flags)
         (func sqe user-data flags))))
 
   (define io-uring-prep-cancel64
-    (let ((func (foreign-procedure "io_uring_prep_cancel64"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_cancel64"
                                    (void* unsigned-64 int) void)))
       (lambda (sqe user-data flags)
         (func sqe user-data flags))))
 
   (define io-uring-prep-cancel-fd
-    (let ((func (foreign-procedure "io_uring_prep_cancel_fd"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_cancel_fd"
                                    (void* int unsigned) void)))
       (lambda (sqe fd flags)
         (func sqe fd flags))))
@@ -1192,25 +1194,25 @@
   ;;------------------------------------------------------------
 
   (define io-uring-prep-poll-add
-    (let ((func (foreign-procedure "io_uring_prep_poll_add"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_poll_add"
                                    (void* int unsigned) void)))
       (lambda (sqe fd poll-mask)
         (func sqe fd poll-mask))))
 
   (define io-uring-prep-poll-multishot
-    (let ((func (foreign-procedure "io_uring_prep_poll_multishot"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_poll_multishot"
                                    (void* int unsigned) void)))
       (lambda (sqe fd poll-mask)
         (func sqe fd poll-mask))))
 
   (define io-uring-prep-poll-remove
-    (let ((func (foreign-procedure "io_uring_prep_poll_remove"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_poll_remove"
                                    (void* unsigned-64) void)))
       (lambda (sqe user-data)
         (func sqe user-data))))
 
   (define io-uring-prep-poll-update
-    (let ((func (foreign-procedure "io_uring_prep_poll_update"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_poll_update"
                                    (void* unsigned-64 unsigned-64
                                           unsigned unsigned) void)))
       (lambda (sqe old-user-data new-user-data poll-mask flags)
@@ -1221,26 +1223,26 @@
   ;;------------------------------------------------------------
 
   (define io-uring-prep-msg-ring
-    (let ((func (foreign-procedure "io_uring_prep_msg_ring"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_msg_ring"
                                    (void* int unsigned unsigned-64 unsigned) void)))
       (lambda (sqe fd len data flags)
         (func sqe fd len data flags))))
 
   (define io-uring-prep-msg-ring-cqe-flags
-    (let ((func (foreign-procedure "io_uring_prep_msg_ring_cqe_flags"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_msg_ring_cqe_flags"
                                    (void* int unsigned unsigned-64
                                           unsigned unsigned) void)))
       (lambda (sqe fd len data flags cqe-flags)
         (func sqe fd len data flags cqe-flags))))
 
   (define io-uring-prep-msg-ring-fd
-    (let ((func (foreign-procedure "io_uring_prep_msg_ring_fd"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_msg_ring_fd"
                                    (void* int int int unsigned-64 unsigned) void)))
       (lambda (sqe fd source-fd target-fd data flags)
         (func sqe fd source-fd target-fd data flags))))
 
   (define io-uring-prep-msg-ring-fd-alloc
-    (let ((func (foreign-procedure "io_uring_prep_msg_ring_fd_alloc"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_msg_ring_fd_alloc"
                                    (void* int int unsigned-64 unsigned) void)))
       (lambda (sqe fd source-fd data flags)
         (func sqe fd source-fd data flags))))
@@ -1250,13 +1252,13 @@
   ;;------------------------------------------------------------
 
   (define io-uring-prep-provide-buffers
-    (let ((func (foreign-procedure "io_uring_prep_provide_buffers"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_provide_buffers"
                                    (void* void* int int int int) void)))
       (lambda (sqe addr len nr bgid bid)
         (func sqe addr len nr bgid bid))))
 
   (define io-uring-prep-remove-buffers
-    (let ((func (foreign-procedure "io_uring_prep_remove_buffers"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_remove_buffers"
                                    (void* int int) void)))
       (lambda (sqe nr bgid)
         (func sqe nr bgid))))
@@ -1266,7 +1268,7 @@
   ;;------------------------------------------------------------
 
   (define io-uring-prep-epoll-ctl
-    (let ((func (foreign-procedure "io_uring_prep_epoll_ctl"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_epoll_ctl"
                                    (void* int int int void*) void)))
       (lambda (sqe epfd fd op ev)
         (func sqe epfd fd op ev))))
@@ -1276,45 +1278,45 @@
   ;;------------------------------------------------------------
 
   (define io-uring-prep-files-update
-    (let ((func (foreign-procedure "io_uring_prep_files_update"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_files_update"
                                    (void* void* unsigned int) void)))
       (lambda (sqe fds nr-fds offset)
         (func sqe fds nr-fds offset))))
 
   (define io-uring-prep-fixed-fd-install
-    (let ((func (foreign-procedure "io_uring_prep_fixed_fd_install"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_fixed_fd_install"
                                    (void* int unsigned) void)))
       (lambda (sqe fd flags)
         (func sqe fd flags))))
 
   (define io-uring-prep-cmd-sock
-    (let ((func (foreign-procedure "io_uring_prep_cmd_sock"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_cmd_sock"
                                    (void* int int int int void* int) void)))
       (lambda (sqe cmd-op fd level optname optval optlen)
         (func sqe cmd-op fd level optname optval optlen))))
 
   (define io-uring-prep-waitid
-    (let ((func (foreign-procedure "io_uring_prep_waitid"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_waitid"
                                    (void* int int void* int unsigned) void)))
       (lambda (sqe idtype id infop options flags)
         (func sqe idtype id infop options flags))))
 
   (define io-uring-prep-futex-wait
-    (let ((func (foreign-procedure "io_uring_prep_futex_wait"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_futex_wait"
                                    (void* void* unsigned-64 unsigned-64
                                           unsigned-32 unsigned) void)))
       (lambda (sqe futex val mask futex-flags flags)
         (func sqe futex val mask futex-flags flags))))
 
   (define io-uring-prep-futex-wake
-    (let ((func (foreign-procedure "io_uring_prep_futex_wake"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_futex_wake"
                                    (void* void* unsigned-64 unsigned-64
                                           unsigned-32 unsigned) void)))
       (lambda (sqe futex val mask futex-flags flags)
         (func sqe futex val mask futex-flags flags))))
 
   (define io-uring-prep-futex-waitv
-    (let ((func (foreign-procedure "io_uring_prep_futex_waitv"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_futex_waitv"
                                    (void* void* unsigned-32 unsigned) void)))
       (lambda (sqe futex nr-futex flags)
         (func sqe futex nr-futex flags))))
@@ -1324,175 +1326,175 @@
   ;;------------------------------------------------------------
 
   (define io-uring-register-buffers
-    (let ((func (foreign-procedure "io_uring_register_buffers"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_buffers"
                                    (void* void* unsigned) int)))
       (lambda (ring iovecs nr-iovecs)
         (func ring iovecs nr-iovecs))))
 
   (define io-uring-unregister-buffers
-    (let ((func (foreign-procedure "io_uring_unregister_buffers"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_unregister_buffers"
                                    (void*) int)))
       (lambda (ring)
         (func ring))))
 
   (define io-uring-register-buffers-sparse
-    (let ((func (foreign-procedure "io_uring_register_buffers_sparse"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_buffers_sparse"
                                    (void* unsigned) int)))
       (lambda (ring nr)
         (func ring nr))))
 
   (define io-uring-register-buffers-tags
-    (let ((func (foreign-procedure "io_uring_register_buffers_tags"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_buffers_tags"
                                    (void* void* void* unsigned) int)))
       (lambda (ring iovecs tags nr)
         (func ring iovecs tags nr))))
 
   (define io-uring-register-buffers-update-tag
-    (let ((func (foreign-procedure "io_uring_register_buffers_update_tag"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_buffers_update_tag"
                                    (void* unsigned void* void* unsigned) int)))
       (lambda (ring off iovecs tags nr)
         (func ring off iovecs tags nr))))
 
   (define io-uring-register-files
-    (let ((func (foreign-procedure "io_uring_register_files"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_files"
                                    (void* void* unsigned) int)))
       (lambda (ring files nr-files)
         (func ring files nr-files))))
 
   (define io-uring-unregister-files
-    (let ((func (foreign-procedure "io_uring_unregister_files"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_unregister_files"
                                    (void*) int)))
       (lambda (ring)
         (func ring))))
 
   (define io-uring-register-files-sparse
-    (let ((func (foreign-procedure "io_uring_register_files_sparse"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_files_sparse"
                                    (void* unsigned) int)))
       (lambda (ring nr)
         (func ring nr))))
 
   (define io-uring-register-files-tags
-    (let ((func (foreign-procedure "io_uring_register_files_tags"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_files_tags"
                                    (void* void* void* unsigned) int)))
       (lambda (ring files tags nr)
         (func ring files tags nr))))
 
   (define io-uring-register-files-update
-    (let ((func (foreign-procedure "io_uring_register_files_update"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_files_update"
                                    (void* unsigned void* unsigned) int)))
       (lambda (ring off files nr-files)
         (func ring off files nr-files))))
 
   (define io-uring-register-files-update-tag
-    (let ((func (foreign-procedure "io_uring_register_files_update_tag"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_files_update_tag"
                                    (void* unsigned void* void* unsigned) int)))
       (lambda (ring off files tags nr-files)
         (func ring off files tags nr-files))))
 
   (define io-uring-register-eventfd
-    (let ((func (foreign-procedure "io_uring_register_eventfd"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_eventfd"
                                    (void* int) int)))
       (lambda (ring fd)
         (func ring fd))))
 
   (define io-uring-register-eventfd-async
-    (let ((func (foreign-procedure "io_uring_register_eventfd_async"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_eventfd_async"
                                    (void* int) int)))
       (lambda (ring fd)
         (func ring fd))))
 
   (define io-uring-unregister-eventfd
-    (let ((func (foreign-procedure "io_uring_unregister_eventfd"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_unregister_eventfd"
                                    (void*) int)))
       (lambda (ring)
         (func ring))))
 
   (define io-uring-register-probe
-    (let ((func (foreign-procedure "io_uring_register_probe"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_probe"
                                    (void* void* unsigned) int)))
       (lambda (ring p nr)
         (func ring p nr))))
 
   (define io-uring-register-personality
-    (let ((func (foreign-procedure "io_uring_register_personality"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_personality"
                                    (void*) int)))
       (lambda (ring)
         (func ring))))
 
   (define io-uring-unregister-personality
-    (let ((func (foreign-procedure "io_uring_unregister_personality"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_unregister_personality"
                                    (void* int) int)))
       (lambda (ring id)
         (func ring id))))
 
   (define io-uring-register-restrictions
-    (let ((func (foreign-procedure "io_uring_register_restrictions"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_restrictions"
                                    (void* void* unsigned) int)))
       (lambda (ring res nr-res)
         (func ring res nr-res))))
 
   (define io-uring-enable-rings
-    (let ((func (foreign-procedure "io_uring_enable_rings"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_enable_rings"
                                    (void*) int)))
       (lambda (ring)
         (func ring))))
 
   (define io-uring-register-iowq-max-workers
-    (let ((func (foreign-procedure "io_uring_register_iowq_max_workers"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_iowq_max_workers"
                                    (void* void*) int)))
       (lambda (ring values)
         (func ring values))))
 
   (define io-uring-register-ring-fd
-    (let ((func (foreign-procedure "io_uring_register_ring_fd"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_ring_fd"
                                    (void*) int)))
       (lambda (ring)
         (func ring))))
 
   (define io-uring-unregister-ring-fd
-    (let ((func (foreign-procedure "io_uring_unregister_ring_fd"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_unregister_ring_fd"
                                    (void*) int)))
       (lambda (ring)
         (func ring))))
 
   (define io-uring-close-ring-fd
-    (let ((func (foreign-procedure "io_uring_close_ring_fd"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_close_ring_fd"
                                    (void*) int)))
       (lambda (ring)
         (func ring))))
 
   (define io-uring-register-buf-ring
-    (let ((func (foreign-procedure "io_uring_register_buf_ring"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_buf_ring"
                                    (void* void* unsigned) int)))
       (lambda (ring reg flags)
         (func ring reg flags))))
 
   (define io-uring-unregister-buf-ring
-    (let ((func (foreign-procedure "io_uring_unregister_buf_ring"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_unregister_buf_ring"
                                    (void* int) int)))
       (lambda (ring bgid)
         (func ring bgid))))
 
   (define io-uring-register-sync-cancel
-    (let ((func (foreign-procedure "io_uring_register_sync_cancel"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_sync_cancel"
                                    (void* void*) int)))
       (lambda (ring reg)
         (func ring reg))))
 
   (define io-uring-register-file-alloc-range
-    (let ((func (foreign-procedure "io_uring_register_file_alloc_range"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_file_alloc_range"
                                    (void* unsigned unsigned) int)))
       (lambda (ring off len)
         (func ring off len))))
 
   (define io-uring-register-napi
-    (let ((func (foreign-procedure "io_uring_register_napi"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register_napi"
                                    (void* void*) int)))
       (lambda (ring napi)
         (func ring napi))))
 
   (define io-uring-unregister-napi
-    (let ((func (foreign-procedure "io_uring_unregister_napi"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_unregister_napi"
                                    (void* void*) int)))
       (lambda (ring napi)
         (func ring napi))))
@@ -1502,49 +1504,49 @@
   ;;------------------------------------------------------------
 
   (define io-uring-setup-buf-ring
-    (let ((func (foreign-procedure "io_uring_setup_buf_ring"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_setup_buf_ring"
                                    (void* unsigned int unsigned void*) void*)))
       (lambda (ring nentries bgid flags err-ptr)
         (func ring nentries bgid flags err-ptr))))
 
   (define io-uring-free-buf-ring
-    (let ((func (foreign-procedure "io_uring_free_buf_ring"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_free_buf_ring"
                                    (void* void* unsigned int) int)))
       (lambda (ring br nentries bgid)
         (func ring br nentries bgid))))
 
   (define io-uring-buf-ring-init
-    (let ((func (foreign-procedure "io_uring_buf_ring_init" (void*) void)))
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_buf_ring_init" (void*) void)))
       (lambda (br)
         (func br))))
 
   (define io-uring-buf-ring-add
-    (let ((func (foreign-procedure "io_uring_buf_ring_add"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_buf_ring_add"
                                    (void* void* unsigned unsigned-16
                                           int int) void)))
       (lambda (br addr len bid mask buf-offset)
         (func br addr len bid mask buf-offset))))
 
   (define io-uring-buf-ring-advance
-    (let ((func (foreign-procedure "io_uring_buf_ring_advance"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_buf_ring_advance"
                                    (void* int) void)))
       (lambda (br count)
         (func br count))))
 
   (define io-uring-buf-ring-cq-advance
-    (let ((func (foreign-procedure "io_uring_buf_ring_cq_advance"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_buf_ring_cq_advance"
                                    (void* void* int) void)))
       (lambda (ring br count)
         (func ring br count))))
 
   (define io-uring-buf-ring-mask
-    (let ((func (foreign-procedure "io_uring_buf_ring_mask"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_buf_ring_mask"
                                    (unsigned-32) int)))
       (lambda (ring-entries)
         (func ring-entries))))
 
   (define io-uring-buf-ring-available
-    (let ((func (foreign-procedure "io_uring_buf_ring_available"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_buf_ring_available"
                                    (void* void* unsigned-16) int)))
       (lambda (ring br bgid)
         (func ring br bgid))))
@@ -1554,23 +1556,23 @@
   ;;------------------------------------------------------------
 
   (define io-uring-get-probe
-    (let ((func (foreign-procedure "io_uring_get_probe" () void*)))
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_get_probe" () void*)))
       (lambda ()
         (func))))
 
   (define io-uring-get-probe-ring
-    (let ((func (foreign-procedure "io_uring_get_probe_ring"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_get_probe_ring"
                                    (void*) void*)))
       (lambda (ring)
         (func ring))))
 
   (define io-uring-free-probe
-    (let ((func (foreign-procedure "io_uring_free_probe" (void*) void)))
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_free_probe" (void*) void)))
       (lambda (probe)
         (func probe))))
 
   (define io-uring-opcode-supported
-    (let ((func (foreign-procedure "io_uring_opcode_supported"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_opcode_supported"
                                    (void* int) int)))
       (lambda (probe op)
         (func probe op))))
@@ -1580,30 +1582,30 @@
   ;;------------------------------------------------------------
 
   (define io-uring-ring-dontfork
-    (let ((func (foreign-procedure "io_uring_ring_dontfork"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_ring_dontfork"
                                    (void*) int)))
       (lambda (ring)
         (func ring))))
 
   (define io-uring-sqring-wait
-    (let ((func (foreign-procedure "io_uring_sqring_wait"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_sqring_wait"
                                    (void*) int)))
       (lambda (ring)
         (func ring))))
 
   (define io-uring-check-version
-    (let ((func (foreign-procedure "io_uring_check_version"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_check_version"
                                    (int int) boolean)))
       (lambda (major minor)
         (func major minor))))
 
   (define io-uring-major-version
-    (let ((func (foreign-procedure "io_uring_major_version" () int)))
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_major_version" () int)))
       (lambda ()
         (func))))
 
   (define io-uring-minor-version
-    (let ((func (foreign-procedure "io_uring_minor_version" () int)))
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_minor_version" () int)))
       (lambda ()
         (func))))
 
@@ -1612,26 +1614,26 @@
   ;;------------------------------------------------------------
 
   (define io-uring-setup
-    (let ((func (foreign-procedure "io_uring_setup"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_setup"
                                    (unsigned void*) int)))
       (lambda (entries params)
         (func entries params))))
 
   (define io-uring-enter
-    (let ((func (foreign-procedure "io_uring_enter"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_enter"
                                    (unsigned unsigned unsigned unsigned void*) int)))
       (lambda (fd to-submit min-complete flags sig)
         (func fd to-submit min-complete flags sig))))
 
   (define io-uring-enter2
-    (let ((func (foreign-procedure "io_uring_enter2"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_enter2"
                                    (unsigned unsigned unsigned unsigned
                                              void* size_t) int)))
       (lambda (fd to-submit min-complete flags arg sz)
         (func fd to-submit min-complete flags arg sz))))
 
   (define io-uring-register
-    (let ((func (foreign-procedure "io_uring_register"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_register"
                                    (unsigned unsigned void* unsigned) int)))
       (lambda (fd opcode arg nr-args)
         (func fd opcode arg nr-args))))
@@ -1641,37 +1643,37 @@
   ;;------------------------------------------------------------
 
   (define io-uring-recvmsg-validate
-    (let ((func (foreign-procedure "io_uring_recvmsg_validate"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_recvmsg_validate"
                                    (void* int void*) void*)))
       (lambda (buf buf-len msgh)
         (func buf buf-len msgh))))
 
   (define io-uring-recvmsg-name
-    (let ((func (foreign-procedure "io_uring_recvmsg_name"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_recvmsg_name"
                                    (void*) void*)))
       (lambda (o)
         (func o))))
 
   (define io-uring-recvmsg-payload
-    (let ((func (foreign-procedure "io_uring_recvmsg_payload"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_recvmsg_payload"
                                    (void* void*) void*)))
       (lambda (o msgh)
         (func o msgh))))
 
   (define io-uring-recvmsg-payload-length
-    (let ((func (foreign-procedure "io_uring_recvmsg_payload_length"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_recvmsg_payload_length"
                                    (void* int void*) unsigned)))
       (lambda (o buf-len msgh)
         (func o buf-len msgh))))
 
   (define io-uring-recvmsg-cmsg-firsthdr
-    (let ((func (foreign-procedure "io_uring_recvmsg_cmsg_firsthdr"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_recvmsg_cmsg_firsthdr"
                                    (void* void*) void*)))
       (lambda (o msgh)
         (func o msgh))))
 
   (define io-uring-recvmsg-cmsg-nexthdr
-    (let ((func (foreign-procedure "io_uring_recvmsg_cmsg_nexthdr"
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_recvmsg_cmsg_nexthdr"
                                    (void* void* void*) void*)))
       (lambda (o msgh cmsg)
         (func o msgh cmsg))))
