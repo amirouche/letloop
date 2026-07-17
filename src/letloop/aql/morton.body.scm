@@ -271,19 +271,19 @@
       (make-coroutine-generator
        (lambda (yield)
          (let ((gen (aql-query handle lower upper)))
-           (if (pair? gen)
-               ;; aql-query returned a list (called on aql handle)
-               (for-each
-                (lambda (pair)
-                  (let ((coords (morton-decode morton (car pair))))
-                    (when (morton-in-box? coords mins maxs)
-                      (yield pair))))
-                gen)
-               ;; aql-query returned a generator (called on transaction)
+           (if (procedure? gen)
+               ;; aql-query returned a generator
                (let loop ()
                  (let ((pair (gen)))
                    (unless (eof-object? pair)
                      (let ((coords (morton-decode morton (car pair))))
                        (when (morton-in-box? coords mins maxs)
                          (yield pair)))
-                     (loop)))))))))))
+                     (loop))))
+               ;; aql-query returned a list, possibly empty
+               (for-each
+                (lambda (pair)
+                  (let ((coords (morton-decode morton (car pair))))
+                    (when (morton-in-box? coords mins maxs)
+                      (yield pair))))
+                gen))))))))
