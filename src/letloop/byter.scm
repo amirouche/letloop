@@ -721,9 +721,9 @@ when BYTEVECTOR has no successor i.e. it is empty or all bytes are #xFF"
   (define ~check-byter-104
     (lambda ()
       ;; -------------------------------------------------------
-      ;; exwen key encoding assumption tests
+      ;; exwen key encoding assumptions
       ;;
-      ;; The claim: if we encode keys as
+      ;; The original claim: encode keys as
       ;;
       ;;   (byter-encode (list prefix uid attribute-name))
       ;;
@@ -735,182 +735,94 @@ when BYTEVECTOR has no successor i.e. it is empty or all bytes are #xFF"
       ;;
       ;;   (byter-encode (list prefix uid (bytevector 255)))
       ;;
-      ;; will capture all attribute keys for that entity and
-      ;; nothing else.
+      ;; captures all attribute keys for that entity and nothing
+      ;; else.
       ;;
-      ;; This requires:
+      ;; That claim is FALSE, with list keys and vector keys alike:
+      ;; the (bytevector 255) sentinel encodes with the bytevector
+      ;; tag, which sorts before the symbol tag, hence symbol-named
+      ;; attribute keys land after the supposed end of the range.
       ;;
-      ;;   1. (list prefix uid) < (list prefix uid attr) for any attr
-      ;;   2. (list prefix uid attr) < (list prefix uid (bytevector 255))
-      ;;   3. (list prefix other-uid attr) is NOT in that range
-      ;;      when other-uid ≠ uid
-      ;;   4. attributes sort consistently within an entity
+      ;; What does hold, for list and vector keys alike: scan from
+      ;; the encoded (prefix uid) key to (byter-next-prefix ...) of
+      ;; that same encoding stripped of its trailing terminator
+      ;; byte; every longer key sharing the (prefix uid) elements
+      ;; lands inside the range whatever the attribute tag, and the
+      ;; keys of other uids land outside.
       ;; -------------------------------------------------------
 
-      (define pk
-        (lambda args
-          (display ";; ")
-          (write args)
-          (newline)
-          (flush-output-port)
-          (car (reverse args))))
+      (define (assert-compare label expected a b)
+        (let ((result (byter-compare a b)))
+          (unless (eq? result expected)
+            (error '~check-byter-104 label expected result))))
 
-      (define (assert-smaller label a b)
-        (let ((result (byter-compare (byter-encode a) (byter-encode b))))
-          (unless (eq? result 'smaller)
-            (error 'assert-smaller
-                   (string-append label ": expected smaller, got ")
-                   result a b))))
+      (define (bytevector-drop-last bytevector)
+        (let* ((length (fx- (bytevector-length bytevector) 1))
+               (out (make-bytevector length)))
+          (bytevector-copy! bytevector 0 out 0 length)
+          out))
 
-      (define (assert-bigger label a b)
-        (let ((result (byter-compare (byter-encode a) (byter-encode b))))
-          (unless (eq? result 'bigger)
-            (error 'assert-bigger
-                   (string-append label ": expected bigger, got ")
-                   result a b))))
+      (define (range-end start)
+        (byter-next-prefix (bytevector-drop-last (byter-encode start))))
 
-      (define (assert-equal label a b)
-        (let ((result (byter-compare (byter-encode a) (byter-encode b))))
-          (unless (eq? result 'equal)
-            (error 'assert-equal
-                   (string-append label ": expected equal, got ")
-                   result a b))))
+      (define attributes
+        (list 'todo/title 'todo/done "a-string" 42 (bytevector 255)))
 
-      ;; --- test fixtures ---
+      (define (check-shape start key-with foreign)
+        (let ((lower (byter-encode start))
+              (upper (range-end start))
+              (end (byter-encode (key-with (bytevector 255)))))
+          ;; the (bytevector 255) sentinel is not an upper bound:
+          ;; symbol-named attribute keys sort after it
+          (assert-compare "symbol key vs (bytevector 255) end" 'bigger
+                          (byter-encode (key-with 'todo/title))
+                          end)
+          ;; every attribute key falls within [lower, upper)
+          (for-each
+           (lambda (attribute)
+             (let ((key (byter-encode (key-with attribute))))
+               (assert-compare "start vs key" 'smaller lower key)
+               (assert-compare "key vs range end" 'smaller key upper)))
+           attributes)
+          ;; another uid's keys land outside the range
+          (assert-compare "foreign uid vs range end" 'bigger
+                          (byter-encode foreign)
+                          upper)))
 
-      (define prefix 'todos)
-      (define uid-a 1)
-      (define uid-b 2)
+      ;; list keys, integer uid
+      (check-shape (list 'todos 1)
+                   (lambda (attribute) (list 'todos 1 attribute))
+                   (list 'todos 2 'todo/title))
 
-      (define start (list prefix uid-a))
-      (define end   (list prefix uid-a (bytevector 255)))
+      ;; vector keys, integer uid
+      (check-shape (vector 'todos 1)
+                   (lambda (attribute) (vector 'todos 1 attribute))
+                   (vector 'todos 2 'todo/title))
 
-      ;; --- test 1: two-element list < three-element list ---
-      ;; (list prefix uid) < (list prefix uid 'todo/title)
-      ;;
-      ;; structurally: (cons prefix (cons uid '()))
-      ;;            vs (cons prefix (cons uid (cons 'todo/title '())))
-      ;;
-      ;; they diverge at the third position: '() (tag #x03)
-      ;; vs (cons ...) (tag #x02). pair tag #x02 < null tag #x03.
-      ;;
-      ;; WAIT — that means the three-element list sorts BEFORE
-      ;; the two-element list. #x02 < #x03.
-      ;;
-      ;; let's find out.
+      ;; vector keys, bytevector uid (pseudo-uuid)
+      (let ((uuid (bytevector 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)))
+        (check-shape (vector 'todos uuid)
+                     (lambda (attribute) (vector 'todos uuid attribute))
+                     (vector 'todos (bytevector 255 255) 'todo/title)))
 
-      (display "test 1: start < key?\n")
-      (let* ((key (list prefix uid-a 'todo/title))
-             (result (byter-compare (byter-encode start) (byter-encode key))))
-        (pk 'test-1 result)
-        ;; if this prints 'bigger, our range scan is backwards
-        )
+      ;; attribute ordering inside an entity is consistent with the
+      ;; ordering of the bare attributes
+      (assert-compare "done vs title inside entity" 'smaller
+                      (byter-encode (vector 'todos 1 'todo/done))
+                      (byter-encode (vector 'todos 1 'todo/title)))
+      (assert-compare "bare done vs title" 'smaller
+                      (byter-encode 'todo/done)
+                      (byter-encode 'todo/title))
 
-      ;; --- test 2: key < end? ---
-      (display "test 2: key < end?\n")
-      (let* ((key (list prefix uid-a 'todo/title))
-             (result (byter-compare (byter-encode key) (byter-encode end))))
-        (pk 'test-2 result)
-        )
+      ;; caveat kept from the original investigation: boolean
+      ;; attribute names sort BEFORE the entity start with vector
+      ;; keys, because the boolean tags sort before the vector
+      ;; terminator tag; attribute names must not be booleans
+      (assert-compare "boolean attribute vs vector start" 'smaller
+                      (byter-encode (vector 'todos 1 #f))
+                      (byter-encode (vector 'todos 1)))
 
-      ;; --- test 3: multiple attributes sort within range ---
-      (display "test 3: multiple attributes within range\n")
-      (for-each
-       (lambda (attr)
-         (let* ((key (list prefix uid-a attr))
-                (vs-start (byter-compare (byter-encode start) (byter-encode key)))
-                (vs-end   (byter-compare (byter-encode key) (byter-encode end))))
-           (pk 'test-3 attr vs-start vs-end)))
-       '(todo/done todo/title todo/created-at actor/email))
-
-      ;; --- test 4: different uid is outside range ---
-      (display "test 4: different uid outside range\n")
-      (let* ((foreign-key (list prefix uid-b 'todo/title))
-             (vs-start (byter-compare (byter-encode start) (byter-encode foreign-key)))
-             (vs-end   (byter-compare (byter-encode foreign-key) (byter-encode end))))
-        (pk 'test-4-vs-start vs-start)
-        (pk 'test-4-vs-end   vs-end)
-        ;; foreign key should be BIGGER than end (uid-b > uid-a)
-        )
-
-      ;; --- test 5: attribute sort order is stable ---
-      (display "test 5: attribute ordering\n")
-      (let* ((key-done  (byter-encode (list prefix uid-a 'todo/done)))
-             (key-title (byter-encode (list prefix uid-a 'todo/title))))
-        (pk 'test-5-done-vs-title (byter-compare key-done key-title))
-        ;; should be consistent with (byter-compare (byter-encode 'todo/done)
-        ;;                                          (byter-encode 'todo/title))
-        (pk 'test-5-bare (byter-compare (byter-encode 'todo/done)
-                                        (byter-encode 'todo/title))))
-
-      ;; --- test 6: the critical pair/null tag question ---
-      ;; list encoding: (list a b) = (cons a (cons b '()))
-      ;; at the divergence point we compare '() vs (cons attr ...)
-      ;; null tag = #x03, pair tag = #x02
-      ;; so #x02 < #x03 means three-element sorts BEFORE two-element
-      ;;
-      ;; if that's the case, we need to swap: start should be the
-      ;; shorter list and end the sentinel, but only if shorter > longer.
-      ;; let's just see what happens.
-
-      (display "test 6: raw tag check\n")
-      (pk 'null-tag #x03)
-      (pk 'pair-tag #x02)
-      (pk 'pair<null? (< #x02 #x03))
-
-      ;; if pair < null, then (list p u attr) < (list p u)
-      ;; and our range scan needs (list p u attr) as START
-      ;; which breaks the model.
-      ;;
-      ;; possible fix: use vectors instead of lists for keys
-      ;; since vector encoding uses length prefix, not recursive cons.
-
-      (display "test 7: vector encoding alternative\n")
-      (let* ((vstart (vector prefix uid-a))
-             (vkey   (vector prefix uid-a 'todo/title))
-             (vend   (vector prefix uid-a (bytevector 255))))
-        (pk 'vec-start<key (byter-compare (byter-encode vstart) (byter-encode vkey)))
-        (pk 'vec-key<end   (byter-compare (byter-encode vkey) (byter-encode vend))))
-
-      ;; vector uses byter-vector (#x04) tag then elements then
-      ;; byter-vector-end (#x05). A two-element vector hits #x05
-      ;; at position 3. A three-element vector has another element
-      ;; at position 3. Since any element tag > #x05? Let's check:
-      ;; #x05 vs #x08 (symbol tag) — #x05 < #x08, so three-element
-      ;; sorts AFTER two-element. That's what we want.
-
-      (display "test 8: vector end tag check\n")
-      (pk 'vector-end-tag #x05)
-      (pk 'symbol-tag #x08)
-      (pk 'string-tag #x07)
-      (pk 'bytevector-tag #x06)
-      (pk 'bool-false-tag #x00)
-      (pk 'bool-true-tag #x01)
-      ;; #x00 and #x01 are BELOW #x05 — booleans as attributes
-      ;; would sort before vector-end, breaking the range.
-      ;; but we're using symbols for attribute names, so #x08 > #x05. ok.
-
-      ;; --- test 9: what about integer uids? ---
-
-      ;; all above #x05, so vector encoding works for integer uids too.
-
-      (display "test 9: integer uid with vectors\n")
-      (let* ((vstart (vector 'todos 42))
-             (vkey   (vector 'todos 42 'todo/title))
-             (vend   (vector 'todos 42 (bytevector 255))))
-        (pk 'int-uid-start<key (byter-compare (byter-encode vstart) (byter-encode vkey)))
-        (pk 'int-uid-key<end   (byter-compare (byter-encode vkey) (byter-encode vend))))
-
-      ;; --- test 10: uuid as bytevector uid ---
-      (display "test 10: bytevector uid (pseudo-uuid)\n")
-      (let* ((fake-uuid (bytevector 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16))
-             (vstart (vector 'todos fake-uuid))
-             (vkey   (vector 'todos fake-uuid 'todo/title))
-             (vend   (vector 'todos fake-uuid (bytevector 255))))
-        (pk 'bv-uid-start<key (byter-compare (byter-encode vstart) (byter-encode vkey)))
-        (pk 'bv-uid-key<end   (byter-compare (byter-encode vkey) (byter-encode vend))))
-
-      (display "\ndone.\n")))
+      #t))
   
   (define random-object-max-complexity (expt 10 4))
 
