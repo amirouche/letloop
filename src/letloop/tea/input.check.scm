@@ -10,7 +10,11 @@
        (else
         (let ((e (input-parser-feed! p (car bs))))
           (loop (cdr bs)
-                (if e (cons e events) events)))))))
+                (cond
+                 ((not e)     events)
+                 ;; a redriven byte can yield a list of events
+                 ((pair? e)   (append (reverse e) events))
+                 (else        (cons e events)))))))))
 
   (define (feed-str p str)
     (feed-bytes p (bytevector->u8-list (string->utf8 str))))
@@ -138,3 +142,36 @@
       (and (= (length es) 1)
            (eq? (key-event-key (car es)) 'home)
            (equal? (key-event-mods (car es)) '(shift)))))
+
+  (define (~check-input-unknown-csi-swallowed)
+    ;; \e[3;5~ (Ctrl+Delete) is not in the xterm table: the whole sequence
+    ;; must be swallowed — zero events, no "5~" leaking as keystrokes —
+    ;; and the parser must be back to normal for the next byte.
+    (let* ((p (make-input-parser xterm-caps))
+           (es (feed-str p "\x1b;[3;5~")))
+      (and (null? es)
+           (let ((es2 (feed-bytes p '(97))))
+             (and (= (length es2) 1)
+                  (= (key-event-ch (car es2)) 97)
+                  (not (key-event-key (car es2)))
+                  (null? (key-event-mods (car es2))))))))
+
+  (define (~check-input-utf8-redrive)
+    ;; #xC3 #x41 — broken UTF-8 lead then ASCII: the parser emits the
+    ;; replacement char for the broken sequence AND redrives #x41 as a
+    ;; fresh byte, yielding the 'A' keystroke.
+    (let* ((p (make-input-parser xterm-caps))
+           (es (feed-bytes p '(#xC3 #x41))))
+      (and (= (length es) 2)
+           (= (key-event-ch (car es)) #xFFFD)
+           (= (key-event-ch (cadr es)) 65))))
+
+  (define (~check-input-ctrl-backslash)
+    ;; control bytes 28..31 are ctrl keys, not printable ch=28..31
+    (let* ((p (make-input-parser xterm-caps))
+           (es (feed-bytes p '(28 29 30 31))))
+      (and (= (length es) 4)
+           (equal? (map key-event-key es)
+                   '(ctrl-backslash ctrl-bracket-right
+                     ctrl-caret ctrl-underscore))
+           (for-all (lambda (e) (not (key-event-ch e))) es))))

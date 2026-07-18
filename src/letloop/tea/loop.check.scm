@@ -45,6 +45,7 @@
           (loop (fx+ rounds 1)))))))
 
   (define (~check-loop-pipe-arrow-key)
+    (check-skip-unless liburing-ffi
     (let-values (((rd wr) (make-pipe)))
       (let* ((parser (make-input-parser xterm-caps))
              (l      (make-tea-loop rd parser)))
@@ -54,9 +55,10 @@
           (tea-loop-shutdown! l)
           (close-fd rd)
           (and (key-event? e)
-               (eq? (key-event-key e) 'arrow-up))))))
+               (eq? (key-event-key e) 'arrow-up)))))))
 
   (define (~check-loop-pipe-multibyte-utf8)
+    (check-skip-unless liburing-ffi
     (let-values (((rd wr) (make-pipe)))
       (let* ((parser (make-input-parser xterm-caps))
              (l      (make-tea-loop rd parser)))
@@ -71,10 +73,11 @@
           (tea-loop-shutdown! l)
           (close-fd rd)
           (and (key-event? e)
-               (= (key-event-ch e) #xE9))))))
+               (= (key-event-ch e) #xE9)))))))
 
   (define (~check-loop-pipe-esc-flush)
     ;; Send a lone ESC; the loop's 50ms timer should fire and yield esc.
+    (check-skip-unless liburing-ffi
     (let-values (((rd wr) (make-pipe)))
       (let* ((parser (make-input-parser xterm-caps))
              (l      (make-tea-loop rd parser)))
@@ -86,4 +89,4 @@
           (tea-loop-shutdown! l)
           (close-fd rd)
           (and (key-event? e)
-               (eq? (key-event-key e) 'esc))))))
+               (eq? (key-event-key e) 'esc)))))))

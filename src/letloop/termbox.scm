@@ -88,7 +88,40 @@
       ((arrow-right) TB-KEY-ARROW-RIGHT)
       ((pg-up)       TB-KEY-PGUP)
       ((pg-down)     TB-KEY-PGDN)
-      (else 0)))
+      ;; termbox2 function/navigation codes count down from 0xFFFF
+      ((f1) 65535) ((f2) 65534) ((f3)  65533) ((f4)  65532)
+      ((f5) 65531) ((f6) 65530) ((f7)  65529) ((f8)  65528)
+      ((f9) 65527) ((f10) 65526) ((f11) 65525) ((f12) 65524)
+      ((insert) 65523)
+      ((delete) 65522)
+      ((home)   65521)
+      ((end)    65520)
+      ;; control keys carry their ASCII code, as in the C binding
+      ((ctrl-space)         0)
+      ((ctrl-backslash)     28)
+      ((ctrl-bracket-right) 29)
+      ((ctrl-caret)         30)
+      ((ctrl-underscore)    31)
+      (else (or (ctrl-letter->code sym) 0))))
+
+  (define (ctrl-letter->code sym)
+    ;; ctrl-a .. ctrl-z → 1 .. 26
+    (let ((s (symbol->string sym)))
+      (and (fx=? (string-length s) 6)
+           (string=? (substring s 0 5) "ctrl-")
+           (let ((c (char->integer (string-ref s 5))))
+             (and (fx>=? c 97) (fx<=? c 122) (fx- c 96))))))
+
+  ;; legacy modifier bits: TB_MOD_ALT=1 TB_MOD_CTRL=2 TB_MOD_SHIFT=4;
+  ;; tea spells alt 'meta.
+  (define (mods->tb mods)
+    (fold-left (lambda (acc m)
+                 (fxior acc (case m
+                              ((meta alt) 1)
+                              ((ctrl)     2)
+                              ((shift)    4)
+                              (else       0))))
+               0 (or mods '())))
 
   ;; ----- lifecycle ---------------------------------------------------------
 
@@ -141,6 +174,7 @@
        ((not e) 0)
        ((key-event? e)
         (set! *ev-type* TB-EVENT-KEY)
+        (set! *ev-mod* (mods->tb (key-event-mods e)))
         (let ((sym (key-event-key e))
               (ch  (key-event-ch  e)))
           (cond

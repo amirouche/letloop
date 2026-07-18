@@ -21,6 +21,7 @@
    ;; signalfd-based SIGWINCH delivery
    sigwinch-fd-open
    sigwinch-fd-drain
+   sigwinch-fd-close
    ;; constants
    O-RDWR  O-NOCTTY  O-CLOEXEC  O-NONBLOCK
    TCSAFLUSH
@@ -154,16 +155,29 @@
   (define c-sigprocmask (foreign-procedure "sigprocmask" (int void* void*) int))
   (define c-signalfd    (foreign-procedure "signalfd"    (int void* int) int))
 
+  (define SIG-UNBLOCK 1)
+
   (define (sigwinch-fd-open)
     (let ((mask (foreign-alloc SIGSET-SIZE)))
-      (check sigwinch-fd-open (c-sigemptyset mask))
-      (check sigwinch-fd-open (c-sigaddset   mask SIGWINCH))
-      (check sigwinch-fd-open (c-sigprocmask SIG-BLOCK mask 0))
-      (let ((fd (c-signalfd -1 mask (fxior SFD-CLOEXEC SFD-NONBLOCK))))
-        (foreign-free mask)
-        (if (fx<? fd 0)
-            (error 'sigwinch-fd-open (strerror (errno)))
-            fd))))
+      (guard (ex (else (foreign-free mask) (raise ex)))
+        (check sigwinch-fd-open (c-sigemptyset mask))
+        (check sigwinch-fd-open (c-sigaddset   mask SIGWINCH))
+        (check sigwinch-fd-open (c-sigprocmask SIG-BLOCK mask 0))
+        (let ((fd (c-signalfd -1 mask (fxior SFD-CLOEXEC SFD-NONBLOCK))))
+          (if (fx<? fd 0)
+              (begin (c-sigprocmask SIG-UNBLOCK mask 0)
+                     (error 'sigwinch-fd-open (strerror (errno))))
+              (begin (foreign-free mask) fd))))))
+
+  (define (sigwinch-fd-close fd)
+    ;; Close the signalfd and undo the process-wide SIGWINCH block, so
+    ;; the signal's default disposition is restored after teardown.
+    (close-fd fd)
+    (let ((mask (foreign-alloc SIGSET-SIZE)))
+      (c-sigemptyset mask)
+      (c-sigaddset mask SIGWINCH)
+      (c-sigprocmask SIG-UNBLOCK mask 0)
+      (foreign-free mask)))
 
   (define SIGFD-SIGINFO-SIZE 128) ; struct signalfd_siginfo
 
