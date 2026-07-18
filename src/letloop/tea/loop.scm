@@ -23,6 +23,9 @@
    ;; cellbuf-resize! when the kernel says the geometry changed
    tea-loop-resize-pending?
    tea-loop-clear-resize-pending!
+   ;; #t once the tty read side reported EOF/hangup — tea-poll uses this
+   ;; to stop blocking on input that can never come
+   tea-loop-tty-eof?
 
    ~check-loop-pipe-arrow-key
    ~check-loop-pipe-multibyte-utf8
@@ -31,6 +34,7 @@
           ;; strerror, POLLIN, O-NONBLOCK also come from (letloop tea
           ;; syscall); keep the tea bindings.
           (except (letloop liburing low) strerror POLLIN O-NONBLOCK)
+          (only (letloop cffi) check-skip-unless)
           (letloop tea syscall)
           (letloop tea input)
           ;; xterm-caps, for the pipe-driven checks
@@ -69,7 +73,10 @@
             (mutable next-gen)
             (mutable esc-timeout-tag)  ; full user_data of the in-flight timeout, or #f
             (mutable resize-pending?)
-            (mutable timeout-ts))      ; foreign-allocated kernel-timespec
+            (mutable timeout-ts)       ; foreign-allocated kernel-timespec
+            (mutable read-in-flight?)  ; #t while an OP-TTY-READ is submitted
+            (mutable tty-eof?)         ; #t once read(2) returned <= 0
+            (mutable tty-poll-tag))    ; user_data of the multishot poll, or #f
     (protocol
      (lambda (new)
        (lambda (tty-fd parser)
@@ -82,7 +89,7 @@
                 (ts    (foreign-alloc (ftype-sizeof <ts>)))
                 (instance
                  (new ring cqep tty-fd sfd buf sbuf parser
-                      '() '() 1 #f #f ts)))
+                      '() '() 1 #f #f ts #f #f #f)))
            (unless (fx=? rc 0)
              (error 'make-tea-loop "io_uring_queue_init failed" rc))
            (submit-tty-poll! instance)
@@ -104,7 +111,19 @@
           (tag (next-tag! l OP-TTY-POLL)))
       (io-uring-prep-poll-multishot sqe (tea-loop-tty-fd l) POLLIN)
       (io-uring-sqe-set-data64 sqe tag)
+      (tea-loop-tty-poll-tag-set! l tag)
       (io-uring-submit (tea-loop-ring l))))
+
+  (define (cancel-tty-poll! l)
+    ;; After EOF/hangup the fd stays permanently ready and the multishot
+    ;; would post a CQE per rearm — a 100% CPU spin. Cancel it.
+    (let ((tag (tea-loop-tty-poll-tag l)))
+      (when tag
+        (let ((sqe (io-uring-get-sqe (tea-loop-ring l))))
+          (io-uring-prep-cancel64 sqe tag 0)
+          (io-uring-sqe-set-data64 sqe 0)
+          (io-uring-submit (tea-loop-ring l))
+          (tea-loop-tty-poll-tag-set! l #f)))))
 
   (define (submit-sigfd-poll! l)
     (let ((sqe (io-uring-get-sqe (tea-loop-ring l)))
@@ -114,12 +133,17 @@
       (io-uring-submit (tea-loop-ring l))))
 
   (define (submit-tty-read! l)
-    (let ((sqe (io-uring-get-sqe (tea-loop-ring l)))
-          (tag (next-tag! l OP-TTY-READ)))
-      (io-uring-prep-read sqe (tea-loop-tty-fd l)
-                          (tea-loop-read-buf l) READ-BUFFER-SIZE 0)
-      (io-uring-sqe-set-data64 sqe tag)
-      (io-uring-submit (tea-loop-ring l))))
+    ;; One read at a time: reads share a single buffer, so two in-flight
+    ;; reads would let the kernel write over bytes being drained. And no
+    ;; reads at all after EOF.
+    (unless (or (tea-loop-read-in-flight? l) (tea-loop-tty-eof? l))
+      (tea-loop-read-in-flight?-set! l #t)
+      (let ((sqe (io-uring-get-sqe (tea-loop-ring l)))
+            (tag (next-tag! l OP-TTY-READ)))
+        (io-uring-prep-read sqe (tea-loop-tty-fd l)
+                            (tea-loop-read-buf l) READ-BUFFER-SIZE 0)
+        (io-uring-sqe-set-data64 sqe tag)
+        (io-uring-submit (tea-loop-ring l)))))
 
   (define (submit-sigfd-read! l)
     (let ((sqe (io-uring-get-sqe (tea-loop-ring l)))
@@ -188,7 +212,11 @@
         (when (fx<? i n)
           (let* ((b (foreign-ref 'unsigned-8 buf i))
                  (e (input-parser-feed! parser b)))
-            (when e (push-event! l e)))
+            ;; A broken UTF-8 sequence yields a list: the replacement
+            ;; char plus the event for the redriven byte.
+            (cond
+             ((pair? e) (for-each (lambda (e) (push-event! l e)) e))
+             (e (push-event! l e))))
           (loop (fx+ i 1))))))
 
   ;; ----- CQE dispatch -----------------------------------------------------
@@ -205,18 +233,28 @@
        ((fx=? op OP-SIGFD-POLL)
         (when (fx>=? res 0) (submit-sigfd-read! l)))
        ((fx=? op OP-TTY-READ)
+        (tea-loop-read-in-flight?-set! l #f)
         (cond
          ((fx>? res 0)
           ;; Bytes arrived — first cancel any pending ESC-flush timer.
           (cancel-esc-timeout! l)
           (drain-read! l res)
-          ;; If parser is still in 'esc state with no continuation in this
-          ;; chunk, schedule a fresh timeout.
-          (when (eq? (input-parser-state parser) 'esc)
+          ;; A full buffer means more bytes may already be waiting with
+          ;; no new poll wakeup coming — read again right away.
+          (when (fx=? res READ-BUFFER-SIZE)
+            (submit-tty-read! l))
+          ;; If the parser is mid escape sequence with no continuation
+          ;; in this chunk, schedule a flush timeout; a truncated \e[ or
+          ;; \eO would otherwise wedge the parser and eat the next key.
+          (when (memq (input-parser-state parser) '(esc csi csi-skip))
             (submit-esc-timeout! l)))
-         ;; res <= 0 → EOF or error; don't resubmit, the multishot poll
-         ;; will fire again on the next event if the fd becomes ready.
-         ))
+         (else
+          ;; EOF or error: the fd is permanently ready, so stop reading
+          ;; and cancel the multishot poll before it busy-spins the loop.
+          (tea-loop-tty-eof?-set! l #t)
+          (cancel-tty-poll! l)
+          ;; queue a marker so blocking tea-poll callers wake up
+          (push-event! l 'tty-eof-event))))
        ((fx=? op OP-SIGFD-READ)
         (when (fx>? res 0)
           (tea-loop-resize-pending?-set! l #t)
@@ -281,7 +319,7 @@
     (foreign-free (tea-loop-read-buf l))
     (foreign-free (tea-loop-sigfd-buf l))
     (foreign-free (tea-loop-timeout-ts l))
-    (close-fd (tea-loop-sigfd l)))
+    (sigwinch-fd-close (tea-loop-sigfd l)))
   
 
   (include "letloop/tea/loop.check.scm")

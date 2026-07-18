@@ -2,8 +2,10 @@
 ;; (letloop tea input) — byte stream → event stream.
 ;;
 ;; Stateful: feed bytes one at a time, get events as they materialize.
-;; Returns either #f (more bytes needed) or an event record.  Each call
-;; consumes exactly one byte.
+;; Returns #f (more bytes needed), an event record, or — rarely — a list
+;; of event records (a broken UTF-8 sequence yields the replacement char
+;; plus the event for the redriven byte).  Each call consumes exactly one
+;; byte.
 ;;
 ;; Recognized inputs:
 ;;
@@ -65,7 +67,10 @@
    ~check-input-paste-with-stray-esc
    ~check-input-paste-utf8
    ~check-input-ctrl-arrow-up
-   ~check-input-shift-home)
+   ~check-input-shift-home
+   ~check-input-unknown-csi-swallowed
+   ~check-input-utf8-redrive
+   ~check-input-ctrl-backslash)
   (import (chezscheme)
           (letloop tea utf8)
           (letloop tea trie)
@@ -135,12 +140,21 @@
       (string->symbol
        (string-append "ctrl-"
                       (string (integer->char (fx+ byte 96))))))
+     ((and (fx>=? byte 28) (fx<=? byte 31))
+      ;; FS GS RS US = ctrl-\ ctrl-] ctrl-^ ctrl-_
+      (vector-ref
+       '#(ctrl-backslash ctrl-bracket-right ctrl-caret ctrl-underscore)
+       (fx- byte 28)))
      (else #f)))
 
   (define (ascii-printable? b)
     (and (fx>=? b #x20) (fx<? b #x7F)))
 
   (define (digit? b) (and (fx>=? b #x30) (fx<=? b #x39)))
+
+  (define (csi-final-byte? b)
+    ;; A CSI sequence terminates on the first byte in 0x40..0x7E inclusive.
+    (and (fx>=? b #x40) (fx<=? b #x7E)))
 
   ;; ----- main entry --------------------------------------------------------
 
@@ -149,6 +163,7 @@
       ((normal) (feed-normal! p b))
       ((esc)    (feed-esc!    p b))
       ((csi)    (feed-csi!    p b))
+      ((csi-skip) (feed-csi-skip! p b))
       ((sgr)    (feed-sgr!    p b))
       ((x10)    (feed-x10!    p b))
       ((paste)  (feed-paste!  p b))
@@ -158,12 +173,19 @@
 
   (define (input-parser-flush! p)
     ;; Called by the loop when a timeout elapses with no more bytes; commits
-    ;; any pending ESC as a literal esc key.
+    ;; any pending ESC as a literal esc key.  A truncated \e[ / \eO prefix
+    ;; (states csi / csi-skip) is dropped silently: emitting the partial
+    ;; bytes as keystrokes would be worse than losing a mangled sequence,
+    ;; and resetting to normal guarantees the next keystroke parses clean.
     (case (input-parser-state p)
       ((esc)
        (input-parser-state-set! p 'normal)
        (trie-state-reset! (input-parser-trie-state p))
        (make-key-event #f 'esc '()))
+      ((csi csi-skip)
+       (input-parser-state-set! p 'normal)
+       (trie-state-reset! (input-parser-trie-state p))
+       #f)
       (else #f)))
 
   ;; ----- normal -----------------------------------------------------------
@@ -217,19 +239,35 @@
         (handle-trie-match! p (cadr r))))))
 
   (define (feed-csi! p b)
+    ;; Collecting the tail of a \e[ or \eO sequence through the trie.
     (let* ((ts (input-parser-trie-state p))
            (r  (trie-feed! ts b)))
       (cond
        ((eq? r 'continue) #f)
        ((eq? r 'no-match)
-        (input-parser-state-set! p 'normal)
-        ;; Drop the partial sequence (the bytes consumed so far are
-        ;; available via trie-state-bytes, but we can't safely re-emit
-        ;; them as separate keys — they were prefixes that didn't pan
-        ;; out).  In termbox2 these are silently dropped; we do the same.
-        #f)
+        ;; Unknown sequence.  We can't safely re-emit the consumed bytes as
+        ;; separate keys — they were prefixes that didn't pan out — and we
+        ;; must not leak the *rest* of the sequence to the application as
+        ;; literal keystrokes either (Ctrl+Delete \e[3;5~ would type "5~").
+        ;; Like termbox2, swallow everything up to and including the CSI
+        ;; final byte, emitting nothing.
+        (trie-state-reset! ts)
+        (cond
+         ((csi-final-byte? b)
+          (input-parser-state-set! p 'normal)
+          #f)
+         (else
+          (input-parser-state-set! p 'csi-skip)
+          #f)))
        (else
         (handle-trie-match! p (cadr r))))))
+
+  (define (feed-csi-skip! p b)
+    ;; Swallowing the remainder of an unrecognized \e[ / \eO sequence:
+    ;; consume silently until the final byte, then return to normal.
+    (when (csi-final-byte? b)
+      (input-parser-state-set! p 'normal))
+    #f)
 
   (define (handle-trie-match! p val)
     (case val
@@ -360,13 +398,25 @@
 
   ;; ----- utf-8 ------------------------------------------------------------
 
+  (define REPLACEMENT-CHAR #xFFFD)
+
   (define (feed-utf8! p b)
     (let ((r (utf8-decoder-feed! (input-parser-utf8-decoder p) b)))
       (cond
        ((eq? r 'incomplete) #f)
        ((eq? r 'invalid)
+        ;; malformed sequence, offending byte consumed — replacement char
         (input-parser-state-set! p 'normal)
-        #f)
+        (make-key-event REPLACEMENT-CHAR #f '()))
+       ((eq? r 'invalid-redrive)
+        ;; The sequence broke on a byte that was never part of it: emit
+        ;; the replacement for the broken sequence, then redrive b as the
+        ;; start of fresh input — so \xC3;A yields U+FFFD *and* the A.
+        (input-parser-state-set! p 'normal)
+        (let ((e (input-parser-feed! p b)))
+          (if e
+              (list (make-key-event REPLACEMENT-CHAR #f '()) e)
+              (make-key-event REPLACEMENT-CHAR #f '()))))
        (else
         (input-parser-state-set! p 'normal)
         (make-key-event r #f '())))))

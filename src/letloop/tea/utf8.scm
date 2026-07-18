@@ -9,10 +9,14 @@
 ;; bytes arrive in arbitrary chunks from read(2):
 ;;
 ;;   (define d (make-utf8-decoder))
-;;   (utf8-decoder-feed! d byte)   ; -> codepoint | 'incomplete | 'invalid
+;;   (utf8-decoder-feed! d byte)
+;;     -> codepoint | 'incomplete | 'invalid | 'invalid-redrive
 ;;
 ;; On 'invalid the decoder is automatically reset; on 'incomplete state
-;; persists for the next byte.
+;; persists for the next byte.  'invalid-redrive means the sequence broke
+;; on a byte that was never part of it (a non-continuation byte where a
+;; continuation was expected): the decoder has reset and the caller must
+;; feed that same byte again as the start of a new sequence.
 (library (letloop tea utf8)
   (export
    utf8-encode
@@ -34,13 +38,21 @@
    ~check-utf8-decode-rejects-overlong
    ~check-utf8-decode-rejects-surrogate
    ~check-utf8-decode-rejects-stray-continuation
-   ~check-utf8-decode-string-roundtrip)
+   ~check-utf8-decode-string-roundtrip
+   ~check-utf8-encode-rejects-surrogate
+   ~check-utf8-decode-redrives-broken-continuation)
   (import (chezscheme))
 
   ;; ----- encoder -----------------------------------------------------------
 
+  (define (surrogate? cp) (and (fx>=? cp #xD800) (fx<? cp #xE000)))
+
   (define (utf8-codepoint-length cp)
     (cond
+     ((surrogate? cp)
+      ;; surrogates are not scalar values — encoding one would produce
+      ;; invalid UTF-8 that the decoder (rightly) rejects
+      (error 'utf8-codepoint-length "surrogate code point" cp))
      ((fx<? cp #x80)     1)
      ((fx<? cp #x800)    2)
      ((fx<? cp #x10000)  3)
@@ -52,6 +64,8 @@
     ;; number of bytes written.  Caller is responsible for ensuring at
     ;; least 4 bytes are available.
     (cond
+     ((surrogate? cp)
+      (error 'utf8-encode! "surrogate code point" cp))
      ((fx<? cp #x80)
       (bytevector-u8-set! bv off cp)
       1)
@@ -132,10 +146,10 @@
       ;; continuation expected
       (cond
        ((not (fx=? (fxand byte #xC0) #x80))
-        ;; not a continuation byte — drop and rewind so the caller can
-        ;; redrive this byte as a fresh first byte.
+        ;; not a continuation byte — reset and tell the caller to redrive
+        ;; this same byte as a fresh first byte.
         (utf8-decoder-reset! d)
-        'invalid)
+        'invalid-redrive)
        (else
         (let ((acc* (fxior (fxsll (utf8-decoder-acc d) 6) (fxand byte #x3F)))
               (need* (fx- (utf8-decoder-need d) 1)))

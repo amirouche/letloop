@@ -76,9 +76,20 @@
             (when (fx<? i n)
               (foreign-set! 'unsigned-8 ptr i (bytevector-u8-ref bv i))
               (loop (fx+ i 1))))
-          (let ((r (write-fd fd ptr n)))
-            (foreign-free ptr)
-            r))))))
+          ;; write(2) can be short (full tty output buffer) or fail with
+          ;; EINTR; a truncated escape stream desynchronizes the screen
+          ;; from the front buffer, so push until every byte is out.
+          (let write-loop ((off 0))
+            (cond
+             ((fx=? off n) (foreign-free ptr) n)
+             (else
+              (let ((r (write-fd fd (fx+ ptr off) (fx- n off))))
+                (cond
+                 ((fx>? r 0) (write-loop (fx+ off r)))
+                 ((fx=? r -4) (write-loop off)) ; EINTR
+                 (else
+                  (foreign-free ptr)
+                  (error 'write-string-fd "write failed" fd r))))))))))))
 
   (define (read-winsize fd)
     (let ((ws (make-winsize)))
@@ -117,21 +128,29 @@
           (tcgetattr fd raw)
           (cfmakeraw! raw)
           (tcsetattr fd TCSAFLUSH raw)
-          (let-values (((w h) (read-winsize fd)))
-            (let* ((w* (if (fx=? w 0) 80 w))
-                   (h* (if (fx=? h 0) 24 h))
-                   (back   (make-cellbuf w* h*))
-                   (front  (make-cellbuf w* h*))
-                   (parser (make-input-parser caps))
-                   (loop   (make-tea-loop fd parser))
-                   (instance (make-tea fd saved caps output-mode
-                                       back front 0 0 (not hide-cursor?)
-                                       parser loop #f)))
-              ;; init: alt screen, hide cursor, clear, keypad on
-              (when alt-screen?
-                (write-string-fd fd (cap-set-init-string caps)))
-              (write-string-fd fd (cap-set-keypad-on caps))
-              instance)))))))
+          (foreign-free raw)
+          ;; From here on the terminal is raw: any failure below (winsize
+          ;; ioctl, io_uring init, signalfd) must restore it before
+          ;; propagating, or the user's shell is left unusable.
+          (guard (ex (else (tcsetattr fd TCSAFLUSH saved)
+                           (foreign-free saved)
+                           (close-fd fd)
+                           (raise ex)))
+            (let-values (((w h) (read-winsize fd)))
+              (let* ((w* (if (fx=? w 0) 80 w))
+                     (h* (if (fx=? h 0) 24 h))
+                     (back   (make-cellbuf w* h*))
+                     (front  (make-cellbuf w* h*))
+                     (parser (make-input-parser caps))
+                     (loop   (make-tea-loop fd parser))
+                     (instance (make-tea fd saved caps output-mode
+                                         back front 0 0 (not hide-cursor?)
+                                         parser loop #f)))
+                ;; init: alt screen, hide cursor, clear, keypad on
+                (when alt-screen?
+                  (write-string-fd fd (cap-set-init-string caps)))
+                (write-string-fd fd (cap-set-keypad-on caps))
+                instance))))))))
 
   (define (tea-close tea)
     (let ((fd   (tea-fd tea))
@@ -224,8 +243,12 @@
     (let* ((loop (tea-loop tea))
            (e    (tea-loop-pop-event! loop)))
       (cond
-       ((eq? e 'resize-event) (handle-resize-marker! tea))
-       (else                  e))))
+       ((eq? e 'resize-event)  (handle-resize-marker! tea))
+       ;; tty hangup: surface it once as (eof); afterwards the loop has
+       ;; cancelled its poll and blocking tea-poll waits quietly instead
+       ;; of spinning.
+       ((eq? e 'tty-eof-event) (cons 'eof '()))
+       (else                   e))))
 
   (define tea-poll
     (case-lambda

@@ -39,7 +39,8 @@
    ~check-cell-diff-multi
    ~check-cell-diff-state-tracking)
   (import (chezscheme)
-          (letloop tea sgr))
+          (letloop tea sgr)
+          (only (letloop tea width) codepoint-width))
 
   ;; ----- attribute mask ----------------------------------------------------
 
@@ -244,9 +245,15 @@
                                (fx=? a st-attr))
                     (sgr-set-color! port mode fg bg (attr-mask->list a))
                     (set! st-fg fg) (set! st-bg bg) (set! st-attr a))
-                  ;; emit char
+                  ;; emit char — track where the terminal cursor really
+                  ;; lands: wide glyphs advance two columns, combining
+                  ;; marks none; assuming one desynchronizes the tracker
+                  ;; from the screen for every following cell.
                   (write-char (integer->char ch) port)
-                  (set! cur-x (fx+ x 1))
+                  (let ((w (codepoint-width ch)))
+                    ;; wide → 2, combining → 0, everything else
+                    ;; (incl. control, width -1) → 1
+                    (set! cur-x (fx+ x (if (fx<? w 0) 1 w))))
                   (set! cur-y y)
                   ;; sync front <- back
                   (fxvector-set! front-chs   i ch)

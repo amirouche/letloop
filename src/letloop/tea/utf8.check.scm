@@ -77,6 +77,24 @@
     (let ((d (make-utf8-decoder)))
       (eq? (utf8-decoder-feed! d #x80) 'invalid)))
 
+  (define (~check-utf8-encode-rejects-surrogate)
+    ;; D800..DFFF are not scalar values; the encoder must refuse them
+    ;; instead of emitting bytes the decoder rejects.
+    (and (guard (c (#t #t)) (utf8-encode #xD800) #f)
+         (guard (c (#t #t)) (utf8-encode #xDFFF) #f)
+         ;; boundary neighbours still encode
+         (bytevector? (utf8-encode #xD7FF))
+         (bytevector? (utf8-encode #xE000))))
+
+  (define (~check-utf8-decode-redrives-broken-continuation)
+    ;; #xC3 #x41: the sequence breaks on 'A', which was never part of it.
+    ;; The decoder must signal invalid-redrive so the caller re-feeds the
+    ;; byte — ending up with replacement + 'A', not just replacement.
+    (let ((d (make-utf8-decoder)))
+      (and (eq?  (utf8-decoder-feed! d #xC3) 'incomplete)
+           (eq?  (utf8-decoder-feed! d #x41) 'invalid-redrive)
+           (eqv? (utf8-decoder-feed! d #x41) 65))))
+
   (define (~check-utf8-decode-string-roundtrip)
     ;; Decode "Héllo €" byte-stream and rebuild the string of codepoints.
     (let* ((s   "Héllo €")
