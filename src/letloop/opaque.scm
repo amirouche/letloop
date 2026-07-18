@@ -199,25 +199,16 @@
                        int))
 
   (define (opaque-register pwdU skS ids rec export-key)
-    (with-lock (list pwdU rec)
-      (let ((skS-ptr (if skS
-                         (begin (lock-object skS)
-                                (bytevector-pointer skS))
-                         0))
-            (ek-ptr (if export-key
-                        (begin (lock-object export-key)
-                               (bytevector-pointer export-key))
-                        0)))
-        (let ((result (%opaque-register
-                       (bytevector-pointer pwdU)
-                       (bytevector-length pwdU)
-                       skS-ptr
-                       (opaque-ids-pointer ids)
-                       (bytevector-pointer rec)
-                       ek-ptr)))
-          (when skS (unlock-object skS))
-          (when export-key (unlock-object export-key))
-          result))))
+    (with-lock (append (list pwdU rec)
+                       (if skS (list skS) (list))
+                       (if export-key (list export-key) (list)))
+      (%opaque-register
+       (bytevector-pointer pwdU)
+       (bytevector-length pwdU)
+       (if skS (bytevector-pointer skS) 0)
+       (opaque-ids-pointer ids)
+       (bytevector-pointer rec)
+       (if export-key (bytevector-pointer export-key) 0))))
 
   ;; ============================================================
   ;; Four-step registration (RFC 9807 Section 5)
@@ -257,18 +248,13 @@
                        int))
 
   (define (opaque-create-registration-response request skS sec pub)
-    (with-lock (list request sec pub)
-      (let ((skS-ptr (if skS
-                         (begin (lock-object skS)
-                                (bytevector-pointer skS))
-                         0)))
-        (let ((result (%opaque-create-registration-response
-                       (bytevector-pointer request)
-                       skS-ptr
-                       (bytevector-pointer sec)
-                       (bytevector-pointer pub))))
-          (when skS (unlock-object skS))
-          result))))
+    (with-lock (append (list request sec pub)
+                       (if skS (list skS) (list)))
+      (%opaque-create-registration-response
+       (bytevector-pointer request)
+       (if skS (bytevector-pointer skS) 0)
+       (bytevector-pointer sec)
+       (bytevector-pointer pub))))
 
   ;; Step 3: Client -> Server: RegistrationRecord
   ;;
@@ -285,19 +271,14 @@
                        int))
 
   (define (opaque-finalize-request sec pub ids reg-rec export-key)
-    (with-lock (list sec pub reg-rec)
-      (let ((ek-ptr (if export-key
-                        (begin (lock-object export-key)
-                               (bytevector-pointer export-key))
-                        0)))
-        (let ((result (%opaque-finalize-request
-                       (bytevector-pointer sec)
-                       (bytevector-pointer pub)
-                       (opaque-ids-pointer ids)
-                       (bytevector-pointer reg-rec)
-                       ek-ptr)))
-          (when export-key (unlock-object export-key))
-          result))))
+    (with-lock (append (list sec pub reg-rec)
+                       (if export-key (list export-key) (list)))
+      (%opaque-finalize-request
+       (bytevector-pointer sec)
+       (bytevector-pointer pub)
+       (opaque-ids-pointer ids)
+       (bytevector-pointer reg-rec)
+       (if export-key (bytevector-pointer export-key) 0))))
 
   ;; Step 4: Server stores final record
   ;;
@@ -361,27 +342,18 @@
                        int))
 
   (define (opaque-create-credential-response ke1 rec ids ctx ke2 sk authU)
-    (with-lock (list ke1 rec ke2 sk)
-      (let ((ctx-ptr (if ctx
-                         (begin (lock-object ctx)
-                                (bytevector-pointer ctx))
-                         0))
-            (ctx-len (if ctx (bytevector-length ctx) 0))
-            (authU-ptr (if authU
-                           (begin (lock-object authU)
-                                  (bytevector-pointer authU))
-                           0)))
-        (let ((result (%opaque-create-credential-response
-                       (bytevector-pointer ke1)
-                       (bytevector-pointer rec)
-                       (opaque-ids-pointer ids)
-                       ctx-ptr ctx-len
-                       (bytevector-pointer ke2)
-                       (bytevector-pointer sk)
-                       authU-ptr)))
-          (when ctx (unlock-object ctx))
-          (when authU (unlock-object authU))
-          result))))
+    (with-lock (append (list ke1 rec ke2 sk)
+                       (if ctx (list ctx) (list))
+                       (if authU (list authU) (list)))
+      (%opaque-create-credential-response
+       (bytevector-pointer ke1)
+       (bytevector-pointer rec)
+       (opaque-ids-pointer ids)
+       (if ctx (bytevector-pointer ctx) 0)
+       (if ctx (bytevector-length ctx) 0)
+       (bytevector-pointer ke2)
+       (bytevector-pointer sk)
+       (if authU (bytevector-pointer authU) 0))))
 
   ;; Step 3: Client recovers credentials, produces KE3
   ;;
@@ -402,32 +374,19 @@
                        int))
 
   (define (opaque-recover-credentials ke2 sec ctx ids sk authU export-key)
-    (with-lock (list ke2 sec sk)
-      (let ((ctx-ptr (if ctx
-                         (begin (lock-object ctx)
-                                (bytevector-pointer ctx))
-                         0))
-            (ctx-len (if ctx (bytevector-length ctx) 0))
-            (authU-ptr (if authU
-                           (begin (lock-object authU)
-                                  (bytevector-pointer authU))
-                           0))
-            (ek-ptr (if export-key
-                        (begin (lock-object export-key)
-                               (bytevector-pointer export-key))
-                        0)))
-        (let ((result (%opaque-recover-credentials
-                       (bytevector-pointer ke2)
-                       (bytevector-pointer sec)
-                       ctx-ptr ctx-len
-                       (opaque-ids-pointer ids)
-                       (bytevector-pointer sk)
-                       authU-ptr
-                       ek-ptr)))
-          (when ctx (unlock-object ctx))
-          (when authU (unlock-object authU))
-          (when export-key (unlock-object export-key))
-          result))))
+    (with-lock (append (list ke2 sec sk)
+                       (if ctx (list ctx) (list))
+                       (if authU (list authU) (list))
+                       (if export-key (list export-key) (list)))
+      (%opaque-recover-credentials
+       (bytevector-pointer ke2)
+       (bytevector-pointer sec)
+       (if ctx (bytevector-pointer ctx) 0)
+       (if ctx (bytevector-length ctx) 0)
+       (opaque-ids-pointer ids)
+       (bytevector-pointer sk)
+       (if authU (bytevector-pointer authU) 0)
+       (if export-key (bytevector-pointer export-key) 0))))
 
   ;; Step 4 (optional): Server verifies client auth
   ;;

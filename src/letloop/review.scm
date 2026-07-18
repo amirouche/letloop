@@ -219,7 +219,7 @@
               (cond
                (in-str
                 (cond
-                 ((char=? ch #\\) (loop (fx+ i 2)))
+                 ((char=? ch #\\) (loop (fxmin (fx+ i 2) len)))
                  ((char=? ch #\")
                   (flush-tok (fx+ i 1) TB-GREEN)
                   (set! in-str #f)
@@ -383,7 +383,7 @@
       hl))
 
   (define (load-file! path)
-    (set! *current-file* path)
+    (set! *current-file* (canonical-key path))
     (set! *file-kind* (file-kind path))
     (set! *file-lines* (read-file-lines path))
     (set! *file-highlights* (compute-highlights *file-lines* *file-kind*))
@@ -430,6 +430,37 @@
         (substring path 2 (string-length path))
         path))
 
+  ;; Annotations may contain newlines (C-j) but REVIEW.md stores one
+  ;; annotation per line: escape newline as \n and backslash as \\ on
+  ;; save, and reverse on load, so the round-trip is lossless.
+  (define (annotation-escape text)
+    (let ((out (open-output-string))
+          (len (string-length text)))
+      (let loop ((i 0))
+        (if (fx>=? i len)
+            (get-output-string out)
+            (let ((ch (string-ref text i)))
+              (cond
+               ((char=? ch #\\)       (put-string out "\\\\"))
+               ((char=? ch #\newline) (put-string out "\\n"))
+               (else (put-char out ch)))
+              (loop (fx+ i 1)))))))
+
+  (define (annotation-unescape text)
+    (let ((out (open-output-string))
+          (len (string-length text)))
+      (let loop ((i 0))
+        (if (fx>=? i len)
+            (get-output-string out)
+            (let ((ch (string-ref text i)))
+              (if (and (char=? ch #\\) (fx<? (fx+ i 1) len))
+                  (let ((next (string-ref text (fx+ i 1))))
+                    (cond
+                     ((char=? next #\n)  (put-char out #\newline) (loop (fx+ i 2)))
+                     ((char=? next #\\)  (put-char out #\\)       (loop (fx+ i 2)))
+                     (else (put-char out ch) (loop (fx+ i 1)))))
+                  (begin (put-char out ch) (loop (fx+ i 1)))))))))
+
   (define (save-annotations!)
     (let ((tmp ".REVIEW.md.tmp"))
       (with-output-to-file tmp
@@ -457,7 +488,7 @@
                     (display "**Line ")
                     (display (fx+ (car e) 1))
                     (display "**: ")
-                    (display (cdr e))
+                    (display (annotation-escape (cdr e)))
                     (newline)))
                 (sort (lambda (a b) (fx<? (car a) (car b)))
                       (filter pair? (hashtable-ref by-file file '()))))
@@ -486,9 +517,10 @@
                            (colon (string-search-forward "**: " s 0)))
                       (when colon
                         (let ((n (string->number (substring s 0 colon)))
-                              (text (substring s (fx+ colon 4) (string-length s))))
+                              (text (annotation-unescape
+                                     (substring s (fx+ colon 4) (string-length s)))))
                           (when n
-                            (let ((k (cons current-file (fx- n 1))))
+                            (let ((k (cons (canonical-key current-file) (fx- n 1))))
                               (hashtable-set! *annotations* k text)
                               (when resolved?
                                 (hashtable-set! *resolved* k #t))))))))
@@ -1162,7 +1194,11 @@
             (put-char out ch)
             (loop (fx+ i 1))))))))
 
-  (define GREP-TMP "/tmp/letloop-review.grep.out")
+  (define GREP-TMP
+    (string-append (or (getenv "TMPDIR") "/tmp")
+                   "/letloop-review.grep."
+                   (number->string (get-process-id))
+                   ".out"))
 
   (define (run-capture cmd)
     (system (string-append cmd " > " GREP-TMP " 2>/dev/null"))
@@ -1172,12 +1208,32 @@
           lines)
         '#()))
 
+  (define *git-root* #f)
+
   (define (git-root)
-    (let ((lines (run-capture "git rev-parse --show-toplevel")))
-      (if (and (fx>? (vector-length lines) 0)
-               (fx>? (string-length (vector-ref lines 0)) 0))
-          (vector-ref lines 0)
-          ".")))
+    (unless *git-root*
+      (set! *git-root*
+            (let ((lines (run-capture "git rev-parse --show-toplevel")))
+              (if (and (fx>? (vector-length lines) 0)
+                       (fx>? (string-length (vector-ref lines 0)) 0))
+                  (vector-ref lines 0)
+                  "."))))
+    *git-root*)
+
+  ;; Canonicalize a path used as an annotation key: an absolute path
+  ;; under the git root becomes root-relative ("./src/foo.scm"), the
+  ;; same shape as tree entry paths, so the same file never ends up
+  ;; with two annotation buckets (and REVIEW.md with two headers).
+  ;; Only rewrite when the relative path resolves from the current
+  ;; directory, so the result stays openable.
+  (define (canonical-key path)
+    (let ((root (string-append (git-root) "/")))
+      (if (string-prefix? root path)
+          (let ((relative
+                 (string-append
+                  "./" (substring path (string-length root) (string-length path)))))
+            (if (file-exists? relative) relative path))
+          path)))
 
   (define (split-grep-line line)
     (let* ((n (string-length line))
@@ -1503,6 +1559,9 @@
       (set! *tree-cursor* 0)
       (set! *tree-scroll* 0)
       (tb-init)
-      (event-loop)))
+      ;; Restore the terminal before propagating any crash, otherwise
+      ;; the shell is left in termbox raw mode.
+      (guard (ex (#t (tb-shutdown) (raise ex)))
+        (event-loop))))
 
   )

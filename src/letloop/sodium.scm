@@ -120,23 +120,25 @@
                                     void* void*)
                                    int)))
       (lambda (ciphertext key nonce)
-        (let* ((clen (bytevector-length ciphertext))
-               (plaintext (make-bytevector (- clen 16)))
-               (mlen-ptr (foreign-alloc 8)))
-          (foreign-set! 'unsigned-64 mlen-ptr 0 0)
-          (with-lock (list ciphertext key nonce plaintext)
-            (let ((rc (func (bytevector-pointer plaintext)
-                            mlen-ptr
-                            0     ;; nsec unused
-                            (bytevector-pointer ciphertext)
-                            clen
-                            0 0   ;; no additional data
-                            (bytevector-pointer nonce)
-                            (bytevector-pointer key))))
-              (foreign-free mlen-ptr)
-              (if (fx=? rc -1)
-                  #f  ;; authentication failure
-                  plaintext)))))))
+        (let ((clen (bytevector-length ciphertext)))
+          (if (< clen 16)
+              #f  ;; too short to hold the 16 bytes authentication tag
+              (let ((plaintext (make-bytevector (- clen 16)))
+                    (mlen-ptr (foreign-alloc 8)))
+                (foreign-set! 'unsigned-64 mlen-ptr 0 0)
+                (with-lock (list ciphertext key nonce plaintext)
+                  (let ((rc (func (bytevector-pointer plaintext)
+                                  mlen-ptr
+                                  0     ;; nsec unused
+                                  (bytevector-pointer ciphertext)
+                                  clen
+                                  0 0   ;; no additional data
+                                  (bytevector-pointer nonce)
+                                  (bytevector-pointer key))))
+                    (foreign-free mlen-ptr)
+                    (if (fx=? rc -1)
+                        #f  ;; authentication failure
+                        plaintext)))))))))
 
   ;; void crypto_aead_xchacha20poly1305_ietf_keygen(unsigned char k[32]);
   (define crypto-aead-xchacha20poly1305-ietf-keygen
