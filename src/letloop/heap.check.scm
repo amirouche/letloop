@@ -19,9 +19,18 @@
 
 (define ~check-heap-000
   (lambda ()
-    ;; Fresh heap is empty; heap-min returns #f.
+    ;; Fresh heap is empty; heap-min returns #f. Popping an empty heap
+    ;; raises without corrupting it: the heap stays empty and usable.
     (let ((h (heap-new)))
-      (check #t (and (heap-empty? h) (not (heap-min h)))))))
+      (let ((raised? (guard (ex (else #t))
+                       (heap-pop-min! h)
+                       #f)))
+        (check #t (and (heap-empty? h)
+                       (not (heap-min h))
+                       raised?
+                       (begin
+                         (heap-add! h 1 'one)
+                         (equal? '(1) (%heap-drain h)))))))))
 
 (define ~check-heap-001
   (lambda ()

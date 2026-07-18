@@ -65,21 +65,25 @@
       (if x (string->list x) '())))
   
   (define percent-decode
-    (lambda (string)
-      (let loop ((chars (string->list* string))
-                 (out '()))
-        (match chars
-          (() (list->string (reverse out)))
-          ((#\+ ,rest ...)
-           (loop rest (cons #\space out)))
-          ((#\% ,a ,b ,rest ...)
-           (loop rest (cons
-                       (integer->char
-                        (string->number
-                         (list->string (list a b))
-                         16))
-                       out)))
-          ((,char . ,rest) (loop rest (cons char out)))))))
+    ;; Optional PLUS? (default #t) decodes #\+ to space, the
+    ;; form/query semantics; pass #f for RFC 3986 path segments where
+    ;; + is a literal character. Invalid %XX escapes are copied
+    ;; through literally instead of raising.
+    (lambda (string . plus)
+      (let ((plus? (if (pair? plus) (car plus) #t)))
+        (let loop ((chars (string->list* string))
+                   (out '()))
+          (match chars
+            (() (list->string (reverse out)))
+            ((#\+ ,rest ...)
+             (loop rest (cons (if plus? #\space #\+) out)))
+            ((#\% ,a ,b ,rest ...)
+             (let ((n (string->number (list->string (list a b)) 16)))
+               (if (and n (fixnum? n) (fx<=? 0 n 255))
+                   (loop rest (cons (integer->char n) out))
+                   ;; invalid escape: keep it as literal text
+                   (loop rest (cons* b a #\% out)))))
+            ((,char . ,rest) (loop rest (cons char out))))))))
 
   (define www-form-urlencoded-read
     ;; content-type: application/x-www-form-urlencoded

@@ -48,6 +48,12 @@
 (define %hdr-content-length (string->utf8 "content-length"))
 (define %val-close (string->utf8 "close"))
 
+;; Canned response for unparsable requests, written best-effort
+;; before closing the connection.
+(define %response-400
+  (string->utf8
+   "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"))
+
 ;; ---- Bytevector-range URI parsing ----
 
 ;; Scan buf[start..end) for a byte value, return index or #f.
@@ -78,13 +84,17 @@
             (let loop ((i start) (seg-start start) (acc '()))
               (cond
                 ((fx>=? i end)
+                 ;; #f: + is a literal character in path segments (RFC
+                 ;; 3986), unlike in query strings.
                  (reverse (cons (percent-decode
-                                 (utf8->string (subbytevector buf seg-start end)))
+                                 (utf8->string (subbytevector buf seg-start end))
+                                 #f)
                                 acc)))
                 ((fx=? (bytevector-u8-ref buf i) 47) ;; #\/
                  (loop (fx+ i 1) (fx+ i 1)
                        (cons (percent-decode
-                              (utf8->string (subbytevector buf seg-start i)))
+                              (utf8->string (subbytevector buf seg-start i))
+                              #f)
                              acc)))
                 (else (loop (fx+ i 1) seg-start acc)))))))))
 
@@ -112,7 +122,8 @@
 
 ;; Parse BUF with the reusable OUT (and optionally REQ-VEC); returns
 ;; (values req remainder) once the head and the whole content-length
-;; body are buffered, (values #f #f) otherwise.
+;; body are buffered, (values #f #f) when more bytes are needed, and
+;; (values 'bad-request #f) on a definite parse error.
 (define try-parse-http-request
   (lambda (buf out . rest)
     (let ((req-vec (if (pair? rest) (car rest) #f)))
@@ -123,18 +134,24 @@
                          (phr-parse-request buf out))))
             (cond
               ((eq? req 'incomplete) (values #f #f))
-              ((not req) (values #f #f))
+              ((not req) (values 'bad-request #f))
               (else
                (let* ((consumed (phr-request-bytes-consumed req))
-                      (body-len (or (phr-request-header-ref-as-integer req %hdr-content-length) 0))
-                      (total (fx+ consumed body-len))
-                      (have (bytevector-length buf)))
-                 (if (fx<? have total)
-                     (values #f #f)
-                     (let ((remainder (if (fx>=? total have)
-                                          (bytevector)
-                                          (subbytevector buf total have))))
-                       (values req remainder)))))))))))
+                      (content-length (phr-request-header-ref-as-integer req %hdr-content-length))
+                      (body-len (or content-length 0)))
+                 ;; Content-length header present but unparsable
+                 ;; (non-digit, or fixnum overflow): bad request.
+                 (if (and (not content-length)
+                          (phr-request-header-ref/bv req %hdr-content-length))
+                     (values 'bad-request #f)
+                     (let ((total (fx+ consumed body-len))
+                           (have (bytevector-length buf)))
+                       (if (fx<? have total)
+                           (values #f #f)
+                           (let ((remainder (if (fx>=? total have)
+                                                (bytevector)
+                                                (subbytevector buf total have))))
+                             (values req remainder)))))))))))))
 
 (define http-response-write*
   (lambda (write-proc status reason headers body-bv)
@@ -150,20 +167,32 @@
     (define out (make-phr-out))
     (define req-vec (vector 'phr-request #f #f 0))
 
+    (define done? #f)
+
+    ;; Idempotent: also called from the guard below when the request
+    ;; path raises after the normal-path cleanup already ran.
     (define (cleanup)
-      (unlock-object out)
-      (close))
+      (unless done?
+        (set! done? #t)
+        (unlock-object out)
+        (close)))
 
     (define (handle-loop buf)
       (let-values (((req remainder) (try-parse-http-request buf out req-vec)))
-        (if (not req)
+        (cond
+          ((eq? req 'bad-request)
+           ;; Definite parse error: best-effort 400, then close, so
+           ;; garbage is not buffered and re-parsed forever.
+           (write %response-400)
+           (cleanup))
+          ((not req)
             (let ((data (read)))
               (cond
                 ((not data) (cleanup))
                 ((eq? data #t) (cleanup))
                 ((eof-object? data) (cleanup))
-                (else (handle-loop (bytevector-append buf data)))))
-            (begin
+                (else (handle-loop (bytevector-append buf data))))))
+          (else
               (unless request-state
                 (set! request-state (context application client req)))
               (let ((method (phr-request-method-symbol req)))
@@ -190,7 +219,15 @@
                   (cleanup)
                   (handle-loop remainder))))))
 
-    (handle-loop (bytevector))))
+    ;; No dynamic-wind here: coroutine suspensions (loop-read /
+    ;; loop-write) are non-local exits through the wind and would run
+    ;; the after-thunk mid-suspension, unpinning OUT while the kernel
+    ;; still references it. GUARD only fires on raise, so suspending
+    ;; and resuming across it is safe; the loop swallows coroutine
+    ;; exceptions, so without this the connection would leak the
+    ;; GC-pinned OUT and the fd.
+    (guard (ex (else (cleanup)))
+      (handle-loop (bytevector)))))
 
 ;; Idle connection reaping
 (define %idle-timeout-seconds 30)
