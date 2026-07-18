@@ -149,41 +149,61 @@
   ;; (values #f #f #f) on error. Must run inside a loop coroutine.
   (define www-request
     (lambda (method url headers body)
-      (guard (ex (else
-                  (if (condition? ex)
-                      (display-condition ex (current-error-port))
-                      (format (current-error-port) "www-request error: ~a\n" ex))
-                  (newline (current-error-port))
-                  (flush-output-port (current-error-port))
-                  (values #f #f #f)))
-        (let-values (((scheme host port request-target) (url-parse url)))
-          (let ((port* (or port (if (string=? scheme "https") 443 80))))
-            ;; NOTE: cannot use dynamic-wind here because loop-abort
-            ;; uses continuations that would trigger the exit guard
-            ;; prematurely
-            (let-values (((ctx fd) (tls-open host port*)))
-              (let ((headers* (if (assq 'host headers)
-                                  headers
-                                  (cons (cons 'host host) headers))))
-                ;; Write request
-                (let ((write! (tls-writer ctx fd)))
-                  (http-request-write write!
-                                      method
-                                      request-target
-                                      'HTTP/1.1
-                                      headers*
-                                      (if (bytevector? body)
-                                          (let ((sent #f))
-                                            (lambda ()
-                                              (if sent
-                                                  (eof-object)
-                                                  (begin (set! sent #t) body))))
-                                          body)))
-                ;; Read response
-                (let-values (((version code reason resp-headers resp-body)
-                              (http-response-read (tls-reader ctx fd))))
-                  (tls-shutdown ctx fd)
-                  (values code resp-headers resp-body)))))))))
+      ;; Track the live TLS context and socket so the guard handler can
+      ;; release them: without teardown every failed request leaks an fd
+      ;; and a libtls context until EMFILE.
+      (let ((live-ctx #f)
+            (live-fd #f))
+        (guard (ex (else
+                    ;; Best-effort teardown; by the time this handler
+                    ;; runs the coroutine is not suspended, so calling
+                    ;; loop-close here is safe (dynamic-wind is not, see
+                    ;; NOTE below).
+                    (when live-ctx
+                      (guard (_ (else #f)) (tls-close live-ctx))
+                      (guard (_ (else #f)) (tls-free live-ctx)))
+                    (when live-fd
+                      (guard (_ (else #f)) (loop-close live-fd)))
+                    (if (condition? ex)
+                        (display-condition ex (current-error-port))
+                        (format (current-error-port) "www-request error: ~a\n" ex))
+                    (newline (current-error-port))
+                    (flush-output-port (current-error-port))
+                    (values #f #f #f)))
+          (let-values (((scheme host port request-target) (url-parse url)))
+            (let ((port* (or port (if (string=? scheme "https") 443 80))))
+              ;; NOTE: cannot use dynamic-wind here because loop-abort
+              ;; uses continuations that would trigger the exit guard
+              ;; prematurely
+              (let-values (((ctx fd) (tls-open host port*)))
+                (set! live-ctx ctx)
+                (set! live-fd fd)
+                (let ((headers* (if (assq 'host headers)
+                                    headers
+                                    (cons (cons 'host host) headers))))
+                  ;; Write request
+                  (let ((write! (tls-writer ctx fd)))
+                    (http-request-write write!
+                                        method
+                                        request-target
+                                        'HTTP/1.1
+                                        headers*
+                                        (if (bytevector? body)
+                                            (let ((sent #f))
+                                              (lambda ()
+                                                (if sent
+                                                    (eof-object)
+                                                    (begin (set! sent #t) body))))
+                                            body)))
+                  ;; Read response
+                  (let-values (((version code reason resp-headers resp-body)
+                                (http-response-read (tls-reader ctx fd))))
+                    ;; Clear before tls-shutdown so a failure inside it
+                    ;; cannot lead to a double free from the guard.
+                    (set! live-ctx #f)
+                    (set! live-fd #f)
+                    (tls-shutdown ctx fd)
+                    (values code resp-headers resp-body))))))))))
 
   ;; End-to-end: async HTTPS GET inside the loop (needs network, like
   ;; the ~check-www-* it mirrors). One retry to absorb httpbin flakes.
