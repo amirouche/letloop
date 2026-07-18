@@ -106,25 +106,24 @@
                       ((and (pair? rest) (vector? (car rest))) (car rest))
                       ((and (pair? rest) (pair? (cdr rest)) (vector? (cadr rest))) (cadr rest))
                       (else #f))))
-        (lock-object buf)
-        (let ((ret (%phr-parse-request-wrapper
-                    (bytevector-pointer buf)
-                    (bytevector-length buf)
-                    (bytevector-pointer out)
-                    %phr-max-headers
-                    last-len)))
-          (unlock-object buf)
-          (cond
-           ((fx>? ret 0)
-            (if req-vec
-                (begin
-                  (vector-set! req-vec 1 buf)
-                  (vector-set! req-vec 2 out)
-                  (vector-set! req-vec 3 ret)
-                  req-vec)
-                (vector 'phr-request buf out ret)))
-           ((fx=? ret -2) 'incomplete)
-           (else #f))))))
+        (with-lock (list buf)
+          (let ((ret (%phr-parse-request-wrapper
+                      (bytevector-pointer buf)
+                      (bytevector-length buf)
+                      (bytevector-pointer out)
+                      %phr-max-headers
+                      last-len)))
+            (cond
+             ((fx>? ret 0)
+              (if req-vec
+                  (begin
+                    (vector-set! req-vec 1 buf)
+                    (vector-set! req-vec 2 out)
+                    (vector-set! req-vec 3 ret)
+                    req-vec)
+                  (vector 'phr-request buf out ret)))
+             ((fx=? ret -2) 'incomplete)
+             (else #f)))))))
 
   (define phr-parse-request
     (lambda (buf . rest)
@@ -298,7 +297,8 @@
                     (loop (fx+ i 1)))))))))
 
   ;; Header lookup parsing the value as a decimal integer straight
-  ;; from the bytes; #f on missing header or non-digit.
+  ;; from the bytes; #f on missing header, non-digit, or a value that
+  ;; overflows the fixnum range.
   (define phr-request-header-ref-as-integer
     (lambda (req key-bv)
       (let ((out (%phr-out req))
@@ -318,7 +318,8 @@
                         (if (fx>=? j val-len)
                             n
                             (let ((d (fx- (bytevector-u8-ref buf (fx+ val-offset j)) 48)))
-                              (if (and (fx>=? d 0) (fx<? d 10))
+                              (if (and (fx>=? d 0) (fx<? d 10)
+                                       (fx<=? n (fxdiv (fx- (greatest-fixnum) d) 10)))
                                   (iloop (fx+ j 1) (fx+ (fx* n 10) d))
                                   #f)))))
                     (loop (fx+ i 1)))))))))

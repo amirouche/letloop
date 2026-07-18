@@ -28,12 +28,14 @@
   (lambda ()
     ;; In-place URI parsing: path segments percent-decoded (single
     ;; byte escapes; percent-decode is not UTF-8 aware), query split,
-    ;; fragment dropped.
-    (let ((buf (string->utf8 "/a%20b/c?x=1&y=deux#frag")))
+    ;; fragment dropped. + stays literal in path segments (RFC 3986)
+    ;; but decodes to space in the query string; invalid %XX escapes
+    ;; pass through as literal text.
+    (let ((buf (string->utf8 "/a%20b/c+d/e%zg?x=1&y=deux+trois#frag")))
       (call-with-values (lambda () (uri-parse/range buf 0 (bytevector-length buf)))
         (lambda (path query)
-          (check #t (and (equal? path '("a b" "c"))
-                         (equal? query '((x . "1") (y . "deux"))))))))))
+          (check #t (and (equal? path '("a b" "c+d" "e%zg"))
+                         (equal? query '((x . "1") (y . "deux trois"))))))))))
 
 (define ~check-http-server-003
   (lambda ()
@@ -52,6 +54,23 @@
                        (string=? (utf8->string remainder) "GET"))))
           (unlock-object out)
           (check #t ok))))))
+
+(define ~check-http-server-005
+  (lambda ()
+    ;; try-parse-http-request: a definite parse error yields
+    ;; 'bad-request rather than 'need more bytes', both for garbage
+    ;; bytes and for an unparsable (fixnum-overflowing)
+    ;; content-length.
+    (let ((out (make-phr-out)))
+      (let-values (((req remainder)
+                    (try-parse-http-request (string->utf8 "\x0;garbage\r\n\r\n") out)))
+        (let-values (((req* remainder*)
+                      (try-parse-http-request
+                       (string->utf8 "POST / HTTP/1.1\r\nContent-Length: 99999999999999999999\r\n\r\n")
+                       out)))
+          (unlock-object out)
+          (check #t (and (eq? req 'bad-request)
+                         (eq? req* 'bad-request))))))))
 
 (define ~check-http-server-004
   (lambda ()

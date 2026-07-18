@@ -50,6 +50,8 @@
 
 (define heap-pop-min!
   (lambda (h)
+    (when (heap-empty? h)
+      (error 'heap-pop-min! "heap is empty"))
     (let* ((n (heap-size h))
            (vec (heap-vec h))
            (min (vector-ref vec 0)))
