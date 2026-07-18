@@ -374,7 +374,8 @@
    )
 
   (import (chezscheme)
-          (only (letloop cffi) define-shared-object lazy-foreign-procedure)
+          (only (letloop cffi) define-shared-object lazy-foreign-procedure
+                with-lock bytevector-pointer strerror)
           (letloop r999))
 
   ;;------------------------------------------------------------
@@ -1685,21 +1686,9 @@
 
   (define stdlib (load-shared-object #f))
 
-  (define-syntax with-lock
-    (syntax-rules ()
-      ((_ objects body ...)
-       (let ((objects* objects))
-         (dynamic-wind
-           (lambda () (for-each lock-object objects*))
-           (lambda () body ...)
-           (lambda () (for-each unlock-object objects*)))))))
-
-  (define (bytevector-pointer bv)
-    (#%$object-address bv (+ (foreign-sizeof 'void*) 1)))
-
-  (define strerror
-    (let ((func (foreign-procedure "strerror" (int) string)))
-      (lambda (code) (func code))))
+  ;; with-lock, bytevector-pointer, strerror are imported from
+  ;; (letloop cffi) and re-exported, so importing both libraries
+  ;; unrestricted stays legal (same binding, no collision).
 
   (define %strlen (foreign-procedure "strlen" (void*) size_t))
 
