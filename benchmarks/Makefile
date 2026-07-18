@@ -6,7 +6,7 @@ help:
 	@echo "Benchmark Suite - HTTP Counter Application"
 	@echo ""
 	@echo "Build targets:"
-	@echo "  make build-scheme   Build Scheme server (picotransparenturing, requires ./venv)"
+	@echo "  make build-scheme   Build Scheme server (my-web-library over io_uring, requires ./venv)"
 	@echo "  make build-go       Build Go server (net/http stdlib)"
 	@echo "  make build-rust     Build Rust server (axum + tokio, release mode)"
 	@echo "  make build-bun-rust Check bun-rust binary availability"
@@ -32,7 +32,7 @@ help:
 build-scheme:
 	@echo "Building Scheme implementation..."
 	@mkdir -p bin
-	@cd .. && ./local/bin/letloop compile --optimize-level=3 ./examples ./examples/picotransparenturing-example.scm main 2>&1 | tail -1 && mv a.out benchmarks/bin/scheme-pico-server
+	@cd .. && ./local/bin/letloop compile --optimize-level=3 ./examples ./benchmarks/scheme ./benchmarks/scheme/bench-server.scm main 2>&1 | tail -1 && mv a.out benchmarks/bin/scheme-pico-server
 	@echo "✓ Scheme (pico) built"
 
 build-go:

@@ -52,19 +52,30 @@
 (define %dns-encode-name
   (lambda (hostname)
     ;; "example.com" → #vu8(7 101 120 97 109 112 108 101 3 99 111 109 0)
-    (let ((parts (let split ((chars (string->list hostname))
-                             (current '())
-                             (out '()))
-                   (cond
-                     ((null? chars)
-                      (reverse (cons (list->string (reverse current)) out)))
-                     ((char=? (car chars) #\.)
-                      (split (cdr chars) '()
-                             (cons (list->string (reverse current)) out)))
-                     (else
-                      (split (cdr chars) (cons (car chars) current) out))))))
+    ;; A single trailing dot ("example.com.") is stripped; every label
+    ;; must be 1 to 63 bytes, as per RFC 1035.
+    (let* ((hostname (let ((len (string-length hostname)))
+                       (if (and (fx>? len 0)
+                                (char=? (string-ref hostname (fx- len 1)) #\.))
+                           (substring hostname 0 (fx- len 1))
+                           hostname)))
+           (parts (let split ((chars (string->list hostname))
+                              (current '())
+                              (out '()))
+                    (cond
+                      ((null? chars)
+                       (reverse (cons (list->string (reverse current)) out)))
+                      ((char=? (car chars) #\.)
+                       (split (cdr chars) '()
+                              (cons (list->string (reverse current)) out)))
+                      (else
+                       (split (cdr chars) (cons (car chars) current) out))))))
       (let ((bvs (map (lambda (part)
                         (let ((bv (string->utf8 part)))
+                          (when (fxzero? (bytevector-length bv))
+                            (error 'dns "Empty label in hostname" hostname))
+                          (when (fx>? (bytevector-length bv) 63)
+                            (error 'dns "Label longer than 63 bytes" part))
                           (let ((out (make-bytevector (+ 1 (bytevector-length bv)))))
                             (bytevector-u8-set! out 0 (bytevector-length bv))
                             (bytevector-copy! bv 0 out 1 (bytevector-length bv))
@@ -73,9 +84,9 @@
         (apply bytevector-append (append bvs (list (bytevector 0))))))))
 
 (define %dns-build-query
-  (lambda (hostname)
-    (let* ((id-hi (random 256))
-           (id-lo (random 256))
+  (lambda (hostname id)
+    (let* ((id-hi (fxsrl id 8))
+           (id-lo (fxlogand id #xFF))
            (header (bytevector id-hi id-lo
                                1 0    ;; QR=0, OPCODE=0, RD=1
                                0 1    ;; QDCOUNT=1
@@ -88,15 +99,23 @@
       (bytevector-append header name qtype qclass))))
 
 (define %dns-parse-response
-  (lambda (bv)
-    ;; Returns (values a b c d) for IPv4 or #f on failure
+  (lambda (bv id)
+    ;; Returns (a b c d) for IPv4 or #f on failure. ID is the query
+    ;; identifier the response must echo back.
     (guard (ex (else #f))
       (when (< (bytevector-length bv) 12)
         (error 'dns "Response too short"))
-      ;; Check QR=1 (response)
+      ;; Check the response ID matches the query ID
+      (unless (= id (+ (* 256 (bytevector-u8-ref bv 0))
+                       (bytevector-u8-ref bv 1)))
+        (error 'dns "Response ID mismatch"))
       (let ((flags (bytevector-u8-ref bv 2)))
+        ;; Check QR=1 (response)
         (unless (not (fxzero? (fxlogand flags #x80)))
-          (error 'dns "Not a response")))
+          (error 'dns "Not a response"))
+        ;; Check TC=0 (no TCP fallback implemented)
+        (unless (fxzero? (fxlogand flags #x02))
+          (error 'dns "Response truncated")))
       ;; Check RCODE=0
       (let ((rcode (fxlogand (bytevector-u8-ref bv 3) #x0F)))
         (unless (fxzero? rcode)
@@ -128,10 +147,10 @@
                                              (bytevector-u8-ref bv (+ rr-pos 9))))
                                    (rdata-pos (+ rr-pos 10)))
                               (if (and (= rtype 1) (= rdlen 4))
-                                  (values (bytevector-u8-ref bv rdata-pos)
-                                          (bytevector-u8-ref bv (+ rdata-pos 1))
-                                          (bytevector-u8-ref bv (+ rdata-pos 2))
-                                          (bytevector-u8-ref bv (+ rdata-pos 3)))
+                                  (list (bytevector-u8-ref bv rdata-pos)
+                                        (bytevector-u8-ref bv (+ rdata-pos 1))
+                                        (bytevector-u8-ref bv (+ rdata-pos 2))
+                                        (bytevector-u8-ref bv (+ rdata-pos 3)))
                                   (parse-answers (+ rdata-pos rdlen) (+ i 1)))))
                            ;; Null terminator — end of name, RR fields follow
                            ((fxzero? b)
@@ -142,10 +161,10 @@
                                              (bytevector-u8-ref bv (+ rr-pos 9))))
                                    (rdata-pos (+ rr-pos 10)))
                               (if (and (= rtype 1) (= rdlen 4))
-                                  (values (bytevector-u8-ref bv rdata-pos)
-                                          (bytevector-u8-ref bv (+ rdata-pos 1))
-                                          (bytevector-u8-ref bv (+ rdata-pos 2))
-                                          (bytevector-u8-ref bv (+ rdata-pos 3)))
+                                  (list (bytevector-u8-ref bv rdata-pos)
+                                        (bytevector-u8-ref bv (+ rdata-pos 1))
+                                        (bytevector-u8-ref bv (+ rdata-pos 2))
+                                        (bytevector-u8-ref bv (+ rdata-pos 3)))
                                   (parse-answers (+ rdata-pos rdlen) (+ i 1)))))
                            ;; Normal label — skip length byte + label bytes
                            (else
@@ -195,6 +214,7 @@
             (make-sockaddr-in a b c d port)))
         ;; DNS lookup via io_uring
         (let* ((ns (%dns-get-nameserver))
+               (query-id (random 65536))
                (udp-fd (loop-socket-new 2 2 0)))  ;; AF_INET, SOCK_DGRAM
           (unless udp-fd (error 'dns-resolve-a "UDP socket failed"))
           (loop-nonblock! udp-fd)
@@ -215,7 +235,7 @@
                         (loop-close udp-fd)
                         (error 'dns-resolve-a "UDP connect failed" (strerror (fx- 0 res))))))))))
           ;; Build and send DNS query
-          (let ((query (%dns-build-query hostname)))
+          (let ((query (%dns-build-query hostname query-id)))
             (lock-object query)
             (let* ((sqe (io-uring-get-sqe (loop-ring (loop-current))))
                    (id (loop-alloc-id!)))
@@ -242,7 +262,10 @@
                 (loop-close udp-fd)
                 (when (fx<=? res 0)
                   (error 'dns-resolve-a "DNS recv failed"))
-                (let ((response (subbytevector buf 0 res)))
-                  (call-with-values (lambda () (%dns-parse-response response))
-                    (lambda (a b c d)
-                      (make-sockaddr-in a b c d port)))))))))))
+                (let* ((response (subbytevector buf 0 res))
+                       (parsed (%dns-parse-response response query-id)))
+                  (unless parsed
+                    (error 'dns-resolve-a "resolution failed" hostname))
+                  (make-sockaddr-in (car parsed) (cadr parsed)
+                                    (caddr parsed) (cadddr parsed)
+                                    port)))))))))

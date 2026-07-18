@@ -6,15 +6,26 @@
 
 (define ~check-dns-000
   (lambda ()
-    ;; QNAME encoding
-    (check (bytevector 7 101 120 97 109 112 108 101 3 99 111 109 0)
-           (%dns-encode-name "example.com"))))
+    ;; QNAME encoding; a trailing-dot FQDN encodes the same, labels
+    ;; longer than 63 bytes and empty labels raise.
+    (check #t (and (equal? (bytevector 7 101 120 97 109 112 108 101 3 99 111 109 0)
+                           (%dns-encode-name "example.com"))
+                   (equal? (%dns-encode-name "example.com")
+                           (%dns-encode-name "example.com."))
+                   (guard (ex (else #t))
+                     (%dns-encode-name (string-append (make-string 64 #\a) ".com"))
+                     #f)
+                   (guard (ex (else #t))
+                     (%dns-encode-name "example..com")
+                     #f)))))
 
 (define ~check-dns-001
   (lambda ()
-    ;; Query layout: 12-byte header, RD=1, QDCOUNT=1, name, A/IN tail.
-    (let ((query (%dns-build-query "example.com")))
+    ;; Query layout: 12-byte header, id, RD=1, QDCOUNT=1, name, A/IN tail.
+    (let ((query (%dns-build-query "example.com" #x2A2B)))
       (check #t (and (= (bytevector-length query) (+ 12 13 2 2))
+                     (= #x2A (bytevector-u8-ref query 0))  ;; id
+                     (= #x2B (bytevector-u8-ref query 1))
                      (= 1 (bytevector-u8-ref query 2))   ;; RD
                      (= 0 (bytevector-u8-ref query 3))
                      (= 1 (bytevector-u8-ref query 5))   ;; QDCOUNT
@@ -48,17 +59,23 @@
 
 (define ~check-dns-002
   (lambda ()
-    (call-with-values (lambda () (%dns-parse-response %dns-check-response))
-      (lambda (a b c d)
-        (check '(93 184 216 34) (list a b c d))))))
+    (check '(93 184 216 34) (%dns-parse-response %dns-check-response 42))))
 
 (define ~check-dns-003
   (lambda ()
-    ;; RCODE=3 (NXDOMAIN) yields #f, as does a truncated packet.
-    (let ((nxdomain (bytevector-copy %dns-check-response)))
+    ;; RCODE=3 (NXDOMAIN) yields #f, as do a truncated packet, a
+    ;; response whose ID does not echo the query ID, and a response
+    ;; with the TC (truncation) bit set.
+    (let ((nxdomain (bytevector-copy %dns-check-response))
+          (wrong-id (bytevector-copy %dns-check-response))
+          (tc-set (bytevector-copy %dns-check-response)))
       (bytevector-u8-set! nxdomain 3 #x83)
-      (check #t (and (not (%dns-parse-response nxdomain))
-                     (not (%dns-parse-response (bytevector 0 1 2))))))))
+      (bytevector-u8-set! wrong-id 1 43)
+      (bytevector-u8-set! tc-set 2 #x83)  ;; QR=1 RD TC
+      (check #t (and (not (%dns-parse-response nxdomain 42))
+                     (not (%dns-parse-response (bytevector 0 1 2) 42))
+                     (not (%dns-parse-response wrong-id 42))
+                     (not (%dns-parse-response tc-set 42)))))))
 
 (define ~check-dns-004
   (lambda ()
