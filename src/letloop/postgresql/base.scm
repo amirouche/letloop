@@ -744,12 +744,16 @@
         escaped)))
 
   (define scram-make-nonce
+    ;; Fresh randomness from the kernel: Chez's (random) is seeded
+    ;; with a constant, so it would hand every process the same nonce.
+    ;; base64 keeps the result printable and free of #\, as SCRAM
+    ;; requires.
     (lambda ()
-      (let ((bv (make-bytevector 24)))
-        (let fill ((i 0))
-          (when (< i 24)
-            (bytevector-u8-set! bv i (random 256))
-            (fill (+ i 1))))
+      (let* ((port (open-file-input-port "/dev/urandom"))
+             (bv   (get-bytevector-n port 24)))
+        (close-port port)
+        (unless (and (bytevector? bv) (= (bytevector-length bv) 24))
+          (pg-raise "Short read from /dev/urandom" 'urandom))
         (base64-encode bv))))
 
   (define scram-parse-server-first
@@ -777,6 +781,15 @@
           (pg-raise "Malformed SCRAM server-first-message" msg))
         (values r (base64-decode s) (string->number i)))))
 
+  ;; ErrorResponse during authentication: surface the server's own
+  ;; message (e.g. "password authentication failed for user ...").
+  (define pg-raise-auth-error
+    (lambda (payload)
+      (let ((fields (pg-parse-error-response payload)))
+        (pg-raise (cond ((assv #\M fields) => cdr)
+                        (else "Authentication error"))
+                  `(pg-error ,fields)))))
+
   (define pg-scram-sha256-auth
     (lambda (conn username password mechanism-list)
       (unless (member "SCRAM-SHA-256" mechanism-list)
@@ -796,6 +809,8 @@
           (pg-raise "Write failed during SCRAM initial response" 'write))
         ;; Read server-first (auth-type 11)
         (let-values (((type payload) (pg-read-message read-u8 read-exact)))
+          (when (char=? type #\E)
+            (pg-raise-auth-error payload))
           (unless (char=? type #\R)
             (pg-raise "Expected AuthenticationSASLContinue" type))
           (let ((atype (bv-ref-int32-be payload 0)))
@@ -832,6 +847,8 @@
                   (pg-raise "Write failed during SCRAM final response" 'write))
                 ;; Read server-final (auth-type 12)
                 (let-values (((type2 payload2) (pg-read-message read-u8 read-exact)))
+                  (when (char=? type2 #\E)
+                    (pg-raise-auth-error payload2))
                   (unless (char=? type2 #\R)
                     (pg-raise "Expected AuthenticationSASLFinal" type2))
                   (let ((atype2 (bv-ref-int32-be payload2 0)))
@@ -919,10 +936,7 @@
                (void))
 
               ((#\E)
-               (let ((fields (pg-parse-error-response payload)))
-                 (let ((msg (cond ((assv #\M fields) => cdr)
-                                  (else "Authentication error"))))
-                   (pg-raise msg `(pg-error ,fields)))))
+               (pg-raise-auth-error payload))
 
               ((#\N)
                (auth-loop))
@@ -950,26 +964,36 @@
 
   (define pg-connect
     (lambda (host port database username password)
-      (let* ((parts (string-split-dots host))
-             (a (car parts)) (b (cadr parts))
-             (c (caddr parts)) (d (cadddr parts)))
-        (let-values (((addr-ptr addrlen) (make-sockaddr-in a b c d port)))
-          (let ((fd (loop-connect addr-ptr addrlen)))
-            (foreign-free addr-ptr)
-            (unless fd
-              (pg-raise "TCP connection failed"
-                         `(host ,host port ,port)))
-            (let-values (((read-u8 read-exact) (make-pg-reader fd)))
-              (let ((conn (make-pg-connection fd read-u8 read-exact #f #f '())))
-                (let ((startup (pg-make-startup-message
-                                `(("user"             . ,username)
-                                  ("database"         . ,database)
-                                  ("application_name" . "letloop-pg")
-                                  ("client_encoding"  . "UTF8")))))
-                  (unless (loop-write fd startup)
-                    (pg-raise "Write failed sending startup" 'write)))
-                (pg-authenticate conn username password)
-                conn)))))))
+      (let ((parts (string-split-dots host)))
+        (unless (and (= (length parts) 4)
+                     (for-all (lambda (n) (and (fixnum? n) (fx<=? 0 n 255)))
+                              parts))
+          (pg-raise (string-append
+                     "pg-connect: only IPv4 literal addresses are supported, got "
+                     host)
+                    `(host ,host)))
+        (let ((a (car parts)) (b (cadr parts))
+              (c (caddr parts)) (d (cadddr parts)))
+          (let-values (((addr-ptr addrlen) (make-sockaddr-in a b c d port)))
+            (let ((fd (loop-connect addr-ptr addrlen)))
+              (foreign-free addr-ptr)
+              (unless fd
+                (pg-raise "TCP connection failed"
+                           `(host ,host port ,port)))
+              ;; From here the fd is live: close it when anything in
+              ;; the handshake raises, otherwise the descriptor leaks.
+              (guard (exn (else (loop-close fd) (raise exn)))
+                (let-values (((read-u8 read-exact) (make-pg-reader fd)))
+                  (let ((conn (make-pg-connection fd read-u8 read-exact #f #f '())))
+                    (let ((startup (pg-make-startup-message
+                                    `(("user"             . ,username)
+                                      ("database"         . ,database)
+                                      ("application_name" . "letloop-pg")
+                                      ("client_encoding"  . "UTF8")))))
+                      (unless (loop-write fd startup)
+                        (pg-raise "Write failed sending startup" 'write)))
+                    (pg-authenticate conn username password)
+                    conn)))))))))
 
   ;;============================================================
   ;; Section 11: Close — pg-close
@@ -984,6 +1008,15 @@
   ;;============================================================
   ;; Section 12: Simple query — pg-exec and pg-query
   ;;============================================================
+
+  ;; Consume messages until ReadyForQuery so the connection stays
+  ;; usable after an aborted exchange (failed Parse, refused COPY...).
+  (define pg-drain-until-ready
+    (lambda (read-u8 read-exact)
+      (let drain ()
+        (let-values (((type payload) (pg-read-message read-u8 read-exact)))
+          (unless (char=? type #\Z)
+            (drain))))))
 
   (define pg-simple-query
     (lambda (conn sql)
@@ -1025,7 +1058,19 @@
               ((#\N)
                (result-loop columns rows tag err))
 
-              ((#\G #\H)
+              ((#\G)
+               ;; CopyInResponse: refuse with CopyFail, then drain to
+               ;; ReadyForQuery so the next query is not a protocol
+               ;; violation.
+               (loop-write fd (pg-make-message
+                               #\f (encode-cstring "COPY not supported")))
+               (pg-drain-until-ready read-u8 read-exact)
+               (pg-raise "COPY protocol not supported" `(type ,type)))
+
+              ((#\H)
+               ;; CopyOutResponse: drain CopyData/CopyDone to
+               ;; ReadyForQuery, then refuse.
+               (pg-drain-until-ready read-u8 read-exact)
                (pg-raise "COPY protocol not supported" `(type ,type)))
 
               (else
@@ -1058,16 +1103,20 @@
         (let ((sync-msg (pg-make-message #\S)))
           (unless (loop-write fd sync-msg)
             (pg-raise "Write failed on Sync" '(sync))))
-        (let prep-loop ()
+        ;; Sync is already on the wire, so on error keep consuming
+        ;; until ReadyForQuery before raising: leaving it unread would
+        ;; desynchronize every later exchange on this connection.
+        (let prep-loop ((err #f))
           (let-values (((type payload) (pg-read-message read-u8 read-exact)))
             (case type
-              ((#\1) (prep-loop))
-              ((#\N) (prep-loop))
-              ((#\Z) (void))
+              ((#\1) (prep-loop err))
+              ((#\N) (prep-loop err))
+              ((#\Z)
+               (when err
+                 (pg-raise "Parse error" `(fields ,err))))
               ((#\E)
-               (pg-raise "Parse error"
-                          `(fields ,(pg-parse-error-response payload))))
-              (else  (prep-loop))))))))
+               (prep-loop (pg-parse-error-response payload)))
+              (else  (prep-loop err))))))))
 
   (define pg-execute
     (lambda (conn name params)
@@ -1125,6 +1174,18 @@
                                (reverse rows)
                                tag
                                err))
+              ((#\G)
+               ;; CopyInResponse: refuse with CopyFail, then drain to
+               ;; ReadyForQuery so the connection stays usable.
+               (loop-write fd (pg-make-message
+                               #\f (encode-cstring "COPY not supported")))
+               (pg-drain-until-ready read-u8 read-exact)
+               (pg-raise "COPY protocol not supported" `(type ,type)))
+              ((#\H)
+               ;; CopyOutResponse: drain CopyData/CopyDone to
+               ;; ReadyForQuery, then refuse.
+               (pg-drain-until-ready read-u8 read-exact)
+               (pg-raise "COPY protocol not supported" `(type ,type)))
               (else
                (pg-raise "Unexpected message in extended query"
                           `(type ,type)))))))))

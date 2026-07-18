@@ -123,18 +123,25 @@
 ;; Connection tests (PostgreSQL at 127.0.0.1:5432, or SKIP)
 ;;============================================================
 
-;; Run BODY in a fresh loop coroutine and hand back its value.
+;; Run BODY in a fresh loop coroutine and hand back its value.  A
+;; condition raised by BODY is stashed, printed on the error port
+;; once the loop stops, and turns the result into #f — loop-run's own
+;; guard would otherwise swallow it, leaving failures undiagnosable.
 (define-syntax run-pg-test
   (syntax-rules ()
     ((_ body ...)
-     (let ((result #f))
+     (let ((result #f) (condition #f))
        (loop-new)
        (loop-spawn
         (lambda ()
-          (set! result (begin body ...))
+          (guard (exn (else (set! condition exn)))
+            (set! result (begin body ...)))
           (loop-stop)))
        (loop-run)
-       result))))
+       (when condition
+         (display-condition condition (current-error-port))
+         (newline (current-error-port)))
+       (if condition #f result)))))
 
 ;; A connection, or #f when nothing listens — in which case the
 ;; calling check passes as skipped rather than failing the suite.
@@ -145,14 +152,18 @@
     (pg-connect "127.0.0.1" 5432 "postgres" "postgres" "")))
 
 ;; The shape shared by every connection check: connect (or skip),
-;; hand CONN to the body, close.
+;; hand CONN to the body, close — best-effort even when the body
+;; raises, so a failing check does not leak its connection.
 (define-syntax with-pg
   (syntax-rules ()
     ((_ conn body ...)
      (run-pg-test
       (let ((conn (pg-connect-or-skip)))
         (or (not conn)
-            (let ((out (begin body ...)))
+            (let ((out (guard (exn (else
+                                    (guard (_ (else #f)) (pg-close conn))
+                                    (raise exn)))
+                         body ...)))
               (pg-close conn)
               out)))))))
 
@@ -232,11 +243,30 @@
         #t))))
 
 (define ~check-postgresql-scram-000
-  ;; Connect with SCRAM-SHA-256 auth; skip gracefully if the server or
-  ;; the scram_user role is missing
+  ;; Connect with SCRAM-SHA-256 auth.  Skip when nothing listens or
+  ;; when the server lacks the CI-provisioned scram_user role
+  ;; (sqlstate 28000, raised at startup before SCRAM begins); a
+  ;; genuine SCRAM failure — wrong password (28P01), signature
+  ;; mismatch, protocol error — must fail the check.
   (lambda ()
+    (define (refused? exn)
+      (and (pg-error? exn)
+           (equal? (pg-error-message exn) "TCP connection failed")))
+    (define (undefined-role? exn)
+      (and (pg-error? exn)
+           (let ((payload (pg-error-payload exn)))
+             (and (pair? payload)
+                  (eq? (car payload) 'pg-error)
+                  (cond ((assv #\C (cadr payload))
+                         => (lambda (p) (equal? (cdr p) "28000")))
+                        (else #f))))))
     (run-pg-test
-     (guard (exn (#t #t))
+     (guard (exn ((refused? exn)
+                  (display "** SKIP: no PostgreSQL at 127.0.0.1:5432\n")
+                  #t)
+                 ((undefined-role? exn)
+                  (display "** SKIP: no scram_user role at 127.0.0.1:5432\n")
+                  #t))
        (let ((conn (pg-connect "127.0.0.1" 5432 "postgres" "scram_user" "secret")))
          (pg-close conn)
          #t)))))
