@@ -4,11 +4,17 @@
 ;; guile-fibers' "operations") synchronized over the io_uring loop
 ;; from (letloop liburing low). Ported from the coop.scm design
 ;; sketch; see plans/v12/20260720-flow/README.md for the full design
-;; and milestone plan. Implements FL-1 (base event algebra) and FL-2
-;; (choice) — no channels, no I/O events yet.
+;; and milestone plan. Implements FL-1 (base event algebra), FL-2
+;; (choice), and FL-3 (rendezvous channels) — no timeouts or I/O
+;; events yet.
 (library (letloop flow)
 
   (export make-flow flow? flow-wrap flow-guard flow-choice flow-perform
+
+          make-flow-channel flow-channel? flow-put flow-get
+          flow-put! flow-get!
+          flow-same-channel-choice-condition?
+          flow-same-channel-choice-channel
 
           flow-spawn flow-run flow-stop
 
@@ -20,7 +26,12 @@
           ~check-flow-001/choice-two-ready
           ~check-flow-001/choice-ready-or-never
           ~check-flow-001/nested-choice-flattens
-          ~check-flow-001/block-fanout-race)
+          ~check-flow-001/block-fanout-race
+
+          ~check-flow-002/ping-pong
+          ~check-flow-003/n-producers-one-consumer
+          ~check-flow-004/same-channel-choice-raises
+          ~check-flow-004/compaction)
 
   (import (chezscheme)
           (letloop r999)
@@ -126,7 +137,11 @@
   ;; parked continuation directly — the completing side may itself be
   ;; in the middle of a CQE drain (§4.3). box-cas! guards against a
   ;; base being resumed more than once (e.g. a losing sibling whose
-  ;; completion arrives after the choice already synched).
+  ;; completion arrives after the choice already synched), and resume
+  ;; returns whether *this* call was the one that won it — the state
+  ;; box is only ever transitioned here, never by a block/try
+  ;; implementation directly, so a channel (say) can tell whether the
+  ;; peer it just matched was still actually available.
   (define flow-block-and-wait
     (lambda (bases)
       (let ((state (box 'waiting)))
@@ -134,18 +149,168 @@
          (lambda (k)
            (define resume
              (lambda (value)
-               (when (box-cas! state 'waiting 'synched)
-                 (loop-spawn (lambda () (k value))))))
+               (and (box-cas! state 'waiting 'synched)
+                    (begin (loop-spawn (lambda () (k value))) #t))))
            (for-each (lambda (base) ((flow-block-proc base) state resume))
                      bases))))))
 
   (define flow-perform
     (lambda (event)
-      (let* ((bases  (flow-flatten event))
-             (result (flow-poll bases)))
-        (if (eq? result %flow-not-ready)
-            (flow-block-and-wait bases)
-            result))))
+      (let ((bases (flow-flatten event)))
+        (flow-check-same-channel-choice! bases)
+        (let ((result (flow-poll bases)))
+          (if (eq? result %flow-not-ready)
+              (flow-block-and-wait bases)
+              result)))))
+
+  ;;------------------------------------------------------------
+  ;; Channels (§4.4)
+  ;;------------------------------------------------------------
+
+  ;; A channel is two FIFOs of pending parties (waiting puts, waiting
+  ;; pops) plus a counter driving periodic compaction. Rendezvous is
+  ;; direct: a value only moves when a put and a get are both present
+  ;; at the same time, there is no buffering.
+  (define-record-type* <flow-channel>
+    (make-flow-channel% puts pops gc-counter)
+    flow-channel?
+    (puts       flow-channel-puts  flow-channel-puts!)
+    (pops       flow-channel-pops  flow-channel-pops!)
+    (gc-counter flow-channel-gc-counter flow-channel-gc-counter!))
+
+  (define make-flow-channel
+    (lambda ()
+      (make-flow-channel% '() '() 0)))
+
+  ;; A pending party: the (possibly choice-shared) state box and
+  ;; resume from flow-perform, plus — for puts only — the value being
+  ;; offered. A party is dead once its state is no longer 'waiting;
+  ;; dead parties are skipped by box-cas! failing and are eventually
+  ;; dropped by compaction, not removed eagerly.
+  (define-record-type* <flow-channel-entry>
+    (make-flow-channel-entry state resume value)
+    flow-channel-entry?
+    (state  flow-channel-entry-state)
+    (resume flow-channel-entry-resume)
+    (value  flow-channel-entry-value))
+
+  (define flow-channel-entry-waiting?
+    (lambda (entry)
+      (eq? (unbox (flow-channel-entry-state entry)) 'waiting)))
+
+  (define %flow-channel-gc-threshold 1024)
+
+  ;; Bump the shared gc-counter on every enqueue; once it reaches the
+  ;; threshold, drop every entry from both FIFOs whose state is no
+  ;; longer 'waiting and reset the counter (§4.4). Called after the
+  ;; enqueue so a completed entry can be compacted the same round it
+  ;; is finally observed as dead.
+  (define flow-channel-bump-gc!
+    (lambda (channel)
+      (let ((n (fx+ 1 (flow-channel-gc-counter channel))))
+        (if (fx>=? n %flow-channel-gc-threshold)
+            (begin
+              (flow-channel-puts! channel
+                (filter flow-channel-entry-waiting? (flow-channel-puts channel)))
+              (flow-channel-pops! channel
+                (filter flow-channel-entry-waiting? (flow-channel-pops channel)))
+              (flow-channel-gc-counter! channel 0))
+            (flow-channel-gc-counter! channel n)))))
+
+  ;; try and block never race each other within a single flow-perform
+  ;; call — phase 1 is single-threaded and nothing yields between the
+  ;; poll pass and the block pass, so the two-phase re-scan coop.scm
+  ;; needed for its bare-thread arm is unnecessary here (§4.7); a
+  ;; future multi-shard resume would need to reintroduce it.
+  ;;
+  ;; Claiming a peer means calling *its* resume, and resume itself
+  ;; owns the state-box CAS (flow-block-and-wait) — try must not CAS
+  ;; the peer's state box on its own first, or resume's own CAS would
+  ;; find it already 'synched and silently refuse to wake the peer.
+  ;; resume's #t/#f return is exactly "did I just win this peer".
+  (define flow-put-try
+    (lambda (channel obj)
+      (lambda ()
+        (let scan ((pops (flow-channel-pops channel)))
+          (cond
+           ((null? pops) #f)
+           (((flow-channel-entry-resume (car pops)) obj)
+            (lambda () (void)))
+           (else (scan (cdr pops))))))))
+
+  (define flow-put-block
+    (lambda (channel obj)
+      (lambda (state resume)
+        (flow-channel-puts! channel
+          (append (flow-channel-puts channel)
+                  (list (make-flow-channel-entry state resume obj))))
+        (flow-channel-bump-gc! channel))))
+
+  (define flow-put
+    (lambda (channel obj)
+      (make-flow% 'base (cons 'flow-put channel)
+                  (lambda (x) (void))
+                  (flow-put-try channel obj)
+                  (flow-put-block channel obj))))
+
+  (define flow-get-try
+    (lambda (channel)
+      (lambda ()
+        (let scan ((puts (flow-channel-puts channel)))
+          (cond
+           ((null? puts) #f)
+           (((flow-channel-entry-resume (car puts)) (void))
+            (let ((obj (flow-channel-entry-value (car puts))))
+              (lambda () obj)))
+           (else (scan (cdr puts))))))))
+
+  (define flow-get-block
+    (lambda (channel)
+      (lambda (state resume)
+        (flow-channel-pops! channel
+          (append (flow-channel-pops channel)
+                  (list (make-flow-channel-entry state resume #f))))
+        (flow-channel-bump-gc! channel))))
+
+  (define flow-get
+    (lambda (channel)
+      (make-flow% 'base (cons 'flow-get channel)
+                  (lambda (x) x)
+                  (flow-get-try channel)
+                  (flow-get-block channel))))
+
+  (define flow-put!
+    (lambda (channel obj) (flow-perform (flow-put channel obj))))
+
+  (define flow-get!
+    (lambda (channel) (flow-perform (flow-get channel))))
+
+  ;; A choice containing both a put and a get on the same channel can
+  ;; never rendezvous with anything but itself and would deadlock;
+  ;; reject it instead (§4.4). Only flow-put/flow-get tag their `data`
+  ;; field this way, so the pair? check cannot misfire on a 'guard
+  ;; event (data is a thunk) or a plain base (data is #f).
+  (define-condition-type &flow-same-channel-choice &error
+    make-flow-same-channel-choice-condition
+    flow-same-channel-choice-condition?
+    (channel flow-same-channel-choice-channel))
+
+  (define flow-check-same-channel-choice!
+    (lambda (bases)
+      (let loop ((bases bases) (puts '()) (pops '()))
+        (unless (null? bases)
+          (let ((tag (flow-data (car bases))))
+            (cond
+             ((not (pair? tag)) (loop (cdr bases) puts pops))
+             ((eq? (car tag) 'flow-put)
+              (when (memq (cdr tag) pops)
+                (raise (make-flow-same-channel-choice-condition (cdr tag))))
+              (loop (cdr bases) (cons (cdr tag) puts) pops))
+             ((eq? (car tag) 'flow-get)
+              (when (memq (cdr tag) puts)
+                (raise (make-flow-same-channel-choice-condition (cdr tag))))
+              (loop (cdr bases) puts (cons (cdr tag) pops)))
+             (else (loop (cdr bases) puts pops))))))))
 
   (define flow-spawn loop-spawn)
   (define flow-run loop-run)
