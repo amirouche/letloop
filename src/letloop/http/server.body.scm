@@ -161,8 +161,17 @@
        (lambda ()
          (if done (eof-object) (begin (set! done #t) body-bv)))))))
 
+;; Per-request idle read timeout: a connection sitting between
+;; requests (or mid-headers) with no bytes from the peer for this long
+;; is closed. Raced directly against the read via flow-choice rather
+;; than left to the coarser, connection-agnostic sweep below — see the
+;; commit message for why the sweep stays as a backstop for the write
+;; side, which flow-write deliberately cannot race (§4.5: once bytes
+;; start moving a write is committed, not cancellable).
+(define %read-idle-timeout-seconds 30)
+
 (define handle-connection
-  (lambda (application context dispatch client read write close)
+  (lambda (application context dispatch peer-ip fd write close)
     (define request-state #f)
     (define out (make-phr-out))
     (define req-vec (vector 'phr-request #f #f 0))
@@ -186,15 +195,17 @@
            (write %response-400)
            (cleanup))
           ((not req)
-            (let ((data (read)))
+            (let ((data (flow-perform
+                         (flow-choice (flow-read fd)
+                                      (flow-timeout %read-idle-timeout-seconds)))))
               (cond
-                ((not data) (cleanup))
-                ((eq? data #t) (cleanup))
-                ((eof-object? data) (cleanup))
+                ((not data) (cleanup))            ;; read error
+                ((eq? data #t) (cleanup))          ;; peer EOF
+                ((eq? data (void)) (cleanup))      ;; idle timeout
                 (else (handle-loop (bytevector-append buf data))))))
           (else
               (unless request-state
-                (set! request-state (context application client req)))
+                (set! request-state (context application peer-ip req)))
               (let ((method (phr-request-method-symbol req)))
                 (let-values (((path-offset path-len) (phr-request-path-range req)))
                   (let-values (((path params) (uri-parse/range (phr-request-buffer req) path-offset path-len)))
@@ -275,10 +286,10 @@
               (when (loop-running? (loop-current))
                 (guard (ex (else (void)))
                   (call-with-values accept
-                    (lambda (read write close peer-ip)
+                    (lambda (read write close peer-ip fd)
                       (when (and read write close)
                         (loop-spawn
-                          (lambda () (handle-connection app-state context dispatch peer-ip read write close)))))))
+                          (lambda () (handle-connection app-state context dispatch peer-ip fd write close)))))))
                 (loop)))))))
     (loop-run)
     ;; Cleanup after loop exits
