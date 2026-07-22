@@ -5,8 +5,8 @@
 ;; from (letloop liburing low). Ported from the coop.scm design
 ;; sketch; see plans/v12/20260720-flow/README.md for the full design
 ;; and milestone plan. Implements FL-1 (base event algebra), FL-2
-;; (choice), FL-3 (rendezvous channels), and FL-4 (timeouts) — no I/O
-;; events yet.
+;; (choice), FL-3 (rendezvous channels), FL-4 (timeouts), and FL-5
+;; (I/O events).
 (library (letloop flow)
 
   (export make-flow flow? flow-wrap flow-guard flow-choice flow-perform
@@ -17,6 +17,8 @@
           flow-same-channel-choice-channel
 
           flow-timeout flow-sleep
+
+          flow-accept flow-read flow-write
 
           flow-spawn flow-run flow-stop
 
@@ -37,10 +39,14 @@
 
           ~check-flow-005/get-or-timeout-put-first
           ~check-flow-005/get-or-timeout-timeout-first
-          ~check-flow-005/losing-timeout-cancelled)
+          ~check-flow-005/losing-timeout-cancelled
+
+          ~check-flow-006/echo-pair
+          ~check-flow-006/read-or-timeout-leaves-fd-usable)
 
   (import (chezscheme)
           (letloop r999)
+          (only (letloop cffi) bytevector-pointer)
           (letloop liburing low))
 
   ;; A <flow> is either:
@@ -382,6 +388,101 @@
 
   (define flow-sleep
     (lambda (seconds) (flow-perform (flow-timeout seconds))))
+
+  ;;------------------------------------------------------------
+  ;; I/O events (§4.5)
+  ;;------------------------------------------------------------
+
+  ;; A fresh, self-owned recv buffer per call rather than the loop's
+  ;; shared provided-buffer ring: that ring's result lands in the
+  ;; private %buf-data table inside (letloop liburing low), which
+  ;; would need its own exported hook to reach from here, and a
+  ;; plain io_uring_prep_recv into our own bytevector needs none —
+  ;; the same tradeoff loop-write already makes for sends.
+  (define %flow-read-buffer-size 65536)
+
+  ;; try is always #f — nothing here can be polled without a real
+  ;; completion. block preps a plain recv (no IOSQE_BUFFER_SELECT)
+  ;; and registers a cancel thunk: an unstarted read has consumed
+  ;; nothing, so losing a choice can cancel it outright (unlike
+  ;; flow-write, see below).
+  (define flow-read
+    (lambda (fd)
+      (make-flow% 'base #f
+                  (lambda (x) x)
+                  (lambda () #f)
+                  (lambda (state resume register-cancel!)
+                    (let* ((ring (loop-ring (loop-current)))
+                           (id   (loop-alloc-id!))
+                           (bv   (make-bytevector %flow-read-buffer-size))
+                           (sqe  (io-uring-get-sqe ring)))
+                      (lock-object bv)
+                      (io-uring-prep-recv sqe fd (bytevector-pointer bv)
+                                          (bytevector-length bv) 0)
+                      (io-uring-sqe-set-data64 sqe id)
+                      (hashtable-set! (loop-handlers (loop-current)) id
+                                      (lambda (res)
+                                        (unlock-object bv)
+                                        (resume
+                                         (cond
+                                          ((fx<? res 0) #f)
+                                          ((fxzero? res) #t)
+                                          (else (subbytevector bv 0 res))))))
+                      (register-cancel!
+                       (lambda ()
+                         (let ((csqe (io-uring-get-sqe ring)))
+                           (io-uring-prep-cancel64 csqe id 0)
+                           (io-uring-sqe-set-data64 csqe (loop-alloc-id!))))))))))
+
+  ;; No register-cancel! here, deliberately: once bytes have started
+  ;; moving this event is committed (§4.5) — a losing choice must not
+  ;; abandon a half-sent write, so the short-write retry loop keeps
+  ;; running to completion in the background regardless of whether
+  ;; this base already lost. resume's own box-cas! makes the eventual
+  ;; final call a harmless no-op in that case, exactly like a losing
+  ;; I/O base's late CQE (§4.3 rule 2).
+  (define flow-write
+    (lambda (fd bv)
+      (make-flow% 'base #f
+                  (lambda (x) x)
+                  (lambda () #f)
+                  (lambda (state resume register-cancel!)
+                    (let ((ring (loop-ring (loop-current))))
+                      (define submit!
+                        (lambda (remaining)
+                          (lock-object remaining)
+                          (let ((id  (loop-alloc-id!))
+                                (sqe (io-uring-get-sqe ring)))
+                            (io-uring-prep-send sqe fd (bytevector-pointer remaining)
+                                                (bytevector-length remaining) 0)
+                            (io-uring-sqe-set-data64 sqe id)
+                            (hashtable-set! (loop-handlers (loop-current)) id
+                                            (lambda (res)
+                                              (unlock-object remaining)
+                                              (cond
+                                               ((fx<=? res 0) (resume #f))
+                                               ((fx=? res (bytevector-length remaining))
+                                                (resume #t))
+                                               (else (submit! (subbytevector remaining res)))))))))
+                      (submit! bv))))))
+
+  ;; try/block delegate directly to loop-accept-try/loop-accept-block
+  ;; (§4.5's one hook into (letloop liburing low)). No register-cancel!
+  ;; — the multishot is per-fd infrastructure, never torn down just
+  ;; because one choice touching it loses; a client accepted after we
+  ;; already lost is pushed back onto the accept backlog by
+  ;; loop-accept-block itself rather than leaked. resume's return
+  ;; value (#t on winning the CAS, #f otherwise) is exactly the
+  ;; claim/decline signal loop-accept-block's handler expects.
+  (define flow-accept
+    (lambda (fd)
+      (make-flow% 'base #f
+                  (lambda (x) x)
+                  (lambda ()
+                    (let ((client (loop-accept-try fd)))
+                      (and client (lambda () client))))
+                  (lambda (state resume register-cancel!)
+                    (loop-accept-block fd (lambda (client) (resume client)))))))
 
   (define flow-spawn loop-spawn)
   (define flow-run loop-run)

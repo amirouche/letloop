@@ -232,3 +232,68 @@
   (loop-run)
   (and (eq? result 'value)
        (fx<? elapsed 1000)))
+
+;; Real loopback TCP: a listener accepts via flow-accept, echoes one
+;; message back via flow-read/flow-write; the peer connects, sends,
+;; and reads the echo back via flow-write/flow-read too, so both
+;; directions of both events run over a real socket pair.
+(define (~check-flow-006/echo-pair)
+  (define PORT 18234)
+  (define listen-fd (loop-socket-new AF-INET SOCK-STREAM 0))
+  (define result #f)
+  (loop-new)
+  (loop-bind listen-fd "127.0.0.1" PORT)
+  (loop-listen listen-fd 128)
+  (loop-spawn (lambda ()
+                (let* ((client (flow-perform (flow-accept listen-fd)))
+                       (data   (flow-perform (flow-read client))))
+                  (flow-perform (flow-write client data))
+                  (loop-close client))))
+  (loop-spawn (lambda ()
+                (call-with-values (lambda () (make-sockaddr-in 127 0 0 1 PORT))
+                  (lambda (addr addrlen)
+                    (let ((fd (loop-connect addr addrlen)))
+                      (foreign-free addr)
+                      (flow-perform (flow-write fd (string->utf8 "hello")))
+                      (set! result (flow-perform (flow-read fd)))
+                      (loop-close fd))))
+                (loop-close listen-fd)
+                (loop-stop)))
+  (loop-run)
+  (equal? result (string->utf8 "hello")))
+
+;; A read racing a short timeout on a silent socket must resolve via
+;; the timeout (not hang), and — the actual point of this check — the
+;; fd must still be usable afterward: a fresh flow-read on the same
+;; fd must see the client's message once it actually arrives, proving
+;; the cancelled/lost read didn't consume or corrupt the connection.
+(define (~check-flow-006/read-or-timeout-leaves-fd-usable)
+  (define PORT 18235)
+  (define listen-fd (loop-socket-new AF-INET SOCK-STREAM 0))
+  (define timed-out #f)
+  (define result #f)
+  (loop-new)
+  (loop-bind listen-fd "127.0.0.1" PORT)
+  (loop-listen listen-fd 128)
+  (loop-spawn (lambda ()
+                (let ((client (flow-perform (flow-accept listen-fd))))
+                  (set! timed-out
+                    (eq? (flow-perform (flow-choice (flow-read client) (flow-timeout 0.05)))
+                         (void)))
+                  (set! result (flow-perform (flow-read client)))
+                  (loop-close client)
+                  (loop-close listen-fd)
+                  (loop-stop))))
+  (loop-spawn (lambda ()
+                (call-with-values (lambda () (make-sockaddr-in 127 0 0 1 PORT))
+                  (lambda (addr addrlen)
+                    (let ((fd (loop-connect addr addrlen)))
+                      (foreign-free addr)
+                      ;; stay silent well past the server's 50ms
+                      ;; read-or-timeout before finally sending
+                      (flow-sleep 0.2)
+                      (flow-perform (flow-write fd (string->utf8 "late")))
+                      (loop-close fd))))))
+  (loop-run)
+  (and timed-out
+       (equal? result (string->utf8 "late"))))
