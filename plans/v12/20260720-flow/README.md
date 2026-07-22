@@ -368,3 +368,111 @@ is recent; CI's may not be — probe with `io-uring-opcode-supported`);
 and `call/1cc` one-shot continuations in `loop-abort` are only correct
 because the state-box CAS guarantees single resumption — FL-2's checks
 must include a double-completion race simulation to pin that invariant.
+
+## 6. Public API reference (target)
+
+None of this is implemented yet; this section pins down what each
+export in §4.1 will do so FL-1..FL-6 have a single source of truth to
+check against.
+
+**`(make-flow wrap try block)`** — constructs a base `<flow>` event
+(`type = 'base`) from a post-synchronization transformer `wrap`, a
+non-blocking poll `try`, and a `block` registration procedure. Mirrors
+`make-coop%` in coop.scm, but with the constructor/field arity actually
+consistent (fixes §1.5 defects 5–6). Not normally called by users
+directly — `flow-timeout`/`flow-read`/`flow-put`/etc. are all built on
+top of it.
+
+**`(flow? obj)`** — predicate; `#t` iff `obj` is a `<flow>` record,
+base or choice.
+
+**`(flow-wrap event proc)`** — returns a new event equivalent to
+`event` except its eventual result is post-processed by `proc`. Wraps
+compose (nested `flow-wrap` calls chain, outermost applied last) and
+distribute over the bases of a `flow-choice` (§4.2).
+
+**`(flow-choice event ...)`** — combines events into one event that
+synchronizes on whichever base becomes ready first. Nested choices
+flatten (choice is associative); a one-element choice is the identity.
+Raises `&flow-same-channel-choice` if a `flow-put` and `flow-get` on
+the same channel both appear among the (transitively flattened) bases,
+instead of deadlocking (§4.4).
+
+**`(flow-perform event)`** — the synchronization point. Polls every
+flattened base's `try` from a random starting offset; the first
+non-`#f` result is a thunk, called for the final value. If every `try`
+returns `#f`, allocates one shared state box, calls every base's
+`block` with `(state resume)`, and suspends the current fiber via
+`loop-abort` until some base's parked CQE/peer handler wins the
+`'waiting → 'synched` CAS and resumes it, cancelling sibling SQEs
+first (§4.2–§4.3).
+
+**`(flow-guard thunk)`** — delayed event construction: `thunk` is
+called, and must return an event, only when `flow-perform` actually
+attempts synchronization — lets the event to synchronize on (e.g.
+which channel) depend on state computed right before blocking.
+
+**`(make-flow-channel)`** — allocates a fresh unbuffered rendezvous
+channel: a waiting-puts FIFO, a waiting-pops FIFO, and a `gc-counter`
+used to periodically compact `'synched` entries out of both (§4.4). A
+put and a get on the same channel must synchronize directly; there is
+no queueing of values.
+
+**`(flow-channel? obj)`** — predicate.
+
+**`(flow-put channel obj)`** — event that succeeds by handing `obj` to
+a matching `flow-get` on `channel`. `try` scans the waiting-pops FIFO
+and attempts the bounded CAS rendezvous; `block` enqueues onto the
+waiting-puts FIFO, then re-scans pops that may have arrived
+concurrently under the two-phase `'waiting → 'claimed → 'synched`
+protocol (§1.3, §4.4). The wrapped result on the put side is
+unspecified.
+
+**`(flow-get channel)`** — the symmetric event: `try`/`block` scan and
+enqueue the gets FIFO instead of the puts FIFO. The wrapped result is
+the object handed over by the matching put.
+
+**`(flow-put! channel obj)`** — shorthand for
+`(flow-perform (flow-put channel obj))`.
+
+**`(flow-get! channel)`** — shorthand for
+`(flow-perform (flow-get channel))`.
+
+**`(flow-timeout ns)`** — event that becomes ready after `ns`
+nanoseconds. `try` is always `#f`; `block` preps an `IORING_OP_TIMEOUT`
+SQE with a `make-timespec` freed on resume. If this event loses a
+choice, its SQE is cancelled via `io-uring-prep-timeout-remove` rather
+than left to fire uselessly (§4.5).
+
+**`(flow-sleep ns)`** — `(flow-perform (flow-timeout ns))`. Exists for
+CML-style code that wants a plain sleep as a special case of
+synchronization; does not replace `loop-sleep`, which stays for
+non-CML callers.
+
+**`(flow-accept fd)`** — event: `try` pops `%accept-backlog` when
+non-empty, a genuine non-blocking fast path unlike the other I/O
+events; `block` parks the state-box handler on the fd's multishot
+accept id. The multishot registration is per-fd infrastructure and is
+never torn down just because one choice involving it loses (§4.5).
+
+**`(flow-read fd)`** — event: `try` is always `#f`; `block` preps a
+buffer-select recv exactly as `loop-read` does. The result is
+post-processed by the event's own internal wrap into `bv` (data),
+`#t` (EOF), or `#f` (error).
+
+**`(flow-write fd bv)`** — event: `block` preps a write of `bv`. A
+partial write re-arms its own follow-up SQE from inside the event's
+completion path rather than re-entering `flow-choice` — once any bytes
+have gone out, the write is committed and can no longer be cancelled
+by a losing choice (§4.5).
+
+**`(flow-spawn thunk)`** — re-export of `loop-spawn`: schedules
+`thunk` to run as a new fiber on the loop.
+
+**`(flow-run)`** — re-export/thin wrapper over the loop's drive loop
+(`loop-run-once`, looped): runs spawned fibers, submits pending SQEs,
+waits for and dispatches CQEs, repeats until stopped or no work
+remains.
+
+**`(flow-stop)`** — signals the running loop to stop after its current
+iteration.
