@@ -18,6 +18,16 @@
 
 (define %dns-nameserver #f)
 
+;; hostname → #(a b c d expiry-jiffy); avoids a full DNS round-trip on
+;; every request to the same host
+(define %dns-cache (make-hashtable string-hash string=?))
+(define %dns-cache-ttl-jiffies (* 60 (expt 10 9)))
+
+;; a linked timeout cancels the DNS recv when the nameserver never
+;; answers, instead of hanging the coroutine forever
+(define %dns-recv-timeout-seconds 5)
+(define %dns-recv-timeout-ts #f)
+
 (define %dns-read-resolv-conf
   (lambda ()
     (guard (ex (else "8.8.8.8"))
@@ -206,14 +216,25 @@
   (lambda (hostname port)
     ;; Returns (values addr-ptr addrlen); the caller foreign-frees
     ;; addr-ptr. Must run inside a loop coroutine unless HOSTNAME is
-    ;; already a dotted IPv4 literal.
+    ;; already a dotted IPv4 literal or cached.
     (if (%dns-ip-string? hostname)
         ;; Already an IP address
         (call-with-values (lambda () (%dns-parse-ip hostname))
           (lambda (a b c d)
             (make-sockaddr-in a b c d port)))
-        ;; DNS lookup via io_uring
-        (let* ((ns (%dns-get-nameserver))
+        (let ((cached (hashtable-ref %dns-cache hostname #f)))
+          (if (and cached (< (jiffy-current) (vector-ref cached 4)))
+              (make-sockaddr-in (vector-ref cached 0)
+                                (vector-ref cached 1)
+                                (vector-ref cached 2)
+                                (vector-ref cached 3)
+                                port)
+              (%dns-resolve-a/network hostname port))))))
+
+(define %dns-resolve-a/network
+  (lambda (hostname port)
+    ;; DNS lookup via io_uring
+    (let* ((ns (%dns-get-nameserver))
                (query-id (random 65536))
                (udp-fd (loop-socket-new 2 2 0)))  ;; AF_INET, SOCK_DGRAM
           (unless udp-fd (error 'dns-resolve-a "UDP socket failed"))
@@ -255,6 +276,16 @@
                    (id (loop-alloc-id!)))
               (io-uring-prep-recv sqe udp-fd (bytevector-pointer buf) 512 0)
               (io-uring-sqe-set-data64 sqe id)
+              ;; arm a linked timeout: on expiry the recv completes with
+              ;; -ECANCELED and the error path below runs
+              (io-uring-sqe-set-flags sqe IOSQE-IO-LINK)
+              (unless %dns-recv-timeout-ts
+                (set! %dns-recv-timeout-ts
+                      (make-timespec %dns-recv-timeout-seconds 0)))
+              (let ((tsqe (io-uring-get-sqe (loop-ring (loop-current)))))
+                (io-uring-prep-link-timeout
+                 tsqe (ftype-pointer-address %dns-recv-timeout-ts) 0)
+                (io-uring-sqe-set-data64 tsqe (loop-alloc-id!)))
               (let ((res (loop-abort
                            (lambda (k)
                              (hashtable-set! (loop-handlers (loop-current)) id k)))))
@@ -266,6 +297,11 @@
                        (parsed (%dns-parse-response response query-id)))
                   (unless parsed
                     (error 'dns-resolve-a "resolution failed" hostname))
+                  (hashtable-set! %dns-cache hostname
+                                  (vector (car parsed) (cadr parsed)
+                                          (caddr parsed) (cadddr parsed)
+                                          (+ (jiffy-current)
+                                             %dns-cache-ttl-jiffies)))
                   (make-sockaddr-in (car parsed) (cadr parsed)
                                     (caddr parsed) (cadddr parsed)
-                                    port)))))))))
+                                    port))))))))
