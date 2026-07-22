@@ -5,14 +5,14 @@
 (define (~check-flow-000/always-ready)
   (define ev (make-flow (lambda (x) x)
                          (lambda () (lambda () 42))
-                         (lambda (state resume)
+                         (lambda (state resume register-cancel!)
                            (error 'block "should never block"))))
   (equal? (flow-perform ev) 42))
 
 (define (~check-flow-000/wrap-order)
   (define base (make-flow (lambda (x) x)
                            (lambda () (lambda () 1))
-                           (lambda (state resume)
+                           (lambda (state resume register-cancel!)
                              (error 'block "should never block"))))
   ;; w2 wraps w1 wraps base: value flows base -> w1 -> w2, i.e. the
   ;; outermost (most recently applied) flow-wrap runs last.
@@ -28,7 +28,7 @@
        (set! counter (+ counter 1))
        (make-flow (lambda (x) x)
                   (lambda () (lambda () counter))
-                  (lambda (state resume)
+                  (lambda (state resume register-cancel!)
                     (error 'block "should never block"))))))
   ;; the thunk must re-run on every synchronization attempt, not be
   ;; memoized after the first flow-perform.
@@ -40,7 +40,7 @@
   (define ev
     (make-flow (lambda (x) x)
                (lambda () #f)                   ;; try: never ready
-               (lambda (state resume)
+               (lambda (state resume register-cancel!)
                  ;; complete on a later tick, exercising the real
                  ;; loop-abort / box-cas! / loop-spawn suspend path
                  (loop-spawn (lambda () (resume 'resumed))))))
@@ -55,11 +55,11 @@
 (define (~check-flow-001/choice-two-ready)
   (define a (make-flow (lambda (x) x)
                         (lambda () (lambda () 'a))
-                        (lambda (state resume)
+                        (lambda (state resume register-cancel!)
                           (error 'block "should never block"))))
   (define b (make-flow (lambda (x) x)
                         (lambda () (lambda () 'b))
-                        (lambda (state resume)
+                        (lambda (state resume register-cancel!)
                           (error 'block "should never block"))))
   (define result (flow-perform (flow-choice a b)))
   (or (eq? result 'a) (eq? result 'b)))
@@ -67,13 +67,13 @@
 (define (~check-flow-001/choice-ready-or-never)
   (define ready (make-flow (lambda (x) x)
                             (lambda () (lambda () 'ready))
-                            (lambda (state resume)
+                            (lambda (state resume register-cancel!)
                               (error 'block "should never block"))))
   ;; try never succeeds and block must never be reached: the poll
   ;; phase finds `ready` in the same pass regardless of rotation.
   (define never (make-flow (lambda (x) x)
                             (lambda () #f)
-                            (lambda (state resume)
+                            (lambda (state resume register-cancel!)
                               (error 'block "ready sibling exists, should not block"))))
   (and (eq? (flow-perform (flow-choice never ready)) 'ready)
        (eq? (flow-perform (flow-choice ready never)) 'ready)))
@@ -82,11 +82,11 @@
   (define (never)
     (make-flow (lambda (x) x)
                (lambda () #f)
-               (lambda (state resume)
+               (lambda (state resume register-cancel!)
                  (error 'block "ready sibling exists, should not block"))))
   (define ready (make-flow (lambda (x) x)
                             (lambda () (lambda () 'c))
-                            (lambda (state resume)
+                            (lambda (state resume register-cancel!)
                               (error 'block "should never block"))))
   (eq? (flow-perform (flow-choice (flow-choice (never) (never)) ready))
        'c))
@@ -100,11 +100,11 @@
   (define winner #f)
   (define a (make-flow (lambda (x) x)
                         (lambda () #f)
-                        (lambda (state resume)
+                        (lambda (state resume register-cancel!)
                           (loop-spawn (lambda () (resume 'a))))))
   (define b (make-flow (lambda (x) x)
                         (lambda () #f)
-                        (lambda (state resume)
+                        (lambda (state resume register-cancel!)
                           (loop-spawn
                            (lambda () (loop-spawn (lambda () (resume 'b))))))))
   (loop-new)
@@ -174,3 +174,61 @@
       (flow-channel-bump-gc! ch)
       (loop (fx+ i 1))))
   (null? (flow-channel-puts ch)))
+
+;; Producer is spawned second, so it runs first (loop-spawn prepends,
+;; loop-run-once processes the thunk list front-to-back): it blocks on
+;; an empty channel first, then the consumer's try matches it in the
+;; same tick, so the choice resolves on the get without ever calling
+;; the timeout base's block — no real timeout SQE is armed at all.
+(define (~check-flow-005/get-or-timeout-put-first)
+  (define ch (make-flow-channel))
+  (define result #f)
+  (loop-new)
+  (loop-spawn (lambda ()
+                (set! result (flow-perform (flow-choice (flow-get ch) (flow-timeout 2.0))))
+                (loop-stop)))
+  (loop-spawn (lambda () (flow-put! ch 'value)))
+  (loop-run)
+  (eq? result 'value))
+
+;; No producer at all: the timeout is the only base that can ever
+;; complete, so a short one proves flow-timeout/flow-choice actually
+;; deliver a real IORING_OP_TIMEOUT completion rather than hanging.
+(define (~check-flow-005/get-or-timeout-timeout-first)
+  (define ch (make-flow-channel))
+  (define result 'not-set)
+  (loop-new)
+  (loop-spawn (lambda ()
+                (set! result (flow-perform (flow-choice (flow-get ch) (flow-timeout 0.02))))
+                (loop-stop)))
+  (loop-run)
+  (eq? result (void)))
+
+;; Consumer is spawned second (runs first): its get and its 2s timeout
+;; both fail to poll ready, so it genuinely blocks and arms a real
+;; timeout SQE. Producer (runs second) flow-sleeps 50ms — a real
+;; timeout of its own — before putting, so the match against the
+;; consumer's already-armed choice happens strictly on a later tick,
+;; genuinely exercising register-cancel! rather than the "never even
+;; blocked" path above. flow-perform's return isn't gated on the
+;; cancel SQE completing (§4.3: cancellation is fire-and-forget), so
+;; this can't observe the kernel op being removed directly; what it
+;; does prove is the behavioral guarantee that matters — resolving via
+;; the put, promptly, rather than being stuck until the 2s timer.
+(define (~check-flow-005/losing-timeout-cancelled)
+  (define ch (make-flow-channel))
+  (define result #f)
+  (define start #f)
+  (define elapsed #f)
+  (loop-new)
+  (loop-spawn (lambda ()
+                (set! start (real-time))
+                (set! result (flow-perform (flow-choice (flow-get ch) (flow-timeout 2.0))))
+                (set! elapsed (- (real-time) start))
+                (loop-stop)))
+  (loop-spawn (lambda ()
+                (flow-sleep 0.05)
+                (flow-put! ch 'value)))
+  (loop-run)
+  (and (eq? result 'value)
+       (fx<? elapsed 1000)))

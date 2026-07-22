@@ -5,7 +5,7 @@
 ;; from (letloop liburing low). Ported from the coop.scm design
 ;; sketch; see plans/v12/20260720-flow/README.md for the full design
 ;; and milestone plan. Implements FL-1 (base event algebra), FL-2
-;; (choice), and FL-3 (rendezvous channels) — no timeouts or I/O
+;; (choice), FL-3 (rendezvous channels), and FL-4 (timeouts) — no I/O
 ;; events yet.
 (library (letloop flow)
 
@@ -15,6 +15,8 @@
           flow-put! flow-get!
           flow-same-channel-choice-condition?
           flow-same-channel-choice-channel
+
+          flow-timeout flow-sleep
 
           flow-spawn flow-run flow-stop
 
@@ -31,7 +33,11 @@
           ~check-flow-002/ping-pong
           ~check-flow-003/n-producers-one-consumer
           ~check-flow-004/same-channel-choice-raises
-          ~check-flow-004/compaction)
+          ~check-flow-004/compaction
+
+          ~check-flow-005/get-or-timeout-put-first
+          ~check-flow-005/get-or-timeout-timeout-first
+          ~check-flow-005/losing-timeout-cancelled)
 
   (import (chezscheme)
           (letloop r999)
@@ -132,26 +138,48 @@
                     (loop (cdr bs)))))))))
 
   ;; Allocate one state box shared by every base, register (state
-  ;; resume) with each base's block, and suspend the current fiber.
-  ;; resume always defers through loop-spawn rather than calling the
-  ;; parked continuation directly — the completing side may itself be
-  ;; in the middle of a CQE drain (§4.3). box-cas! guards against a
-  ;; base being resumed more than once (e.g. a losing sibling whose
-  ;; completion arrives after the choice already synched), and resume
-  ;; returns whether *this* call was the one that won it — the state
-  ;; box is only ever transitioned here, never by a block/try
-  ;; implementation directly, so a channel (say) can tell whether the
-  ;; peer it just matched was still actually available.
+  ;; resume register-cancel!) with each base's block, and suspend the
+  ;; current fiber. resume always defers through loop-spawn rather
+  ;; than calling the parked continuation directly — the completing
+  ;; side may itself be in the middle of a CQE drain (§4.3). box-cas!
+  ;; guards against a base being resumed more than once (e.g. a losing
+  ;; sibling whose completion arrives after the choice already
+  ;; synched), and resume returns whether *this* call was the one that
+  ;; won it — the state box is only ever transitioned here, never by a
+  ;; block/try implementation directly, so a channel (say) can tell
+  ;; whether the peer it just matched was still actually available.
+  ;;
+  ;; register-cancel! lets a block that submitted a real SQE (a
+  ;; timeout, a read, ...) hand over a thunk that cancels it; the
+  ;; instant any base wins, every registered cancel thunk fires —
+  ;; including, harmlessly, the winner's own (§4.3 rule 3: cancelling
+  ;; an already-completed op is a safe no-op at the kernel level, so
+  ;; there is no need to track and exclude the winner specifically).
+  ;;
+  ;; Each base is handed its *own* resume — value flows through that
+  ;; base's own wrap before reaching the shared inner resume, exactly
+  ;; as flow-poll applies wrap on the ready path — so no block
+  ;; implementation has to remember to wrap its own raw completion
+  ;; value (a real io_uring res code, an object off a channel, ...).
   (define flow-block-and-wait
     (lambda (bases)
-      (let ((state (box 'waiting)))
+      (let ((state (box 'waiting))
+            (cancels (box '())))
         (loop-abort
          (lambda (k)
+           (define register-cancel!
+             (lambda (thunk) (set-box! cancels (cons thunk (unbox cancels)))))
            (define resume
              (lambda (value)
                (and (box-cas! state 'waiting 'synched)
-                    (begin (loop-spawn (lambda () (k value))) #t))))
-           (for-each (lambda (base) ((flow-block-proc base) state resume))
+                    (begin
+                      (for-each (lambda (thunk) (thunk)) (unbox cancels))
+                      (loop-spawn (lambda () (k value)))
+                      #t))))
+           (for-each (lambda (base)
+                       ((flow-block-proc base) state
+                        (lambda (raw) (resume ((flow-wrap-proc base) raw)))
+                        register-cancel!))
                      bases))))))
 
   (define flow-perform
@@ -240,7 +268,7 @@
 
   (define flow-put-block
     (lambda (channel obj)
-      (lambda (state resume)
+      (lambda (state resume register-cancel!)
         (flow-channel-puts! channel
           (append (flow-channel-puts channel)
                   (list (make-flow-channel-entry state resume obj))))
@@ -266,7 +294,7 @@
 
   (define flow-get-block
     (lambda (channel)
-      (lambda (state resume)
+      (lambda (state resume register-cancel!)
         (flow-channel-pops! channel
           (append (flow-channel-pops channel)
                   (list (make-flow-channel-entry state resume #f))))
@@ -311,6 +339,49 @@
                 (raise (make-flow-same-channel-choice-condition (cdr tag))))
               (loop (cdr bases) puts (cons (cdr tag) pops)))
              (else (loop (cdr bases) puts pops))))))))
+
+  ;;------------------------------------------------------------
+  ;; Timeouts (§4.5)
+  ;;------------------------------------------------------------
+
+  ;; try is always #f — a timeout is never already-elapsed at poll
+  ;; time by construction. block preps IORING_OP_TIMEOUT directly
+  ;; (mirroring loop-sleep's own prep, but parking the flow-perform
+  ;; resume instead of a raw continuation) and registers a cancel
+  ;; thunk that preps IORING_OP_TIMEOUT_REMOVE if this base loses.
+  ;;
+  ;; The removal's own completion needs no handler: whether the
+  ;; timeout is cancelled or fires for real, the *original* op's CQE
+  ;; still arrives exactly once (with -ECANCELED on a successful
+  ;; removal), so the one handler registered below always runs
+  ;; eventually and is the single place `ts` is freed — no separate
+  ;; free-on-cancel path is needed.
+  (define flow-timeout
+    (lambda (seconds)
+      (make-flow% 'base #f
+                  (lambda (x) (void))
+                  (lambda () #f)
+                  (lambda (state resume register-cancel!)
+                    (let* ((ring (loop-ring (loop-current)))
+                           (id   (loop-alloc-id!))
+                           (ns   (exact (round (* seconds 1000000000))))
+                           (ts   (make-timespec (div ns 1000000000)
+                                                 (mod ns 1000000000)))
+                           (sqe  (io-uring-get-sqe ring)))
+                      (io-uring-prep-timeout sqe (ftype-pointer-address ts) 0 0)
+                      (io-uring-sqe-set-data64 sqe id)
+                      (hashtable-set! (loop-handlers (loop-current)) id
+                                      (lambda (res)
+                                        (foreign-free (ftype-pointer-address ts))
+                                        (resume res)))
+                      (register-cancel!
+                       (lambda ()
+                         (let ((csqe (io-uring-get-sqe ring)))
+                           (io-uring-prep-timeout-remove csqe id 0)
+                           (io-uring-sqe-set-data64 csqe (loop-alloc-id!))))))))))
+
+  (define flow-sleep
+    (lambda (seconds) (flow-perform (flow-timeout seconds))))
 
   (define flow-spawn loop-spawn)
   (define flow-run loop-run)
