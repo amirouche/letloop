@@ -297,3 +297,53 @@
   (loop-run)
   (and timed-out
        (equal? result (string->utf8 "late"))))
+
+;; FL-6: a standalone proof that flow composes for a realistic
+;; consumer pattern — a per-connection request/echo loop that races
+;; each read against an idle timeout and closes gracefully once the
+;; peer goes silent, the same shape http/server.body.scm's read path
+;; would take if ported onto flow. Deliberately left as a standalone
+;; check rather than actually replacing that file's own idle handling
+;; (a periodic sweep over all connections, not a per-read race) — see
+;; plans/v12/20260720-flow/README.md's FL-6 milestone note.
+(define (~check-flow-006/request-loop-idle-timeout)
+  (define PORT 18236)
+  (define listen-fd (loop-socket-new AF-INET SOCK-STREAM 0))
+  (define echoed '())
+  (define closed-on-timeout #f)
+  (loop-new)
+  (loop-bind listen-fd "127.0.0.1" PORT)
+  (loop-listen listen-fd 128)
+  (loop-spawn (lambda ()
+                (let ((client (flow-perform (flow-accept listen-fd))))
+                  (let request-loop ()
+                    (let ((result (flow-perform
+                                   (flow-choice (flow-read client) (flow-timeout 0.1)))))
+                      (cond
+                       ((eq? result (void))   ;; idle timeout won
+                        (set! closed-on-timeout #t)
+                        (loop-close client))
+                       ((eq? result #t)       ;; peer EOF
+                        (loop-close client))
+                       (else
+                        (set! echoed (cons result echoed))
+                        (flow-perform (flow-write client result))
+                        (request-loop)))))
+                  (loop-close listen-fd)
+                  (loop-stop))))
+  (loop-spawn (lambda ()
+                (call-with-values (lambda () (make-sockaddr-in 127 0 0 1 PORT))
+                  (lambda (addr addrlen)
+                    (let ((fd (loop-connect addr addrlen)))
+                      (foreign-free addr)
+                      (flow-perform (flow-write fd (string->utf8 "one")))
+                      (flow-perform (flow-read fd))
+                      (flow-perform (flow-write fd (string->utf8 "two")))
+                      (flow-perform (flow-read fd))
+                      ;; go silent well past the server's 100ms
+                      ;; per-read idle timeout before closing
+                      (flow-sleep 0.3)
+                      (loop-close fd))))))
+  (loop-run)
+  (and (equal? (reverse echoed) (list (string->utf8 "one") (string->utf8 "two")))
+       closed-on-timeout))

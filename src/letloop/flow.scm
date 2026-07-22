@@ -5,8 +5,9 @@
 ;; from (letloop liburing low). Ported from the coop.scm design
 ;; sketch; see plans/v12/20260720-flow/README.md for the full design
 ;; and milestone plan. Implements FL-1 (base event algebra), FL-2
-;; (choice), FL-3 (rendezvous channels), FL-4 (timeouts), and FL-5
-;; (I/O events).
+;; (choice), FL-3 (rendezvous channels), FL-4 (timeouts), FL-5 (I/O
+;; events), and FL-6 (a standalone consumer proof — see the check).
+;; FL-7 (multi-shard) is out of scope.
 (library (letloop flow)
 
   (export make-flow flow? flow-wrap flow-guard flow-choice flow-perform
@@ -42,7 +43,8 @@
           ~check-flow-005/losing-timeout-cancelled
 
           ~check-flow-006/echo-pair
-          ~check-flow-006/read-or-timeout-leaves-fd-usable)
+          ~check-flow-006/read-or-timeout-leaves-fd-usable
+          ~check-flow-006/request-loop-idle-timeout)
 
   (import (chezscheme)
           (letloop r999)
