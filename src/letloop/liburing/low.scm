@@ -1908,26 +1908,38 @@
   ;; Event loop globals
   ;;------------------------------------------------------------
 
-  (define %loop #f)
-  (define %multishots (make-eqv-hashtable))
-  (define %multishot-ids (make-eqv-hashtable))
-  (define %buf-ring-nentries 4096)
-  (define %buf-ring-buf-size 4096)
-  (define %buf-ring-bgid 0)
-  (define %buf-ring #f)
-  (define %buf-ring-base 0)
-  (define %buf-ring-mask 0)
-  (define %buf-data (make-eqv-hashtable))
-  (define %fd-handlers (make-eqv-hashtable))
-  (define %active-connections (make-eqv-hashtable))
+  ;; Per-shard state (FL-7): each of these was a bare global
+  ;; before, safe only because phase 1 was single-threaded. A
+  ;; thread-parameter gives every OS thread that calls loop-new its
+  ;; own independent cell, so N shards (N threads, each with its
+  ;; own ring) can each run loop-new/loop-run without corrupting
+  ;; each other's state. define-thread-parameter keeps every call
+  ;; site below shaped exactly like the plain (define name init) it
+  ;; replaces.
+  (define-syntax define-thread-parameter
+    (syntax-rules ()
+      ((_ name init) (define name (make-thread-parameter init)))))
+
+  (define-thread-parameter %loop #f)
+  (define-thread-parameter %multishots (make-eqv-hashtable))
+  (define-thread-parameter %multishot-ids (make-eqv-hashtable))
+  (define-thread-parameter %buf-ring-nentries 4096)
+  (define-thread-parameter %buf-ring-buf-size 4096)
+  (define-thread-parameter %buf-ring-bgid 0)
+  (define-thread-parameter %buf-ring #f)
+  (define-thread-parameter %buf-ring-base 0)
+  (define-thread-parameter %buf-ring-mask 0)
+  (define-thread-parameter %buf-data (make-eqv-hashtable))
+  (define-thread-parameter %fd-handlers (make-eqv-hashtable))
+  (define-thread-parameter %active-connections (make-eqv-hashtable))
   ;; listen fd → FIFO list of client fds accepted by the multishot
   ;; while no loop-accept waiter was parked; loop-accept pops from
   ;; here before parking, so already-accepted clients are not leaked.
-  (define %accept-backlog (make-eqv-hashtable))
+  (define-thread-parameter %accept-backlog (make-eqv-hashtable))
   (define ECANCELED 125)
-  (define %read-timeout-seconds 5)
-  (define %read-timeout-ts #f)
-  (define %wait-timeout #f)
+  (define-thread-parameter %read-timeout-seconds 5)
+  (define-thread-parameter %read-timeout-ts #f)
+  (define-thread-parameter %wait-timeout #f)
 
   ;;------------------------------------------------------------
   ;; Event loop record
@@ -1947,8 +1959,8 @@
 
   (define loop-alloc-id!
     (lambda ()
-      (let ((id (loop-next-id %loop)))
-        (loop-next-id! %loop (fx+ id 1))
+      (let ((id (loop-next-id (%loop))))
+        (loop-next-id! (%loop) (fx+ id 1))
         id)))
 
   ;; io_uring_get_sqe returns NULL when the submission queue is full
@@ -1971,13 +1983,13 @@
   ;; The loop installed by the latest loop-new, #f outside loop-run.
   (define loop-current
     (lambda ()
-      %loop))
+      (%loop)))
 
   ;; fd → jiffy of last read/write activity, maintained by the read
   ;; and write paths; lets callers reap idle connections.
   (define loop-active-connections
     (lambda ()
-      %active-connections))
+      (%active-connections)))
 
   ;;------------------------------------------------------------
   ;; Continuation machinery
@@ -2030,22 +2042,22 @@
 
   (define loop-run-once
     (lambda ()
-      (let ((thunks (loop-thunks %loop)))
-        (loop-thunks! %loop '())
+      (let ((thunks (loop-thunks (%loop))))
+        (loop-thunks! (%loop) '())
         (for-each (lambda (thunk) (loop-apply thunk)) thunks))
 
-      (let ((ring (loop-ring %loop))
-            (cqe-ptr (loop-cqe-ptr %loop)))
-        (let ((has-handlers? (not (fxzero? (hashtable-size (loop-handlers %loop)))))
+      (let ((ring (loop-ring (%loop)))
+            (cqe-ptr (loop-cqe-ptr (%loop))))
+        (let ((has-handlers? (not (fxzero? (hashtable-size (loop-handlers (%loop))))))
               (has-pending?  (not (fxzero? (io-uring-sq-ready ring)))))
           (cond
            (has-handlers?
             (io-uring-submit ring)
-            (io-uring-wait-cqe-timeout ring cqe-ptr %wait-timeout))
+            (io-uring-wait-cqe-timeout ring cqe-ptr (%wait-timeout)))
            (has-pending?
             (io-uring-submit ring))
            (else
-            (io-uring-wait-cqe-timeout ring cqe-ptr %wait-timeout))))
+            (io-uring-wait-cqe-timeout ring cqe-ptr (%wait-timeout)))))
 
         (let drain ()
           (when (fxzero? (io-uring-peek-cqe ring cqe-ptr))
@@ -2054,23 +2066,23 @@
                    (res   (io-uring-cqe-get-res cqe))
                    (flags (io-uring-cqe-get-flags cqe)))
               (io-uring-cqe-seen ring cqe)
-              (let ((ms-fd (hashtable-ref %multishot-ids id #f)))
+              (let ((ms-fd (hashtable-ref (%multishot-ids) id #f)))
                 (when (and ms-fd (fxzero? (fxlogand flags IORING-CQE-F-MORE)))
-                  (hashtable-delete! %multishot-ids id)
-                  (hashtable-delete! %multishots ms-fd))
+                  (hashtable-delete! (%multishot-ids) id)
+                  (hashtable-delete! (%multishots) ms-fd))
                 (when (and (fx>? res 0)
                            (not (fxzero? (fxlogand flags IORING-CQE-F-BUFFER))))
                   (let* ((bid      (fxsrl (fxlogand flags #xFFFF0000) 16))
-                         (buf-addr (+ %buf-ring-base (* bid %buf-ring-buf-size)))
+                         (buf-addr (+ (%buf-ring-base) (* bid (%buf-ring-buf-size))))
                          (bv       (make-bytevector res)))
                     (with-lock (list bv)
                       (memcpy (bytevector-pointer bv) buf-addr res))
-                    (io-uring-buf-ring-add %buf-ring buf-addr %buf-ring-buf-size
-                                           bid %buf-ring-mask 0)
-                    (io-uring-buf-ring-advance %buf-ring 1)
-                    (hashtable-set! %buf-data id bv)))
-                (let ((handler (hashtable-ref (loop-handlers %loop) id #f)))
-                  (hashtable-delete! (loop-handlers %loop) id)
+                    (io-uring-buf-ring-add (%buf-ring) buf-addr (%buf-ring-buf-size)
+                                           bid (%buf-ring-mask) 0)
+                    (io-uring-buf-ring-advance (%buf-ring) 1)
+                    (hashtable-set! (%buf-data) id bv)))
+                (let ((handler (hashtable-ref (loop-handlers (%loop)) id #f)))
+                  (hashtable-delete! (loop-handlers (%loop)) id)
                   (cond
                    (handler
                     (loop-apply (lambda () (handler res))))
@@ -2078,8 +2090,8 @@
                     ;; Multishot-accept CQE with no waiter parked: the
                     ;; kernel already accepted this client, so queue the
                     ;; fd for the next loop-accept instead of leaking it.
-                    (hashtable-set! %accept-backlog ms-fd
-                                    (append (hashtable-ref %accept-backlog ms-fd '())
+                    (hashtable-set! (%accept-backlog) ms-fd
+                                    (append (hashtable-ref (%accept-backlog) ms-fd '())
                                             (list res))))))))
             (drain)))
 
@@ -2089,30 +2101,30 @@
   (define loop-run
     (lambda ()
       (let lp ()
-        (when (loop-running? %loop)
-          (guard (ex (else (loop-running! %loop #f)))
+        (when (loop-running? (%loop))
+          (guard (ex (else (loop-running! (%loop) #f)))
             (loop-run-once))
           (lp)))))
 
   (define loop-spawn
     (lambda (thunk)
-      (loop-thunks! %loop (cons thunk (loop-thunks %loop)))))
+      (loop-thunks! (%loop) (cons thunk (loop-thunks (%loop))))))
 
   (define loop-new
     (lambda ()
       ;; Tear down the previous ring, if any, so repeated loop-new does
       ;; not leak the ring, cqe pointer, buffer ring, and buffer base.
-      (when %loop
-        (when %buf-ring
-          (io-uring-free-buf-ring (loop-ring %loop) %buf-ring
-                                  %buf-ring-nentries %buf-ring-bgid)
-          (foreign-free %buf-ring-base)
-          (set! %buf-ring #f)
-          (set! %buf-ring-base 0))
-        (io-uring-queue-exit (loop-ring %loop))
-        (foreign-free (loop-ring %loop))
-        (foreign-free (loop-cqe-ptr %loop))
-        (set! %loop #f))
+      (when (%loop)
+        (when (%buf-ring)
+          (io-uring-free-buf-ring (loop-ring (%loop)) (%buf-ring)
+                                  (%buf-ring-nentries) (%buf-ring-bgid))
+          (foreign-free (%buf-ring-base))
+          (%buf-ring #f)
+          (%buf-ring-base 0))
+        (io-uring-queue-exit (loop-ring (%loop)))
+        (foreign-free (loop-ring (%loop)))
+        (foreign-free (loop-cqe-ptr (%loop)))
+        (%loop #f))
       (let ((ring     (make-io-uring))
             (cqe-ptr  (make-cqe-pointer))
             (handlers (make-eqv-hashtable)))
@@ -2121,51 +2133,51 @@
             (error 'loop-new
                    (format #f "io_uring_queue_init failed: ~a"
                            (strerror (fx- 0 ret))))))
-        (set! %loop
+        (%loop
           (loop-base-new (jiffy-current) '() #t ring cqe-ptr handlers 0 '()))
-        (set! %read-timeout-ts  (make-timespec %read-timeout-seconds 0))
-        (set! %wait-timeout     (make-timespec 0 100000000))
-        (set! %multishots       (make-eqv-hashtable))
-        (set! %multishot-ids    (make-eqv-hashtable))
-        (set! %buf-data         (make-eqv-hashtable))
-        (set! %fd-handlers      (make-eqv-hashtable))
-        (set! %active-connections (make-eqv-hashtable))
-        (set! %accept-backlog   (make-eqv-hashtable))
+        (%read-timeout-ts  (make-timespec (%read-timeout-seconds) 0))
+        (%wait-timeout     (make-timespec 0 100000000))
+        (%multishots       (make-eqv-hashtable))
+        (%multishot-ids    (make-eqv-hashtable))
+        (%buf-data         (make-eqv-hashtable))
+        (%fd-handlers      (make-eqv-hashtable))
+        (%active-connections (make-eqv-hashtable))
+        (%accept-backlog   (make-eqv-hashtable))
         (let ((err-ptr (foreign-alloc 4)))
           (foreign-set! 'integer-32 err-ptr 0 0)
-          (let ((br (io-uring-setup-buf-ring ring %buf-ring-nentries
-                                             %buf-ring-bgid 0 err-ptr)))
+          (let ((br (io-uring-setup-buf-ring ring (%buf-ring-nentries)
+                                             (%buf-ring-bgid) 0 err-ptr)))
             (let ((err (foreign-ref 'integer-32 err-ptr 0)))
               (foreign-free err-ptr)
               (when (eqv? br 0)
                 (error 'loop-new
                        (format #f "io_uring_setup_buf_ring failed: ~a"
                                (strerror (fx- 0 err))))))
-            (let ((base (foreign-alloc (* %buf-ring-nentries %buf-ring-buf-size)))
-                  (mask (io-uring-buf-ring-mask %buf-ring-nentries)))
+            (let ((base (foreign-alloc (* (%buf-ring-nentries) (%buf-ring-buf-size))))
+                  (mask (io-uring-buf-ring-mask (%buf-ring-nentries))))
               (let fill ((i 0))
-                (when (fx<? i %buf-ring-nentries)
-                  (io-uring-buf-ring-add br (+ base (* i %buf-ring-buf-size))
-                                          %buf-ring-buf-size i mask i)
+                (when (fx<? i (%buf-ring-nentries))
+                  (io-uring-buf-ring-add br (+ base (* i (%buf-ring-buf-size)))
+                                          (%buf-ring-buf-size) i mask i)
                   (fill (fx+ i 1))))
-              (io-uring-buf-ring-advance br %buf-ring-nentries)
-              (set! %buf-ring      br)
-              (set! %buf-ring-base base)
-              (set! %buf-ring-mask mask))))
-        %loop)))
+              (io-uring-buf-ring-advance br (%buf-ring-nentries))
+              (%buf-ring      br)
+              (%buf-ring-base base)
+              (%buf-ring-mask mask))))
+        (%loop))))
 
   (define loop-stop
     (lambda ()
-      (loop-running! %loop #f)
-      (let-values (((keys vals) (hashtable-entries %multishots)))
+      (loop-running! (%loop) #f)
+      (let-values (((keys vals) (hashtable-entries (%multishots))))
         (vector-for-each
           (lambda (fd id)
-            (let ((sqe (loop-get-sqe (loop-ring %loop))))
+            (let ((sqe (loop-get-sqe (loop-ring (%loop)))))
               (io-uring-prep-cancel64 sqe id 0)
               (io-uring-sqe-set-data64 sqe (loop-alloc-id!))))
           keys vals))
-      (when (not (fxzero? (io-uring-sq-ready (loop-ring %loop))))
-        (io-uring-submit (loop-ring %loop)))))
+      (when (not (fxzero? (io-uring-sq-ready (loop-ring (%loop)))))
+        (io-uring-submit (loop-ring (%loop))))))
 
   ;;------------------------------------------------------------
   ;; Async I/O operations
@@ -2178,42 +2190,42 @@
       ;; each one unlocks its buffers and takes its normal error path
       ;; instead of being abandoned mid-suspension. The real CQEs for
       ;; the cancelled operations find no handler and are dropped.
-      (let ((ids (hashtable-ref %fd-handlers fd '())))
+      (let ((ids (hashtable-ref (%fd-handlers) fd '())))
         (for-each (lambda (id)
-                    (let ((handler (hashtable-ref (loop-handlers %loop) id #f)))
-                      (hashtable-delete! (loop-handlers %loop) id)
+                    (let ((handler (hashtable-ref (loop-handlers (%loop)) id #f)))
+                      (hashtable-delete! (loop-handlers (%loop)) id)
                       (when handler
                         (loop-spawn (lambda () (handler (fx- 0 ECANCELED)))))))
                   ids)
-        (hashtable-delete! %fd-handlers fd))
+        (hashtable-delete! (%fd-handlers) fd))
       ;; Clients accepted by the multishot but never claimed by
       ;; loop-accept: close them too, fire-and-forget.
       (for-each (lambda (client)
-                  (let* ((sqe (loop-get-sqe (loop-ring %loop)))
+                  (let* ((sqe (loop-get-sqe (loop-ring (%loop))))
                          (id  (loop-alloc-id!)))
                     (io-uring-prep-close sqe client)
                     (io-uring-sqe-set-data64 sqe id)))
-                (hashtable-ref %accept-backlog fd '()))
-      (hashtable-delete! %accept-backlog fd)
-      (hashtable-delete! %active-connections fd)
-      (let* ((cancel-sqe (loop-get-sqe (loop-ring %loop)))
+                (hashtable-ref (%accept-backlog) fd '()))
+      (hashtable-delete! (%accept-backlog) fd)
+      (hashtable-delete! (%active-connections) fd)
+      (let* ((cancel-sqe (loop-get-sqe (loop-ring (%loop))))
              (cancel-id  (loop-alloc-id!)))
         (io-uring-prep-cancel-fd cancel-sqe fd IORING-ASYNC-CANCEL-ALL)
         (io-uring-sqe-set-data64 cancel-sqe cancel-id))
-      (let* ((sqe (loop-get-sqe (loop-ring %loop)))
+      (let* ((sqe (loop-get-sqe (loop-ring (%loop))))
              (id  (loop-alloc-id!)))
         (io-uring-prep-close sqe fd)
         (io-uring-sqe-set-data64 sqe id)
         (let ((res (loop-abort
                      (lambda (k)
-                       (hashtable-set! (loop-handlers %loop) id k)))))
+                       (hashtable-set! (loop-handlers (%loop)) id k)))))
           res))))
 
   (define loop-accept-client-setup!
     (lambda (client)
       (loop-socket-option! client 6 'tcp-option/nodelay  #t)
       (loop-socket-option! client 1 'socket-option/keepalive #t)
-      (hashtable-set! %active-connections client (jiffy-current))
+      (hashtable-set! (%active-connections) client (jiffy-current))
       client))
 
   ;; Non-blocking: pop a client the multishot already accepted while
@@ -2221,12 +2233,12 @@
   ;; multishot itself — only loop-accept-block does that.
   (define loop-accept-try
     (lambda (fd)
-      (let ((backlog (hashtable-ref %accept-backlog fd '())))
+      (let ((backlog (hashtable-ref (%accept-backlog) fd '())))
         (and (pair? backlog)
              (begin
                (if (null? (cdr backlog))
-                   (hashtable-delete! %accept-backlog fd)
-                   (hashtable-set! %accept-backlog fd (cdr backlog)))
+                   (hashtable-delete! (%accept-backlog) fd)
+                   (hashtable-set! (%accept-backlog) fd (cdr backlog)))
                (loop-accept-client-setup! (car backlog)))))))
 
   ;; Arms fd's multishot accept if it isn't already running, then
@@ -2239,33 +2251,33 @@
   ;; for, rather than being leaked.
   (define loop-accept-block
     (lambda (fd handler)
-      (let ((active-id (hashtable-ref %multishots fd #f)))
+      (let ((active-id (hashtable-ref (%multishots) fd #f)))
         (unless active-id
-          (let* ((sqe (loop-get-sqe (loop-ring %loop)))
+          (let* ((sqe (loop-get-sqe (loop-ring (%loop))))
                  (id  (loop-alloc-id!)))
             (io-uring-prep-multishot-accept sqe fd 0 0 0)
             (io-uring-sqe-set-data64 sqe id)
-            (hashtable-set! %multishots fd id)
-            (hashtable-set! %multishot-ids id fd)
+            (hashtable-set! (%multishots) fd id)
+            (hashtable-set! (%multishot-ids) id fd)
             (set! active-id id)))
         ;; A single continuation slot is keyed by active-id; a second
         ;; concurrent waiter would silently overwrite the first one,
         ;; abandoning its coroutine.
-        (when (hashtable-ref (loop-handlers %loop) active-id #f)
+        (when (hashtable-ref (loop-handlers (%loop)) active-id #f)
           (error 'loop-accept-block "concurrent accept on fd" fd))
-        (hashtable-set! (loop-handlers %loop) active-id
+        (hashtable-set! (loop-handlers (%loop)) active-id
           (lambda (res)
             (if (fx<? res 0)
                 (begin
-                  (let ((mid (hashtable-ref %multishots fd #f)))
+                  (let ((mid (hashtable-ref (%multishots) fd #f)))
                     (when mid
-                      (hashtable-delete! %multishots fd)
-                      (hashtable-delete! %multishot-ids mid)))
+                      (hashtable-delete! (%multishots) fd)
+                      (hashtable-delete! (%multishot-ids) mid)))
                   (handler #f))
                 (let ((client (loop-accept-client-setup! res)))
                   (unless (handler client)
-                    (hashtable-set! %accept-backlog fd
-                      (append (hashtable-ref %accept-backlog fd '())
+                    (hashtable-set! (%accept-backlog) fd
+                      (append (hashtable-ref (%accept-backlog) fd '())
                               (list client)))))))))))
 
   (define loop-accept
@@ -2277,48 +2289,48 @@
 
   (define loop-read
     (lambda (fd)
-      (let* ((sqe (loop-get-sqe (loop-ring %loop)))
+      (let* ((sqe (loop-get-sqe (loop-ring (%loop))))
              (id  (loop-alloc-id!)))
-        (io-uring-prep-recv sqe fd 0 %buf-ring-buf-size 0)
+        (io-uring-prep-recv sqe fd 0 (%buf-ring-buf-size) 0)
         (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
-        (io-uring-sqe-set-buf-group sqe %buf-ring-bgid)
+        (io-uring-sqe-set-buf-group sqe (%buf-ring-bgid))
         (io-uring-sqe-set-data64 sqe id)
-        (hashtable-set! %fd-handlers fd
-                        (cons id (hashtable-ref %fd-handlers fd '())))
+        (hashtable-set! (%fd-handlers) fd
+                        (cons id (hashtable-ref (%fd-handlers) fd '())))
         (let ((res (loop-abort
                      (lambda (k)
-                       (hashtable-set! (loop-handlers %loop) id k)))))
-          (hashtable-set! %fd-handlers fd
-                          (remq id (hashtable-ref %fd-handlers fd '())))
+                       (hashtable-set! (loop-handlers (%loop)) id k)))))
+          (hashtable-set! (%fd-handlers) fd
+                          (remq id (hashtable-ref (%fd-handlers) fd '())))
           (cond
            ((fx<? res 0)
-            (hashtable-delete! %buf-data id)
+            (hashtable-delete! (%buf-data) id)
             #f)
            ((fxzero? res)
-            (hashtable-delete! %buf-data id)
+            (hashtable-delete! (%buf-data) id)
             #t)
            (else
-            (hashtable-set! %active-connections fd (jiffy-current))
-            (let ((bv (hashtable-ref %buf-data id #f)))
-              (hashtable-delete! %buf-data id)
+            (hashtable-set! (%active-connections) fd (jiffy-current))
+            (let ((bv (hashtable-ref (%buf-data) id #f)))
+              (hashtable-delete! (%buf-data) id)
               bv)))))))
 
   (define loop-write
     (lambda (fd bv)
       (let write-loop ((bv bv))
         (lock-object bv)
-        (let* ((sqe (loop-get-sqe (loop-ring %loop)))
+        (let* ((sqe (loop-get-sqe (loop-ring (%loop))))
                (id  (loop-alloc-id!)))
           (io-uring-prep-send sqe fd (bytevector-pointer bv)
                               (bytevector-length bv) 0)
           (io-uring-sqe-set-data64 sqe id)
-          (hashtable-set! %fd-handlers fd
-                          (cons id (hashtable-ref %fd-handlers fd '())))
+          (hashtable-set! (%fd-handlers) fd
+                          (cons id (hashtable-ref (%fd-handlers) fd '())))
           (let ((res (loop-abort
                        (lambda (k)
-                         (hashtable-set! (loop-handlers %loop) id k)))))
-            (hashtable-set! %fd-handlers fd
-                            (remq id (hashtable-ref %fd-handlers fd '())))
+                         (hashtable-set! (loop-handlers (%loop)) id k)))))
+            (hashtable-set! (%fd-handlers) fd
+                            (remq id (hashtable-ref (%fd-handlers) fd '())))
             (unlock-object bv)
             (cond
              ((fx<=? res 0) #f)
@@ -2330,13 +2342,13 @@
       (let ((fd (loop-socket-new AF-INET SOCK-STREAM 0)))
         (unless fd (error 'loop-connect "socket() failed"))
         (loop-nonblock! fd)
-        (let* ((sqe (loop-get-sqe (loop-ring %loop)))
+        (let* ((sqe (loop-get-sqe (loop-ring (%loop))))
                (id  (loop-alloc-id!)))
           (io-uring-prep-connect sqe fd addr addrlen)
           (io-uring-sqe-set-data64 sqe id)
           (let ((res (loop-abort
                        (lambda (k)
-                         (hashtable-set! (loop-handlers %loop) id k)))))
+                         (hashtable-set! (loop-handlers (%loop)) id k)))))
             (if (fx<? res 0)
                 (begin (loop-close fd) #f)
                 fd))))))
@@ -2344,7 +2356,7 @@
   (define loop-sleep
     (lambda (seconds)
       (let* ((ns  (exact (round (* seconds 1000000000))))
-             (sqe (loop-get-sqe (loop-ring %loop)))
+             (sqe (loop-get-sqe (loop-ring (%loop))))
              (id  (loop-alloc-id!))
              (ts  (make-timespec (div ns 1000000000)
                                  (mod ns 1000000000))))
@@ -2352,7 +2364,7 @@
         (io-uring-sqe-set-data64 sqe id)
         (let ((res (loop-abort
                      (lambda (k)
-                       (hashtable-set! (loop-handlers %loop) id k)))))
+                       (hashtable-set! (loop-handlers (%loop)) id k)))))
           (foreign-free (ftype-pointer-address ts))
           res))))
 
@@ -2378,12 +2390,12 @@
 
   (define loop-poll-wait
     (lambda (fd poll-mask)
-      (let* ((sqe (loop-get-sqe (loop-ring %loop)))
+      (let* ((sqe (loop-get-sqe (loop-ring (%loop))))
              (id  (loop-alloc-id!)))
         (io-uring-prep-poll-add sqe fd poll-mask)
         (io-uring-sqe-set-data64 sqe id)
         (loop-abort
           (lambda (k)
-            (hashtable-set! (loop-handlers %loop) id k))))))
+            (hashtable-set! (loop-handlers (%loop)) id k))))))
 
   ) ;; end library
