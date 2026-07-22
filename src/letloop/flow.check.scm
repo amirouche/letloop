@@ -164,7 +164,7 @@
   (define (dead-entry i)
     (let ((state (box 'waiting)))
       (box-cas! state 'waiting 'synched)
-      (make-flow-channel-entry state (lambda (v) #f) i)))
+      (make-flow-channel-entry state (lambda (v) #f) i (box #f))))
   (define (build-list n f)
     (let loop ((i 0) (acc '()))
       (if (fx=? i n) acc (loop (fx+ i 1) (cons (f i) acc)))))

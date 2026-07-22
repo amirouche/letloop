@@ -25,7 +25,7 @@
           flow-spawn flow-run flow-stop
 
           flow-current-shard flow-shard?
-          flow-shard-spawn flow-shard-stop!
+          flow-shard-spawn flow-shard-post! flow-shard-stop!
 
           ~check-flow-000/always-ready
           ~check-flow-000/wrap-order
@@ -275,19 +275,38 @@
 
   ;; A pending party: the (possibly choice-shared) state box and
   ;; resume from flow-perform, plus — for puts only — the value being
-  ;; offered. A party is dead once its state is no longer 'waiting;
-  ;; dead parties are skipped by resume's own CAS failing and are
-  ;; eventually dropped by compaction, not removed eagerly.
+  ;; offered — plus CLAIMED, a channel-local guard independent of
+  ;; STATE (see flow-channel-entry-claim! below, and the lost-wakeup
+  ;; fix in flow-put-block/flow-get-block). A party is dead once its
+  ;; state is no longer 'waiting; dead parties are skipped by resume's
+  ;; own CAS failing and are eventually dropped by compaction, not
+  ;; removed eagerly.
   (define-record-type* <flow-channel-entry>
-    (make-flow-channel-entry state resume value)
+    (make-flow-channel-entry state resume value claimed)
     flow-channel-entry?
-    (state  flow-channel-entry-state)
-    (resume flow-channel-entry-resume)
-    (value  flow-channel-entry-value))
+    (state   flow-channel-entry-state)
+    (resume  flow-channel-entry-resume)
+    (value   flow-channel-entry-value)
+    (claimed flow-channel-entry-claimed))
+
+  (define (make-flow-channel-entry* state resume value)
+    (make-flow-channel-entry state resume value (box #f)))
 
   (define flow-channel-entry-waiting?
     (lambda (entry)
       (eq? (unbox (flow-channel-entry-state entry)) 'waiting)))
+
+  ;; Exclusive right to attempt (entry-resume entry): every call site
+  ;; that might call entry-resume — flow-put-try/flow-get-try's normal
+  ;; discovery, and flow-put-block/flow-get-block's own post-register
+  ;; rescan below — must win this CAS first. As long as that's
+  ;; consistently true, a claim! win guarantees the entry's underlying
+  ;; state is still 'waiting (nobody else has "permission" to have
+  ;; resumed it), so the subsequent resume call can never spuriously
+  ;; fail and strand the entry claimed-but-not-actually-resumed.
+  (define flow-channel-entry-claim!
+    (lambda (entry)
+      (box-cas! (flow-channel-entry-claimed entry) #f #t)))
 
   (define %flow-channel-gc-threshold 1024)
 
@@ -322,27 +341,59 @@
   ;; get can still land in between, which is exactly why the lists
   ;; above are lock-free rather than plain mutable fields.
   ;;
-  ;; Claiming a peer means calling *its* resume, and resume itself
-  ;; owns the state-box CAS (flow-block-and-wait) — try must not CAS
-  ;; the peer's state box on its own first, or resume's own CAS would
-  ;; find it already 'synched and silently refuse to wake the peer.
-  ;; resume's #t/#f return is exactly "did I just win this peer".
+  ;; Claiming a peer means winning flow-channel-entry-claim! on it,
+  ;; THEN calling its resume — resume itself owns the state-box CAS
+  ;; (flow-block-and-wait), but claim! is what makes that CAS race-free
+  ;; against a second concurrent claimant (see the lost-wakeup fix in
+  ;; flow-put-block/flow-get-block below): try must not skip claim! and
+  ;; call resume directly, or two concurrent tries could both "win" the
+  ;; same peer's resume call racing each other, and a block's own
+  ;; post-register rescan could double-claim an entry that a normal
+  ;; try is concurrently discovering. resume's own #t/#f return remains
+  ;; "did I just win this peer" for the caller.
   (define flow-put-try
     (lambda (channel obj)
       (lambda ()
         (let scan ((pops (unbox (flow-channel-pops channel))))
           (cond
            ((null? pops) #f)
-           (((flow-channel-entry-resume (car pops)) obj)
+           ((and (flow-channel-entry-waiting? (car pops))
+                 (flow-channel-entry-claim! (car pops))
+                 ((flow-channel-entry-resume (car pops)) obj))
             (lambda () (void)))
            (else (scan (cdr pops))))))))
 
+  ;; Lost-wakeup fix: try-then-block (here and in flow-get-block) has a
+  ;; gap — a concurrent peer's OWN try can run before this push and
+  ;; therefore miss this entry, while THIS side's earlier try (in
+  ;; flow-perform, before falling through to block) can equally have
+  ;; missed an equally-fresh peer registration. Without a re-check,
+  ;; both sides would register and wait forever with nothing left to
+  ;; discover either one — no compaction or GC path ever revisits a
+  ;; pair like that. So: after registering, claim! ourselves (so no
+  ;; concurrent try can complete us out from under this rescan), then
+  ;; scan the peer list once more; a match found here is claimed and
+  ;; resumed exactly like a normal try would, and we complete our own
+  ;; entry directly (same resume closure a peer's try would have
+  ;; called). No match: release our own claim so a future normal try
+  ;; can still discover and resume us — this rescan changes nothing
+  ;; about our own entry's state if it comes up empty.
   (define flow-put-block
     (lambda (channel obj)
       (lambda (state resume register-cancel!)
-        (flow-box-cons! (flow-channel-puts channel)
-                         (make-flow-channel-entry state resume obj))
-        (flow-channel-bump-gc! channel))))
+        (let ((entry (make-flow-channel-entry* state resume obj)))
+          (flow-box-cons! (flow-channel-puts channel) entry)
+          (flow-channel-bump-gc! channel)
+          (when (flow-channel-entry-claim! entry)
+            (let scan ((pops (unbox (flow-channel-pops channel))))
+              (cond
+               ((null? pops)
+                (set-box! (flow-channel-entry-claimed entry) #f))
+               ((and (flow-channel-entry-waiting? (car pops))
+                     (flow-channel-entry-claim! (car pops))
+                     ((flow-channel-entry-resume (car pops)) obj))
+                ((flow-channel-entry-resume entry) (void)))
+               (else (scan (cdr pops))))))))))
 
   (define flow-put
     (lambda (channel obj)
@@ -357,17 +408,31 @@
         (let scan ((puts (unbox (flow-channel-puts channel))))
           (cond
            ((null? puts) #f)
-           (((flow-channel-entry-resume (car puts)) (void))
+           ((and (flow-channel-entry-waiting? (car puts))
+                 (flow-channel-entry-claim! (car puts))
+                 ((flow-channel-entry-resume (car puts)) (void)))
             (let ((obj (flow-channel-entry-value (car puts))))
               (lambda () obj)))
            (else (scan (cdr puts))))))))
 
+  ;; Mirror of flow-put-block's lost-wakeup fix; see its comment.
   (define flow-get-block
     (lambda (channel)
       (lambda (state resume register-cancel!)
-        (flow-box-cons! (flow-channel-pops channel)
-                         (make-flow-channel-entry state resume #f))
-        (flow-channel-bump-gc! channel))))
+        (let ((entry (make-flow-channel-entry* state resume #f)))
+          (flow-box-cons! (flow-channel-pops channel) entry)
+          (flow-channel-bump-gc! channel)
+          (when (flow-channel-entry-claim! entry)
+            (let scan ((puts (unbox (flow-channel-puts channel))))
+              (cond
+               ((null? puts)
+                (set-box! (flow-channel-entry-claimed entry) #f))
+               ((and (flow-channel-entry-waiting? (car puts))
+                     (flow-channel-entry-claim! (car puts))
+                     ((flow-channel-entry-resume (car puts)) (void)))
+                ((flow-channel-entry-resume entry)
+                 (flow-channel-entry-value (car puts))))
+               (else (scan (cdr puts))))))))))
 
   (define flow-get
     (lambda (channel)
