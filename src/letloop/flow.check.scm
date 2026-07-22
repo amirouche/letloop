@@ -424,3 +424,47 @@
   (sleep (make-time 'time-duration 0 1))
   (and (unbox done)
        (equal? (sort < (unbox received)) (sort < expected))))
+
+;; Regression for a real crash under heavy persistent-shard-pool reuse
+;; (reproduced by scripts/louds-shard-decode-benchmark.scm in
+;; atlas-stoa): flow-shard-post! preps an IORING_OP_MSG_RING SQE on the
+;; *poster's own* ring every call, via raw io-uring-get-sqe. That
+;; returns NULL once the ring's 256-entry submission queue is full and
+;; nothing has submitted yet -- exactly what happens when a fiber posts
+;; many times in a tight loop with no suspension in between, since
+;; loop-run-once (the only place that calls io_uring_submit) never gets
+;; control back until the fiber returns. Posting more than 256 times in
+;; one shot from a single fiber invocation reproduces the overflow; the
+;; fix (flow-shard-post! using loop-get-sqe, which submits and retries
+;; once on NULL, same as every other flow.scm SQE call site) prevents
+;; io-uring-prep-msg-ring from ever writing through a NULL pointer.
+(define (~check-flow-008/shard-post-sqe-ring-overflow)
+  (define n 400) ;; > the ring's 256-entry submission queue
+  (define count (box 0))
+  (define done (box #f))
+  (define (bump!)
+    (let ((v (unbox count)))
+      (unless (box-cas! count v (fx+ v 1))
+        (bump!))))
+  (define receiver (flow-shard-spawn (lambda () (void))))
+  (define poster
+    (flow-shard-spawn
+     (lambda ()
+       (let loop ((i 0))
+         (if (fx>=? i n)
+             (set-box! done #t)
+             (begin
+               (flow-shard-post! receiver bump!)
+               (loop (fx+ i 1))))))))
+  (let wait ((k 0))
+    (unless (or (unbox done) (fx>=? k 500))
+      (sleep (make-time 'time-duration 10000000 0))
+      (wait (fx+ k 1))))
+  (let wait ((k 0))
+    (unless (or (fx=? (unbox count) n) (fx>=? k 500))
+      (sleep (make-time 'time-duration 10000000 0))
+      (wait (fx+ k 1))))
+  (flow-shard-stop! poster)
+  (flow-shard-stop! receiver)
+  (sleep (make-time 'time-duration 0 1))
+  (fx=? (unbox count) n))

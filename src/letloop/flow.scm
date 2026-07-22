@@ -51,7 +51,8 @@
           ~check-flow-006/request-loop-idle-timeout
 
           ~check-flow-007/two-shard-channel-rendezvous
-          ~check-flow-007/stress-n-shards-m-messages)
+          ~check-flow-007/stress-n-shards-m-messages
+          ~check-flow-008/shard-post-sqe-ring-overflow)
 
   (import (chezscheme)
           (letloop r999)
@@ -501,7 +502,7 @@
                            (ns   (exact (round (* seconds 1000000000))))
                            (ts   (make-timespec (div ns 1000000000)
                                                  (mod ns 1000000000)))
-                           (sqe  (io-uring-get-sqe ring)))
+                           (sqe  (loop-get-sqe ring)))
                       (io-uring-prep-timeout sqe (ftype-pointer-address ts) 0 0)
                       (io-uring-sqe-set-data64 sqe id)
                       (hashtable-set! (loop-handlers (loop-current)) id
@@ -510,7 +511,7 @@
                                         (resume res)))
                       (register-cancel!
                        (lambda ()
-                         (let ((csqe (io-uring-get-sqe ring)))
+                         (let ((csqe (loop-get-sqe ring)))
                            (io-uring-prep-timeout-remove csqe id 0)
                            (io-uring-sqe-set-data64 csqe (loop-alloc-id!))))))))))
 
@@ -543,7 +544,7 @@
                     (let* ((ring (loop-ring (loop-current)))
                            (id   (loop-alloc-id!))
                            (bv   (make-bytevector %flow-read-buffer-size))
-                           (sqe  (io-uring-get-sqe ring)))
+                           (sqe  (loop-get-sqe ring)))
                       (lock-object bv)
                       (io-uring-prep-recv sqe fd (bytevector-pointer bv)
                                           (bytevector-length bv) 0)
@@ -558,7 +559,7 @@
                                           (else (subbytevector bv 0 res))))))
                       (register-cancel!
                        (lambda ()
-                         (let ((csqe (io-uring-get-sqe ring)))
+                         (let ((csqe (loop-get-sqe ring)))
                            (io-uring-prep-cancel64 csqe id 0)
                            (io-uring-sqe-set-data64 csqe (loop-alloc-id!))))))))))
 
@@ -580,7 +581,7 @@
                         (lambda (remaining)
                           (lock-object remaining)
                           (let ((id  (loop-alloc-id!))
-                                (sqe (io-uring-get-sqe ring)))
+                                (sqe (loop-get-sqe ring)))
                             (io-uring-prep-send sqe fd (bytevector-pointer remaining)
                                                 (bytevector-length remaining) 0)
                             (io-uring-sqe-set-data64 sqe id)
@@ -661,7 +662,7 @@
       (flow-box-cons! (flow-shard-mailbox shard) thunk)
       (when (flow-current-shard)
         (let* ((ring (loop-ring (loop-current)))
-               (sqe  (io-uring-get-sqe ring)))
+               (sqe  (loop-get-sqe ring)))
           (io-uring-prep-msg-ring sqe (flow-shard-ring-fd shard) 0 0 0)
           (io-uring-sqe-set-data64 sqe (loop-alloc-id!))))))
 

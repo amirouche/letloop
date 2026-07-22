@@ -366,7 +366,7 @@
    ;; operations (e.g. (letloop dns)): current loop, its ring, the
    ;; completion-handler table, id allocation, coroutine abort
    loop-current loop-ring loop-handlers loop-alloc-id! loop-abort
-   loop-running? loop-active-connections loop-ring-fd
+   loop-running? loop-active-connections loop-ring-fd loop-get-sqe
 
    ;; async I/O operations
    loop-connect loop-read loop-write loop-close loop-sleep
