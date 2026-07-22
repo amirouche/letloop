@@ -371,6 +371,12 @@
    ;; async I/O operations
    loop-connect loop-read loop-write loop-close loop-sleep
    loop-accept loop-tcp-serve loop-poll-wait
+
+   ;; accept split into its non-blocking poll and its multishot
+   ;; registration, for libraries (e.g. (letloop flow)) that need to
+   ;; race accept against other events instead of always suspending
+   ;; the caller until a client arrives
+   loop-accept-try loop-accept-block
    )
 
   (import (chezscheme)
@@ -2203,48 +2209,71 @@
                        (hashtable-set! (loop-handlers %loop) id k)))))
           res))))
 
+  (define loop-accept-client-setup!
+    (lambda (client)
+      (loop-socket-option! client 6 'tcp-option/nodelay  #t)
+      (loop-socket-option! client 1 'socket-option/keepalive #t)
+      (hashtable-set! %active-connections client (jiffy-current))
+      client))
+
+  ;; Non-blocking: pop a client the multishot already accepted while
+  ;; nobody was parked, or #f if the backlog is empty. Never arms the
+  ;; multishot itself — only loop-accept-block does that.
+  (define loop-accept-try
+    (lambda (fd)
+      (let ((backlog (hashtable-ref %accept-backlog fd '())))
+        (and (pair? backlog)
+             (begin
+               (if (null? (cdr backlog))
+                   (hashtable-delete! %accept-backlog fd)
+                   (hashtable-set! %accept-backlog fd (cdr backlog)))
+               (loop-accept-client-setup! (car backlog)))))))
+
+  ;; Arms fd's multishot accept if it isn't already running, then
+  ;; registers HANDLER against its next completion. HANDLER is called
+  ;; with a set-up client fd, or #f on an error (which always tears
+  ;; the multishot down first, same as before this was split out).
+  ;; HANDLER returns #t to claim the client, #f to decline (e.g. lost
+  ;; a race to a sibling event); a declined client is pushed onto the
+  ;; backlog exactly like a multishot completion nobody was waiting
+  ;; for, rather than being leaked.
+  (define loop-accept-block
+    (lambda (fd handler)
+      (let ((active-id (hashtable-ref %multishots fd #f)))
+        (unless active-id
+          (let* ((sqe (loop-get-sqe (loop-ring %loop)))
+                 (id  (loop-alloc-id!)))
+            (io-uring-prep-multishot-accept sqe fd 0 0 0)
+            (io-uring-sqe-set-data64 sqe id)
+            (hashtable-set! %multishots fd id)
+            (hashtable-set! %multishot-ids id fd)
+            (set! active-id id)))
+        ;; A single continuation slot is keyed by active-id; a second
+        ;; concurrent waiter would silently overwrite the first one,
+        ;; abandoning its coroutine.
+        (when (hashtable-ref (loop-handlers %loop) active-id #f)
+          (error 'loop-accept-block "concurrent accept on fd" fd))
+        (hashtable-set! (loop-handlers %loop) active-id
+          (lambda (res)
+            (if (fx<? res 0)
+                (begin
+                  (let ((mid (hashtable-ref %multishots fd #f)))
+                    (when mid
+                      (hashtable-delete! %multishots fd)
+                      (hashtable-delete! %multishot-ids mid)))
+                  (handler #f))
+                (let ((client (loop-accept-client-setup! res)))
+                  (unless (handler client)
+                    (hashtable-set! %accept-backlog fd
+                      (append (hashtable-ref %accept-backlog fd '())
+                              (list client)))))))))))
+
   (define loop-accept
     (lambda (fd)
-      (define client-setup!
-        (lambda (client)
-          (loop-socket-option! client 6 'tcp-option/nodelay  #t)
-          (loop-socket-option! client 1 'socket-option/keepalive #t)
-          (hashtable-set! %active-connections client (jiffy-current))
-          client))
-      (let ((backlog (hashtable-ref %accept-backlog fd '())))
-        (if (pair? backlog)
-            ;; The multishot already accepted a client while no waiter
-            ;; was parked: claim it without suspending.
-            (begin
-              (if (null? (cdr backlog))
-                  (hashtable-delete! %accept-backlog fd)
-                  (hashtable-set! %accept-backlog fd (cdr backlog)))
-              (client-setup! (car backlog)))
-            (let ((active-id (hashtable-ref %multishots fd #f)))
-              (unless active-id
-                (let* ((sqe (loop-get-sqe (loop-ring %loop)))
-                       (id  (loop-alloc-id!)))
-                  (io-uring-prep-multishot-accept sqe fd 0 0 0)
-                  (io-uring-sqe-set-data64 sqe id)
-                  (hashtable-set! %multishots fd id)
-                  (hashtable-set! %multishot-ids id fd)
-                  (set! active-id id)))
-              ;; A single continuation slot is keyed by active-id; a
-              ;; second concurrent waiter would silently overwrite the
-              ;; first one, abandoning its coroutine.
-              (when (hashtable-ref (loop-handlers %loop) active-id #f)
-                (error 'loop-accept "concurrent accept on fd" fd))
-              (let ((res (loop-abort
-                           (lambda (k)
-                             (hashtable-set! (loop-handlers %loop) active-id k)))))
-                (if (fx<? res 0)
-                    (begin
-                      (let ((mid (hashtable-ref %multishots fd #f)))
-                        (when mid
-                          (hashtable-delete! %multishots fd)
-                          (hashtable-delete! %multishot-ids mid)))
-                      #f)
-                    (client-setup! res))))))))
+      (or (loop-accept-try fd)
+          (loop-abort
+           (lambda (k)
+             (loop-accept-block fd (lambda (client) (k client) #t)))))))
 
   (define loop-read
     (lambda (fd)
