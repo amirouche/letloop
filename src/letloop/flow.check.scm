@@ -168,12 +168,12 @@
   (define (build-list n f)
     (let loop ((i 0) (acc '()))
       (if (fx=? i n) acc (loop (fx+ i 1) (cons (f i) acc)))))
-  (flow-channel-puts! ch (build-list 5 dead-entry))
+  (set-box! (flow-channel-puts ch) (build-list 5 dead-entry))
   (let loop ((i 0))
     (when (fx<? i %flow-channel-gc-threshold)
       (flow-channel-bump-gc! ch)
       (loop (fx+ i 1))))
-  (null? (flow-channel-puts ch)))
+  (null? (unbox (flow-channel-puts ch))))
 
 ;; Producer is spawned second, so it runs first (loop-spawn prepends,
 ;; loop-run-once processes the thunk list front-to-back): it blocks on
@@ -347,3 +347,80 @@
   (loop-run)
   (and (equal? (reverse echoed) (list (string->utf8 "one") (string->utf8 "two")))
        closed-on-timeout))
+
+;; FL-7: a channel shared between two genuinely separate OS threads
+;; (shards), each with its own ring — not the same-thread scheduling
+;; tricks (spawn order, loop-run-once tick counts) FL-1..FL-6's checks
+;; use. shard-b's flow-get! blocks and parks a continuation owned by
+;; shard-b; shard-a's flow-put! matches it from a different thread
+;; entirely, so resume must route through flow-shard-post! (the
+;; mailbox + msg_ring path) rather than loop-spawn — if owner-tracking
+;; were wrong this would either hang (never resumed) or crash
+;; (continuation invoked on the wrong thread's stack).
+(define (~check-flow-007/two-shard-channel-rendezvous)
+  (define ch (make-flow-channel))
+  (define result (box #f))
+  (define done (box #f))
+  (define shard-b
+    (flow-shard-spawn
+     (lambda ()
+       (set-box! result (flow-get! ch))
+       (set-box! done #t))))
+  (define shard-a
+    (flow-shard-spawn
+     (lambda ()
+       (flow-put! ch 'cross-shard-value))))
+  (let wait ((n 0))
+    (unless (or (unbox done) (fx>=? n 200))
+      (sleep (make-time 'time-duration 10000000 0))
+      (wait (fx+ n 1))))
+  (flow-shard-stop! shard-a)
+  (flow-shard-stop! shard-b)
+  (sleep (make-time 'time-duration 0 1))
+  (eq? (unbox result) 'cross-shard-value))
+
+;; The milestone's stress check: 3 producer shards each spawning 20
+;; concurrent put fibers into one shared channel, a 4th collector
+;; shard doing all 60 gets. Every rendezvous here crosses shards (the
+;; collector's gets almost never land on the same shard as the put
+;; that satisfies them), so this exercises the box-cas! channel lists
+;; under genuine concurrent cross-thread push/pop and the mailbox
+;; wakeup path under real load, not just the single pairing above.
+(define (~check-flow-007/stress-n-shards-m-messages)
+  (define n-per-shard 20)
+  (define shard-ids (list 0 1 2))
+  (define total (fx* (length shard-ids) n-per-shard))
+  (define ch (make-flow-channel))
+  (define received (box '()))
+  (define done (box #f))
+  (define (shard-range sid)
+    (let loop ((i 0) (acc '()))
+      (if (fx>=? i n-per-shard)
+          acc
+          (loop (fx+ i 1) (cons (fx+ (fx* sid 1000) i) acc)))))
+  (define expected (apply append (map shard-range shard-ids)))
+  (define collector
+    (flow-shard-spawn
+     (lambda ()
+       (let loop ((i 0) (acc '()))
+         (if (fx>=? i total)
+             (begin (set-box! received acc) (set-box! done #t))
+             (loop (fx+ i 1) (cons (flow-get! ch) acc)))))))
+  (define producers
+    (map (lambda (sid)
+           (flow-shard-spawn
+            (lambda ()
+              (let loop ((i 0))
+                (when (fx<? i n-per-shard)
+                  (loop-spawn (lambda () (flow-put! ch (fx+ (fx* sid 1000) i))))
+                  (loop (fx+ i 1)))))))
+         shard-ids))
+  (let wait ((n 0))
+    (unless (or (unbox done) (fx>=? n 500))
+      (sleep (make-time 'time-duration 10000000 0))
+      (wait (fx+ n 1))))
+  (for-each flow-shard-stop! producers)
+  (flow-shard-stop! collector)
+  (sleep (make-time 'time-duration 0 1))
+  (and (unbox done)
+       (equal? (sort < (unbox received)) (sort < expected))))

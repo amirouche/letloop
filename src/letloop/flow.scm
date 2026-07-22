@@ -6,8 +6,9 @@
 ;; sketch; see plans/v12/20260720-flow/README.md for the full design
 ;; and milestone plan. Implements FL-1 (base event algebra), FL-2
 ;; (choice), FL-3 (rendezvous channels), FL-4 (timeouts), FL-5 (I/O
-;; events), and FL-6 (a standalone consumer proof — see the check).
-;; FL-7 (multi-shard) is out of scope.
+;; events), FL-6 (a standalone consumer proof — see the check), and
+;; FL-7 (multi-shard: N OS threads, each its own ring, cross-shard
+;; resume via IORING_OP_MSG_RING).
 (library (letloop flow)
 
   (export make-flow flow? flow-wrap flow-guard flow-choice flow-perform
@@ -22,6 +23,9 @@
           flow-accept flow-read flow-write
 
           flow-spawn flow-run flow-stop
+
+          flow-current-shard flow-shard?
+          flow-shard-spawn flow-shard-stop!
 
           ~check-flow-000/always-ready
           ~check-flow-000/wrap-order
@@ -44,7 +48,10 @@
 
           ~check-flow-006/echo-pair
           ~check-flow-006/read-or-timeout-leaves-fd-usable
-          ~check-flow-006/request-loop-idle-timeout)
+          ~check-flow-006/request-loop-idle-timeout
+
+          ~check-flow-007/two-shard-channel-rendezvous
+          ~check-flow-007/stress-n-shards-m-messages)
 
   (import (chezscheme)
           (letloop r999)
@@ -169,10 +176,22 @@
   ;; as flow-poll applies wrap on the ready path — so no block
   ;; implementation has to remember to wrap its own raw completion
   ;; value (a real io_uring res code, an object off a channel, ...).
+  ;;
+  ;; owner is this fiber's shard (§4.7), captured at block time —
+  ;; #f under plain single-shard usage (flow-resume-owner! degenerates
+  ;; to a direct loop-spawn then, exactly the pre-FL-7 behavior). Both
+  ;; k and the cancel thunks are only ever run via flow-resume-owner!,
+  ;; never inline here: a cancel thunk preps an SQE on *its own*
+  ;; shard's ring (io-uring-get-sqe (loop-ring (loop-current)) at the
+  ;; time it was registered) — firing it from whichever shard happens
+  ;; to be running this resume would submit a cancel to the wrong
+  ;; ring. Continuations are the same story: k was captured on owner's
+  ;; native stack and must only ever be invoked by owner's own thread.
   (define flow-block-and-wait
     (lambda (bases)
       (let ((state (box 'waiting))
-            (cancels (box '())))
+            (cancels (box '()))
+            (owner (flow-current-shard)))
         (loop-abort
          (lambda (k)
            (define register-cancel!
@@ -181,8 +200,11 @@
              (lambda (value)
                (and (box-cas! state 'waiting 'synched)
                     (begin
-                      (for-each (lambda (thunk) (thunk)) (unbox cancels))
-                      (loop-spawn (lambda () (k value)))
+                      (flow-resume-owner!
+                       owner
+                       (lambda ()
+                         (for-each (lambda (thunk) (thunk)) (unbox cancels))
+                         (k value)))
                       #t))))
            (for-each (lambda (base)
                        ((flow-block-proc base) state
@@ -200,29 +222,62 @@
               result)))))
 
   ;;------------------------------------------------------------
+  ;; Lock-free lists (coop.scm layer 1, with defect 1 fixed: the
+  ;; original box-cons! CASed against a free variable `lst` instead of
+  ;; a snapshot of (unbox box); this one snapshots first). Safe for
+  ;; concurrent push from multiple OS threads at once, unlike a plain
+  ;; mutable field — needed once a channel or a shard's cross-resume
+  ;; mailbox (§4.7) can be touched from more than one shard.
+  ;;------------------------------------------------------------
+
+  (define flow-box-cons!
+    (lambda (box item)
+      (let ((lst (unbox box)))
+        (unless (box-cas! box lst (cons item lst))
+          (flow-box-cons! box item)))))
+
+  ;; Atomically swap BOX's list for '(), returning whatever was there.
+  (define flow-box-drain!
+    (lambda (box)
+      (let ((lst (unbox box)))
+        (if (box-cas! box lst '())
+            lst
+            (flow-box-drain! box)))))
+
+  (define flow-box-increment!
+    (lambda (box)
+      (let ((n (unbox box)))
+        (if (box-cas! box n (fx+ n 1))
+            (fx+ n 1)
+            (flow-box-increment! box)))))
+
+  ;;------------------------------------------------------------
   ;; Channels (§4.4)
   ;;------------------------------------------------------------
 
-  ;; A channel is two FIFOs of pending parties (waiting puts, waiting
-  ;; pops) plus a counter driving periodic compaction. Rendezvous is
-  ;; direct: a value only moves when a put and a get are both present
-  ;; at the same time, there is no buffering.
+  ;; A channel is two lock-free lists of pending parties (waiting
+  ;; puts, waiting pops) plus a counter driving periodic compaction.
+  ;; Rendezvous is direct: a value only moves when a put and a get are
+  ;; both present at the same time, there is no buffering. The lists
+  ;; are box-cas!-protected rather than plain mutable fields so a
+  ;; channel can safely be shared across shards (§4.7) — a fiber on
+  ;; any shard may enqueue into or scan either list at any time.
   (define-record-type* <flow-channel>
     (make-flow-channel% puts pops gc-counter)
     flow-channel?
-    (puts       flow-channel-puts  flow-channel-puts!)
-    (pops       flow-channel-pops  flow-channel-pops!)
-    (gc-counter flow-channel-gc-counter flow-channel-gc-counter!))
+    (puts       flow-channel-puts)
+    (pops       flow-channel-pops)
+    (gc-counter flow-channel-gc-counter))
 
   (define make-flow-channel
     (lambda ()
-      (make-flow-channel% '() '() 0)))
+      (make-flow-channel% (box '()) (box '()) (box 0))))
 
   ;; A pending party: the (possibly choice-shared) state box and
   ;; resume from flow-perform, plus — for puts only — the value being
   ;; offered. A party is dead once its state is no longer 'waiting;
-  ;; dead parties are skipped by box-cas! failing and are eventually
-  ;; dropped by compaction, not removed eagerly.
+  ;; dead parties are skipped by resume's own CAS failing and are
+  ;; eventually dropped by compaction, not removed eagerly.
   (define-record-type* <flow-channel-entry>
     (make-flow-channel-entry state resume value)
     flow-channel-entry?
@@ -236,28 +291,36 @@
 
   (define %flow-channel-gc-threshold 1024)
 
+  ;; Atomically filter dead entries out of BOX's list; retries against
+  ;; a fresh snapshot if a concurrent push raced ahead of us, losing
+  ;; only the wasted filter work, never an entry.
+  (define flow-channel-compact!
+    (lambda (box)
+      (let ((lst (unbox box)))
+        (unless (box-cas! box lst (filter flow-channel-entry-waiting? lst))
+          (flow-channel-compact! box)))))
+
   ;; Bump the shared gc-counter on every enqueue; once it reaches the
-  ;; threshold, drop every entry from both FIFOs whose state is no
-  ;; longer 'waiting and reset the counter (§4.4). Called after the
-  ;; enqueue so a completed entry can be compacted the same round it
-  ;; is finally observed as dead.
+  ;; threshold, drop every dead entry from both lists and reset the
+  ;; counter (§4.4). If a concurrent bump also crossed the threshold
+  ;; and reset first, this reset attempt just no-ops (box-cas! against
+  ;; a now-stale N) rather than clobbering their progress — compaction
+  ;; still ran, it just isn't perfectly deduplicated under concurrent
+  ;; crossings, which is fine for a maintenance operation.
   (define flow-channel-bump-gc!
     (lambda (channel)
-      (let ((n (fx+ 1 (flow-channel-gc-counter channel))))
-        (if (fx>=? n %flow-channel-gc-threshold)
-            (begin
-              (flow-channel-puts! channel
-                (filter flow-channel-entry-waiting? (flow-channel-puts channel)))
-              (flow-channel-pops! channel
-                (filter flow-channel-entry-waiting? (flow-channel-pops channel)))
-              (flow-channel-gc-counter! channel 0))
-            (flow-channel-gc-counter! channel n)))))
+      (let ((n (flow-box-increment! (flow-channel-gc-counter channel))))
+        (when (fx>=? n %flow-channel-gc-threshold)
+          (flow-channel-compact! (flow-channel-puts channel))
+          (flow-channel-compact! (flow-channel-pops channel))
+          (box-cas! (flow-channel-gc-counter channel) n 0)))))
 
   ;; try and block never race each other within a single flow-perform
-  ;; call — phase 1 is single-threaded and nothing yields between the
-  ;; poll pass and the block pass, so the two-phase re-scan coop.scm
-  ;; needed for its bare-thread arm is unnecessary here (§4.7); a
-  ;; future multi-shard resume would need to reintroduce it.
+  ;; call on one shard — nothing yields between the poll pass and the
+  ;; block pass — so the two-phase re-scan coop.scm needed for its
+  ;; bare-thread arm is unnecessary here; a *different* shard's put or
+  ;; get can still land in between, which is exactly why the lists
+  ;; above are lock-free rather than plain mutable fields.
   ;;
   ;; Claiming a peer means calling *its* resume, and resume itself
   ;; owns the state-box CAS (flow-block-and-wait) — try must not CAS
@@ -267,7 +330,7 @@
   (define flow-put-try
     (lambda (channel obj)
       (lambda ()
-        (let scan ((pops (flow-channel-pops channel)))
+        (let scan ((pops (unbox (flow-channel-pops channel))))
           (cond
            ((null? pops) #f)
            (((flow-channel-entry-resume (car pops)) obj)
@@ -277,9 +340,8 @@
   (define flow-put-block
     (lambda (channel obj)
       (lambda (state resume register-cancel!)
-        (flow-channel-puts! channel
-          (append (flow-channel-puts channel)
-                  (list (make-flow-channel-entry state resume obj))))
+        (flow-box-cons! (flow-channel-puts channel)
+                         (make-flow-channel-entry state resume obj))
         (flow-channel-bump-gc! channel))))
 
   (define flow-put
@@ -292,7 +354,7 @@
   (define flow-get-try
     (lambda (channel)
       (lambda ()
-        (let scan ((puts (flow-channel-puts channel)))
+        (let scan ((puts (unbox (flow-channel-puts channel))))
           (cond
            ((null? puts) #f)
            (((flow-channel-entry-resume (car puts)) (void))
@@ -303,9 +365,8 @@
   (define flow-get-block
     (lambda (channel)
       (lambda (state resume register-cancel!)
-        (flow-channel-pops! channel
-          (append (flow-channel-pops channel)
-                  (list (make-flow-channel-entry state resume #f))))
+        (flow-box-cons! (flow-channel-pops channel)
+                         (make-flow-channel-entry state resume #f))
         (flow-channel-bump-gc! channel))))
 
   (define flow-get
@@ -485,6 +546,110 @@
                       (and client (lambda () client))))
                   (lambda (state resume register-cancel!)
                     (loop-accept-block fd (lambda (client) (resume client)))))))
+
+  ;;------------------------------------------------------------
+  ;; Multi-shard (FL-7, phase 2 of §4.7)
+  ;;------------------------------------------------------------
+
+  ;; #f on any OS thread that never called flow-shard-spawn — the
+  ;; classic single-shard case FL-1..FL-6 and every existing consumer
+  ;; run under, where flow-resume-owner! degenerates to a direct
+  ;; loop-spawn and nothing above this section changes behavior at
+  ;; all. Set once, for the life of the thread, by flow-shard-spawn.
+  (define flow-current-shard (make-thread-parameter #f))
+
+  ;; ring-fd lets another shard reach this one via a real
+  ;; IORING_OP_MSG_RING wakeup — ring fds are ordinary per-process file
+  ;; descriptors, valid from any thread that shares the process, so
+  ;; this works with no further plumbing. mailbox is the lock-free
+  ;; landing pad for cross-shard/bare-thread resume thunks.
+  (define-record-type* <flow-shard>
+    (make-flow-shard% ring-fd mailbox)
+    flow-shard?
+    (ring-fd flow-shard-ring-fd)
+    (mailbox flow-shard-mailbox))
+
+  ;; Run every thunk parked in this shard's mailbox, on this shard's
+  ;; own thread, via loop-spawn — never invoked directly by whichever
+  ;; shard called flow-shard-post!. Called once per tick by
+  ;; flow-shard-run!, independent of whether a wakeup ever arrives.
+  (define flow-shard-drain-mailbox!
+    (lambda ()
+      (let ((shard (flow-current-shard)))
+        (when shard
+          (for-each loop-spawn (flow-box-drain! (flow-shard-mailbox shard)))))))
+
+  ;; Hand THUNK to SHARD's mailbox and nudge it awake. If the caller is
+  ;; itself a shard, the nudge is a real io_uring_prep_msg_ring
+  ;; targeting the peer's ring: a genuine kernel-mediated cross-ring
+  ;; wakeup that makes SHARD's own io_uring_wait_cqe_timeout return
+  ;; early instead of waiting out its ~100ms window. A bare thread (no
+  ;; ring of its own) has no such fast path — that wait is an
+  ;; uninterruptible blocking syscall from here, and nothing short of
+  ;; arming the wait *from* the target ring can preempt it — so it
+  ;; simply relies on SHARD draining its mailbox on its normal ~100ms
+  ;; poll cadence, the same bound every idle loop-run-once tick already
+  ;; has. Either way THUNK only ever runs via flow-shard-drain-mailbox!
+  ;; on SHARD's own thread; this never calls it directly.
+  (define flow-shard-post!
+    (lambda (shard thunk)
+      (flow-box-cons! (flow-shard-mailbox shard) thunk)
+      (when (flow-current-shard)
+        (let* ((ring (loop-ring (loop-current)))
+               (sqe  (io-uring-get-sqe ring)))
+          (io-uring-prep-msg-ring sqe (flow-shard-ring-fd shard) 0 0 0)
+          (io-uring-sqe-set-data64 sqe (loop-alloc-id!))))))
+
+  ;; Where flow-block-and-wait's resume actually runs a parked
+  ;; continuation (or fires that fiber's cancel thunks): locally via
+  ;; loop-spawn when OWNER is this shard (or plain single-shard usage,
+  ;; OWNER = #f, matching pre-FL-7 behavior exactly), cross-shard via
+  ;; the mailbox otherwise.
+  (define flow-resume-owner!
+    (lambda (owner thunk)
+      (if (or (not owner) (eq? owner (flow-current-shard)))
+          (loop-spawn thunk)
+          (flow-shard-post! owner thunk))))
+
+  ;; Like loop-run, but drains this shard's cross-resume mailbox once
+  ;; per tick so a resume posted from another shard or a bare thread
+  ;; is never stuck waiting on a wakeup that didn't arrive.
+  (define flow-shard-run!
+    (lambda ()
+      (let lp ()
+        (when (loop-running? (loop-current))
+          (flow-shard-drain-mailbox!)
+          (guard (ex (else (loop-stop)))
+            (loop-run-once))
+          (lp)))))
+
+  ;; Start a new shard: a fresh OS thread running its own loop-new'd
+  ;; ring, with THUNK spawned as its first fiber. Blocks the caller
+  ;; briefly — just until the new thread's ring exists — so the
+  ;; returned <flow-shard> is immediately usable with flow-shard-post!/
+  ;; flow-shard-stop!.
+  (define flow-shard-spawn
+    (lambda (thunk)
+      (let ((ready (box #f)))
+        (fork-thread
+         (lambda ()
+           (loop-detach!)
+           (loop-new)
+           (let ((shard (make-flow-shard% (loop-ring-fd (loop-current)) (box '()))))
+             (flow-current-shard shard)
+             (set-box! ready shard)
+             (loop-spawn thunk)
+             (flow-shard-run!))))
+        (let wait ()
+          (or (unbox ready)
+              (begin (sleep (make-time 'time-duration 1000000 0)) (wait)))))))
+
+  ;; Stop SHARD's loop from any thread — posts rather than calling
+  ;; loop-stop directly, since loop-running!/(loop-current) are
+  ;; SHARD's thread-parameters, not the caller's.
+  (define flow-shard-stop!
+    (lambda (shard)
+      (flow-shard-post! shard (lambda () (loop-stop)))))
 
   (define flow-spawn loop-spawn)
   (define flow-run loop-run)
