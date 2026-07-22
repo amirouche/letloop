@@ -360,13 +360,13 @@
    jiffy-current
 
    ;; event loop lifecycle
-   loop-new loop-run loop-run-once loop-stop loop-spawn
+   loop-new loop-run loop-run-once loop-stop loop-spawn loop-detach!
 
    ;; loop internals, for libraries extending the loop with new
    ;; operations (e.g. (letloop dns)): current loop, its ring, the
    ;; completion-handler table, id allocation, coroutine abort
    loop-current loop-ring loop-handlers loop-alloc-id! loop-abort
-   loop-running? loop-active-connections
+   loop-running? loop-active-connections loop-ring-fd
 
    ;; async I/O operations
    loop-connect loop-read loop-write loop-close loop-sleep
@@ -1985,6 +1985,22 @@
     (lambda ()
       (%loop)))
 
+  ;; Byte offset of struct io_uring's `int ring_fd` field: sizeof
+  ;; struct io_uring_sq (104) + struct io_uring_cq (88) + `unsigned
+  ;; flags` (4) = 196 on x86-64/aarch64, cross-checked against
+  ;; io-uring-size (216) above accounting for every following field
+  ;; (features, enter_ring_fd, int_flags, pad) too, and confirmed
+  ;; empirically: reading this offset after a real io_uring_queue_init
+  ;; and cross-checking /proc/self/fd/<value> shows anon_inode:[io_uring].
+  ;; Needed for FL-7 (multi-shard): io_uring_prep_msg_ring's target is
+  ;; a plain fd, and there is no exported liburing accessor for it —
+  ;; io_uring_ring_fd() is header-inline, not a real .so symbol.
+  (define %io-uring-ring-fd-offset 196)
+
+  (define loop-ring-fd
+    (lambda (loop)
+      (foreign-ref 'integer-32 (loop-ring loop) %io-uring-ring-fd-offset)))
+
   ;; fd → jiffy of last read/write activity, maintained by the read
   ;; and write paths; lets callers reap idle connections.
   (define loop-active-connections
@@ -2109,6 +2125,37 @@
   (define loop-spawn
     (lambda (thunk)
       (loop-thunks! (%loop) (cons thunk (loop-thunks (%loop))))))
+
+  ;; fork-thread makes the new OS thread inherit a *snapshot* of the
+  ;; spawning thread's current thread-parameter values, not each
+  ;; parameter's original default — confirmed empirically (a parent
+  ;; that set p to 99 before forking sees a child that also reads 99
+  ;; on first read, despite p's own default being 0). That means a
+  ;; freshly spawned shard (FL-7) calling loop-new right after fork
+  ;; would inherit whatever ring the *spawning* thread's %loop already
+  ;; pointed at — and loop-new's own "tear down the previous ring"
+  ;; step would then free memory the spawning thread still owns and
+  ;; is still using, a genuine double-free/use-after-free. Call this
+  ;; once, before loop-new, at the start of any thread that did not
+  ;; itself create the ring its parent's %loop happens to reference.
+  (define loop-detach!
+    (lambda ()
+      (%loop #f)
+      (%multishots (make-eqv-hashtable))
+      (%multishot-ids (make-eqv-hashtable))
+      (%buf-ring-nentries 4096)
+      (%buf-ring-buf-size 4096)
+      (%buf-ring-bgid 0)
+      (%buf-ring #f)
+      (%buf-ring-base 0)
+      (%buf-ring-mask 0)
+      (%buf-data (make-eqv-hashtable))
+      (%fd-handlers (make-eqv-hashtable))
+      (%active-connections (make-eqv-hashtable))
+      (%accept-backlog (make-eqv-hashtable))
+      (%read-timeout-seconds 5)
+      (%read-timeout-ts #f)
+      (%wait-timeout #f)))
 
   (define loop-new
     (lambda ()
