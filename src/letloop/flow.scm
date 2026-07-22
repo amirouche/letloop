@@ -4,18 +4,23 @@
 ;; guile-fibers' "operations") synchronized over the io_uring loop
 ;; from (letloop liburing low). Ported from the coop.scm design
 ;; sketch; see plans/v12/20260720-flow/README.md for the full design
-;; and milestone plan (this file implements milestone FL-1: the base
-;; event algebra only — no choice, no channels, no I/O events yet).
+;; and milestone plan. Implements FL-1 (base event algebra) and FL-2
+;; (choice) — no channels, no I/O events yet.
 (library (letloop flow)
 
-  (export make-flow flow? flow-wrap flow-guard flow-perform
+  (export make-flow flow? flow-wrap flow-guard flow-choice flow-perform
 
           flow-spawn flow-run flow-stop
 
           ~check-flow-000/always-ready
           ~check-flow-000/wrap-order
           ~check-flow-000/guard
-          ~check-flow-000/suspend-resume)
+          ~check-flow-000/suspend-resume
+
+          ~check-flow-001/choice-two-ready
+          ~check-flow-001/choice-ready-or-never
+          ~check-flow-001/nested-choice-flattens
+          ~check-flow-001/block-fanout-race)
 
   (import (chezscheme)
           (letloop r999)
@@ -29,8 +34,11 @@
   ;;   type = 'guard — data is a thunk that must produce a fresh event
   ;;                   on every synchronization attempt (§4.1); wrap/
   ;;                   try/block are unused, resolved via flow-flatten.
-  ;;
-  ;; type = 'choice arrives in FL-2 alongside flow-choice.
+  ;;   type = 'choice — data is a vector of member events (possibly
+  ;;                    themselves choices/guards); wrap/try/block are
+  ;;                    unused, resolved via flow-flatten. flow-choice
+  ;;                    is associative and does not eagerly flatten —
+  ;;                    flow-flatten unwraps nesting at perform time.
   (define-record-type* <flow>
     (make-flow% type data wrap try block)
     flow?
@@ -48,6 +56,14 @@
     (lambda (thunk)
       (make-flow% 'guard thunk #f #f #f)))
 
+  ;; Choice is associative; a single-event choice is left as a
+  ;; 1-element choice rather than collapsed — flow-flatten treats it
+  ;; identically to collapsing, so there is no observable difference
+  ;; and no need to special-case it here.
+  (define flow-choice
+    (lambda events
+      (make-flow% 'choice (list->vector events) #f #f #f)))
+
   (define flow-wrap
     (lambda (event proc)
       (case (flow-type event)
@@ -60,17 +76,26 @@
          (make-flow% 'guard
                      (lambda () (flow-wrap ((flow-data event)) proc))
                      #f #f #f))
+        ((choice)
+         (make-flow% 'choice
+                     (vector-map (lambda (base) (flow-wrap base proc))
+                                 (flow-data event))
+                     #f #f #f))
         (else
          (error 'flow-wrap "unsupported flow type" (flow-type event))))))
 
   ;; Resolve EVENT down to the list of base events it synchronizes
-  ;; over: a base is its own singleton flattening, a guard is resolved
-  ;; by calling its thunk exactly once and flattening the result.
+  ;; over: a base is its own singleton flattening; a guard is resolved
+  ;; by calling its thunk exactly once and flattening the result; a
+  ;; choice recursively flattens its members (this is where nested
+  ;; choices collapse, since choice is associative).
   (define flow-flatten
     (lambda (event)
       (case (flow-type event)
         ((base) (list event))
         ((guard) (flow-flatten ((flow-data event))))
+        ((choice)
+         (apply append (map flow-flatten (vector->list (flow-data event)))))
         (else
          (error 'flow-flatten "unsupported flow type" (flow-type event))))))
 
