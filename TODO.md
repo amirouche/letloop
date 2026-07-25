@@ -3,6 +3,7 @@
 - api: cookies: parse and set cookies with a Map-like API.
 - api: http router: dynamic paths and wildcards.
 - api: http server: harden (letloop http server) and `letloop http serve`: chunked request bodies, streaming responses, richer error handling.
+- api: http server: verify under concurrent load whether the fixed call-with-loop-prompt bug (a suspended fiber resumed on a later tick then returning normally used to re-run its spawn tick's remaining sibling thunks) ever actually fired in `handle-connection` (`http/server.body.scm`) before the fix — its shape (per-connection fiber, suspends on `flow-choice (flow-read fd) (flow-timeout ...)`, later returns normally via `cleanup` on EOF/timeout/`Connection: close`) matches the bug's trigger conditions exactly, which would mean other connections still pending in that fiber's spawn tick had their remaining work (dispatch, write) silently re-executed. Existing checks pass identically before/after the fix, which only means the tested scenarios don't happen to trigger it — write a real concurrent-connections test (many connections open at once, one finishing while others are mid-request) and check for duplicate dispatch/write calls to confirm whether this was live in practice, not just structurally possible.
 - api: json: parser review and improvements: correctness, readability, CLI.
 - api: redis: built-in client with Pub/Sub support.
 - api: s3: upload/download from S3-compatible cloud storage.
