@@ -828,40 +828,48 @@
          (<= (car ts) (cadr ts))
          (<= (cadr ts) (caddr ts)))))
 
-;; flow-log-start! actually reaches DESTINATION on its own, with no
-;; explicit flow-log-drain! call from the test — proves the dedicated
-;; flush thread runs and drains independently.
+;; flow-log-start! actually reaches (current-error-port) on its own,
+;; with no explicit flow-log-drain! call from the test — proves the
+;; dedicated flush thread runs and drains independently. Captures
+;; current-error-port via parameterize (fork-thread inherits the
+;; dynamic binding in effect at fork time, confirmed directly) rather
+;; than touching the real stderr. Sleeps a fixed several-periods-worth
+;; of wall-clock time rather than polling get-output-string in a loop:
+;; a string port is not synchronized, so reading it from this thread
+;; while the flush thread might be mid-write would be a real data
+;; race, not just a slow poll — read it exactly once, only after
+;; flow-log-stop! has returned (which guarantees the flush thread has
+;; performed its final flush and exited, so nothing else can be
+;; touching the port anymore).
 (define (~check-flow-010/start-reaches-destination)
-  (define port (open-output-string))
-  (loop-new)
-  (loop-spawn
-   (lambda ()
-     (flow-log 'hello)
-     (loop-stop)))
-  (flow-log-start! 0.02 port)
-  (loop-run)
-  (let wait ((n 0))
-    (unless (or (fx>? (string-length (get-output-string port)) 0)
-                (fx>=? n 500))
-      (sleep (make-time 'time-duration 10000000 0))
-      (wait (fx+ n 1))))
-  (flow-log-stop!)
-  (fx>? (string-length (get-output-string port)) 0))
+  (define captured (open-output-string))
+  (parameterize ((current-error-port captured))
+    (loop-new)
+    (loop-spawn
+     (lambda ()
+       (flow-log 'hello)
+       (loop-stop)))
+    (flow-log-start! 0.02)
+    (loop-run)
+    (sleep (make-time 'time-duration 200000000 0)) ;; ~10 flush periods
+    (flow-log-stop!))
+  (fx>? (string-length (get-output-string captured)) 0))
 
 ;; flow-log-stop! performs one final drain-and-flush before returning,
 ;; so an entry logged just before stop is never lost even when the
 ;; flush period itself is far longer than the test could wait for.
 (define (~check-flow-010/stop-flushes-remaining)
-  (define port (open-output-string))
-  (loop-new)
-  (loop-spawn
-   (lambda ()
-     (flow-log 'final-entry)
-     (loop-stop)))
-  (flow-log-start! 1000.0 port)
-  (loop-run)
-  (flow-log-stop!)
-  (let* ((s (get-output-string port))
+  (define captured (open-output-string))
+  (parameterize ((current-error-port captured))
+    (loop-new)
+    (loop-spawn
+     (lambda ()
+       (flow-log 'final-entry)
+       (loop-stop)))
+    (flow-log-start! 1000.0)
+    (loop-run)
+    (flow-log-stop!))
+  (let* ((s (get-output-string captured))
          (entry (read (open-input-string s))))
     (and (pair? entry) (eq? (cdr entry) 'final-entry))))
 
