@@ -642,10 +642,7 @@
   (loop-spawn
    (lambda ()
      (set! created (flow-check-create! path payload))
-     (let ((fd (flow-perform (flow-open path O-RDONLY 0)))
-           ;; Both helper fibers park on this channel (nobody ever
-           ;; puts) once they are done, instead of returning.
-           (parked (make-flow-channel)))
+     (let ((fd (flow-perform (flow-open path O-RDONLY 0))))
        ;; loop-spawn is LIFO within a tick: spawn the closer first so
        ;; the reader's block runs first next tick and its SQE is
        ;; already prepped (handler parked) when loop-close-block preps
@@ -653,13 +650,11 @@
        (loop-spawn
         (lambda ()
           (set! close-result (flow-perform (flow-close fd)))
-          (set! close-done #t)
-          (flow-perform (flow-get parked))))
+          (set! close-done #t)))
        (loop-spawn
         (lambda ()
           (set! read-result (flow-perform (flow-read-at fd 0 512)))
-          (set! read-done #t)
-          (flow-perform (flow-get parked))))
+          (set! read-done #t)))
        (let wait ((n 0))
          (flow-sleep 0.01)
          (if (or (and read-done close-done) (fx>? n 500))
