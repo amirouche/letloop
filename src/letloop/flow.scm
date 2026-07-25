@@ -1046,29 +1046,24 @@
         (for-each (lambda (b) (flow-box-cons! flow-log-registry b)) boxes)
         (apply append (map (lambda (b) (reverse (flow-box-drain! b))) boxes)))))
 
-  ;; DESTINATION is either an output port (entries written via `write`,
-  ;; one per line, then the port flushed every cycle) or a file path
-  ;; string (opened in append mode, written, and closed every cycle).
-  ;; Plain synchronous Chez port I/O rather than flow-open/
-  ;; flow-write-at: this thread is not on the async event-loop's
-  ;; critical path -- it is not even necessarily running a loop at all,
-  ;; since flow-log must work from bare threads too -- so there is
-  ;; nothing to gain from routing a periodic background flush through
-  ;; io_uring, and doing so would force this thread to also
-  ;; loop-new/loop-run its own ring for no benefit.
+  ;; Always (current-error-port) -- read at flush time, not captured
+  ;; once at flow-log-start! time, so a caller that reparameterizes
+  ;; current-error-port (e.g. a test capturing it, or a supervisor
+  ;; redirecting it) is honored on the next cycle. Plain synchronous
+  ;; Chez port I/O rather than flow-open/flow-write-at: this thread is
+  ;; not on the async event-loop's critical path -- it is not even
+  ;; necessarily running a loop at all, since flow-log must work from
+  ;; bare threads too -- so there is nothing to gain from routing a
+  ;; periodic background flush through io_uring, and doing so would
+  ;; force this thread to also loop-new/loop-run its own ring for no
+  ;; benefit.
   (define flow-log-write-entries!
-    (lambda (entries destination)
+    (lambda (entries)
       (unless (null? entries)
-        (if (string? destination)
-            (call-with-output-file destination
-              (lambda (port)
-                (for-each (lambda (entry) (write entry port) (newline port))
-                          entries))
-              'append)
-            (begin
-              (for-each (lambda (entry) (write entry destination) (newline destination))
-                        entries)
-              (flush-output-port destination))))))
+        (let ((port (current-error-port)))
+          (for-each (lambda (entry) (write entry port) (newline port))
+                    entries)
+          (flush-output-port port)))))
 
   ;; flow-log-start!/flow-log-stop! state: exactly one dedicated flush
   ;; thread, not one per shard (a per-shard flush thread would defeat
@@ -1087,13 +1082,13 @@
 
   ;; Spawn exactly one dedicated OS thread that, every PERIOD-SECONDS,
   ;; drains every registered shard's log box (via flow-log-drain!) and
-  ;; flushes the merged result to DESTINATION. Calling this again
-  ;; before flow-log-stop! spawns a second, competing flush thread --
-  ;; draining itself stays correct either way (flow-box-drain! never
-  ;; double-delivers the same entry), but running two at once is not a
-  ;; supported configuration.
+  ;; flushes the merged result to (current-error-port). Calling this
+  ;; again before flow-log-stop! spawns a second, competing flush
+  ;; thread -- draining itself stays correct either way
+  ;; (flow-box-drain! never double-delivers the same entry), but
+  ;; running two at once is not a supported configuration.
   (define flow-log-start!
-    (lambda (period-seconds destination)
+    (lambda (period-seconds)
       (set-box! flow-log-stop-requested? #f)
       (set-box! flow-log-stopped? #f)
       (let ((ticks (fxmax 1 (exact (round (/ period-seconds %flow-log-poll-interval))))))
@@ -1106,7 +1101,7 @@
                                    (exact (round (* %flow-log-poll-interval 1000000000)))
                                    0))
                  (wait-ticks (fx+ n 1))))
-             (flow-log-write-entries! (flow-log-drain!) destination)
+             (flow-log-write-entries! (flow-log-drain!))
              (if (unbox flow-log-stop-requested?)
                  (set-box! flow-log-stopped? #t)
                  (lp))))))
