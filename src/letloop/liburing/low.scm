@@ -2036,7 +2036,17 @@
   ;; Continuation machinery
   ;;------------------------------------------------------------
 
-  (define loop-prompt-current #f)
+  ;; Thread-parameter, not a plain define: shards are separate OS
+  ;; threads (see the %loop comment above), so a shared global here
+  ;; would let shard A's returning fiber (in call-with-loop-prompt,
+  ;; below) read shard B's current prompt and invoke a continuation
+  ;; captured on shard B's C stack — Chez raises "attempt to return to
+  ;; stale foreign context" when that happens, and every subsequent
+  ;; fiber return keeps mismatching once one has. loop-abort's read of
+  ;; the same cell has a much smaller race window (no fiber code runs
+  ;; between its read and its jump), which is why only the fiber-return
+  ;; path surfaced this.
+  (define-thread-parameter loop-prompt-current #f)
   (define loop-prompt-singleton '(loop-prompt-singleton))
 
   (define call-with-loop-prompt
@@ -2045,11 +2055,11 @@
           (lambda ()
             (call/1cc
              (lambda (k)
-               (set! loop-prompt-current k)
+               (loop-prompt-current k)
                (call-with-values thunk
                  (lambda out
-                   (let ((prompt loop-prompt-current))
-                     (set! loop-prompt-current #f)
+                   (let ((prompt (loop-prompt-current)))
+                     (loop-prompt-current #f)
                      (cond
                       ;; Still our own prompt: the fiber never
                       ;; suspended, so this frame is the live one and a
@@ -2077,8 +2087,8 @@
     (lambda args
       (call/1cc
        (lambda (k)
-         (let ((prompt loop-prompt-current))
-           (set! loop-prompt-current #f)
+         (let ((prompt (loop-prompt-current)))
+           (loop-prompt-current #f)
            (apply prompt (cons loop-prompt-singleton (cons k args))))))))
 
   (define loop-apply
