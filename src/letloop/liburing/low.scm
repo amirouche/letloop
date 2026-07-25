@@ -105,6 +105,7 @@
 
    ;; prep: file operations
    io-uring-prep-openat
+   io-uring-prep-openat-pointer
    io-uring-prep-openat-direct
    io-uring-prep-open
    io-uring-prep-open-direct
@@ -377,6 +378,10 @@
    ;; race accept against other events instead of always suspending
    ;; the caller until a client arrives
    loop-accept-try loop-accept-block
+
+   ;; close split the same way, for libraries that need close to be an
+   ;; event they can compose rather than an unconditional suspension
+   loop-close-block
    )
 
   (import (chezscheme)
@@ -966,6 +971,21 @@
   (define io-uring-prep-openat
     (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_openat"
                                    (void* int string int unsigned) void)))
+      (lambda (sqe dfd path flags mode)
+        (func sqe dfd path flags mode))))
+
+  ;; Same C entry point as io-uring-prep-openat, but PATH is a raw
+  ;; pointer the caller owns instead of an FFI `string`. Preparing an
+  ;; SQE only *records* the path pointer; the kernel dereferences it at
+  ;; submit time, which — for anything built on the event loop rather
+  ;; than a private submit-and-wait ring — is a later tick entirely. The
+  ;; C copy an FFI `string` argument allocates is freed the moment the
+  ;; prep call returns, so it would be dangling by then; callers of this
+  ;; variant keep the path alive themselves (a locked bytevector, or
+  ;; foreign-alloc'd memory) until the completion arrives.
+  (define io-uring-prep-openat-pointer
+    (let ((func (lazy-foreign-procedure liburing-ffi "io_uring_prep_openat"
+                                   (void* int void* int unsigned) void)))
       (lambda (sqe dfd path flags mode)
         (func sqe dfd path flags mode))))
 
@@ -2230,8 +2250,19 @@
   ;; Async I/O operations
   ;;------------------------------------------------------------
 
-  (define loop-close
-    (lambda (fd)
+  ;; loop-close's teardown and submission, with HANDLER registered
+  ;; against the close's own completion instead of the caller's
+  ;; continuation — for libraries (e.g. (letloop flow)) that must not
+  ;; suspend the calling fiber here, the same split loop-accept-try/
+  ;; loop-accept-block already provides for accept.
+  ;;
+  ;; Nothing below is socket-specific: a file fd simply has no entry in
+  ;; %fd-handlers, %accept-backlog or %active-connections (every lookup
+  ;; defaults to '() and every delete of an absent key is a no-op), and
+  ;; its IORING_OP_ASYNC_CANCEL matches nothing, so it falls straight
+  ;; through to IORING_OP_CLOSE. Regular files need no separate path.
+  (define loop-close-block
+    (lambda (fd handler)
       ;; Resume every coroutine parked on this fd with a synthetic
       ;; failed completion (-ECANCELED), mimicking the CQE drain, so
       ;; each one unlocks its buffers and takes its normal error path
@@ -2239,10 +2270,10 @@
       ;; the cancelled operations find no handler and are dropped.
       (let ((ids (hashtable-ref (%fd-handlers) fd '())))
         (for-each (lambda (id)
-                    (let ((handler (hashtable-ref (loop-handlers (%loop)) id #f)))
+                    (let ((parked (hashtable-ref (loop-handlers (%loop)) id #f)))
                       (hashtable-delete! (loop-handlers (%loop)) id)
-                      (when handler
-                        (loop-spawn (lambda () (handler (fx- 0 ECANCELED)))))))
+                      (when parked
+                        (loop-spawn (lambda () (parked (fx- 0 ECANCELED)))))))
                   ids)
         (hashtable-delete! (%fd-handlers) fd))
       ;; Clients accepted by the multishot but never claimed by
@@ -2263,10 +2294,13 @@
              (id  (loop-alloc-id!)))
         (io-uring-prep-close sqe fd)
         (io-uring-sqe-set-data64 sqe id)
-        (let ((res (loop-abort
-                     (lambda (k)
-                       (hashtable-set! (loop-handlers (%loop)) id k)))))
-          res))))
+        (hashtable-set! (loop-handlers (%loop)) id handler))))
+
+  (define loop-close
+    (lambda (fd)
+      (loop-abort
+       (lambda (k)
+         (loop-close-block fd k)))))
 
   (define loop-accept-client-setup!
     (lambda (client)
