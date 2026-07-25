@@ -788,3 +788,108 @@
   (flow-shard-stop! receiver)
   (sleep (make-time 'time-duration 0 1))
   (fx=? (unbox count) n))
+
+;; FL-10: flow-log. Basic single-shard accumulate-then-drain round
+;; trip — flow-log entries come back in the order they were logged
+;; (flow-log-drain! reverses each box's most-recent-first CAS list, see
+;; there), oldest first.
+(define (~check-flow-010/log-drain-roundtrip)
+  (define entries #f)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-log 'a)
+     (flow-log 'b)
+     (flow-log 'c)
+     (set! entries (flow-log-drain!))
+     (loop-stop)))
+  (loop-run)
+  (equal? (map cdr entries) '(a b c)))
+
+;; Timestamps come from loop-jiffy (the per-tick cached clock), so
+;; entries logged in the same tick can share a timestamp, but the
+;; sequence across an intervening flow-sleep (which crosses ticks)
+;; must never go backwards.
+(define (~check-flow-010/timestamps-non-decreasing)
+  (define entries #f)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-log 'tick-0)
+     (flow-sleep 0.01)
+     (flow-log 'tick-1)
+     (flow-sleep 0.01)
+     (flow-log 'tick-2)
+     (set! entries (flow-log-drain!))
+     (loop-stop)))
+  (loop-run)
+  (let ((ts (map car entries)))
+    (and (fx=? (length ts) 3)
+         (<= (car ts) (cadr ts))
+         (<= (cadr ts) (caddr ts)))))
+
+;; flow-log-start! actually reaches DESTINATION on its own, with no
+;; explicit flow-log-drain! call from the test — proves the dedicated
+;; flush thread runs and drains independently.
+(define (~check-flow-010/start-reaches-destination)
+  (define port (open-output-string))
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-log 'hello)
+     (loop-stop)))
+  (flow-log-start! 0.02 port)
+  (loop-run)
+  (let wait ((n 0))
+    (unless (or (fx>? (string-length (get-output-string port)) 0)
+                (fx>=? n 500))
+      (sleep (make-time 'time-duration 10000000 0))
+      (wait (fx+ n 1))))
+  (flow-log-stop!)
+  (fx>? (string-length (get-output-string port)) 0))
+
+;; flow-log-stop! performs one final drain-and-flush before returning,
+;; so an entry logged just before stop is never lost even when the
+;; flush period itself is far longer than the test could wait for.
+(define (~check-flow-010/stop-flushes-remaining)
+  (define port (open-output-string))
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-log 'final-entry)
+     (loop-stop)))
+  (flow-log-start! 1000.0 port)
+  (loop-run)
+  (flow-log-stop!)
+  (let* ((s (get-output-string port))
+         (entry (read (open-input-string s))))
+    (and (pair? entry) (eq? (cdr entry) 'final-entry))))
+
+;; Genuine cross-OS-thread test, same spirit as FL-7: two real shards
+;; each log one entry, and a THIRD thread entirely (the test body
+;; itself, never a shard) drains the shared registry and sees both —
+;; proving registration and draining are race-free across real
+;; threads, not just same-thread fiber interleavings.
+(define (~check-flow-010/two-shard-cross-thread-drain)
+  (define done-a (box #f))
+  (define done-b (box #f))
+  (define shard-a
+    (flow-shard-spawn
+     (lambda ()
+       (flow-log 'from-a)
+       (set-box! done-a #t))))
+  (define shard-b
+    (flow-shard-spawn
+     (lambda ()
+       (flow-log 'from-b)
+       (set-box! done-b #t))))
+  (let wait ((n 0))
+    (unless (or (and (unbox done-a) (unbox done-b)) (fx>=? n 200))
+      (sleep (make-time 'time-duration 10000000 0))
+      (wait (fx+ n 1))))
+  (flow-shard-stop! shard-a)
+  (flow-shard-stop! shard-b)
+  (sleep (make-time 'time-duration 0 1))
+  (let* ((entries (flow-log-drain!))
+         (tags (map cdr entries)))
+    (and (memq 'from-a tags) (memq 'from-b tags))))
