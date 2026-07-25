@@ -2285,19 +2285,37 @@
   ;; Async I/O operations
   ;;------------------------------------------------------------
 
-  ;; loop-close's teardown and submission, with HANDLER registered
-  ;; against the close's own completion instead of the caller's
-  ;; continuation — for libraries (e.g. (letloop flow)) that must not
-  ;; suspend the calling fiber here, the same split loop-accept-try/
-  ;; loop-accept-block already provides for accept.
+  ;; loop-close's teardown and submission, shared by loop-close (which
+  ;; parks the caller's continuation on the close CQE) and
+  ;; loop-close-block (which registers a supplied handler instead, for
+  ;; libraries — e.g. (letloop flow) — that must not suspend the
+  ;; calling fiber here), the same split loop-accept-try/
+  ;; loop-accept-block already provides for accept. Returns the close
+  ;; op's id; the caller registers its handler/continuation against it
+  ;; as its very next step — safe, because nothing here is submitted
+  ;; until the next loop tick and no drain can run in between.
+  ;;
+  ;; Deliberately NOT called from inside loop-abort's callback:
+  ;; everything below runs on the *caller's* stack, so a loop-get-sqe
+  ;; failure (submission queue full even after a flush — this preps up
+  ;; to 2+N SQEs) raises into the caller, catchable by the established
+  ;; guard-wrapped-loop-close error-path idiom (tls/uring, postgresql).
+  ;; Run under loop-abort it would instead be swallowed by loop-apply's
+  ;; catch-all guard, leaving the fiber parked forever with no error.
   ;;
   ;; Nothing below is socket-specific: a file fd simply has no entry in
   ;; %fd-handlers, %accept-backlog or %active-connections (every lookup
-  ;; defaults to '() and every delete of an absent key is a no-op), and
-  ;; its IORING_OP_ASYNC_CANCEL matches nothing, so it falls straight
-  ;; through to IORING_OP_CLOSE. Regular files need no separate path.
-  (define loop-close-block
-    (lambda (fd handler)
+  ;; defaults to '() and every delete of an absent key is a no-op).
+  ;; Its IORING_OP_ASYNC_CANCEL is not necessarily a no-op, though: it
+  ;; also matches file ops other fibers still have in flight on this fd
+  ;; ((letloop flow)'s flow-read-at/flow-write-at). Those register in
+  ;; loop-handlers only, never %fd-handlers, so the synthetic-resume
+  ;; pass below skips them — their -ECANCELED CQEs still find their
+  ;; handlers, which unlock their buffers and resume their parked
+  ;; fibers through the normal error path. Either way regular files
+  ;; need no separate teardown.
+  (define loop-close-prep!
+    (lambda (fd)
       ;; Resume every coroutine parked on this fd with a synthetic
       ;; failed completion (-ECANCELED), mimicking the CQE drain, so
       ;; each one unlocks its buffers and takes its normal error path
@@ -2329,13 +2347,22 @@
              (id  (loop-alloc-id!)))
         (io-uring-prep-close sqe fd)
         (io-uring-sqe-set-data64 sqe id)
+        id)))
+
+  (define loop-close-block
+    (lambda (fd handler)
+      (let ((id (loop-close-prep! fd)))
         (hashtable-set! (loop-handlers (%loop)) id handler))))
 
+  ;; Teardown and prep run on the caller's stack, before the abort —
+  ;; see loop-close-prep!'s comment: an SQ-full error must raise here,
+  ;; into the caller, not vanish inside loop-apply's guard.
   (define loop-close
     (lambda (fd)
-      (loop-abort
-       (lambda (k)
-         (loop-close-block fd k)))))
+      (let ((id (loop-close-prep! fd)))
+        (loop-abort
+         (lambda (k)
+           (hashtable-set! (loop-handlers (%loop)) id k))))))
 
   (define loop-accept-client-setup!
     (lambda (client)

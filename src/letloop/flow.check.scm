@@ -548,6 +548,131 @@
   (loop-run)
   (eq? result #f))
 
+;; flow-open on the losing side of a choice: the loser-with-success
+;; path in flow-open's completion handler must close the fd nobody now
+;; owns (detected via resume's #f "did I win" return) rather than leak
+;; it. Which base wins each round is genuinely racy (a 0-second
+;; timeout against a page-cache openat), so run many rounds and assert
+;; the invariant that holds either way: the process's open-fd count is
+;; back at its baseline once the dust settles — a leaked orphan would
+;; grow it by one per round the timeout won.
+(define (~check-flow-009/open-loses-choice-no-fd-leak)
+  (define path (flow-check-path "flow-009-open-choice.bin"))
+  (define rounds 50)
+  (define failures 0)
+  (define baseline #f)
+  (define final #f)
+  (flow-check-remove! path)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-check-create! path (flow-check-bytes 64))
+     (set! baseline (length (directory-list "/proc/self/fd")))
+     (let round ((n 0))
+       (unless (fx=? n rounds)
+         (let ((r (flow-perform
+                   (flow-choice (flow-open path O-RDONLY 0)
+                                (flow-timeout 0.0)))))
+           (cond
+            ((fixnum? r) (flow-perform (flow-close r))) ;; open won: ours to close
+            ((eq? r (void)) (void))                     ;; timeout won: orphan path
+            (else (set! failures (fx+ failures 1)))))
+         (round (fx+ n 1))))
+     ;; give straggler orphan-close CQEs from the last rounds a tick
+     ;; or two to land before counting
+     (flow-sleep 0.05)
+     (set! final (length (directory-list "/proc/self/fd")))
+     (loop-stop)))
+  (loop-run)
+  (flow-check-remove! path)
+  (and (fxzero? failures)
+       (fixnum? baseline)
+       (eqv? final baseline)))
+
+;; flow-close composed under flow-choice: per its committed-at-block
+;; caveat, once the choice reaches the block phase the close happens
+;; whichever base wins — so afterward the fd must actually be closed,
+;; and a probe read on it must yield #f (EBADF), never data. Nothing
+;; opens another fd between the close and the probe, so the descriptor
+;; number cannot have been reused out from under the test.
+(define (~check-flow-009/close-under-choice-fd-actually-closed)
+  (define path (flow-check-path "flow-009-close-choice.bin"))
+  (define created #f)
+  (define chosen 'not-set)
+  (define after 'not-set)
+  (flow-check-remove! path)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (set! created (flow-check-create! path (flow-check-bytes 64)))
+     (let ((fd (flow-perform (flow-open path O-RDONLY 0))))
+       (set! chosen (flow-perform
+                     (flow-choice (flow-close fd) (flow-timeout 1.0))))
+       ;; in the unlikely event the timeout won, the committed close's
+       ;; CQE still needs a tick to land before the probe
+       (flow-sleep 0.02)
+       (set! after (flow-perform (flow-read-at fd 0 16))))
+     (loop-stop)))
+  (loop-run)
+  (flow-check-remove! path)
+  (and created
+       (or (eqv? chosen 0) (eq? chosen (void)))
+       (eq? after #f)))
+
+;; flow-close while another fiber's flow-read-at is parked on the same
+;; fd, both submitted in the same tick: exercises loop-close-block's
+;; IORING_OP_ASYNC_CANCEL(CANCEL_ALL) actually matching an in-flight
+;; file op. The read's handler lives in loop-handlers only, never
+;; %fd-handlers, so the synthetic-resume pass skips it — the real CQE
+;; (data, -ECANCELED or -EBADF depending on how the kernel orders the
+;; three ops) must come back, unlock the buffer and resume the parked
+;; fiber. The assertions are liveness and shape: the reader fiber
+;; resumes (not stranded) with either the payload or #f, and the close
+;; itself succeeds.
+(define (~check-flow-009/close-while-read-in-flight)
+  (define path (flow-check-path "flow-009-close-inflight.bin"))
+  (define payload (flow-check-bytes 512))
+  (define created #f)
+  (define read-result 'not-set)
+  (define read-done #f)
+  (define close-result 'not-set)
+  (define close-done #f)
+  (flow-check-remove! path)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (set! created (flow-check-create! path payload))
+     (let ((fd (flow-perform (flow-open path O-RDONLY 0)))
+           ;; Both helper fibers park on this channel (nobody ever
+           ;; puts) once they are done, instead of returning.
+           (parked (make-flow-channel)))
+       ;; loop-spawn is LIFO within a tick: spawn the closer first so
+       ;; the reader's block runs first next tick and its SQE is
+       ;; already prepped (handler parked) when loop-close-block preps
+       ;; the cancel + close right after it.
+       (loop-spawn
+        (lambda ()
+          (set! close-result (flow-perform (flow-close fd)))
+          (set! close-done #t)
+          (flow-perform (flow-get parked))))
+       (loop-spawn
+        (lambda ()
+          (set! read-result (flow-perform (flow-read-at fd 0 512)))
+          (set! read-done #t)
+          (flow-perform (flow-get parked))))
+       (let wait ((n 0))
+         (flow-sleep 0.01)
+         (if (or (and read-done close-done) (fx>? n 500))
+             (loop-stop)
+             (wait (fx+ n 1)))))))
+  (loop-run)
+  (flow-check-remove! path)
+  (and created
+       read-done
+       close-done
+       (eqv? close-result 0)
+       (or (equal? read-result payload) (eq? read-result #f))))
+
 ;; FL-7: a channel shared between two genuinely separate OS threads
 ;; (shards), each with its own ring — not the same-thread scheduling
 ;; tricks (spawn order, loop-run-once tick counts) FL-1..FL-6's checks

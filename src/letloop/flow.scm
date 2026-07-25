@@ -61,7 +61,10 @@
           ~check-flow-009/chunked-read-until-eof
           ~check-flow-009/nonzero-offset
           ~check-flow-009/read-or-timeout-leaves-fd-usable
-          ~check-flow-009/open-nonexistent-fails)
+          ~check-flow-009/open-nonexistent-fails
+          ~check-flow-009/open-loses-choice-no-fd-leak
+          ~check-flow-009/close-under-choice-fd-actually-closed
+          ~check-flow-009/close-while-read-in-flight)
 
   (import (chezscheme)
           (letloop r999)
@@ -655,6 +658,8 @@
   ;; non-negative fixnum, a bytevector, or 'eof.
 
   ;; open(2) flags, so callers need not hardcode the numeric values.
+  ;; O-APPEND caveat: Linux pwrite(2) — and therefore flow-write-at —
+  ;; ignores the offset on an O_APPEND fd and appends regardless.
   (define O-RDONLY 0)
   (define O-WRONLY 1)
   (define O-RDWR   2)
@@ -712,9 +717,19 @@
                                         (unlock-object cpath)
                                         (let ((won (resume (and (fx>=? res 0) res))))
                                           (when (and (not won) (fx>=? res 0))
-                                            (let ((csqe (loop-get-sqe ring)))
-                                              (io-uring-prep-close csqe res)
-                                              (io-uring-sqe-set-data64 csqe (loop-alloc-id!)))))))
+                                            ;; This runs inside the CQE drain, under
+                                            ;; loop-apply's catch-all guard: if the
+                                            ;; ring is so loaded that loop-get-sqe
+                                            ;; raises even after its flush-retry, a
+                                            ;; bare raise would be silently swallowed
+                                            ;; and the orphan fd leaked. Retry next
+                                            ;; tick instead — by then the tick's
+                                            ;; submit has drained the queue.
+                                            (let retry ()
+                                              (guard (ex (else (loop-spawn retry)))
+                                                (let ((csqe (loop-get-sqe ring)))
+                                                  (io-uring-prep-close csqe res)
+                                                  (io-uring-sqe-set-data64 csqe (loop-alloc-id!)))))))))
                       (register-cancel!
                        (lambda ()
                          (let ((csqe (loop-get-sqe ring)))
@@ -730,12 +745,23 @@
   ;; the last chunk of a file is normally short. Callers advance their
   ;; own offset by the length actually returned.
   ;;
+  ;; COUNT must be >= 1: read(2) returns 0 for a zero-length buffer,
+  ;; indistinguishable from end-of-file, so a count of 0 would yield a
+  ;; spurious 'eof mid-file — rejected here, at event-construction
+  ;; time on the caller's own stack, where the raise is loud (a raise
+  ;; from inside block would be swallowed by the loop's guard and
+  ;; strand the fiber).
+  ;;
   ;; register-cancel! as in flow-read: an abandoned read has consumed
   ;; nothing — and for a regular file, positioned reads consume nothing
   ;; even when they do run, so a losing sibling leaves the fd exactly
   ;; where it was.
   (define flow-read-at
     (lambda (fd offset count)
+      (unless (and (fixnum? count) (fx>=? count 1))
+        (error 'flow-read-at "count must be a positive fixnum" count))
+      (unless (and (fixnum? offset) (fx>=? offset 0))
+        (error 'flow-read-at "offset must be a non-negative fixnum" offset))
       (make-flow% 'base #f
                   (lambda (x) x)
                   (lambda () #f)
@@ -775,6 +801,11 @@
   ;; harmless no-op in that case.
   (define flow-write-at
     (lambda (fd offset bv)
+      ;; Same construction-time validation as flow-read-at: a negative
+      ;; offset would only blow up later, at prep time inside the
+      ;; loop's swallow-all guard, stranding the fiber silently.
+      (unless (and (fixnum? offset) (fx>=? offset 0))
+        (error 'flow-write-at "offset must be a non-negative fixnum" offset))
       (make-flow% 'base #f
                   (lambda (x) x)
                   (lambda () #f)
@@ -798,11 +829,24 @@
   ;; the completion handler supplied rather than the caller's
   ;; continuation — none of which is socket-specific, so file fds need
   ;; no separate teardown. A fiber that is not composing close with
-  ;; anything can equally well call loop-close directly; this is the
-  ;; form that composes under flow-choice.
+  ;; anything can equally well call loop-close directly.
   ;;
   ;; No register-cancel!: a close in flight must run to completion or
   ;; the fd leaks.
+  ;;
+  ;; Caveat under flow-choice — sharper than flow-write's analogous
+  ;; committed-at-block semantics: the choice's result does NOT tell
+  ;; you whether the close happened. If a sibling base is already
+  ;; ready at poll time, block never runs and the fd is still open; if
+  ;; the choice reaches the block phase, the close is committed right
+  ;; there even when a sibling then wins, and the winning value is the
+  ;; sibling's either way. So never "retry" flow-close after losing a
+  ;; choice: the descriptor may already be closed and its number
+  ;; reused, and the retry would close a stranger's fd. Only compose
+  ;; flow-close into a choice when the caller treats fd as dead the
+  ;; moment the choice is performed, whatever the outcome — otherwise
+  ;; perform it alone (or call loop-close), where the result is
+  ;; unambiguous.
   (define flow-close
     (lambda (fd)
       (make-flow% 'base #f
