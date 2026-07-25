@@ -382,6 +382,11 @@
    ;; close split the same way, for libraries that need close to be an
    ;; event they can compose rather than an unconditional suspension
    loop-close-block
+
+   ~check-low-000/resumed-return-does-not-rerun-sibling
+   ~check-low-001/two-suspends-then-return
+   ~check-low-002/non-suspending-fibers-run-once
+   ~check-low-003/resumed-return-does-not-rerun-late-spawn
    )
 
   (import (chezscheme)
@@ -2041,7 +2046,27 @@
             (call/1cc
              (lambda (k)
                (set! loop-prompt-current k)
-               (thunk))))
+               (call-with-values thunk
+                 (lambda out
+                   (let ((prompt loop-prompt-current))
+                     (set! loop-prompt-current #f)
+                     (cond
+                      ;; Still our own prompt: the fiber never
+                      ;; suspended, so this frame is the live one and a
+                      ;; plain return lands exactly where invoking k
+                      ;; would. Keep the cheap path — and keep the
+                      ;; one-shot k unshot — for the common case.
+                      ((eq? prompt k) (apply values out))
+                      ;; The fiber suspended at some point and is being
+                      ;; resumed by another loop-apply: hand the values
+                      ;; to *that* prompt rather than falling into this
+                      ;; frame's stale continuation.
+                      (prompt (apply prompt out))
+                      ;; No prompt at all (should not happen: every
+                      ;; fiber body runs under loop-apply). Degrade to
+                      ;; the pre-fix behaviour rather than erroring
+                      ;; inside the scheduler.
+                      (else (apply values out)))))))))
         (lambda out
           (cond
            ((and (pair? out) (eq? (car out) loop-prompt-singleton))
@@ -2478,5 +2503,7 @@
         (loop-abort
           (lambda (k)
             (hashtable-set! (loop-handlers (%loop)) id k))))))
+
+  (include "letloop/liburing/low.check.scm")
 
   ) ;; end library
