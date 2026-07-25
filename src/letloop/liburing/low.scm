@@ -369,6 +369,13 @@
    loop-current loop-ring loop-handlers loop-alloc-id! loop-abort
    loop-running? loop-active-connections loop-ring-fd loop-get-sqe
 
+   ;; per-tick cached timestamp: refreshed once per loop-run-once
+   ;; iteration (one jiffy-current syscall per tick) rather than once
+   ;; per caller, for libraries (e.g. (letloop flow)'s flow-log) that
+   ;; want a "when, roughly" timestamp far more often than once per
+   ;; tick
+   loop-jiffy
+
    ;; async I/O operations
    loop-connect loop-read loop-write loop-close loop-sleep
    loop-accept loop-tcp-serve loop-poll-wait
@@ -2010,6 +2017,15 @@
     (lambda ()
       (%loop)))
 
+  ;; The current loop's cached per-tick timestamp -- refreshed once per
+  ;; loop-run-once iteration (see there), not on every call. One real
+  ;; jiffy-current syscall per event-loop tick instead of one per
+  ;; caller, for anything (e.g. flow-log) that wants to timestamp far
+  ;; more often than once per tick.
+  (define loop-jiffy
+    (lambda ()
+      (%loop-jiffy (%loop))))
+
   ;; Byte offset of struct io_uring's `int ring_fd` field: sizeof
   ;; struct io_uring_sq (104) + struct io_uring_cq (88) + `unsigned
   ;; flags` (4) = 196 on x86-64/aarch64, cross-checked against
@@ -2113,6 +2129,11 @@
 
   (define loop-run-once
     (lambda ()
+      ;; Refresh the cached per-tick timestamp before any thunk or
+      ;; handler runs this iteration -- one jiffy-current syscall per
+      ;; tick, not one per loop-jiffy caller (see loop-jiffy above).
+      (%loop-jiffy! (%loop) (jiffy-current))
+
       (let ((thunks (loop-thunks (%loop))))
         (loop-thunks! (%loop) '())
         (for-each (lambda (thunk) (loop-apply thunk)) thunks))

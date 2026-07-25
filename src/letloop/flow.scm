@@ -30,6 +30,8 @@
           flow-current-shard flow-shard?
           flow-shard-spawn flow-shard-post! flow-shard-stop!
 
+          flow-log flow-log-start! flow-log-stop! flow-log-drain!
+
           ~check-flow-000/always-ready
           ~check-flow-000/wrap-order
           ~check-flow-000/guard
@@ -64,7 +66,13 @@
           ~check-flow-009/open-nonexistent-fails
           ~check-flow-009/open-loses-choice-no-fd-leak
           ~check-flow-009/close-under-choice-fd-actually-closed
-          ~check-flow-009/close-while-read-in-flight)
+          ~check-flow-009/close-while-read-in-flight
+
+          ~check-flow-010/log-drain-roundtrip
+          ~check-flow-010/timestamps-non-decreasing
+          ~check-flow-010/start-reaches-destination
+          ~check-flow-010/stop-flushes-remaining
+          ~check-flow-010/two-shard-cross-thread-drain)
 
   (import (chezscheme)
           (letloop r999)
@@ -964,5 +972,155 @@
   (define flow-spawn loop-spawn)
   (define flow-run loop-run)
   (define flow-stop loop-stop)
+
+  ;;------------------------------------------------------------
+  ;; flow-log: structured runtime logging
+  ;;------------------------------------------------------------
+  ;;
+  ;; Every entry is (cons timestamp sexp), TIMESTAMP coming from
+  ;; loop-jiffy -- the event loop's per-tick cached jiffy (one real
+  ;; clock syscall per tick, see low.scm), never a fresh jiffy-current
+  ;; syscall per flow-log call.
+  ;;
+  ;; Accumulation reuses flow-box-cons!/flow-box-drain!, the same
+  ;; lock-free primitive already backing channel put/get queues and
+  ;; per-shard mailboxes above -- deliberately NOT flow-shard-post!/
+  ;; msg_ring: routing every flow-log call through the cross-shard
+  ;; wakeup path would add ring pressure under logging load, which is
+  ;; exactly what a dedicated CAS box avoids.
+
+  ;; Registry of every OS thread's own log box. A single process-wide
+  ;; box -- not a thread-parameter, since every thread that logs pushes
+  ;; ITS OWN box into this ONE shared box -- accumulated with
+  ;; flow-box-cons!, so concurrent registration from any number of
+  ;; shards never races and never drops a registration.
+  (define flow-log-registry (box '()))
+
+  ;; This OS thread's own log accumulator. A thread-parameter, per the
+  ;; established per-shard-state pattern (see low.scm's %loop and
+  ;; friends, and flow-current-shard above): a plain global here would
+  ;; let two shards clobber each other's log entries, exactly the
+  ;; class of cross-shard corruption bug this codebase already hit
+  ;; once with per-shard state that was not a thread-parameter.
+  (define flow-log-box (make-thread-parameter #f))
+
+  ;; Lazily create and register this thread's log box on first
+  ;; flow-log call, so flow-log works from any OS thread -- a real
+  ;; flow-shard-spawn'd shard or a bare thread -- with no separate
+  ;; explicit setup step. Only this thread ever writes its OWN
+  ;; flow-log-box parameter value, so the check-then-set here needs no
+  ;; CAS of its own; flow-box-cons! below is what makes the registry
+  ;; push itself safe against concurrent registration from other
+  ;; threads.
+  (define flow-log-ensure-box!
+    (lambda ()
+      (or (flow-log-box)
+          (let ((b (box '())))
+            (flow-log-box b)
+            (flow-box-cons! flow-log-registry b)
+            b))))
+
+  ;; Accumulate SEXP into this thread's log box, timestamped with the
+  ;; current tick's cached loop-jiffy.
+  (define flow-log
+    (lambda (sexp)
+      (flow-box-cons! (flow-log-ensure-box!) (cons (loop-jiffy) sexp))))
+
+  ;; Drain the registry and every registered box, returning every
+  ;; pending entry: oldest-first within each shard's own box, boxes
+  ;; concatenated in registry order (not globally timestamp-sorted --
+  ;; a caller wanting strict cross-shard temporal order can sort the
+  ;; result itself).
+  ;;
+  ;; flow-box-drain! on the registry is itself race-free against
+  ;; concurrent registrations (a new shard registering mid-drain either
+  ;; lands in the drained snapshot or is still there afterward -- see
+  ;; flow-box-cons!/flow-box-drain!'s CAS retry above), but draining it
+  ;; empties it as a side effect; since registration happens once per
+  ;; thread for that thread's whole lifetime (not a one-shot queue),
+  ;; every drained box is pushed straight back in below so it remains
+  ;; discoverable by the next drain.
+  (define flow-log-drain!
+    (lambda ()
+      (let ((boxes (flow-box-drain! flow-log-registry)))
+        (for-each (lambda (b) (flow-box-cons! flow-log-registry b)) boxes)
+        (apply append (map (lambda (b) (reverse (flow-box-drain! b))) boxes)))))
+
+  ;; DESTINATION is either an output port (entries written via `write`,
+  ;; one per line, then the port flushed every cycle) or a file path
+  ;; string (opened in append mode, written, and closed every cycle).
+  ;; Plain synchronous Chez port I/O rather than flow-open/
+  ;; flow-write-at: this thread is not on the async event-loop's
+  ;; critical path -- it is not even necessarily running a loop at all,
+  ;; since flow-log must work from bare threads too -- so there is
+  ;; nothing to gain from routing a periodic background flush through
+  ;; io_uring, and doing so would force this thread to also
+  ;; loop-new/loop-run its own ring for no benefit.
+  (define flow-log-write-entries!
+    (lambda (entries destination)
+      (unless (null? entries)
+        (if (string? destination)
+            (call-with-output-file destination
+              (lambda (port)
+                (for-each (lambda (entry) (write entry port) (newline port))
+                          entries))
+              'append)
+            (begin
+              (for-each (lambda (entry) (write entry destination) (newline destination))
+                        entries)
+              (flush-output-port destination))))))
+
+  ;; flow-log-start!/flow-log-stop! state: exactly one dedicated flush
+  ;; thread, not one per shard (a per-shard flush thread would defeat
+  ;; the point of a single drain-and-flush cadence). stopped? starts #t
+  ;; ("no flush thread currently running") so a flow-log-stop! with no
+  ;; matching flow-log-start! returns immediately instead of hanging.
+  (define flow-log-stop-requested? (box #f))
+  (define flow-log-stopped? (box #t))
+
+  ;; Granularity at which the flush thread re-checks
+  ;; flow-log-stop-requested?, independent of PERIOD-SECONDS -- so
+  ;; flow-log-stop! is noticed promptly even when the flush period
+  ;; itself is long, rather than only at the next whole period
+  ;; boundary.
+  (define %flow-log-poll-interval 0.01)
+
+  ;; Spawn exactly one dedicated OS thread that, every PERIOD-SECONDS,
+  ;; drains every registered shard's log box (via flow-log-drain!) and
+  ;; flushes the merged result to DESTINATION. Calling this again
+  ;; before flow-log-stop! spawns a second, competing flush thread --
+  ;; draining itself stays correct either way (flow-box-drain! never
+  ;; double-delivers the same entry), but running two at once is not a
+  ;; supported configuration.
+  (define flow-log-start!
+    (lambda (period-seconds destination)
+      (set-box! flow-log-stop-requested? #f)
+      (set-box! flow-log-stopped? #f)
+      (let ((ticks (fxmax 1 (exact (round (/ period-seconds %flow-log-poll-interval))))))
+        (fork-thread
+         (lambda ()
+           (let lp ()
+             (let wait-ticks ((n 0))
+               (unless (or (unbox flow-log-stop-requested?) (fx>=? n ticks))
+                 (sleep (make-time 'time-duration
+                                   (exact (round (* %flow-log-poll-interval 1000000000)))
+                                   0))
+                 (wait-ticks (fx+ n 1))))
+             (flow-log-write-entries! (flow-log-drain!) destination)
+             (if (unbox flow-log-stop-requested?)
+                 (set-box! flow-log-stopped? #t)
+                 (lp))))))
+      (void)))
+
+  ;; Signal the flush thread to stop and block the CALLER until it has
+  ;; performed one final drain-and-flush and actually exited its loop,
+  ;; so nothing logged before the stop request is lost on shutdown.
+  (define flow-log-stop!
+    (lambda ()
+      (set-box! flow-log-stop-requested? #t)
+      (let wait ()
+        (unless (unbox flow-log-stopped?)
+          (sleep (make-time 'time-duration 10000000 0))
+          (wait)))))
 
   (include "letloop/flow.check.scm"))
