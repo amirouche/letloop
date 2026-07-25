@@ -348,6 +348,206 @@
   (and (equal? (reverse echoed) (list (string->utf8 "one") (string->utf8 "two")))
        closed-on-timeout))
 
+;;------------------------------------------------------------
+;; File I/O (flow-open / flow-read-at / flow-write-at / flow-close)
+;;------------------------------------------------------------
+
+;; Under /tmp/letloop so `make clean` sweeps anything a crashed check
+;; leaves behind; each check also deletes its own file on the way out.
+(define %flow-check-directory "/tmp/letloop")
+
+(define (flow-check-path name)
+  (unless (file-exists? %flow-check-directory)
+    (mkdir %flow-check-directory))
+  (string-append %flow-check-directory "/" name))
+
+(define (flow-check-remove! path)
+  (when (file-exists? path)
+    (delete-file path)))
+
+;; Deterministic filler, so a mis-offset read is caught by content and
+;; not merely by length.
+(define (flow-check-bytes size)
+  (let ((bv (make-bytevector size)))
+    (let loop ((i 0))
+      (if (fx=? i size)
+          bv
+          (begin (bytevector-u8-set! bv i (fxmod (fx* i 7) 251))
+                 (loop (fx+ i 1)))))))
+
+(define (flow-check-concatenate bvs)
+  (let ((out (make-bytevector (apply + (map bytevector-length bvs)))))
+    (let loop ((bvs bvs) (offset 0))
+      (if (null? bvs)
+          out
+          (let ((n (bytevector-length (car bvs))))
+            (bytevector-copy! (car bvs) 0 out offset n)
+            (loop (cdr bvs) (fx+ offset n)))))))
+
+;; flow-write-at reports what it actually wrote rather than looping, so
+;; a caller that wants "all of it" writes the loop itself — as here.
+(define (flow-check-write-all fd offset bv)
+  (let loop ((offset offset) (bv bv))
+    (let ((n (flow-perform (flow-write-at fd offset bv))))
+      (cond
+       ((not n) #f)
+       ((fx=? n (bytevector-length bv)) #t)
+       (else (loop (fx+ offset n) (subbytevector bv n)))))))
+
+(define (flow-check-create! path bv)
+  (let ((fd (flow-perform
+             (flow-open path (fxior O-WRONLY O-CREAT O-TRUNC) #o600))))
+    (and fd
+         (let ((ok (flow-check-write-all fd 0 bv)))
+           (flow-perform (flow-close fd))
+           ok))))
+
+;; Round trip through a real file: create + write + close, then reopen
+;; read-only and read the whole thing back in one call.
+(define (~check-flow-009/file-write-read-roundtrip)
+  (define path (flow-check-path "flow-009-roundtrip.bin"))
+  (define payload (string->utf8 "the quick brown fox jumps over the lazy dog"))
+  (define written #f)
+  (define result #f)
+  (flow-check-remove! path)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (let ((fd (flow-perform
+                (flow-open path (fxior O-WRONLY O-CREAT O-TRUNC) #o600))))
+       (set! written (flow-perform (flow-write-at fd 0 payload)))
+       (flow-perform (flow-close fd)))
+     (let ((fd (flow-perform (flow-open path O-RDONLY 0))))
+       (set! result (flow-perform (flow-read-at fd 0 65536)))
+       (flow-perform (flow-close fd)))
+     (loop-stop)))
+  (loop-run)
+  (flow-check-remove! path)
+  (and (eqv? written (bytevector-length payload))
+       (equal? result payload)))
+
+;; A file deliberately larger than the chunk size and not a multiple of
+;; it: the loop must see two full chunks, one short chunk, and then
+;; 'eof — the caller tracking its own offset the whole way, since these
+;; primitives keep no cursor.
+(define (~check-flow-009/chunked-read-until-eof)
+  (define path (flow-check-path "flow-009-chunked.bin"))
+  (define chunk 4096)
+  (define payload (flow-check-bytes 10000))
+  (define created #f)
+  (define pieces '())
+  (define saw-eof #f)
+  (flow-check-remove! path)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (set! created (flow-check-create! path payload))
+     (let ((fd (flow-perform (flow-open path O-RDONLY 0))))
+       (let read-loop ((offset 0))
+         (let ((piece (flow-perform (flow-read-at fd offset chunk))))
+           (cond
+            ((eq? piece 'eof) (set! saw-eof #t))
+            ((not piece) (void))       ;; error: fall through, check fails
+            (else
+             (set! pieces (cons piece pieces))
+             (read-loop (fx+ offset (bytevector-length piece)))))))
+       (flow-perform (flow-close fd)))
+     (loop-stop)))
+  (loop-run)
+  (flow-check-remove! path)
+  (let ((pieces (reverse pieces)))
+    (and created
+         saw-eof
+         (fx=? (length pieces) 3)                       ;; 4096 + 4096 + 1808
+         (fx=? (bytevector-length (list-ref pieces 2)) 1808)
+         (equal? (flow-check-concatenate pieces) payload))))
+
+;; Neither the write nor the read starts at 0: the marker must land at
+;; exactly OFFSET (the head of the file untouched), and reading it back
+;; from OFFSET must return it — an offset silently ignored would fail
+;; both halves.
+(define (~check-flow-009/nonzero-offset)
+  (define path (flow-check-path "flow-009-offset.bin"))
+  (define offset 4000)
+  (define payload (flow-check-bytes 8192))
+  (define marker (string->utf8 "MARKER-AT-4000"))
+  (define created #f)
+  (define patched #f)
+  (define read-back #f)
+  (define head #f)
+  (flow-check-remove! path)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (set! created (flow-check-create! path payload))
+     (let ((fd (flow-perform (flow-open path O-RDWR 0))))
+       (set! patched (flow-perform (flow-write-at fd offset marker)))
+       (set! read-back (flow-perform
+                        (flow-read-at fd offset (bytevector-length marker))))
+       (set! head (flow-perform (flow-read-at fd 0 16)))
+       (flow-perform (flow-close fd)))
+     (loop-stop)))
+  (loop-run)
+  (flow-check-remove! path)
+  (and created
+       (eqv? patched (bytevector-length marker))
+       (equal? read-back marker)
+       (equal? head (subbytevector payload 0 16))))
+
+;; The file-fd counterpart of ~check-flow-006/read-or-timeout-leaves-fd-
+;; usable. A regular-file read cannot be made to hang the way a silent
+;; socket can, so which base wins is genuinely racy here (a 0-second
+;; timeout against an already-satisfiable read) and neither outcome is
+;; asserted; what is asserted is the part that matters — after the
+;; choice resolves, whichever way it went, a plain flow-read-at on the
+;; same fd still returns the right bytes, so a losing/cancelled read
+;; leaves neither the fd nor the loop's handler table in a half-
+;; submitted state.
+(define (~check-flow-009/read-or-timeout-leaves-fd-usable)
+  (define path (flow-check-path "flow-009-choice.bin"))
+  (define payload (flow-check-bytes 512))
+  (define created #f)
+  (define slow #f)
+  (define racy #f)
+  (define after #f)
+  (flow-check-remove! path)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (set! created (flow-check-create! path payload))
+     (let ((fd (flow-perform (flow-open path O-RDONLY 0))))
+       ;; a read that cannot lose: 1s is forever next to a 512-byte
+       ;; read off the page cache
+       (set! slow (flow-perform
+                   (flow-choice (flow-read-at fd 0 512) (flow-timeout 1.0))))
+       ;; a read that may well lose
+       (set! racy (flow-perform
+                   (flow-choice (flow-read-at fd 0 512) (flow-timeout 0.0))))
+       (set! after (flow-perform (flow-read-at fd 0 512)))
+       (flow-perform (flow-close fd)))
+     (loop-stop)))
+  (loop-run)
+  (flow-check-remove! path)
+  (and created
+       (equal? slow payload)
+       (or (equal? racy payload) (eq? racy (void)))
+       (equal? after payload)))
+
+;; Opening a missing path without O-CREAT must yield #f — the same
+;; shape flow-read/flow-write use for failure — rather than hanging or
+;; handing back a negative "fd" that would then be used as one.
+(define (~check-flow-009/open-nonexistent-fails)
+  (define path (flow-check-path "flow-009-does-not-exist.bin"))
+  (define result 'not-set)
+  (flow-check-remove! path)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (set! result (flow-perform (flow-open path O-RDONLY 0)))
+     (loop-stop)))
+  (loop-run)
+  (eq? result #f))
+
 ;; FL-7: a channel shared between two genuinely separate OS threads
 ;; (shards), each with its own ring — not the same-thread scheduling
 ;; tricks (spawn order, loop-run-once tick counts) FL-1..FL-6's checks

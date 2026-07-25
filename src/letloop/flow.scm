@@ -22,6 +22,9 @@
 
           flow-accept flow-read flow-write
 
+          flow-open flow-read-at flow-write-at flow-close
+          O-RDONLY O-WRONLY O-RDWR O-CREAT O-TRUNC O-APPEND
+
           flow-spawn flow-run flow-stop
 
           flow-current-shard flow-shard?
@@ -52,7 +55,13 @@
 
           ~check-flow-007/two-shard-channel-rendezvous
           ~check-flow-007/stress-n-shards-m-messages
-          ~check-flow-008/shard-post-sqe-ring-overflow)
+          ~check-flow-008/shard-post-sqe-ring-overflow
+
+          ~check-flow-009/file-write-read-roundtrip
+          ~check-flow-009/chunked-read-until-eof
+          ~check-flow-009/nonzero-offset
+          ~check-flow-009/read-or-timeout-leaves-fd-usable
+          ~check-flow-009/open-nonexistent-fails)
 
   (import (chezscheme)
           (letloop r999)
@@ -612,6 +621,197 @@
                       (and client (lambda () client))))
                   (lambda (state resume register-cancel!)
                     (loop-accept-block fd (lambda (client) (resume client)))))))
+
+  ;;------------------------------------------------------------
+  ;; File I/O events (§4.5, regular-file variant)
+  ;;------------------------------------------------------------
+
+  ;; flow-read/flow-write above wrap recv/send, which are socket-only
+  ;; syscalls (ENOTSOCK on a regular file) with a fixed 64K internal
+  ;; buffer. These four wrap openat/read/write/close instead: chunked,
+  ;; with an explicit per-call size and an explicit per-call offset,
+  ;; since a regular-file read needs a position and these primitives
+  ;; deliberately keep no cursor state of their own — a caller doing
+  ;; sequential chunked reads tracks and increments its own offset.
+  ;;
+  ;; Each is the same make-flow% skeleton as flow-read: try is always
+  ;; #f (nothing here is pollable without a real completion), block
+  ;; preps exactly one SQE, registers a completion handler in the
+  ;; loop's handler table, and — where abandoning the op is safe —
+  ;; registers a cancel thunk so a losing choice tears it down.
+  ;;
+  ;; fd is a plain integer throughout, like flow-accept's client and
+  ;; loop-connect's result; there is no wrapper record, no guardian and
+  ;; no dynamic-wind. Callers close explicitly, on both the normal and
+  ;; the error path (the established idiom — see (letloop tls uring)
+  ;; and (letloop postgresql base), where dynamic-wind is rejected
+  ;; outright as unsafe for this suspend/resume model).
+  ;;
+  ;; Failures surface as #f rather than a raised condition, matching
+  ;; flow-read/flow-write. That is not just convention: a completion
+  ;; handler runs on whichever stack drained the CQE, never on the
+  ;; parked fiber's, so a raise from here would unwind the wrong
+  ;; context entirely. #f is unambiguous — every success value is a
+  ;; non-negative fixnum, a bytevector, or 'eof.
+
+  ;; open(2) flags, so callers need not hardcode the numeric values.
+  (define O-RDONLY 0)
+  (define O-WRONLY 1)
+  (define O-RDWR   2)
+  (define O-CREAT  #o100)
+  (define O-TRUNC  #o1000)
+  (define O-APPEND #o2000)
+
+  (define %flow-at-fdcwd -100)
+
+  ;; A NUL-terminated copy of STR as a bytevector, so the path can be
+  ;; locked and handed to the kernel by pointer; see flow-open.
+  (define %flow-c-string
+    (lambda (str)
+      (let* ((bytes (string->utf8 str))
+             (n     (bytevector-length bytes))
+             (out   (make-bytevector (fx+ n 1) 0)))
+        (bytevector-copy! bytes 0 out 0 n)
+        out)))
+
+  ;; Yields the new fd (a non-negative fixnum) or #f on failure —
+  ;; ENOENT on a missing path without O-CREAT, EACCES, ... all land on
+  ;; #f rather than hanging or yielding a negative "fd".
+  ;;
+  ;; The path is a locked bytevector passed to io-uring-prep-openat-
+  ;; pointer rather than an FFI `string` argument: preparing an SQE
+  ;; only records the path pointer, and the kernel dereferences it at
+  ;; submit time — a later loop tick — by which point the C copy an
+  ;; FFI `string` allocates has long been freed. lock-object also keeps
+  ;; the collector from moving it in the meantime; the handler unlocks
+  ;; it, on every outcome, exactly as flow-timeout frees its timespec.
+  ;;
+  ;; register-cancel! is safe here (an openat that never ran opened
+  ;; nothing), but the cancel can still lose the race — so if this base
+  ;; already lost the choice and the open succeeded anyway, close the
+  ;; fd nobody now owns instead of leaking it. resume's #t/#f return is
+  ;; the "did I win" signal, the same one loop-accept-block uses to
+  ;; decide whether a client was claimed or must be pushed back.
+  (define flow-open
+    (lambda (path flags mode)
+      (make-flow% 'base #f
+                  (lambda (x) x)
+                  (lambda () #f)
+                  (lambda (state resume register-cancel!)
+                    (let* ((ring  (loop-ring (loop-current)))
+                           (id    (loop-alloc-id!))
+                           (cpath (%flow-c-string path))
+                           (sqe   (loop-get-sqe ring)))
+                      (lock-object cpath)
+                      (io-uring-prep-openat-pointer sqe %flow-at-fdcwd
+                                                    (bytevector-pointer cpath)
+                                                    flags mode)
+                      (io-uring-sqe-set-data64 sqe id)
+                      (hashtable-set! (loop-handlers (loop-current)) id
+                                      (lambda (res)
+                                        (unlock-object cpath)
+                                        (let ((won (resume (and (fx>=? res 0) res))))
+                                          (when (and (not won) (fx>=? res 0))
+                                            (let ((csqe (loop-get-sqe ring)))
+                                              (io-uring-prep-close csqe res)
+                                              (io-uring-sqe-set-data64 csqe (loop-alloc-id!)))))))
+                      (register-cancel!
+                       (lambda ()
+                         (let ((csqe (loop-get-sqe ring)))
+                           (io-uring-prep-cancel64 csqe id 0)
+                           (io-uring-sqe-set-data64 csqe (loop-alloc-id!))))))))))
+
+  ;; Yields a bytevector of at most COUNT bytes, 'eof at end of file
+  ;; (res = 0), or #f on error. 'eof rather than an empty bytevector so
+  ;; a read-until-EOF loop can dispatch on it directly instead of
+  ;; special-casing zero-length results.
+  ;;
+  ;; A short read (res < COUNT) is a legitimate result, not an error:
+  ;; the last chunk of a file is normally short. Callers advance their
+  ;; own offset by the length actually returned.
+  ;;
+  ;; register-cancel! as in flow-read: an abandoned read has consumed
+  ;; nothing — and for a regular file, positioned reads consume nothing
+  ;; even when they do run, so a losing sibling leaves the fd exactly
+  ;; where it was.
+  (define flow-read-at
+    (lambda (fd offset count)
+      (make-flow% 'base #f
+                  (lambda (x) x)
+                  (lambda () #f)
+                  (lambda (state resume register-cancel!)
+                    (let* ((ring (loop-ring (loop-current)))
+                           (id   (loop-alloc-id!))
+                           (bv   (make-bytevector count))
+                           (sqe  (loop-get-sqe ring)))
+                      (lock-object bv)
+                      (io-uring-prep-read sqe fd (bytevector-pointer bv) count offset)
+                      (io-uring-sqe-set-data64 sqe id)
+                      (hashtable-set! (loop-handlers (loop-current)) id
+                                      (lambda (res)
+                                        (unlock-object bv)
+                                        (resume
+                                         (cond
+                                          ((fx<? res 0) #f)
+                                          ((fxzero? res) 'eof)
+                                          ((fx=? res count) bv)
+                                          (else (subbytevector bv 0 res))))))
+                      (register-cancel!
+                       (lambda ()
+                         (let ((csqe (loop-get-sqe ring)))
+                           (io-uring-prep-cancel64 csqe id 0)
+                           (io-uring-sqe-set-data64 csqe (loop-alloc-id!))))))))))
+
+  ;; Yields the number of bytes written (a fixnum, possibly short of
+  ;; (bytevector-length bv)) or #f on error. Unlike flow-write there is
+  ;; no retry loop: with an explicit offset a short write is trivially
+  ;; resumable by the caller, and reporting it is more useful than
+  ;; silently looping.
+  ;;
+  ;; No register-cancel!, deliberately, for the same reason flow-write
+  ;; has none: once bytes may have hit the file this event is
+  ;; committed, and a losing choice must not abandon a half-written
+  ;; chunk. resume's own box-cas! makes the eventual completion a
+  ;; harmless no-op in that case.
+  (define flow-write-at
+    (lambda (fd offset bv)
+      (make-flow% 'base #f
+                  (lambda (x) x)
+                  (lambda () #f)
+                  (lambda (state resume register-cancel!)
+                    (let* ((ring (loop-ring (loop-current)))
+                           (id   (loop-alloc-id!))
+                           (sqe  (loop-get-sqe ring)))
+                      (lock-object bv)
+                      (io-uring-prep-write sqe fd (bytevector-pointer bv)
+                                           (bytevector-length bv) offset)
+                      (io-uring-sqe-set-data64 sqe id)
+                      (hashtable-set! (loop-handlers (loop-current)) id
+                                      (lambda (res)
+                                        (unlock-object bv)
+                                        (resume (and (fx>=? res 0) res)))))))))
+
+  ;; Yields 0 on success, #f on error. Delegates to loop-close-block,
+  ;; which is loop-close's bookkeeping (resume anything parked on this
+  ;; fd with a synthetic cancellation, drop it from the loop's tracking
+  ;; tables, cancel in-flight ops, then submit IORING_OP_CLOSE) with
+  ;; the completion handler supplied rather than the caller's
+  ;; continuation — none of which is socket-specific, so file fds need
+  ;; no separate teardown. A fiber that is not composing close with
+  ;; anything can equally well call loop-close directly; this is the
+  ;; form that composes under flow-choice.
+  ;;
+  ;; No register-cancel!: a close in flight must run to completion or
+  ;; the fd leaks.
+  (define flow-close
+    (lambda (fd)
+      (make-flow% 'base #f
+                  (lambda (x) x)
+                  (lambda () #f)
+                  (lambda (state resume register-cancel!)
+                    (loop-close-block fd
+                                      (lambda (res)
+                                        (resume (and (fx>=? res 0) res))))))))
 
   ;;------------------------------------------------------------
   ;; Multi-shard (FL-7, phase 2 of §4.7)
