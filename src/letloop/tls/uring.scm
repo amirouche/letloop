@@ -18,6 +18,7 @@
           tls-writer
           tls-shutdown
           www-request
+          www-poll-timeout-seconds
 
           ~check-tls-uring-000)
 
@@ -36,6 +37,65 @@
                 phr-response-header-ref)
           (rename (only (letloop www) www-url-read) (www-url-read url-parse))
           (letloop liburing low))
+
+  ;; Liveness guard for every poll this library parks on: a peer (or a
+  ;; middlebox) that goes silent while we are waiting for readiness
+  ;; would otherwise park the fiber forever -- www-request has no other
+  ;; timeout anywhere, and its stale-pooled-connection retry only
+  ;; covers a *raised* error, not a poll that never completes. The
+  ;; timeout races an IORING_OP_TIMEOUT against the IORING_OP_POLL_ADD;
+  ;; whichever completes first cancels the other and resumes the fiber,
+  ;; a timeout raising so the established error paths (teardown,
+  ;; stale-retry, storage-level retries) take over. Per *poll*, not per
+  ;; request: it only fires when the peer sends nothing at all for the
+  ;; whole window while we are actively waiting, so a slow multi-MiB
+  ;; body that keeps trickling never trips it.
+  (define www-poll-timeout-seconds (make-parameter 60))
+
+  (define %tls-poll-wait
+    (lambda (fd poll-mask)
+      (let* ((ring (loop-ring (loop-current)))
+             (poll-sqe (loop-get-sqe ring))
+             (poll-id (loop-alloc-id!)))
+        (io-uring-prep-poll-add poll-sqe fd poll-mask)
+        (io-uring-sqe-set-data64 poll-sqe poll-id)
+        (let* ((timeout-sqe (loop-get-sqe ring))
+               (timeout-id (loop-alloc-id!))
+               (ts (make-timespec (www-poll-timeout-seconds) 0)))
+          (io-uring-prep-timeout timeout-sqe (ftype-pointer-address ts) 0 0)
+          (io-uring-sqe-set-data64 timeout-sqe timeout-id)
+          (let ((result
+                  (loop-abort
+                    (lambda (k)
+                      (let ((handlers (loop-handlers (loop-current))))
+                        ;; The drain deletes the fired id's own handler
+                        ;; before calling it; each winner deletes the
+                        ;; loser's handler and preps a cancel for it, so
+                        ;; the loser's eventual CQE (-ECANCELED or the
+                        ;; race's late completion) finds no handler and
+                        ;; is dropped. Single-shard drains are
+                        ;; sequential, so no claim box is needed.
+                        (hashtable-set! handlers poll-id
+                          (lambda (res)
+                            (hashtable-delete! handlers timeout-id)
+                            (let ((sqe (loop-get-sqe ring)))
+                              (io-uring-prep-cancel64 sqe timeout-id 0)
+                              (io-uring-sqe-set-data64 sqe (loop-alloc-id!)))
+                            (k res)))
+                        (hashtable-set! handlers timeout-id
+                          (lambda (res)
+                            (hashtable-delete! handlers poll-id)
+                            (let ((sqe (loop-get-sqe ring)))
+                              (io-uring-prep-cancel64 sqe poll-id 0)
+                              (io-uring-sqe-set-data64 sqe (loop-alloc-id!)))
+                            (k 'timeout))))))))
+            ;; Both SQEs were submitted before any CQE could resume us,
+            ;; so the kernel has copied the timespec by now.
+            (foreign-free (ftype-pointer-address ts))
+            (when (eq? result 'timeout)
+              (error 'www-request "poll timed out" fd poll-mask
+                     (www-poll-timeout-seconds)))
+            result)))))
 
   (define %tls-initialized #f)
 
@@ -109,23 +169,30 @@
                     (tls-free ctx)
                     (loop-close fd)
                     (error 'tls-open "tls_connect_socket failed" msg))))
-              ;; Non-blocking handshake — yield on WANT_POLLIN/POLLOUT
-              (let loop ()
-                (let ((rc (tls-handshake ctx)))
-                  (cond
-                    ((zero? rc) (void))
-                    ((= rc TLS_WANT_POLLIN)
-                     (loop-poll-wait fd POLLIN)
-                     (loop))
-                    ((= rc TLS_WANT_POLLOUT)
-                     (loop-poll-wait fd POLLOUT)
-                     (loop))
-                    (else
-                     (let ((msg (tls-error ctx)))
-                       (tls-close ctx)
-                       (tls-free ctx)
-                       (loop-close fd)
-                       (error 'tls-open "tls_handshake failed" msg))))))
+              ;; Non-blocking handshake — yield on WANT_POLLIN/POLLOUT.
+              ;; Every raise out of this loop (handshake failure, or a
+              ;; %tls-poll-wait timeout) tears down ctx and fd in the
+              ;; guard, exactly once, then re-raises — a hung handshake
+              ;; must not leak them (www-request's guard only tears
+              ;; down connections tls-open has already returned).
+              (guard (exception
+                       (#t (guard (_ (else #f)) (tls-close ctx))
+                           (guard (_ (else #f)) (tls-free ctx))
+                           (guard (_ (else #f)) (loop-close fd))
+                           (raise exception)))
+                (let loop ()
+                  (let ((rc (tls-handshake ctx)))
+                    (cond
+                      ((zero? rc) (void))
+                      ((= rc TLS_WANT_POLLIN)
+                       (%tls-poll-wait fd POLLIN)
+                       (loop))
+                      ((= rc TLS_WANT_POLLOUT)
+                       (%tls-poll-wait fd POLLOUT)
+                       (loop))
+                      (else
+                       (error 'tls-open "tls_handshake failed"
+                              (tls-error ctx)))))))
               (values ctx fd)))))))
 
   ;; Thunk yielding bytevectors, eof-object at end of stream.
@@ -143,10 +210,10 @@
                    out))
                 ((zero? n) (eof-object))
                 ((= n TLS_WANT_POLLIN)
-                 (loop-poll-wait fd POLLIN)
+                 (%tls-poll-wait fd POLLIN)
                  (loop))
                 ((= n TLS_WANT_POLLOUT)
-                 (loop-poll-wait fd POLLOUT)
+                 (%tls-poll-wait fd POLLOUT)
                  (loop))
                 (else
                  (error 'tls-reader "tls_read failed" (tls-error ctx))))))))))
@@ -165,10 +232,10 @@
                 (cond
                   ((> n 0) (loop (+ offset n)))
                   ((= n TLS_WANT_POLLIN)
-                   (loop-poll-wait fd POLLIN)
+                   (%tls-poll-wait fd POLLIN)
                    (loop offset))
                   ((= n TLS_WANT_POLLOUT)
-                   (loop-poll-wait fd POLLOUT)
+                   (%tls-poll-wait fd POLLOUT)
                    (loop offset))
                   (else
                    (error 'tls-writer "tls_write failed" (tls-error ctx)))))))))))
@@ -290,13 +357,34 @@
             (error 'www-request "connection closed mid-body")
             (%www-bytevector-append buf chunk)))))
 
-  ;; grow BUF until it holds at least TOTAL bytes
+  ;; grow BUF until it holds at least TOTAL bytes — accumulating the
+  ;; incoming chunks in a list and flattening once at the end, not by
+  ;; repeated whole-buffer reallocate+copy: that is O(n^2) in the body
+  ;; size, and an 8 MiB body arriving as 4 KiB TLS records would
+  ;; memcpy ~8 GiB, turning a ~1s transfer into many seconds of pure
+  ;; copying (and widening the zero-window stall a busy scheduler
+  ;; already imposes on the peer).
   (define %www-read-exactly
     (lambda (read! buf total)
-      (let loop ((buf buf))
-        (if (fx>=? (bytevector-length buf) total)
-            buf
-            (loop (%www-fill read! buf))))))
+      (if (fx>=? (bytevector-length buf) total)
+          buf
+          (let loop ((chunks (list buf)) (have (bytevector-length buf)))
+            (let ((chunk (read!)))
+              (if (eof-object? chunk)
+                  (error 'www-request "connection closed mid-body")
+                  (let ((have (fx+ have (bytevector-length chunk)))
+                        (chunks (cons chunk chunks)))
+                    (if (fx>=? have total)
+                        (let ((out (make-bytevector have)))
+                          (let fill ((chunks chunks) (end have))
+                            (if (null? chunks)
+                                out
+                                (let* ((piece (car chunks))
+                                       (start (fx- end (bytevector-length piece))))
+                                  (bytevector-copy! piece 0 out start
+                                                    (bytevector-length piece))
+                                  (fill (cdr chunks) start)))))
+                        (loop chunks have)))))))))
 
   (define %www-read-until-eof
     (lambda (read! buf)
