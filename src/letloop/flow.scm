@@ -6,9 +6,16 @@
 ;; sketch; see plans/v12/20260720-flow/README.md for the full design
 ;; and milestone plan. Implements FL-1 (base event algebra), FL-2
 ;; (choice), FL-3 (rendezvous channels), FL-4 (timeouts), FL-5 (I/O
-;; events), FL-6 (a standalone consumer proof — see the check), and
+;; events), and FL-6 (a standalone consumer proof — see the check).
 ;; FL-7 (multi-shard: N OS threads, each its own ring, cross-shard
-;; resume via IORING_OP_MSG_RING).
+;; resume via IORING_OP_MSG_RING) was implemented and then dropped:
+;; single-shard already saturates far beyond what any real handler
+;; with actual per-request work needs, and no consumer in this tree
+;; ever called flow-shard-spawn outside its own tests, while the
+;; thread-parameter plumbing it required cost real throughput on the
+;; single-shard path every other consumer actually runs (see the
+;; commit that removed it). Scaling across cores is SO_REUSEPORT's
+;; job now, not this library's.
 (library (letloop flow)
 
   (export make-flow flow? flow-wrap flow-guard flow-choice flow-perform
@@ -26,9 +33,6 @@
           O-RDONLY O-WRONLY O-RDWR O-CREAT O-TRUNC O-APPEND
 
           flow-spawn flow-run flow-stop
-
-          flow-current-shard flow-shard?
-          flow-shard-spawn flow-shard-post! flow-shard-stop!
 
           flow-log flow-log-start! flow-log-stop! flow-log-drain!
 
@@ -55,10 +59,6 @@
           ~check-flow-006/read-or-timeout-leaves-fd-usable
           ~check-flow-006/request-loop-idle-timeout
 
-          ~check-flow-007/two-shard-channel-rendezvous
-          ~check-flow-007/stress-n-shards-m-messages
-          ~check-flow-008/shard-post-sqe-ring-overflow
-
           ~check-flow-009/file-write-read-roundtrip
           ~check-flow-009/chunked-read-until-eof
           ~check-flow-009/nonzero-offset
@@ -71,8 +71,7 @@
           ~check-flow-010/log-drain-roundtrip
           ~check-flow-010/timestamps-non-decreasing
           ~check-flow-010/start-reaches-destination
-          ~check-flow-010/stop-flushes-remaining
-          ~check-flow-010/two-shard-cross-thread-drain)
+          ~check-flow-010/stop-flushes-remaining)
 
   (import (chezscheme)
           (letloop r999)
@@ -197,22 +196,10 @@
   ;; as flow-poll applies wrap on the ready path — so no block
   ;; implementation has to remember to wrap its own raw completion
   ;; value (a real io_uring res code, an object off a channel, ...).
-  ;;
-  ;; owner is this fiber's shard (§4.7), captured at block time —
-  ;; #f under plain single-shard usage (flow-resume-owner! degenerates
-  ;; to a direct loop-spawn then, exactly the pre-FL-7 behavior). Both
-  ;; k and the cancel thunks are only ever run via flow-resume-owner!,
-  ;; never inline here: a cancel thunk preps an SQE on *its own*
-  ;; shard's ring (io-uring-get-sqe (loop-ring (loop-current)) at the
-  ;; time it was registered) — firing it from whichever shard happens
-  ;; to be running this resume would submit a cancel to the wrong
-  ;; ring. Continuations are the same story: k was captured on owner's
-  ;; native stack and must only ever be invoked by owner's own thread.
   (define flow-block-and-wait
     (lambda (bases)
       (let ((state (box 'waiting))
-            (cancels (box '()))
-            (owner (flow-current-shard)))
+            (cancels (box '())))
         (loop-abort
          (lambda (k)
            (define register-cancel!
@@ -221,11 +208,8 @@
              (lambda (value)
                (and (box-cas! state 'waiting 'synched)
                     (begin
-                      (flow-resume-owner!
-                       owner
-                       (lambda ()
-                         (for-each (lambda (thunk) (thunk)) (unbox cancels))
-                         (k value)))
+                      (for-each (lambda (thunk) (thunk)) (unbox cancels))
+                      (loop-spawn (lambda () (k value)))
                       #t))))
            (for-each (lambda (base)
                        ((flow-block-proc base) state
@@ -595,12 +579,12 @@
   ;; keep-alive read started racing through flow-choice (each read
   ;; was already a second SQE alongside flow-timeout's; a private
   ;; 64KiB alloc+pin on top of that made it worse for no benefit —
-  ;; typical requests fit easily in the ring's %buf-ring-buf-size
+  ;; typical requests fit easily in the ring's loop-buf-ring-buf-size
   ;; buffers). loop-run-once's CQE drain already copies the ring
-  ;; buffer's bytes into a bytevector and stashes it in %buf-data
-  ;; keyed by completion id whenever IORING_CQE_F_BUFFER is set, so
-  ;; the handler below just collects it from there instead of a bv
-  ;; it manages itself.
+  ;; buffer's bytes into a bytevector and stashes it, keyed by
+  ;; completion id, whenever IORING_CQE_F_BUFFER is set, so the
+  ;; handler below just collects it via loop-buf-data-take! instead
+  ;; of a bv it manages itself.
   (define flow-read
     (lambda (fd)
       (make-flow% 'base #f
@@ -610,19 +594,17 @@
                     (let* ((ring (loop-ring (loop-current)))
                            (id   (loop-alloc-id!))
                            (sqe  (loop-get-sqe ring)))
-                      (io-uring-prep-recv sqe fd 0 (%buf-ring-buf-size) 0)
+                      (io-uring-prep-recv sqe fd 0 (loop-buf-ring-buf-size) 0)
                       (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
-                      (io-uring-sqe-set-buf-group sqe (%buf-ring-bgid))
+                      (io-uring-sqe-set-buf-group sqe (loop-buf-ring-bgid))
                       (io-uring-sqe-set-data64 sqe id)
                       (hashtable-set! (loop-handlers (loop-current)) id
                                       (lambda (res)
                                         (resume
                                          (cond
-                                          ((fx<? res 0) (hashtable-delete! (%buf-data) id) #f)
-                                          ((fxzero? res) (hashtable-delete! (%buf-data) id) #t)
-                                          (else (let ((bv (hashtable-ref (%buf-data) id #f)))
-                                                  (hashtable-delete! (%buf-data) id)
-                                                  bv))))))
+                                          ((fx<? res 0) (loop-buf-data-take! id) #f)
+                                          ((fxzero? res) (loop-buf-data-take! id) #t)
+                                          (else (loop-buf-data-take! id))))))
                       (register-cancel!
                        (lambda ()
                          (let ((csqe (loop-get-sqe ring)))
@@ -911,110 +893,6 @@
                                       (lambda (res)
                                         (resume (and (fx>=? res 0) res))))))))
 
-  ;;------------------------------------------------------------
-  ;; Multi-shard (FL-7, phase 2 of §4.7)
-  ;;------------------------------------------------------------
-
-  ;; #f on any OS thread that never called flow-shard-spawn — the
-  ;; classic single-shard case FL-1..FL-6 and every existing consumer
-  ;; run under, where flow-resume-owner! degenerates to a direct
-  ;; loop-spawn and nothing above this section changes behavior at
-  ;; all. Set once, for the life of the thread, by flow-shard-spawn.
-  (define flow-current-shard (make-thread-parameter #f))
-
-  ;; ring-fd lets another shard reach this one via a real
-  ;; IORING_OP_MSG_RING wakeup — ring fds are ordinary per-process file
-  ;; descriptors, valid from any thread that shares the process, so
-  ;; this works with no further plumbing. mailbox is the lock-free
-  ;; landing pad for cross-shard/bare-thread resume thunks.
-  (define-record-type* <flow-shard>
-    (make-flow-shard% ring-fd mailbox)
-    flow-shard?
-    (ring-fd flow-shard-ring-fd)
-    (mailbox flow-shard-mailbox))
-
-  ;; Run every thunk parked in this shard's mailbox, on this shard's
-  ;; own thread, via loop-spawn — never invoked directly by whichever
-  ;; shard called flow-shard-post!. Called once per tick by
-  ;; flow-shard-run!, independent of whether a wakeup ever arrives.
-  (define flow-shard-drain-mailbox!
-    (lambda ()
-      (let ((shard (flow-current-shard)))
-        (when shard
-          (for-each loop-spawn (flow-box-drain! (flow-shard-mailbox shard)))))))
-
-  ;; Hand THUNK to SHARD's mailbox and nudge it awake. If the caller is
-  ;; itself a shard, the nudge is a real io_uring_prep_msg_ring
-  ;; targeting the peer's ring: a genuine kernel-mediated cross-ring
-  ;; wakeup that makes SHARD's own io_uring_wait_cqe_timeout return
-  ;; early instead of waiting out its ~100ms window. A bare thread (no
-  ;; ring of its own) has no such fast path — that wait is an
-  ;; uninterruptible blocking syscall from here, and nothing short of
-  ;; arming the wait *from* the target ring can preempt it — so it
-  ;; simply relies on SHARD draining its mailbox on its normal ~100ms
-  ;; poll cadence, the same bound every idle loop-run-once tick already
-  ;; has. Either way THUNK only ever runs via flow-shard-drain-mailbox!
-  ;; on SHARD's own thread; this never calls it directly.
-  (define flow-shard-post!
-    (lambda (shard thunk)
-      (flow-box-cons! (flow-shard-mailbox shard) thunk)
-      (when (flow-current-shard)
-        (let* ((ring (loop-ring (loop-current)))
-               (sqe  (loop-get-sqe ring)))
-          (io-uring-prep-msg-ring sqe (flow-shard-ring-fd shard) 0 0 0)
-          (io-uring-sqe-set-data64 sqe (loop-alloc-id!))))))
-
-  ;; Where flow-block-and-wait's resume actually runs a parked
-  ;; continuation (or fires that fiber's cancel thunks): locally via
-  ;; loop-spawn when OWNER is this shard (or plain single-shard usage,
-  ;; OWNER = #f, matching pre-FL-7 behavior exactly), cross-shard via
-  ;; the mailbox otherwise.
-  (define flow-resume-owner!
-    (lambda (owner thunk)
-      (if (or (not owner) (eq? owner (flow-current-shard)))
-          (loop-spawn thunk)
-          (flow-shard-post! owner thunk))))
-
-  ;; Like loop-run, but drains this shard's cross-resume mailbox once
-  ;; per tick so a resume posted from another shard or a bare thread
-  ;; is never stuck waiting on a wakeup that didn't arrive.
-  (define flow-shard-run!
-    (lambda ()
-      (let lp ()
-        (when (loop-running? (loop-current))
-          (flow-shard-drain-mailbox!)
-          (guard (ex (else (loop-stop)))
-            (loop-run-once))
-          (lp)))))
-
-  ;; Start a new shard: a fresh OS thread running its own loop-new'd
-  ;; ring, with THUNK spawned as its first fiber. Blocks the caller
-  ;; briefly — just until the new thread's ring exists — so the
-  ;; returned <flow-shard> is immediately usable with flow-shard-post!/
-  ;; flow-shard-stop!.
-  (define flow-shard-spawn
-    (lambda (thunk)
-      (let ((ready (box #f)))
-        (fork-thread
-         (lambda ()
-           (loop-detach!)
-           (loop-new)
-           (let ((shard (make-flow-shard% (loop-ring-fd (loop-current)) (box '()))))
-             (flow-current-shard shard)
-             (set-box! ready shard)
-             (loop-spawn thunk)
-             (flow-shard-run!))))
-        (let wait ()
-          (or (unbox ready)
-              (begin (sleep (make-time 'time-duration 1000000 0)) (wait)))))))
-
-  ;; Stop SHARD's loop from any thread — posts rather than calling
-  ;; loop-stop directly, since loop-running!/(loop-current) are
-  ;; SHARD's thread-parameters, not the caller's.
-  (define flow-shard-stop!
-    (lambda (shard)
-      (flow-shard-post! shard (lambda () (loop-stop)))))
-
   (define flow-spawn loop-spawn)
   (define flow-run loop-run)
   (define flow-stop loop-stop)
@@ -1029,35 +907,28 @@
   ;; syscall per flow-log call.
   ;;
   ;; Accumulation reuses flow-box-cons!/flow-box-drain!, the same
-  ;; lock-free primitive already backing channel put/get queues and
-  ;; per-shard mailboxes above -- deliberately NOT flow-shard-post!/
-  ;; msg_ring: routing every flow-log call through the cross-shard
-  ;; wakeup path would add ring pressure under logging load, which is
-  ;; exactly what a dedicated CAS box avoids.
+  ;; lock-free primitive already backing channel put/get queues, so
+  ;; concurrent logging from any number of OS threads never races.
 
   ;; Registry of every OS thread's own log box. A single process-wide
   ;; box -- not a thread-parameter, since every thread that logs pushes
   ;; ITS OWN box into this ONE shared box -- accumulated with
   ;; flow-box-cons!, so concurrent registration from any number of
-  ;; shards never races and never drops a registration.
+  ;; threads never races and never drops a registration.
   (define flow-log-registry (box '()))
 
-  ;; This OS thread's own log accumulator. A thread-parameter, per the
-  ;; established per-shard-state pattern (see low.scm's %loop and
-  ;; friends, and flow-current-shard above): a plain global here would
-  ;; let two shards clobber each other's log entries, exactly the
-  ;; class of cross-shard corruption bug this codebase already hit
-  ;; once with per-shard state that was not a thread-parameter.
+  ;; This OS thread's own log accumulator. A thread-parameter: a plain
+  ;; global here would let two OS threads logging concurrently clobber
+  ;; each other's entries.
   (define flow-log-box (make-thread-parameter #f))
 
   ;; Lazily create and register this thread's log box on first
-  ;; flow-log call, so flow-log works from any OS thread -- a real
-  ;; flow-shard-spawn'd shard or a bare thread -- with no separate
-  ;; explicit setup step. Only this thread ever writes its OWN
-  ;; flow-log-box parameter value, so the check-then-set here needs no
-  ;; CAS of its own; flow-box-cons! below is what makes the registry
-  ;; push itself safe against concurrent registration from other
-  ;; threads.
+  ;; flow-log call, so flow-log works from any OS thread with no
+  ;; separate explicit setup step. Only this thread ever writes its
+  ;; OWN flow-log-box parameter value, so the check-then-set here
+  ;; needs no CAS of its own; flow-box-cons! below is what makes the
+  ;; registry push itself safe against concurrent registration from
+  ;; other threads.
   (define flow-log-ensure-box!
     (lambda ()
       (or (flow-log-box)
