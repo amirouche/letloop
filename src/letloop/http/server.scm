@@ -45,8 +45,7 @@
           (letloop http)
           (rename (only (letloop www) www-percent-decode www-query-read)
                   (www-percent-decode percent-decode))
-          (letloop liburing low)
-          (letloop flow))
+          (letloop liburing low))
 
   (begin
     (include "letloop/http/server.body.scm")
