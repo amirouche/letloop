@@ -316,18 +316,63 @@
          (500 . "Internal Server Error")))
       ht))
 
-  (define %header-value->string
+  ;; "name: " encoded once per distinct header symbol. Response
+  ;; headers come from a small fixed vocabulary (content-type,
+  ;; content-length, location, ...), so this converges immediately
+  ;; and takes the per-response cost to a hashtable probe.
+  (define %header-name-cache (make-eq-hashtable))
+
+  (define %header-name-bytes
+    (lambda (sym)
+      (or (hashtable-ref %header-name-cache sym #f)
+          (let ((bv (string->utf8 (string-append (symbol->string sym) ": "))))
+            (hashtable-set! %header-name-cache sym bv)
+            bv))))
+
+  (define %crlf (string->utf8 "\r\n"))
+
+  ;; Non-negative fixnum straight to ASCII digits: content-length is a
+  ;; number on every single response, and routing it through
+  ;; number->string would allocate a 32-bit-per-character Scheme
+  ;; string only to immediately re-encode it.
+  (define %integer->utf8
+    (lambda (n)
+      (if (eqv? n 0)
+          (bytevector 48)
+          (let loop ((n n) (digits '()))
+            (if (eqv? n 0)
+                (u8-list->bytevector digits)
+                (loop (quotient n 10)
+                      (cons (fx+ 48 (remainder n 10)) digits)))))))
+
+  (define %header-value-bytes
     (lambda (v)
-      (cond ((string? v) v)
-            ((number? v) (number->string v))
-            (else (format #f "~a" v)))))
+      (cond ((string? v) (string->utf8 v))
+            ((and (fixnum? v) (fx>=? v 0)) (%integer->utf8 v))
+            ((number? v) (string->utf8 (number->string v)))
+            (else (string->utf8 (format #f "~a" v))))))
 
   (define http-response-write
     (lambda (accumulator version code reason headers body)
       ;; body is (lambda () -> bytevector | eof-object)
       (assert (or (pair? headers) (null? headers)))
-      (let ((chunks (generator->list body)))
-        (let ((content-length (apply fx+ (map bytevector-length chunks))))
+      ;; Single-chunk bodies are the overwhelmingly common case (every
+      ;; response built by the http server is one bytevector); peel the
+      ;; first two reads by hand so they do not pay for a list.
+      (let* ((first (body))
+             (chunks (if (eof-object? first)
+                         '()
+                         (let ((second (body)))
+                           (if (eof-object? second)
+                               (list first)
+                               (let loop ((out (list second first)))
+                                 (let ((next (body)))
+                                   (if (eof-object? next)
+                                       (reverse out)
+                                       (loop (cons next out))))))))))
+        (let ((content-length
+               (let loop ((cs chunks) (n 0))
+                 (if (null? cs) n (loop (cdr cs) (fx+ n (bytevector-length (car cs))))))))
           (let* ((headers* (massage-headers-content-length headers content-length))
                  (status-bv
                   (let ((hit (hashtable-ref %status-lines code #f)))
@@ -337,24 +382,28 @@
                         (cdr hit)
                         (string->utf8 (string-append version " " (number->string code)
                                                      " " reason "\r\n")))))
-                 (header-bv
-                  (string->utf8
-                   (apply string-append
-                          (let loop ((h headers*) (acc '()))
-                            (if (null? h)
-                                (reverse (cons "\r\n" acc))
-                                (let ((pair (car h)))
-                                  (loop (cdr h)
-                                        (cons "\r\n"
-                                              (cons (%header-value->string (cdr pair))
-                                                    (cons ": "
-                                                          (cons (symbol->string (car pair))
-                                                                acc)))))))))))) 
-            ;; One accumulator call with the whole response: every
-            ;; caller re-assembles the pieces into a single buffer
-            ;; anyway, and generator->list above already materialised
-            ;; the body, so splitting it gains nothing.
-            (accumulator (apply bytevector-append status-bv header-bv chunks)))))))
+                 ;; Assemble straight from byte pieces: building the
+                 ;; header block as a Scheme string first would
+                 ;; allocate four bytes per character and then walk it
+                 ;; again to UTF-8 encode it.
+                 (pieces
+                  (cons status-bv
+                        (let loop ((h headers*))
+                          (if (null? h)
+                              (cons %crlf chunks)
+                              (cons (%header-name-bytes (caar h))
+                                    (cons (%header-value-bytes (cdar h))
+                                          (cons %crlf (loop (cdr h))))))))))
+            (accumulator
+             (let* ((total (let loop ((p pieces) (n 0))
+                             (if (null? p) n (loop (cdr p) (fx+ n (bytevector-length (car p)))))))
+                    (out (make-bytevector total)))
+               (let loop ((p pieces) (offset 0))
+                 (if (null? p)
+                     out
+                     (let ((bv (car p)))
+                       (bytevector-copy! bv 0 out offset (bytevector-length bv))
+                       (loop (cdr p) (fx+ offset (bytevector-length bv)))))))))))))
 
   (define ~check-http-header-value-case
     (lambda ()
