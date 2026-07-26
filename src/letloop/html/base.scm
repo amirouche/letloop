@@ -46,27 +46,40 @@
                    (#\> . "&gt;")))
            (cons char (list->string (list char)))))))
 
+  ;; One output port, no per-character allocation. The obvious
+  ;; (apply string-append (map html-character->string (string->list s)))
+  ;; costs a cons + a one-char string per character plus an N-argument
+  ;; apply, which dominated HTML rendering on the server's hot path.
   (define string->html-string
     (lambda (string)
-      (apply string-append
-             (map html-character->string (string->list string)))))
+      (let ((port (open-output-string)))
+        (string-for-each
+         (lambda (ch)
+           (case ch
+             ((#\<) (put-string port "&lt;"))
+             ((#\>) (put-string port "&gt;"))
+             ((#\&) (put-string port "&amp;"))
+             ((#\") (put-string port "&quot;"))
+             (else (put-char port ch))))
+         string)
+        (get-output-string port))))
 
   (define html-doctype "<!DOCTYPE html>")
 
   (define html-write-tag-start
     (lambda (tag attributes accumulator)
-      (accumulator (format #f "<~a" tag))
+      (accumulator (string-append "<" (symbol->string tag)))
       (for-each
        (lambda (attribute)
          ;; Escape the value, otherwise a quote inside it breaks out
          ;; of the attribute (injection).
          (let ((value (cadr attribute)))
-           (accumulator (format #f " ~a=\"~a\""
-                                (car attribute)
-                                (string->html-string
-                                 (if (string? value)
-                                     value
-                                     (format #f "~a" value)))))))
+           (accumulator (string-append " " (symbol->string (car attribute)) "=\""
+                                       (string->html-string
+                                        (if (string? value)
+                                            value
+                                            (format #f "~a" value)))
+                                       "\""))))
        attributes)
       (if (html-element-no-end-tag? tag)
           (accumulator "/>")
@@ -75,7 +88,7 @@
   (define html-write-tag-end
     (lambda (tag accumulator)
       (unless (html-element-no-end-tag? tag)
-        (accumulator (format #f "</~a>" tag)))))
+        (accumulator (string-append "</" (symbol->string tag) ">")))))
 
   (define html-write
     (case-lambda
