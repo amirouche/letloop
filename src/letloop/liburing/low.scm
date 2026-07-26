@@ -2142,8 +2142,18 @@
       (let ((ring (loop-ring %loop))
             (cqe-ptr (loop-cqe-ptr %loop)))
         (let ((has-handlers? (not (fxzero? (hashtable-size (loop-handlers %loop)))))
-              (has-pending?  (not (fxzero? (io-uring-sq-ready ring)))))
+              (has-pending?  (not (fxzero? (io-uring-sq-ready ring))))
+              ;; Thunks queued *during* this tick: a fiber spawned work
+              ;; and then parked. They are runnable right now, so this
+              ;; tick must not block waiting for completions -- doing so
+              ;; delayed every spawned fiber by up to %wait-timeout
+              ;; (100ms), which is what a fan-out pays before any of its
+              ;; workers start. The drain below uses a non-blocking peek,
+              ;; so completions that are already there are still taken.
+              (has-thunks?   (pair? (loop-thunks %loop))))
           (cond
+           (has-thunks?
+            (when has-pending? (io-uring-submit ring)))
            (has-handlers?
             (io-uring-submit ring)
             (io-uring-wait-cqe-timeout ring cqe-ptr %wait-timeout))
