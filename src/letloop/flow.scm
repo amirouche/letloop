@@ -310,6 +310,38 @@
     (value   flow-channel-entry-value)
     (claimed flow-channel-entry-claimed))
 
+  ;; Temporary diagnostic, enabled by LETLOOP_FLOW_TRACE=1: every
+  ;; channel park/resume prints one line, tagging entries and channels
+  ;; with small sequential ids, so a hang's final state shows exactly
+  ;; which fibers are parked on which channels with no matching peer.
+  (define %flow-trace? (and (getenv "LETLOOP_FLOW_TRACE") #t))
+  (define %flow-trace-entry-counter (box 0))
+  (define %flow-trace-channel-ids (make-weak-eq-hashtable))
+  (define %flow-trace-channel-counter (box 0))
+
+  (define %flow-trace-channel-id
+    (lambda (channel)
+      (or (hashtable-ref %flow-trace-channel-ids channel #f)
+          (let ((id (flow-box-increment! %flow-trace-channel-counter)))
+            (hashtable-set! %flow-trace-channel-ids channel id)
+            id))))
+
+  (define %flow-trace!
+    (lambda parts
+      (when %flow-trace?
+        (for-each (lambda (p) (display p (current-error-port))) parts)
+        (newline (current-error-port))
+        (flush-output-port (current-error-port)))))
+
+  (define %flow-trace-entry-ids (make-weak-eq-hashtable))
+
+  (define %flow-trace-entry-id
+    (lambda (entry)
+      (or (hashtable-ref %flow-trace-entry-ids entry #f)
+          (let ((id (flow-box-increment! %flow-trace-entry-counter)))
+            (hashtable-set! %flow-trace-entry-ids entry id)
+            id))))
+
   (define (make-flow-channel-entry* state resume value)
     (make-flow-channel-entry state resume value (box #f)))
 
@@ -381,6 +413,8 @@
            ((and (flow-channel-entry-waiting? (car pops))
                  (flow-channel-entry-claim! (car pops))
                  ((flow-channel-entry-resume (car pops)) obj))
+            (%flow-trace! "put-try hit e" (%flow-trace-entry-id (car pops))
+                          " ch" (%flow-trace-channel-id channel))
             (lambda () (void)))
            (else (scan (cdr pops))))))))
 
@@ -403,6 +437,8 @@
     (lambda (channel obj)
       (lambda (state resume register-cancel!)
         (let ((entry (make-flow-channel-entry* state resume obj)))
+          (%flow-trace! "put-park e" (%flow-trace-entry-id entry)
+                        " ch" (%flow-trace-channel-id channel))
           (flow-box-cons! (flow-channel-puts channel) entry)
           (flow-channel-bump-gc! channel)
           (when (flow-channel-entry-claim! entry)
@@ -413,6 +449,9 @@
                ((and (flow-channel-entry-waiting? (car pops))
                      (flow-channel-entry-claim! (car pops))
                      ((flow-channel-entry-resume (car pops)) obj))
+                (%flow-trace! "put-block rendezvous e"
+                              (%flow-trace-entry-id entry)
+                              " with e" (%flow-trace-entry-id (car pops)))
                 ((flow-channel-entry-resume entry) (void)))
                (else (scan (cdr pops))))))))))
 
@@ -432,6 +471,8 @@
            ((and (flow-channel-entry-waiting? (car puts))
                  (flow-channel-entry-claim! (car puts))
                  ((flow-channel-entry-resume (car puts)) (void)))
+            (%flow-trace! "get-try hit e" (%flow-trace-entry-id (car puts))
+                          " ch" (%flow-trace-channel-id channel))
             (let ((obj (flow-channel-entry-value (car puts))))
               (lambda () obj)))
            (else (scan (cdr puts))))))))
@@ -441,6 +482,8 @@
     (lambda (channel)
       (lambda (state resume register-cancel!)
         (let ((entry (make-flow-channel-entry* state resume #f)))
+          (%flow-trace! "get-park e" (%flow-trace-entry-id entry)
+                        " ch" (%flow-trace-channel-id channel))
           (flow-box-cons! (flow-channel-pops channel) entry)
           (flow-channel-bump-gc! channel)
           (when (flow-channel-entry-claim! entry)
@@ -451,6 +494,9 @@
                ((and (flow-channel-entry-waiting? (car puts))
                      (flow-channel-entry-claim! (car puts))
                      ((flow-channel-entry-resume (car puts)) (void)))
+                (%flow-trace! "get-block rendezvous e"
+                              (%flow-trace-entry-id entry)
+                              " with e" (%flow-trace-entry-id (car puts)))
                 ((flow-channel-entry-resume entry)
                  (flow-channel-entry-value (car puts))))
                (else (scan (cdr puts))))))))))

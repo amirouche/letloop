@@ -2107,9 +2107,24 @@
            (loop-prompt-current #f)
            (apply prompt (cons loop-prompt-singleton (cons k args))))))))
 
+  ;; The catch-all guard keeps a fiber's crash from killing the whole
+  ;; scheduler, but swallowing it *silently* turns any unguarded-fiber
+  ;; bug into an undebuggable hang: the dead fiber's channel peers park
+  ;; forever with zero CPU and zero output (the exact signature of a
+  ;; lost-wakeup, which it is not). Report what died on stderr — the
+  ;; fiber is still gone (loop-spawn-monitored is the eventual real
+  ;; answer for delivery to supervisors), but the failure is at least
+  ;; visible and attributable.
   (define loop-apply
     (lambda (thunk)
-      (guard (ex (else (void)))
+      (guard (ex (else
+                  (display "loop-apply: fiber died: " (current-error-port))
+                  (if (condition? ex)
+                      (display-condition ex (current-error-port))
+                      (display ex (current-error-port)))
+                  (newline (current-error-port))
+                  (flush-output-port (current-error-port))
+                  (void)))
         (call-with-loop-prompt thunk (lambda (k handler) (handler k))))))
 
   ;;------------------------------------------------------------
