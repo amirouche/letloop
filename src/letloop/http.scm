@@ -295,28 +295,66 @@
 
   ;; http-response-write
 
+  ;; Pre-encoded status lines for the common codes, so an ordinary
+  ;; response spends no time building or UTF-8-encoding "HTTP/1.1 200
+  ;; OK\r\n". Keyed by code but storing the reason too: the cached
+  ;; bytes are only used when the caller's version and reason actually
+  ;; match, so a custom reason still renders correctly.
+  (define %status-lines
+    (let ((ht (make-eqv-hashtable)))
+      (for-each
+       (lambda (pair)
+         (hashtable-set! ht (car pair)
+                         (cons (cdr pair)
+                               (string->utf8
+                                (string-append "HTTP/1.1 " (number->string (car pair))
+                                               " " (cdr pair) "\r\n")))))
+       '((200 . "OK") (201 . "Created") (204 . "No Content")
+         (301 . "Moved Permanently") (302 . "Found") (304 . "Not Modified")
+         (400 . "Bad Request") (401 . "Unauthorized") (403 . "Forbidden")
+         (404 . "Not Found") (405 . "Method Not Allowed")
+         (500 . "Internal Server Error")))
+      ht))
+
+  (define %header-value->string
+    (lambda (v)
+      (cond ((string? v) v)
+            ((number? v) (number->string v))
+            (else (format #f "~a" v)))))
+
   (define http-response-write
     (lambda (accumulator version code reason headers body)
       ;; body is (lambda () -> bytevector | eof-object)
-      ;; Consume body to compute content-length, write headers in one call, then stream body chunks
       (assert (or (pair? headers) (null? headers)))
-
       (let ((chunks (generator->list body)))
         (let ((content-length (apply fx+ (map bytevector-length chunks))))
           (let* ((headers* (massage-headers-content-length headers content-length))
-                 (response-line (string-append version " " (number->string code) " " reason "\r\n"))
-                 (header-str (apply string-append
-                                    (map (lambda (x)
-                                           (string-append
-                                            (symbol->string (car x)) ": "
-                                            (let ((v (cdr x)))
-                                              (cond ((string? v) v)
-                                                    ((number? v) (number->string v))
-                                                    (else (format #f "~a" v))))
-                                            "\r\n"))
-                                         headers*))))
-            (accumulator (string->utf8 (string-append response-line header-str "\r\n")))
-            (for-each accumulator chunks))))))
+                 (status-bv
+                  (let ((hit (hashtable-ref %status-lines code #f)))
+                    (if (and hit
+                             (string=? version "HTTP/1.1")
+                             (string=? reason (car hit)))
+                        (cdr hit)
+                        (string->utf8 (string-append version " " (number->string code)
+                                                     " " reason "\r\n")))))
+                 (header-bv
+                  (string->utf8
+                   (apply string-append
+                          (let loop ((h headers*) (acc '()))
+                            (if (null? h)
+                                (reverse (cons "\r\n" acc))
+                                (let ((pair (car h)))
+                                  (loop (cdr h)
+                                        (cons "\r\n"
+                                              (cons (%header-value->string (cdr pair))
+                                                    (cons ": "
+                                                          (cons (symbol->string (car pair))
+                                                                acc)))))))))))) 
+            ;; One accumulator call with the whole response: every
+            ;; caller re-assembles the pieces into a single buffer
+            ;; anyway, and generator->list above already materialised
+            ;; the body, so splitting it gains nothing.
+            (accumulator (apply bytevector-append status-bv header-bv chunks)))))))
 
   (define ~check-http-header-value-case
     (lambda ()
