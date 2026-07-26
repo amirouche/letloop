@@ -369,6 +369,14 @@
    loop-current loop-ring loop-handlers loop-alloc-id! loop-abort
    loop-running? loop-active-connections loop-ring-fd loop-get-sqe
 
+   ;; provided-buffer-ring internals, for libraries (e.g. (letloop
+   ;; flow)'s flow-read) that want the zero-per-call-allocation recv
+   ;; path loop-read already uses instead of a private bytevector:
+   ;; group id + per-buffer size to prep the SQE, %buf-data to collect
+   ;; the completion's bytevector (populated generically by
+   ;; loop-run-once's CQE drain whenever IORING_CQE_F_BUFFER is set)
+   %buf-ring-bgid %buf-ring-buf-size %buf-data
+
    ;; per-tick cached timestamp: refreshed once per loop-run-once
    ;; iteration (one jiffy-current syscall per tick) rather than once
    ;; per caller, for libraries (e.g. (letloop flow)'s flow-log) that
