@@ -222,7 +222,14 @@
                                    (let ((done #f))
                                      (lambda ()
                                        (if done (eof-object) (begin (set! done #t) body-bv)))))
-                                  (apply bytevector-append (reverse chunks)))))
+                                  ;; http-response-write hands back the
+                                  ;; whole response in one piece, so the
+                                  ;; common case is a single chunk and
+                                  ;; re-appending it would copy every
+                                  ;; response a second time for nothing.
+                                  (if (and (pair? chunks) (null? (cdr chunks)))
+                                      (car chunks)
+                                      (apply bytevector-append (reverse chunks))))))
                           (write response-bv)))))))
               (if (phr-request-header-value-ci=? req %hdr-connection %val-close)
                   (cleanup)
