@@ -304,8 +304,17 @@
       (let ((chunks (generator->list body)))
         (let ((content-length (apply fx+ (map bytevector-length chunks))))
           (let* ((headers* (massage-headers-content-length headers content-length))
-                 (response-line (format #f "~a ~a ~a\r\n" version code reason))
-                 (header-str (apply string-append (map (lambda (x) (format #f "~a: ~a\r\n" (car x) (cdr x))) headers*))))
+                 (response-line (string-append version " " (number->string code) " " reason "\r\n"))
+                 (header-str (apply string-append
+                                    (map (lambda (x)
+                                           (string-append
+                                            (symbol->string (car x)) ": "
+                                            (let ((v (cdr x)))
+                                              (cond ((string? v) v)
+                                                    ((number? v) (number->string v))
+                                                    (else (format #f "~a" v))))
+                                            "\r\n"))
+                                         headers*))))
             (accumulator (string->utf8 (string-append response-line header-str "\r\n")))
             (for-each accumulator chunks))))))
 
