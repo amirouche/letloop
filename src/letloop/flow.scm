@@ -588,19 +588,19 @@
   ;; I/O events (§4.5)
   ;;------------------------------------------------------------
 
-  ;; A fresh, self-owned recv buffer per call rather than the loop's
-  ;; shared provided-buffer ring: that ring's result lands in the
-  ;; private %buf-data table inside (letloop liburing low), which
-  ;; would need its own exported hook to reach from here, and a
-  ;; plain io_uring_prep_recv into our own bytevector needs none —
-  ;; the same tradeoff loop-write already makes for sends.
-  (define %flow-read-buffer-size 65536)
-
-  ;; try is always #f — nothing here can be polled without a real
-  ;; completion. block preps a plain recv (no IOSQE_BUFFER_SELECT)
-  ;; and registers a cancel thunk: an unstarted read has consumed
-  ;; nothing, so losing a choice can cancel it outright (unlike
-  ;; flow-write, see below).
+  ;; Uses the loop's shared provided-buffer ring (the same one
+  ;; loop-read draws from) instead of a fresh self-owned bytevector:
+  ;; a plain per-call allocation + lock-object/unlock-object pin
+  ;; measurably regressed http/server's hot path once every
+  ;; keep-alive read started racing through flow-choice (each read
+  ;; was already a second SQE alongside flow-timeout's; a private
+  ;; 64KiB alloc+pin on top of that made it worse for no benefit —
+  ;; typical requests fit easily in the ring's %buf-ring-buf-size
+  ;; buffers). loop-run-once's CQE drain already copies the ring
+  ;; buffer's bytes into a bytevector and stashes it in %buf-data
+  ;; keyed by completion id whenever IORING_CQE_F_BUFFER is set, so
+  ;; the handler below just collects it from there instead of a bv
+  ;; it manages itself.
   (define flow-read
     (lambda (fd)
       (make-flow% 'base #f
@@ -609,20 +609,20 @@
                   (lambda (state resume register-cancel!)
                     (let* ((ring (loop-ring (loop-current)))
                            (id   (loop-alloc-id!))
-                           (bv   (make-bytevector %flow-read-buffer-size))
                            (sqe  (loop-get-sqe ring)))
-                      (lock-object bv)
-                      (io-uring-prep-recv sqe fd (bytevector-pointer bv)
-                                          (bytevector-length bv) 0)
+                      (io-uring-prep-recv sqe fd 0 (%buf-ring-buf-size) 0)
+                      (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
+                      (io-uring-sqe-set-buf-group sqe (%buf-ring-bgid))
                       (io-uring-sqe-set-data64 sqe id)
                       (hashtable-set! (loop-handlers (loop-current)) id
                                       (lambda (res)
-                                        (unlock-object bv)
                                         (resume
                                          (cond
-                                          ((fx<? res 0) #f)
-                                          ((fxzero? res) #t)
-                                          (else (subbytevector bv 0 res))))))
+                                          ((fx<? res 0) (hashtable-delete! (%buf-data) id) #f)
+                                          ((fxzero? res) (hashtable-delete! (%buf-data) id) #t)
+                                          (else (let ((bv (hashtable-ref (%buf-data) id #f)))
+                                                  (hashtable-delete! (%buf-data) id)
+                                                  bv))))))
                       (register-cancel!
                        (lambda ()
                          (let ((csqe (loop-get-sqe ring)))
