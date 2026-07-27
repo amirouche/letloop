@@ -789,3 +789,34 @@
       (loop-run-once)
       (tick (fx+ n 1))))
   (and (eq? result 'sync) cancelled))
+
+;; A cancel thunk that raises (loop-get-sqe does exactly that on a
+;; full submission queue — see the NULL-SQE fix e27eb79) must not
+;; take the winning continuation down with it: the state box has
+;; already CASed to 'synched, so if k is lost here no other base can
+;; ever resume the fiber — it is gone for good, silently. The raise
+;; itself is reported by loop-apply's guard (that is fine); what this
+;; check pins down is that the fiber still gets its value. Bounded
+;; loop-run-once ticks instead of loop-run so the buggy case fails
+;; instead of hanging.
+(define (~check-flow-011/raising-cancel-does-not-lose-fiber)
+  (define result #f)
+  (define winner (make-flow (lambda (x) x)
+                            (lambda () #f)
+                            (lambda (state resume register-cancel!)
+                              (loop-spawn (lambda () (resume 'won))))))
+  (define raising (make-flow (lambda (x) x)
+                             (lambda () #f)
+                             (lambda (state resume register-cancel!)
+                               (register-cancel!
+                                (lambda ()
+                                  (error 'raising-cancel "boom"))))))
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (set! result (flow-perform (flow-choice winner raising)))))
+  (let tick ((n 0))
+    (when (fx<? n 6)
+      (loop-run-once)
+      (tick (fx+ n 1))))
+  (eq? result 'won))

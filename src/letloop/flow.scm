@@ -73,7 +73,8 @@
           ~check-flow-010/start-reaches-destination
           ~check-flow-010/stop-flushes-remaining
 
-          ~check-flow-011/sync-resume-runs-later-cancels)
+          ~check-flow-011/sync-resume-runs-later-cancels
+          ~check-flow-011/raising-cancel-does-not-lose-fiber)
 
   (import (chezscheme)
           (letloop r999)
