@@ -399,6 +399,7 @@
    ~check-low-001/two-suspends-then-return
    ~check-low-002/non-suspending-fibers-run-once
    ~check-low-003/resumed-return-does-not-rerun-late-spawn
+   ~check-low-004/handlerless-buffered-cqe-not-retained
    )
 
   (import (chezscheme)

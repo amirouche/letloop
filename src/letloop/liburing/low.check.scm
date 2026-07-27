@@ -96,3 +96,47 @@
      (void)))
   (loop-run)
   (and done (eqv? sibling-runs 1)))
+
+;; A CQE that carries IORING_CQE_F_BUFFER but finds no handler must
+;; not leave its copied-out bytevector behind in %buf-data — nothing
+;; would ever collect it. The handler-less shape is real:
+;; loop-close-prep! deletes the parked handlers of a closing fd's
+;; in-flight reads and resumes them with -ECANCELED, but when the
+;; recv completed with data before the async cancel landed, its CQE
+;; still arrives with F_BUFFER set; before the fix each such race
+;; grew %buf-data by one entry, forever, under connection churn.
+;; Reproduced here without the race: arm a buffer-select recv whose
+;; completion id never gets a handler at all — the exact state the
+;; close path leaves behind — send it bytes over loopback, and check
+;; %buf-data is empty once the CQE has been drained. The 200ms grace
+;; before stopping dwarfs loopback delivery latency.
+(define (~check-low-004/handlerless-buffered-cqe-not-retained)
+  (define PORT 18240)
+  (define listen-fd (loop-socket-new AF-INET SOCK-STREAM 0))
+  (define done #f)
+  (loop-new)
+  (loop-bind listen-fd "127.0.0.1" PORT)
+  (loop-listen listen-fd 128)
+  (loop-spawn
+   (lambda ()
+     (let ((client (loop-accept listen-fd)))
+       ;; buffer-select recv prepped exactly like loop-read, minus
+       ;; the handler registration
+       (let* ((sqe (loop-get-sqe (loop-ring %loop)))
+              (id  (loop-alloc-id!)))
+         (io-uring-prep-recv sqe client 0 %buf-ring-buf-size 0)
+         (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
+         (io-uring-sqe-set-buf-group sqe %buf-ring-bgid)
+         (io-uring-sqe-set-data64 sqe id)))))
+  (loop-spawn
+   (lambda ()
+     (call-with-values (lambda () (make-sockaddr-in 127 0 0 1 PORT))
+       (lambda (addr addrlen)
+         (let ((fd (loop-connect addr addrlen)))
+           (foreign-free addr)
+           (loop-write fd (string->utf8 "orphan"))
+           (loop-sleep 0.2)
+           (set! done #t)
+           (loop-stop))))))
+  (loop-run)
+  (and done (fxzero? (hashtable-size %buf-data))))
