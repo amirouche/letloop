@@ -32,7 +32,10 @@ help:
 build-scheme:
 	@echo "Building Scheme implementation..."
 	@mkdir -p bin
-	@cd .. && ./local/bin/letloop compile --optimize-level=3 ./examples ./benchmarks/scheme ./benchmarks/scheme/bench-server.scm main 2>&1 | tail -1 && mv a.out benchmarks/bin/scheme-pico-server
+	@# No `| tail -1`: letloop reports by name any library it could not
+	@# fold into the program, and that has to be seen, not swallowed.
+	cd .. && ./local/bin/letloop compile --optimize-level=3 ./examples ./benchmarks/scheme ./benchmarks/scheme/bench-server.scm main
+	mv ../a.out bin/scheme-pico-server
 	@echo "✓ Scheme (pico) built"
 
 build-go:

@@ -2,6 +2,16 @@
 
 2026-07-26
 
+> **Superseded 2026-07-27** by `20260727-amalgamated-compile.md`. The
+> unexplained result below — 202k as `a.out` against 221k for the same
+> code as a `.so` — is explained there: a boot-image library shadows its
+> own source, so no `.wpo` is written for it, and `compile-whole-program`
+> reports what it could not fold only through its return value. The
+> shipping question is settled and `letloop compile` amalgamates by
+> default. One finding here needs qualifying: `optimize-level` is *not*
+> irrelevant to amalgamation — a `.wpo` compiled at level 0 folded into a
+> level 3 program forfeits the entire benefit.
+
 Findings from chasing an HTTP server throughput regression. The
 performance work itself is done and committed; this document records
 the one lever that is **not** done, because it needs a decision about
