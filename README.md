@@ -50,7 +50,6 @@ On Arch: `sudo pacman -S util-linux-libs libretls`. On Alpine:
 ./venv
 make chezscheme
 make letloop
-mv a.out local/bin/letloop
 make check
 ```
 
@@ -77,8 +76,11 @@ letloop root exec DIRECTORY TARGET-DIRECTORY -- COMMAND ...
 
 - **check** — discovers and runs `~check-*` procedures exported by
   libraries; `~benchmark-*` procedures are benchmarks.
-- **compile** — whole-program-optimized standalone executable from a
-  library and an entry-point procedure.
+- **compile** — standalone executable from a library and an entry-point
+  procedure. The program and every library it imports are compiled as a
+  single unit, so that calls across library boundaries can be inlined;
+  `--visible-libraries` compiles them separately and leaves them
+  importable at run time instead.
 - **exec** — compile and run in one step, forwarding arguments after `--`.
 - **http serve** — serve a web library exporting `application`,
   `context`, and `dispatch` over the io_uring HTTP server (see
@@ -92,7 +94,8 @@ letloop root exec DIRECTORY TARGET-DIRECTORY -- COMMAND ...
   distribution images.
 
 Key flags: `--dev` (debug, profile, instruction counts),
-`--optimize-level=0..3`, `--disable-garbage-collector`.
+`--optimize-level=0..3`, `--disable-garbage-collector`,
+`--visible-libraries`, `--boot=PATH`.
 
 ## Libraries in tree
 

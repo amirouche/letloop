@@ -31,16 +31,14 @@ FFI binding libraries (`tls`, `liburing`, `vulkan`, `sodium`, `argon2`, `blake3`
 **First-time setup** (builds ChezScheme from source, ~5–15 min):
 ```bash
 ./venv               # enters a shell with SCHEME, LETLOOP_ROOT, LD_LIBRARY_PATH set
-make chezscheme
-make letloop
-mv a.out local/bin/letloop
+make chezscheme      # ChezScheme $(CHEZ_REF), currently main = 10.5.0-pre-release.1
+make letloop         # installs itself, no `mv a.out` step
 make check
 ```
 
 **Rebuild letloop after changes:**
 ```bash
-make letloop          # must be inside ./venv shell, or: ./venv make letloop
-mv a.out local/bin/letloop
+make letloop          # must be inside ./venv shell, or: ./venv $(pwd)/local/ make letloop
 ```
 
 **Run all tests:**
@@ -94,12 +92,29 @@ src/letloop/www.scm          Web utilities
 src/letloop/cffi.scm         C FFI bindings
 ```
 
-**Build output:** `make letloop` compiles `src/letloop/base.scm` with whole-program optimization, producing `a.out` (and intermediate `.so`/`.wpo` files, which are git-ignored).
+**Build output:** `make letloop` produces `letloop.boot` from `src/letloop/base.scm` and installs it, the way Chez itself ships: the `scheme` executable hardlinked under another name, which makes it load the boot file that goes by that name.
+
+```
+$PREFIX/lib/csv<version>/<machine>/letloop        hardlink to the scheme binary
+$PREFIX/lib/csv<version>/<machine>/letloop.boot   assembled from one .so per library
+$PREFIX/bin/letloop                               relative symlink to the above
+$PREFIX/lib/letloop/src/letloop/**.scm            the sources letloop ships
+$PREFIX/lib/letloop/obj/<optimize-level>/**       their .so and .wpo, per level
+```
+
+letloop's own libraries stay separately compiled and importable: `exec`, `repl` and `check` resolve user code against them. The symlink has to stay *relative*, because `scheme-binarypath*` locates the boot directory through `dirname($SCHEME) + "/" + readlink($SCHEME)`.
+
+**`letloop compile` amalgamates by default:** the program and every library it imports become one compilation unit via `compile-program` + `compile-whole-program`, so calls across library boundaries can be inlined — worth ~14% on the HTTP benchmark. Two things make that possible and are easy to break:
+
+- It runs in a **child process** spawned as `<exe> -b petite.boot -b scheme.boot --script build.scm`. A library already defined in the process shadows its own source and is never recompiled, so no `.wpo` is written for it — and every `(letloop ...)` library arrives with the boot image. `compile-whole-program` then folds nothing and reports it only through its return value, which is why the child treats a non-empty return as fatal.
+- The `.wpo` cache is **per optimize level**. Folding a level 0 cache into a level 3 program measured 401k req/s against 456k for a level 3 cache. `CACHE_LEVELS` in the makefile primes 0 and 3; any other level is built on demand.
+
+`--visible-libraries` restores the old behaviour, and is required by a program that resolves a library name at run time with `environment` or `eval`.
 
 **Runtime boot loading order** (relevant when debugging standalone binaries):
 1. `petite.boot`
 2. `scheme.boot`
-3. `letloop.boot` (if present)
+3. `letloop.boot` (only with `--visible-libraries`; an amalgamated program carries no letloop boot image)
 4. `program.boot`
 
 ## Testing Framework
@@ -126,10 +141,15 @@ letloop root create DISTRIBUTION VERSION MACHINE DIRECTORY
 letloop root exec DIRECTORY TARGET-DIRECTORY -- COMMAND ...
 ```
 
-Key flags: `--dev` (debug/profile), `--optimize-level=0-3`, `--disable-garbage-collector`.
+Key flags: `--dev` (debug/profile), `--optimize-level=0-3`, `--disable-garbage-collector`, `--visible-libraries` (do not amalgamate), `--boot=PATH` (emit a boot file instead of an executable; needs `--visible-libraries`).
 
 ## Environment
 
-The `venv` script sets up `LETLOOP_ROOT`, `SCHEME`, and `LD_LIBRARY_PATH`. Run `./venv` to enter a shell with these set, or `./venv COMMAND` to run a single command in that environment.
+The `venv` script sets up `LETLOOP_ROOT`, `SCHEME`, and `LD_LIBRARY_PATH`. Its signature is `./venv [PREFIX] [COMMAND ...]`:
+
+- `./venv` — enters a shell with these set, `LETLOOP_PREFIX` defaulting to `$(pwd)/local`.
+- `./venv $(pwd)/local/ COMMAND ...` — runs a single command in that environment.
+
+**The first argument is always `LETLOOP_PREFIX`, and it must be an absolute path** — it is consumed and shifted before the rest is exec'd. There is no one-argument "just run this command" form: `./venv make letloop` sets `LETLOOP_PREFIX=make`, creates a stray `./make/bin/`, and then execs `letloop` with no arguments.
 
 Environment variables: `LETLOOP_DEBUG`, `LETLOOP_DEBUG_ROOT`, `SCHEME`, `LD_LIBRARY_PATH`, `LETLOOP_ROOT`, `LETLOOP_PREFIX`.

@@ -130,8 +130,12 @@ echo ""
 
 # Scheme (compiled)
 if [ -x "$BENCHMARK_DIR/bin/scheme-pico-server" ]; then
+    # LD_LIBRARY_PATH is not optional: with the distro's liburing-ffi
+    # (2.11 on Debian) instead of the 2.14 the makefile builds, the
+    # server accepts connections and answers nothing, which shows up as
+    # a plausible-looking 0.00 req/s rather than an error.
     SERVERS[scheme-pico]="Scheme-pico"
-    COMMANDS[scheme-pico]="$BENCHMARK_DIR/bin/scheme-pico-server"
+    COMMANDS[scheme-pico]="env LD_LIBRARY_PATH=$BENCHMARK_DIR/../local/lib $BENCHMARK_DIR/bin/scheme-pico-server"
     echo "✓ Scheme (pico, compiled)"
 fi
 

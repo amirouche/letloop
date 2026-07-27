@@ -21,25 +21,29 @@ Build ChezScheme from source (required before building letloop).
 ---
 
 #### `/letloop-build`
-Build the letloop binary from source.
+Build letloop from source.
 
 **What it does:**
-- Compiles `src/letloop/base.scm` with whole-program optimization
-- Generates `.so` and `.wpo` files
-- Creates `a.out` executable
+- Compiles every library under `src/letloop/` to a `.so`, separately, and
+  assembles them into `letloop.boot` — letloop's own libraries stay
+  importable, which `exec`, `repl` and `check` need
+- Installs `letloop.boot` beside `petite.boot`/`scheme.boot`, hardlinks the
+  `scheme` binary as `letloop`, and symlinks `$PREFIX/bin/letloop` to it
+- Installs the sources to `$PREFIX/lib/letloop/src` with a per-optimize-level
+  `.so`/`.wpo` cache under `obj/`, which is what lets `letloop compile`
+  fold a `(letloop ...)` library into a user program
 
 **Prerequisites:** ChezScheme must be built first
 
-**Output:** `a.out` in project root
+**Output:** installed in place; no `a.out`
 
 ---
 
 #### `/letloop-install`
-Build and install letloop to `local/bin` in one step.
+Build and install letloop to `local/bin`.
 
 **What it does:**
-- Runs `make letloop`
-- Moves `a.out` to `local/bin/letloop`
+- Runs `make letloop`, which installs itself (there is no `mv a.out` step)
 
 **After installation:**
 ```bash
