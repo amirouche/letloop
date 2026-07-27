@@ -97,6 +97,35 @@ Same machine, back to back, `taskset -c 0`, bench.sh methodology.
 
 The 2026-07-27 09:36 hand-built reference was 446,244 / 452,542.
 
+### Startup, which turns out to be the larger effect
+
+A `fib` library importing nothing but `(chezscheme)`, 200 runs per figure,
+two passes agreeing to within 0.7 ms:
+
+| build | startup | vs the Chez floor |
+|---|---|---|
+| bare `scheme`, empty script | 32.77 ms | — |
+| amalgamated `a.out` | 33.27 ms | **+0.5 ms** |
+| amalgamated boot file + scheme copy | 32.52 / 32.89 ms | +0 ms |
+| module monolith boot file | 32.81 / 32.48 ms | +0 ms |
+| `--visible-libraries` `a.out` | 69.43 ms | **+36.7 ms** |
+| `letloop` itself | 69.60 ms | +36.8 ms |
+
+An amalgamated program starts at the floor. A separately-compiled one
+pays 37 ms loading and invoking `letloop.boot`'s 74 libraries **even
+though `fib` imports none of them** — 2.1x, far more than the ~14% on
+throughput, and the figure that matters for anything CLI-shaped.
+
+Reading the boot files off disk costs nothing against carrying them as C
+arrays, so `--boot` is a real option rather than a compromise.
+
+This also prices letloop's own CLI latency: the 70 ms is that same tax.
+`letloop compile` never imports those libraries — `base.scm` pulls in
+`(letloop http server)` only for `http serve` — so resolving those few
+imports lazily through `environment` would let letloop itself be
+amalgamated and start in ~33 ms, loading the library boot only for
+`check`, `exec`, `repl` and `serve`. Not attempted here.
+
 ## Not done: the module monolith, settled by measurement
 
 **Rewriting `src/letloop` as one compilation unit** built from nested Chez
@@ -117,7 +146,14 @@ state, `taskset -c 0`, bench.sh methodology:
 
 **+1.3%, under a noise floor of 2.6%** — the same binary varied
 427,068 → 438,033 at c=32. This reproduces the March table (224k monolith
-vs 221k amalgamated, +1.4%) closely enough to trust both.
+vs 221k amalgamated, +1.4%) closely enough to trust both. On startup it
+is worth nothing at all: 32.81/32.48 ms against 32.52/32.89 ms for the
+amalgamated boot file, both at the Chez floor.
+
+Note that the whole program was merged, not part of it: all 16 libraries
+the counter app imports, plus the handler and server, 18 modules in one
+compilation unit. Merging the other 58 libraries could only add code that
+never runs, so there is no further throughput to find this way.
 
 Two earlier objections to this design were wrong and should not be
 repeated: build time is *not* a cost (all 74 libraries compile at
