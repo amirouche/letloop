@@ -28,14 +28,15 @@ chezscheme: ## Compile chezscheme $(CHEZ_REF) into $(PREFIX)
 letloop: clean src/letloop-program.c src/letloop-usage.md src/letloop/base.scm ## Produce letloop.boot from letloop/base.scm's letloop-main, and install it
 	echo $(SCHEME)
 	$(SCHEME) --version
-	echo '(source-directories (list "./src/")) (generate-wpo-files #t)(import (letloop base)) (letloop-compile (list "--visible-libraries" "--boot=letloop.boot" "./src/" "src/letloop/base.scm" "letloop-main"))' | $(SCHEME) --quiet --libdirs ./src/ --compile-imported-libraries
+	echo '(source-directories (list "./src/")) (generate-wpo-files #t)(import (letloop base)) (letloop-compile (list "--boot=letloop.boot" "./src/" "src/letloop/base.scm" "letloop-main"))' | $(SCHEME) --quiet --libdirs ./src/ --compile-imported-libraries
 	test -s letloop.boot
 	@# letloop ships the way Chez itself does: the scheme executable under
 	@# another name, which makes it load the boot file that goes by that
-	@# name. Its libraries have to stay importable -- exec, repl and check
-	@# resolve user code against them -- so letloop.boot is assembled from
-	@# separately compiled objects, and `letloop compile` amalgamates user
-	@# programs in a child process instead.
+	@# name. The boot image is amalgamated and holds nothing but the CLI --
+	@# (letloop base) imports no letloop library, it resolves them at run
+	@# time from $(PREFIX)/lib/letloop instead. That keeps startup at the
+	@# bare Chez floor, 33ms rather than 69ms, and leaves every library
+	@# name free for a user program to import.
 	BOOT=$$(dirname $$(readlink -f $(SCHEME))); \
 	  install -m 644 letloop.boot "$$BOOT/letloop.boot"; \
 	  ln -f "$$BOOT/scheme" "$$BOOT/letloop"; \

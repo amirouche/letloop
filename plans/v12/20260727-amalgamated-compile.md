@@ -119,12 +119,44 @@ throughput, and the figure that matters for anything CLI-shaped.
 Reading the boot files off disk costs nothing against carrying them as C
 arrays, so `--boot` is a real option rather than a compromise.
 
-This also prices letloop's own CLI latency: the 70 ms is that same tax.
-`letloop compile` never imports those libraries — `base.scm` pulls in
-`(letloop http server)` only for `http serve` — so resolving those few
-imports lazily through `environment` would let letloop itself be
-amalgamated and start in ~33 ms, loading the library boot only for
-`check`, `exec`, `repl` and `serve`. Not attempted here.
+### letloop's own startup: 69.6 ms → 35.06 ms
+
+Done, since the 37 ms was letloop's own tax too. `(letloop base)` now
+imports nothing from letloop and resolves `cli-read`, `transparent`,
+`letloop-root` and `letloop-review` at first use, against the sources
+installed at `$PREFIX/lib/letloop`. letloop.boot is amalgamated and holds
+the CLI alone: 678 KB against 2.8 MB, starting 2 ms above the bare Chez
+floor of 33.04 ms.
+
+Both reasons this had to be a lazy *resolution* rather than a smaller boot
+image are load-bearing:
+
+- **A folded library's name stays occupied.** Verified: with `(t b)`
+  folded into a program, `(environment '(t b))` fails with "attempt to
+  import invisible library" *even with its source on the library path*,
+  while a never-folded `(t c)` loads from source fine. So anything
+  `(letloop base)` imports becomes unimportable for user programs —
+  `(letloop match)` and `(letloop http server)`, which the benchmark
+  handler and server both import, would have broken.
+- **Baking a smaller subgraph would not have helped.** Loading a compiled
+  library invokes its imports, so the cost is paid at startup whatever
+  the boot image holds. Only importing nothing avoids it.
+
+The `(letloop match)` dependency was removed by rewriting four library
+shape tests as plain list code. Every subcommand that replaces
+`library-directories` calls `letloop-library-path!` afterwards, or
+letloop's own libraries drop off the path mid-run.
+
+Two consequences worth knowing:
+
+- `(letloop base)` is itself folded, so `letloop check ./src/` skips
+  `src/letloop/base.scm`. It exports no `~check-*`, so no test is lost.
+- `bin/letloop` being the `scheme` binary, Chez's C `main` intercepts
+  `--help`, `--version`, `-b`, `--boot` and `--verbose` before any Scheme
+  runs, so `letloop --help` prints Chez's usage rather than letloop's.
+  That is a regression against the old C-hosted binary, which passed
+  everything through to `letloop-main`. It is also why the flag is
+  `--boot=PATH` and not `--boot PATH`.
 
 ## Not done: the module monolith, settled by measurement
 
@@ -182,6 +214,24 @@ The 58 libraries left alone include the `define-ftype` ones and
 result. The prototype is not committed.
 
 ## Traps worth keeping
+
+- **`let` does not sequence its initializers, and instrumentation notices.**
+  `(letloop tea terminfo)`'s `read-u16le` was
+  `(let ((lo (get-u8 p)) (hi (get-u8 p))) ...)`: two side-effecting reads
+  in one `let`, whose evaluation order Scheme leaves unspecified. Chez
+  picked the order the code wanted, until `(compile-profile 'source)`
+  picked the other one and byte-swapped every 16-bit field in the file.
+  It presented as a terminal with no capabilities rather than as an
+  error, because `build-cap-set` takes the name from its argument rather
+  than from the parse, so `~check-terminfo-load-xterm` kept passing while
+  the two content checks failed. Now `let*`.
+
+  Worth knowing how it surfaced: making `(letloop base)` import nothing
+  meant `(letloop tea terminfo)` was no longer pulled in transitively via
+  `(letloop review)` → `(letloop termbox)` *before* `letloop-check` turns
+  profiling on. It had been compiled uninstrumented by luck of import
+  order. Any check that only passes because of when its library happens
+  to be compiled is worth a second look.
 
 - `guard` around a compile catches Chez's **continuable warnings** and
   unwinds, writing off a library that merely warns. That silently kept

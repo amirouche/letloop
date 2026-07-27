@@ -1,8 +1,12 @@
 #!chezscheme
 (library (letloop base)
   (export letloop-main letloop-compile letloop-exec letloop-repl letloop-check letloop-review)
-  (import (chezscheme) (letloop match) (letloop cli base) (letloop root) (letloop review)
-          (only (letloop http server) transparent))
+  ;; Nothing from letloop is imported here on purpose -- see
+  ;; letloop-library-path!. An imported library would be folded into the
+  ;; letloop program, and a folded library is invisible: its name would
+  ;; then block user programs from importing it, and loading it at
+  ;; startup costs 36ms nobody asked for.
+  (import (chezscheme))
 
   (define pk
     (lambda args
@@ -321,6 +325,33 @@
                    (k (failure ex))))
            thunk)))))
 
+  ;; The shape tests below were written with (letloop match). They are
+  ;; plain list code now because this library must import nothing from
+  ;; letloop: whatever it imports gets folded into the letloop program
+  ;; and turns invisible, and an invisible library's name then blocks a
+  ;; user program from importing that same library. See the lazy
+  ;; definitions further down.
+
+  (define clause-of
+    (lambda (sexp index keyword)
+      ;; The INDEXth form of SEXP, when it is a (KEYWORD ...) clause.
+      (let loop ((sexp sexp) (index index))
+        (cond
+         ((not (pair? sexp)) #f)
+         ((fxzero? index) (and (pair? (car sexp))
+                               (eq? (caar sexp) keyword)
+                               (car sexp)))
+         (else (loop (cdr sexp) (fx- index 1)))))))
+
+  (define library-form-name
+    ;; The name in (library (name ...) ...), or #f for anything else.
+    (lambda (sexp)
+      (and (pair? sexp)
+           (eq? (car sexp) 'library)
+           (pair? (cdr sexp))
+           (list? (cadr sexp))
+           (cadr sexp))))
+
   (define maybe-library-name
     (lambda (filename)
       (pk '*maybe-library-name filename)
@@ -328,9 +359,7 @@
           #f
           (and=> (guard (ex (else #f))
                    (call-with-input-file filename read))
-                 (lambda (sexp) (and=> (match sexp
-                                         ((library (,name ...) ,body ...) name)
-                                         (,_ #f))
+                 (lambda (sexp) (and=> (library-form-name sexp)
                                        (lambda (name)
                                          (call-with-warnings-ignored
                                           (lambda ()
@@ -342,14 +371,15 @@
 
   (define extract-library-name
     (lambda (import-spec)
-      (match import-spec
-        ((for ,lib-ref ,_ ...) (extract-library-name lib-ref))
-        ((only ,lib-ref ,_ ...) (extract-library-name lib-ref))
-        ((except ,lib-ref ,_ ...) (extract-library-name lib-ref))
-        ((prefix ,lib-ref ,_) (extract-library-name lib-ref))
-        ((rename ,lib-ref ,_ ...) (extract-library-name lib-ref))
-        ((,name ...) name)
-        (,_ #f))))
+      (cond
+       ((not (pair? import-spec)) #f)
+       ;; for, only, except, prefix and rename all wrap a library
+       ;; reference as their first subform.
+       ((memq (car import-spec) '(for only except prefix rename))
+        (and (pair? (cdr import-spec))
+             (extract-library-name (cadr import-spec))))
+       ((list? import-spec) import-spec)
+       (else #f))))
 
   (define library-imports
     (lambda (filename)
@@ -357,10 +387,14 @@
         (call-with-input-file filename
           (lambda (port)
             (let ((sexp (read port)))
-              (match sexp
-                ((library (,_ ...) (export ,_ ...) (import ,imports ...) ,_ ...)
-                 (filter pair? (map extract-library-name imports)))
-                (,_ '()))))))))
+              (if (not (library-form-name sexp))
+                  '()
+                  ;; (library (name) (export ...) (import ...) body ...)
+                  (let ((imports (and (clause-of sexp 2 'export)
+                                      (clause-of sexp 3 'import))))
+                    (if imports
+                        (filter pair? (map extract-library-name (cdr imports)))
+                        '())))))))))
 
   (define topological-sort-libraries
     (lambda (discovered)
@@ -623,10 +657,46 @@
       (and (maybe-library? filename)
            (and=> (guard (ex (else #f))
                     (call-with-input-file filename read))
-                  (lambda (sexp)
-                    (match sexp
-                      ((library (,name ...) ,body ...) name)
-                      (,_ #f)))))))
+                  library-form-name))))
+
+  (define letloop-library-path!
+    ;; Put the sources letloop ships, and their objects, on the library
+    ;; path. letloop resolves its own libraries at run time through this
+    ;; rather than importing them, so that none of them ends up folded
+    ;; into the letloop program -- a folded library is invisible, and its
+    ;; name then blocks a user program from importing it. It also keeps
+    ;; letloop's own startup at the bare Chez floor, 33ms rather than
+    ;; 69ms, since nothing is loaded until a subcommand asks for it.
+    ;;
+    ;; Called again after every subcommand that replaces the library
+    ;; directories outright.
+    (lambda ()
+      (and=> (letloop-library-directory)
+             (lambda (root)
+               (let ((entry (cons (string-append root "/src")
+                                  ;; the objects built at install time,
+                                  ;; so this loads compiled code
+                                  (string-append root "/obj/0"))))
+                 (unless (member entry (library-directories))
+                   (library-directories (append (library-directories) (list entry)))
+                   (source-directories (append (source-directories)
+                                               (list (string-append root "/src"))))))))))
+
+  (define lazy
+    ;; A procedure from one of letloop's own libraries, resolved on first
+    ;; use instead of imported.
+    (lambda (library name)
+      (let ((cached #f))
+        (lambda args
+          (unless cached
+            (letloop-library-path!)
+            (set! cached (eval name (environment library))))
+          (apply cached args)))))
+
+  (define cli-read (lazy '(letloop cli base) 'cli-read))
+  (define transparent (lazy '(letloop http server) 'transparent))
+  (define letloop-root (lazy '(letloop root) 'letloop-root))
+  (define letloop-review (lazy '(letloop review) 'letloop-review))
 
   (define letloop-compile
     (lambda (arguments)
@@ -767,6 +837,9 @@
             ;; directory.
             (library-directories directories)
             (source-directories directories))
+
+          ;; the override above drops letloop's own libraries off the path
+          (letloop-library-path!)
 
           (optimize-level optimize-level*)
 
@@ -1094,6 +1167,9 @@
       (library-directories directories)
       (source-directories directories))
 
+    ;; the override above drops letloop's own libraries off the path
+    (letloop-library-path!)
+
     (when optimize-level*
       (optimize-level optimize-level*))
 
@@ -1172,6 +1248,9 @@
     (unless (null? directories)
       (library-directories directories)
       (source-directories directories))
+
+    ;; the override above drops letloop's own libraries off the path
+    (letloop-library-path!)
 
     (unless (null? extensions)
       (library-extensions (append extensions (library-extensions))))
@@ -1359,6 +1438,9 @@
 
       (library-directories directories)
       (source-directories directories)
+
+      ;; the override above drops letloop's own libraries off the path
+      (letloop-library-path!)
 
       (unless (null? extensions)
         (library-extensions extensions))
