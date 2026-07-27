@@ -96,13 +96,24 @@ src/letloop/cffi.scm         C FFI bindings
 
 ```
 $PREFIX/lib/csv<version>/<machine>/letloop        hardlink to the scheme binary
-$PREFIX/lib/csv<version>/<machine>/letloop.boot   assembled from one .so per library
+$PREFIX/lib/csv<version>/<machine>/letloop.boot   amalgamated, the CLI only (678 KB)
 $PREFIX/bin/letloop                               relative symlink to the above
 $PREFIX/lib/letloop/src/letloop/**.scm            the sources letloop ships
 $PREFIX/lib/letloop/obj/<optimize-level>/**       their .so and .wpo, per level
 ```
 
-letloop's own libraries stay separately compiled and importable: `exec`, `repl` and `check` resolve user code against them. The symlink has to stay *relative*, because `scheme-binarypath*` locates the boot directory through `dirname($SCHEME) + "/" + readlink($SCHEME)`.
+**`(letloop base)` imports nothing from letloop, on purpose.** It resolves `cli-read`, `transparent`, `letloop-root` and `letloop-review` at first use through `lazy` / `letloop-library-path!`, against the sources installed at `$PREFIX/lib/letloop`. Two reasons, and both bite hard if someone adds an import back:
+
+- A library imported by `(letloop base)` gets folded into the amalgamated letloop program, and a folded library is **invisible** — its name then blocks *user* programs from importing that same library. `(environment '(letloop match))` fails with "attempt to import invisible library" even with the source on the path.
+- Loading letloop's libraries at startup costs **36 ms**. letloop starts in 35.06 ms against a bare Chez floor of 33.04 ms; before this it was 69.6 ms.
+
+So the shape tests in `base.scm` are plain list code rather than `(letloop match)` patterns, and every subcommand that replaces `library-directories` calls `letloop-library-path!` afterwards to put letloop's own libraries back on it.
+
+One consequence: `(letloop base)` is itself folded, so `letloop check ./src/` skips `src/letloop/base.scm` — it exports no `~check-*`, so no test is lost.
+
+Because `bin/letloop` is the `scheme` binary, **Chez's C `main` intercepts `--help`, `--version`, `-b`, `--boot` and `--verbose`** before any Scheme runs: `letloop --help` prints *Chez's* usage. Run `letloop` with no arguments for letloop's. This is also why the flag is spelled `--boot=PATH` and not `--boot PATH`.
+
+The `bin/letloop` symlink has to stay *relative*, because `scheme-binarypath*` locates the boot directory through `dirname($SCHEME) + "/" + readlink($SCHEME)`.
 
 **`letloop compile` amalgamates by default:** the program and every library it imports become one compilation unit via `compile-program` + `compile-whole-program`, so calls across library boundaries can be inlined — worth ~14% on the HTTP benchmark. Two things make that possible and are easy to break:
 

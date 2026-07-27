@@ -1,5 +1,9 @@
 Usage:
 
+  Note: letloop is the Chez Scheme executable under another name, so
+  --help, --version, -b, --boot and --verbose are read by Chez itself
+  before letloop sees them. Run letloop with no arguments for this text.
+
   letloop check [--fail-fast] [DIRECTORY ...] LIBRARY.SCM ...
   letloop compile [DIRECTORY ...] LIBRARY.SCM PROCEDURE [-- CC-FLAGS ...]
   letloop exec [DIRECTORY ...] LIBRARY.SCM PROCEDURE [-- ARGUMENT ...]
