@@ -1,4 +1,4 @@
-.PHONY: help letloop argon2 blake3 sodium oprf opaque liburing check shaders font-bundle
+.PHONY: help letloop letloop-libraries argon2 blake3 sodium oprf opaque liburing check shaders font-bundle
 
 SCHEME=$(shell which scheme)
 PWD=$(shell pwd)
@@ -6,26 +6,63 @@ LETLOOP=$(shell which letloop)
 SHELL=/bin/bash
 PREFIX=$(PWD)/local
 
+# Which ChezScheme to build. There is no v10.5.0 tag upstream: main carries
+# scheme-version #x0a050001, i.e. 10.5.0-pre-release.1, while the latest
+# release tag is v10.4.1. Pin this to a tag when one lands.
+CHEZ_REF=main
+
 help: ## Help!...
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST) | sort
 
 ./local/bin/scheme: chezscheme
 
-chezscheme: ## Compile latest chezscheme
+chezscheme: ## Compile chezscheme $(CHEZ_REF) into $(PREFIX)
 	rm -rf $(PREFIX)/src/chezscheme
 	mkdir -p $(PREFIX)/src
 	cd $(PREFIX)/src && git clone https://github.com/cisco/chezscheme
-	cd $(PREFIX)/src/chezscheme && git checkout main
+	cd $(PREFIX)/src/chezscheme && git checkout $(CHEZ_REF)
 	cd $(PREFIX)/src/chezscheme && ./configure --threads --disable-x11 --disable-curses --kernelobj --installprefix=$(PREFIX)/
 	cd $(PREFIX)/src/chezscheme && make -j$(shell nproc --ignore 1)
 	cd $(PREFIX)/src/chezscheme && make install
 
-letloop: clean src/letloop-program.c src/letloop-usage.md src/letloop/base.scm ## Produce a.out from letloop/base.scm's procedure called letloop-main
+letloop: clean src/letloop-program.c src/letloop-usage.md src/letloop/base.scm ## Produce letloop.boot from letloop/base.scm's letloop-main, and install it
 	echo $(SCHEME)
 	$(SCHEME) --version
-	echo '(source-directories (list "./src/")) (generate-wpo-files #t)(import (letloop base)) (letloop-compile (list "./src/" "src/letloop/base.scm" "letloop-main"))' | $(SCHEME) --quiet --libdirs ./src/ --compile-imported-libraries
-	cp a.out $(PREFIX)/bin/letloop
+	echo '(source-directories (list "./src/")) (generate-wpo-files #t)(import (letloop base)) (letloop-compile (list "--visible-libraries" "--boot=letloop.boot" "./src/" "src/letloop/base.scm" "letloop-main"))' | $(SCHEME) --quiet --libdirs ./src/ --compile-imported-libraries
+	test -s letloop.boot
+	@# letloop ships the way Chez itself does: the scheme executable under
+	@# another name, which makes it load the boot file that goes by that
+	@# name. Its libraries have to stay importable -- exec, repl and check
+	@# resolve user code against them -- so letloop.boot is assembled from
+	@# separately compiled objects, and `letloop compile` amalgamates user
+	@# programs in a child process instead.
+	BOOT=$$(dirname $$(readlink -f $(SCHEME))); \
+	  install -m 644 letloop.boot "$$BOOT/letloop.boot"; \
+	  ln -f "$$BOOT/scheme" "$$BOOT/letloop"; \
+	  mkdir -p $(PREFIX)/bin; \
+	  ln -srf "$$BOOT/letloop" $(PREFIX)/bin/letloop; \
+	  echo "Installed $$BOOT/letloop.boot and $(PREFIX)/bin/letloop"
+	$(MAKE) letloop-libraries
 	@echo What is done is not to be done!
+
+# Optimize levels to prime the object cache for. 0 is what `letloop
+# compile` defaults to, 3 is what the benchmarks ask for. Any other level
+# is compiled on demand, into its own cache directory, the first time a
+# program is built at it.
+CACHE_LEVELS=0 3
+
+letloop-libraries: ## Install letloop's sources and their per-level .wpo cache into $(PREFIX)/lib/letloop
+	rm -rf $(PREFIX)/lib/letloop
+	mkdir -p $(PREFIX)/lib/letloop/src
+	cp -a src/letloop $(PREFIX)/lib/letloop/src/
+	@# One pass per level, and one pass only: .wpo files from separate
+	@# compilations disagree ("does not define expected compilation
+	@# instance of library").
+	for level in $(CACHE_LEVELS); do \
+	  $(SCHEME) --quiet --script scripts/library-cache.ss \
+	    $(PREFIX)/lib/letloop/src $(PREFIX)/lib/letloop/obj/$$level $$level || exit 1; \
+	done
+	$(SCHEME) --version > $(PREFIX)/lib/letloop/STAMP
 
 font-bundle: ## Regenerate font-bundled.scm from FullCyrAsia-DejaVu30x16.psf.gz (PSF2, ~32K, ASCII coverage)
 	@command -v gunzip >/dev/null || { echo "gunzip required"; exit 1; }
