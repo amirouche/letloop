@@ -137,7 +137,14 @@
   (define (read-u8 p) (get-u8 p))
 
   (define (read-u16le p)
-    (let ((lo (get-u8 p)) (hi (get-u8 p)))
+    ;; let*, not let: the initializers each consume a byte, and the order
+    ;; a plain let evaluates them in is unspecified. Chez happened to
+    ;; pick the one this wants, until (compile-profile 'source) changed
+    ;; its mind and byte-swapped every 16-bit read in the file -- which
+    ;; showed up as a terminal with no capabilities at all, since
+    ;; build-cap-set takes the name from its argument rather than from
+    ;; the parse and so still looked healthy.
+    (let* ((lo (get-u8 p)) (hi (get-u8 p)))
       (cond
        ((or (eof-object? lo) (eof-object? hi)) #f)
        (else (fxior lo (fxsll hi 8))))))
