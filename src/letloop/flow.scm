@@ -206,12 +206,24 @@
          (lambda (k)
            (define register-cancel!
              (lambda (thunk) (set-box! cancels (cons thunk (unbox cancels)))))
+           ;; The cancel list is unboxed inside the spawned thunk, not
+           ;; at resume time: a base can win SYNCHRONOUSLY, during the
+           ;; block-registration for-each below (flow-put-block/
+           ;; flow-get-block's post-register rescan does exactly that),
+           ;; and the bases after it in flatten order have not
+           ;; registered their cancels yet. Snapshotting here would
+           ;; fire an incomplete list and leave e.g. a losing
+           ;; flow-read armed forever, eating and discarding the fd's
+           ;; next bytes. Deferring through loop-spawn reads the list
+           ;; only after the registration pass has finished.
            (define resume
              (lambda (value)
                (and (box-cas! state 'waiting 'synched)
                     (begin
-                      (for-each (lambda (thunk) (thunk)) (unbox cancels))
-                      (loop-spawn (lambda () (k value)))
+                      (loop-spawn
+                       (lambda ()
+                         (for-each (lambda (thunk) (thunk)) (unbox cancels))
+                         (k value)))
                       #t))))
            (for-each (lambda (base)
                        ((flow-block-proc base) state
