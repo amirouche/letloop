@@ -752,3 +752,40 @@
          (entry (read (open-input-string s))))
     (and (pair? entry) (eq? (cdr entry) 'final-entry))))
 
+
+;;------------------------------------------------------------
+;; FL-review 4b8bbc1: cancel-list semantics of flow-block-and-wait
+;;------------------------------------------------------------
+
+;; A base whose block proc resumes SYNCHRONOUSLY, during the
+;; block-registration pass itself, wins the choice before the bases
+;; after it in flatten order have registered their cancels. The
+;; cancel list must nonetheless fire every registered cancel — the
+;; late ones included — or a losing flow-read stays armed on its fd
+;; with nobody left to cancel it, and silently eats (then discards)
+;; the next bytes that arrive on the socket. In-tree this shape is
+;; reachable through flow-put-block/flow-get-block's post-register
+;; rescan, which calls an entry's own resume inline. So: `sync` wins
+;; during registration; `parked`, registered after it, must still
+;; see its cancel run once the resume is actually delivered.
+(define (~check-flow-011/sync-resume-runs-later-cancels)
+  (define cancelled #f)
+  (define result #f)
+  (define sync (make-flow (lambda (x) x)
+                          (lambda () #f)         ;; try: not ready
+                          (lambda (state resume register-cancel!)
+                            (resume 'sync))))    ;; resume inline, mid-registration
+  (define parked (make-flow (lambda (x) x)
+                            (lambda () #f)
+                            (lambda (state resume register-cancel!)
+                              (register-cancel!
+                               (lambda () (set! cancelled #t))))))
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (set! result (flow-perform (flow-choice sync parked)))))
+  (let tick ((n 0))
+    (when (fx<? n 4)
+      (loop-run-once)
+      (tick (fx+ n 1))))
+  (and (eq? result 'sync) cancelled))

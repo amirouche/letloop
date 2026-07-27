@@ -71,7 +71,9 @@
           ~check-flow-010/log-drain-roundtrip
           ~check-flow-010/timestamps-non-decreasing
           ~check-flow-010/start-reaches-destination
-          ~check-flow-010/stop-flushes-remaining)
+          ~check-flow-010/stop-flushes-remaining
+
+          ~check-flow-011/sync-resume-runs-later-cancels)
 
   (import (chezscheme)
           (letloop r999)
