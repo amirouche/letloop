@@ -190,10 +190,15 @@
   ;;
   ;; register-cancel! lets a block that submitted a real SQE (a
   ;; timeout, a read, ...) hand over a thunk that cancels it; the
-  ;; instant any base wins, every registered cancel thunk fires —
-  ;; including, harmlessly, the winner's own (§4.3 rule 3: cancelling
-  ;; an already-completed op is a safe no-op at the kernel level, so
-  ;; there is no need to track and exclude the winner specifically).
+  ;; instant any base wins, every LOSER's cancel thunk fires. The
+  ;; winner's own is skipped: cancelling an already-completed op is a
+  ;; safe no-op at the kernel level (§4.3 rule 3), but it still costs
+  ;; a wasted SQE plus its -ENOENT CQE on every operation completed
+  ;; through this path, so each cancel is tagged with its
+  ;; registration and the winning registration excludes itself. The
+  ;; tag is per REGISTRATION, not per base object, so the same base
+  ;; appearing twice in one choice still gets its losing twin's
+  ;; cancel fired.
   ;;
   ;; Each base is handed its *own* resume — value flows through that
   ;; base's own wrap before reaching the shared inner resume, exactly
@@ -206,8 +211,6 @@
             (cancels (box '())))
         (loop-abort
          (lambda (k)
-           (define register-cancel!
-             (lambda (thunk) (set-box! cancels (cons thunk (unbox cancels)))))
            ;; The cancel list is unboxed inside a spawned thunk, not
            ;; at resume time: a base can win SYNCHRONOUSLY, during the
            ;; block-registration for-each below (flow-put-block/
@@ -230,19 +233,29 @@
            ;; not matter: cancel SQEs target ids the resumed fiber
            ;; can no longer touch, and everything prepped this tick
            ;; is submitted together at the next boundary anyway.
-           (define resume
-             (lambda (value)
+           (define resume-from
+             (lambda (tag value)
                (and (box-cas! state 'waiting 'synched)
                     (begin
                       (loop-spawn
                        (lambda ()
-                         (for-each (lambda (thunk) (thunk)) (unbox cancels))))
+                         (for-each (lambda (pair)
+                                     (unless (eq? (car pair) tag)
+                                       ((cdr pair))))
+                                   (unbox cancels))))
                       (loop-spawn (lambda () (k value)))
                       #t))))
            (for-each (lambda (base)
-                       ((flow-block-proc base) state
-                        (lambda (raw) (resume ((flow-wrap-proc base) raw)))
-                        register-cancel!))
+                       ;; one fresh tag per registration — see the
+                       ;; comment above on winner-cancel exclusion
+                       (let ((tag (cons #f #f)))
+                         ((flow-block-proc base) state
+                          (lambda (raw)
+                            (resume-from tag ((flow-wrap-proc base) raw)))
+                          (lambda (thunk)
+                            (set-box! cancels
+                                      (cons (cons tag thunk)
+                                            (unbox cancels)))))))
                      bases))))))
 
   (define flow-perform
