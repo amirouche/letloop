@@ -1009,11 +1009,6 @@
       (when (and dev? optimize-level-given?)
         (errors "--dev sets its own optimize level, it cannot be combined with --optimize-level"))
 
-      (when (and boot (not visible-libraries?))
-        ;; A boot file exists to be imported from; folding its libraries
-        ;; away would leave nothing to import.
-        (errors "--boot needs --visible-libraries"))
-
       (maybe-display-errors-then-exit errors)
 
       (if visible-libraries?
@@ -1026,7 +1021,15 @@
               (lambda (port)
                 (put-bytevector port
                                 (get-bytevector-all (open-file-input-port program.boot)))))
-            (format #t "Produced: ~a\n" boot))
+            (format #t "Produced: ~a\n" boot)
+            ;; A boot image needs no C compiler, and an amalgamated one
+            ;; runs as it stands. Chez starts the boot file that goes by
+            ;; the name of the executable, so a copy or hardlink of the
+            ;; scheme binary is the whole program -- which is how letloop
+            ;; itself is installed.
+            (let ((name (basename-without-extension (basename* boot))))
+              (format #t "Start it by naming the scheme binary ~a, beside ~a, petite.boot and scheme.boot~%"
+                      name (basename* boot))))
           (link-executable! (if visible-libraries? (letloop.boot) '())))))
 
   (define letloop-compile* (lambda () (letloop-compile (command-line-arguments))))
