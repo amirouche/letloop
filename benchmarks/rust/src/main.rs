@@ -57,7 +57,9 @@ async fn increment(State(counter): State<Counter>) -> Response {
         let mut c = counter.lock().await;
         *c += 1;
     }
-    axum::response::Redirect::permanent("/").into_response()
+    // 302 Found with Location: /, matching every other server in the
+    // suite (axum's Redirect helpers only offer 303/307/308)
+    (StatusCode::FOUND, [(axum::http::header::LOCATION, "/")]).into_response()
 }
 
 async fn sleep(State(_counter): State<Counter>) -> impl IntoResponse {
