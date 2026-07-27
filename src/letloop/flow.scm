@@ -272,8 +272,11 @@
   ;; original box-cons! CASed against a free variable `lst` instead of
   ;; a snapshot of (unbox box); this one snapshots first). Safe for
   ;; concurrent push from multiple OS threads at once, unlike a plain
-  ;; mutable field — needed once a channel or a shard's cross-resume
-  ;; mailbox (§4.7) can be touched from more than one shard.
+  ;; mutable field. Since FL-7's removal the event loop — and with it
+  ;; channels — is single-OS-thread, so only flow-log still exercises
+  ;; the cross-thread guarantee (any thread may log; the flush thread
+  ;; drains); channels keep using these because the CAS costs nothing
+  ;; on the uncontended single-thread path.
   ;;------------------------------------------------------------
 
   (define flow-box-cons!
@@ -304,10 +307,16 @@
   ;; A channel is two lock-free lists of pending parties (waiting
   ;; puts, waiting pops) plus a counter driving periodic compaction.
   ;; Rendezvous is direct: a value only moves when a put and a get are
-  ;; both present at the same time, there is no buffering. The lists
-  ;; are box-cas!-protected rather than plain mutable fields so a
-  ;; channel can safely be shared across shards (§4.7) — a fiber on
-  ;; any shard may enqueue into or scan either list at any time.
+  ;; both present at the same time, there is no buffering.
+  ;;
+  ;; Contract since FL-7's removal: a channel may only be touched from
+  ;; fibers of THE one event loop. The lists themselves are still
+  ;; CAS-protected, but completing a rendezvous calls the parked
+  ;; peer's resume, and resume preps cancel SQEs on the loop's ring
+  ;; and conses onto its (unsynchronized) thunk list — from a foreign
+  ;; OS thread that corrupts loop state, mailbox indirection that
+  ;; used to make it safe is gone. Cross-thread hand-off is what
+  ;; flow-log's CAS boxes (below) are for.
   (define-record-type* <flow-channel>
     (make-flow-channel% puts pops gc-counter)
     flow-channel?
@@ -413,11 +422,14 @@
           (box-cas! (flow-channel-gc-counter channel) n 0)))))
 
   ;; try and block never race each other within a single flow-perform
-  ;; call on one shard — nothing yields between the poll pass and the
-  ;; block pass — so the two-phase re-scan coop.scm needed for its
-  ;; bare-thread arm is unnecessary here; a *different* shard's put or
-  ;; get can still land in between, which is exactly why the lists
-  ;; above are lock-free rather than plain mutable fields.
+  ;; call — nothing yields between the poll pass and the block pass,
+  ;; and since FL-7's removal nothing outside the one loop thread may
+  ;; touch a channel (see the <flow-channel> contract above), so no
+  ;; concurrent peer can land in between either. The claim!/rescan
+  ;; discipline below is kept regardless: it is what made the
+  ;; rendezvous safe when a peer COULD appear mid-gap, it costs one
+  ;; CAS on the empty path, and dropping it would silently re-open
+  ;; the lost-wakeup hole the moment concurrency ever returns.
   ;;
   ;; Claiming a peer means winning flow-channel-entry-claim! on it,
   ;; THEN calling its resume — resume itself owns the state-box CAS
@@ -979,19 +991,22 @@
             b))))
 
   ;; Accumulate SEXP into this thread's log box, timestamped with the
-  ;; current tick's cached loop-jiffy.
+  ;; current tick's cached loop-jiffy. Callable from any OS thread —
+  ;; the one flow facility that still is — but only once loop-new has
+  ;; run somewhere in the process: loop-jiffy reads the loop record
+  ;; and raises on the #f it is before then.
   (define flow-log
     (lambda (sexp)
       (flow-box-cons! (flow-log-ensure-box!) (cons (loop-jiffy) sexp))))
 
   ;; Drain the registry and every registered box, returning every
-  ;; pending entry: oldest-first within each shard's own box, boxes
+  ;; pending entry: oldest-first within each thread's own box, boxes
   ;; concatenated in registry order (not globally timestamp-sorted --
-  ;; a caller wanting strict cross-shard temporal order can sort the
+  ;; a caller wanting strict cross-thread temporal order can sort the
   ;; result itself).
   ;;
   ;; flow-box-drain! on the registry is itself race-free against
-  ;; concurrent registrations (a new shard registering mid-drain either
+  ;; concurrent registrations (a new thread registering mid-drain either
   ;; lands in the drained snapshot or is still there afterward -- see
   ;; flow-box-cons!/flow-box-drain!'s CAS retry above), but draining it
   ;; empties it as a side effect; since registration happens once per
@@ -1024,8 +1039,8 @@
           (flush-output-port port)))))
 
   ;; flow-log-start!/flow-log-stop! state: exactly one dedicated flush
-  ;; thread, not one per shard (a per-shard flush thread would defeat
-  ;; the point of a single drain-and-flush cadence). stopped? starts #t
+  ;; thread, not one per logging thread (that would defeat the point
+  ;; of a single drain-and-flush cadence). stopped? starts #t
   ;; ("no flush thread currently running") so a flow-log-stop! with no
   ;; matching flow-log-start! returns immediately instead of hanging.
   (define flow-log-stop-requested? (box #f))
@@ -1039,7 +1054,7 @@
   (define %flow-log-poll-interval 0.01)
 
   ;; Spawn exactly one dedicated OS thread that, every PERIOD-SECONDS,
-  ;; drains every registered shard's log box (via flow-log-drain!) and
+  ;; drains every registered thread's log box (via flow-log-drain!) and
   ;; flushes the merged result to (current-error-port). Calling this
   ;; again before flow-log-stop! spawns a second, competing flush
   ;; thread -- draining itself stays correct either way
