@@ -820,3 +820,37 @@
       (loop-run-once)
       (tick (fx+ n 1))))
   (eq? result 'won))
+
+;; The winner of a choice must not fire its OWN cancel: its
+;; operation already completed, so the cancel SQE it would prep is a
+;; guaranteed no-op the kernel answers with -ENOENT — one wasted
+;; SQE + CQE round-trip per completed operation, on the hottest path
+;; the flow-choice bookkeeping has (48f0273's benchmark notice
+;; identified exactly that bookkeeping as the remaining throughput
+;; gap). Losers' cancels must of course still all fire.
+(define (~check-flow-011/winner-own-cancel-not-fired)
+  (define winner-cancelled #f)
+  (define loser-cancelled #f)
+  (define result #f)
+  (define winner (make-flow (lambda (x) x)
+                            (lambda () #f)
+                            (lambda (state resume register-cancel!)
+                              (register-cancel!
+                               (lambda () (set! winner-cancelled #t)))
+                              (loop-spawn (lambda () (resume 'won))))))
+  (define loser (make-flow (lambda (x) x)
+                           (lambda () #f)
+                           (lambda (state resume register-cancel!)
+                             (register-cancel!
+                              (lambda () (set! loser-cancelled #t))))))
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (set! result (flow-perform (flow-choice winner loser)))))
+  (let tick ((n 0))
+    (when (fx<? n 6)
+      (loop-run-once)
+      (tick (fx+ n 1))))
+  (and (eq? result 'won)
+       loser-cancelled
+       (not winner-cancelled)))
