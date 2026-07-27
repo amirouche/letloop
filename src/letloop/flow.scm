@@ -207,7 +207,7 @@
          (lambda (k)
            (define register-cancel!
              (lambda (thunk) (set-box! cancels (cons thunk (unbox cancels)))))
-           ;; The cancel list is unboxed inside the spawned thunk, not
+           ;; The cancel list is unboxed inside a spawned thunk, not
            ;; at resume time: a base can win SYNCHRONOUSLY, during the
            ;; block-registration for-each below (flow-put-block/
            ;; flow-get-block's post-register rescan does exactly that),
@@ -217,14 +217,26 @@
            ;; flow-read armed forever, eating and discarding the fd's
            ;; next bytes. Deferring through loop-spawn reads the list
            ;; only after the registration pass has finished.
+           ;;
+           ;; Cancels and k are spawned as SEPARATE thunks: a cancel
+           ;; can raise (loop-get-sqe does, on a full submission
+           ;; queue), and once state has CASed to 'synched nothing
+           ;; else can ever resume this fiber — sharing one thunk
+           ;; would let a loser's failed cancel destroy the winner's
+           ;; continuation. Split, the raise is confined to the
+           ;; cancel thunk (reported by loop-apply's guard) and k
+           ;; still runs. Their relative order within the tick does
+           ;; not matter: cancel SQEs target ids the resumed fiber
+           ;; can no longer touch, and everything prepped this tick
+           ;; is submitted together at the next boundary anyway.
            (define resume
              (lambda (value)
                (and (box-cas! state 'waiting 'synched)
                     (begin
                       (loop-spawn
                        (lambda ()
-                         (for-each (lambda (thunk) (thunk)) (unbox cancels))
-                         (k value)))
+                         (for-each (lambda (thunk) (thunk)) (unbox cancels))))
+                      (loop-spawn (lambda () (k value)))
                       #t))))
            (for-each (lambda (base)
                        ((flow-block-proc base) state
