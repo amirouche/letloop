@@ -1,5 +1,6 @@
 __pycache__
 a.out
+letloop.boot
 benchmarks/bin/
 local
 *.ss~

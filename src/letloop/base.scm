@@ -305,6 +305,22 @@
       (display-condition ex)
       (newline (current-error-port))))
 
+  (define call-with-warnings-ignored
+    ;; Chez raises compile-time warnings as continuable conditions, so a
+    ;; guard around a compile catches them, unwinds, and writes off a
+    ;; library that merely warns -- which silently drops it from the boot
+    ;; image. Hand warnings back to the default handler, which prints
+    ;; them and carries on, and escape only for a serious condition.
+    (lambda (thunk failure)
+      (call/1cc
+       (lambda (k)
+         (with-exception-handler
+             (lambda (ex)
+               (if (warning? ex)
+                   (raise-continuable ex)
+                   (k (failure ex))))
+           thunk)))))
+
   (define maybe-library-name
     (lambda (filename)
       (pk '*maybe-library-name filename)
@@ -316,10 +332,13 @@
                                          ((library (,name ...) ,body ...) name)
                                          (,_ #f))
                                        (lambda (name)
-                                         (guard (ex (else (display-condition! '**maybe-library-name ex)
-                                                          #f))
-                                           (pk '***environmnet name)
-                                           (and (eval '#t (environment name)) name)))))))))
+                                         (call-with-warnings-ignored
+                                          (lambda ()
+                                            (pk '***environmnet name)
+                                            (and (eval '#t (environment name)) name))
+                                          (lambda (ex)
+                                            (display-condition! '**maybe-library-name ex)
+                                            #f)))))))))
 
   (define extract-library-name
     (lambda (import-spec)
@@ -459,8 +478,9 @@
 
   (define maybe-compile-file*
     (lambda (f)
-      (guard (ex (else (display-condition! 'maybe-compile-file* ex) (void)))
-        (maybe-compile-file f))))
+      (call-with-warnings-ignored
+       (lambda () (maybe-compile-file f))
+       (lambda (ex) (display-condition! 'maybe-compile-file* ex) (void)))))
 
   (define (system* command)
     (unless (fxzero? (system command))
@@ -470,6 +490,143 @@
     (lambda (library-name main)
       (guard (ex (else (display-condition! 'import-procedure? ex) #f))
         (procedure? (eval main (environment library-name))))))
+
+  (define .wpo
+    (lambda (x)
+      (string-append (basename-without-extension x) ".wpo")))
+
+  ;; Runtime counterparts of the meta helpers near the top of this
+  ;; library: those only exist at expand time, and scheme-binarypath*
+  ;; keeps private copies to stay clear of out-of-phase identifiers.
+
+  (define basename*
+    (lambda (filepath)
+      (let loop ((index (string-length filepath)))
+        (cond
+         ((fxzero? index) filepath)
+         ((char=? (string-ref filepath (fx- index 1)) #\/)
+          (substring filepath index (string-length filepath)))
+         (else (loop (fx- index 1)))))))
+
+  (define dirname*
+    (lambda (filepath)
+      (substring filepath 0 (fx- (string-length filepath)
+                                 (string-length (basename* filepath))))))
+
+  (define string-prefix?
+    (lambda (x y)
+      (let ((n (string-length x)))
+        (and (fx<= n (string-length y))
+             (let loop ((index 0))
+               (or (fx= index n)
+                   (and (char=? (string-ref x index) (string-ref y index))
+                        (loop (fx+ index 1)))))))))
+
+  (define directory-list*
+    (lambda (directory)
+      (guard (ex (else '()))
+        (directory-list directory))))
+
+  (define executable-path
+    ;; The real path of the running binary.
+    ;;
+    ;; This cannot be shelled out to: /proc/self/exe resolves against
+    ;; whichever process reads it, so `readlink /proc/self/exe` in a
+    ;; subprocess dutifully reports the subprocess.
+    (let ((cached #f))
+      (lambda ()
+        (unless cached
+          (set! cached
+                (guard (ex (else #f))
+                  (let* ((stdlib (load-shared-object #f))
+                         (readlink (foreign-procedure "readlink" (string u8* uptr) iptr))
+                         (buffer (make-bytevector 4096))
+                         (count (readlink "/proc/self/exe" buffer (bytevector-length buffer))))
+                    (and (fx> count 0)
+                         (let ((out (make-bytevector count)))
+                           (bytevector-copy! buffer 0 out 0 count)
+                           (utf8->string out)))))))
+        cached)))
+
+  (define executable-directory
+    ;; The directory holding the running binary, with a trailing slash.
+    (lambda ()
+      (and=> (executable-path) dirname*)))
+
+  (define boot-directory
+    ;; Where petite.boot and scheme.boot are installed. Chez looks for
+    ;; boot files in %x:%x/../lib/csv%v/%m:%x/../../boot/%m, where %x is
+    ;; the directory of the executable, but it never tells anyone which
+    ;; one it picked. letloop has to name them itself, because it passes
+    ;; them to the pristine child with -b.
+    (lambda ()
+      (define machine (symbol->string (machine-type)))
+      (define csv
+        (lambda (lib)
+          (map (lambda (x) (string-append lib x "/" machine "/"))
+               (filter (lambda (x) (string-prefix? "csv" x))
+                       (directory-list* lib)))))
+      (define candidates
+        (let ((exe (or (executable-directory) ""))
+              (scheme (guard (ex (else "")) (scheme-binarypath*))))
+          (filter (lambda (x) (not (fxzero? (string-length x))))
+                  (append (let ((given (getenv "LETLOOP_BOOT_DIRECTORY")))
+                            (if given (list (string-append given "/")) '()))
+                          (list exe scheme)
+                          (csv (string-append exe "../lib/"))
+                          (csv (string-append exe "../../lib/"))
+                          (list (string-append exe "../../boot/" machine "/"))))))
+      (let loop ((candidates candidates))
+        (cond
+         ((null? candidates) #f)
+         ((and (file-exists? (string-append (car candidates) "petite.boot"))
+               (file-exists? (string-append (car candidates) "scheme.boot")))
+          (car candidates))
+         (else (loop (cdr candidates)))))))
+
+  (define letloop-library-directory
+    ;; Where letloop's own sources are installed, $LETLOOP_PREFIX/lib/letloop,
+    ;; holding src/ and the per-optimize-level object caches under obj/.
+    ;;
+    ;; A user program can only fold a (letloop ...) library into itself if
+    ;; that library's .wpo is at hand, and a boot image carries none, so
+    ;; the sources ship. Returns #f when letloop was never installed, in
+    ;; which case the source tree has to be named on the command line.
+    (lambda ()
+      (define candidates
+        (let ((exe (or (executable-directory) "")))
+          (append (let ((prefix (getenv "LETLOOP_PREFIX")))
+                    (if prefix (list (string-append prefix "/lib/letloop")) '()))
+                  (map (lambda (up) (string-append exe up "lib/letloop"))
+                       (list "" "../" "../../" "../../../")))))
+      (let loop ((candidates candidates))
+        (cond
+         ((null? candidates) #f)
+         ((file-directory? (string-append (car candidates) "/src")) (car candidates))
+         (else (loop (cdr candidates)))))))
+
+  (define writable-directory?
+    (lambda (directory)
+      (guard (ex (else #f))
+        (let ((probe (string-append directory "/.letloop-probe")))
+          (call-with-port (open-file-output-port probe (file-options replace))
+            (lambda (port) (put-u8 port 108)))
+          (delete-file probe)
+          #t))))
+
+  (define read-library-name
+    ;; The name in (library (name ...) ...), read without importing the
+    ;; library. maybe-library-name validates by importing, which the
+    ;; amalgamating path must not do: it deliberately leaves every
+    ;; library out of this process so the child can compile them.
+    (lambda (filename)
+      (and (maybe-library? filename)
+           (and=> (guard (ex (else #f))
+                    (call-with-input-file filename read))
+                  (lambda (sexp)
+                    (match sexp
+                      ((library (,name ...) ,body ...) name)
+                      (,_ #f)))))))
 
   (define letloop-compile
     (lambda (arguments)
@@ -493,35 +650,53 @@
                   (loop index))))
             out)))
 
-      (define petite.boot-fallback
-        (lambda ()
+      (define boot-file
+        ;; Used when no C host registered the boot images as symbols,
+        ;; which is the case both when bootstrapping with upstream scheme
+        ;; and when letloop is installed as a boot file next to them.
+        (lambda (name)
           (bytevector->u8-list
            (get-bytevector-all
-            (open-file-input-port (string-append (scheme-binarypath*) "/petite.boot"))))))
+            (open-file-input-port
+             (string-append (or (boot-directory)
+                                (string-append (scheme-binarypath*) "/"))
+                            name))))))
 
-      (define scheme.boot-fallback
-        (lambda ()
-          (bytevector->u8-list
-           (get-bytevector-all
-            (open-file-input-port (string-append (scheme-binarypath*) "/scheme.boot"))))))
+      (define petite.boot-fallback (lambda () (boot-file "petite.boot")))
+
+      (define scheme.boot-fallback (lambda () (boot-file "scheme.boot")))
+
+      ;; Read on demand: several megabytes each, and a build that only
+      ;; produces a boot file never needs them.
 
       (define petite.boot
-        (guard (ex (else (petite.boot-fallback)))
-          (let ((boot-size (foreign-entry "petite-boot-size"))
-                (boot (foreign-entry "petite-boot")))
-            (bytevector->u8-list (pointer->bytevector boot boot-size)))))
+        (lambda ()
+          (guard (ex (else (petite.boot-fallback)))
+            (let ((boot-size (foreign-entry "petite-boot-size"))
+                  (boot (foreign-entry "petite-boot")))
+              (bytevector->u8-list (pointer->bytevector boot boot-size))))))
 
       (define scheme.boot
-        (guard (ex (else (scheme.boot-fallback)))
-          (let ((boot-size (foreign-entry "scheme-boot-size"))
-                (boot (foreign-entry "scheme-boot")))
-            (bytevector->u8-list (pointer->bytevector boot boot-size)))))
+        (lambda ()
+          (guard (ex (else (scheme.boot-fallback)))
+            (let ((boot-size (foreign-entry "scheme-boot-size"))
+                  (boot (foreign-entry "scheme-boot")))
+              (bytevector->u8-list (pointer->bytevector boot boot-size))))))
 
       (define letloop.boot
-        (guard (ex (else '()))
-          (let ((boot-size (foreign-entry "letloop-boot-size"))
-                (boot (foreign-entry "letloop-boot")))
-            (bytevector->u8-list (pointer->bytevector boot boot-size)))))
+        ;; The boot image holding letloop's own libraries, so that a
+        ;; program built with --visible-libraries can still import them at
+        ;; run time. It comes from the C host that registered it as a
+        ;; symbol, or -- now that letloop ships as a boot file itself --
+        ;; from disk, next to petite.boot.
+        (lambda ()
+          (or (guard (ex (else #f))
+                (let* ((boot-size (foreign-entry "letloop-boot-size"))
+                       (boot (foreign-entry "letloop-boot"))
+                       (out (bytevector->u8-list (pointer->bytevector boot boot-size))))
+                  (and (pair? out) out)))
+              (guard (ex (else '()))
+                (boot-file "letloop.boot")))))
 
       ;; parse ARGUMENTS, and set the following variables:
 
@@ -532,11 +707,18 @@
       (define dev? #f)
       (define disable-garbage-collector? #f)
       (define optimize-level* 0)
-      (define program.scm #f)
+      (define optimize-level-given? #f)
+      (define visible-libraries? #f)
+      (define boot #f)
       (define extra '())
       (define sorted-discovered #f)
 
       (define errors (make-accumulator))
+
+      (define program.scm (string-append temporary-directory "/program.scm"))
+      (define build.scm (string-append temporary-directory "/build.scm"))
+      (define whole.so (string-append temporary-directory "/whole.so"))
+      (define program.boot (string-append temporary-directory "/program.boot"))
 
       (define massage-standalone!
         (lambda (standalone)
@@ -559,12 +741,258 @@
                 (set! dev? #t))
                ((and (eq? (car keyword) '--disable-garbage-collector) (not (string? (cdr keyword))))
                 (set! disable-garbage-collector? #t))
+               ((and (eq? (car keyword) '--visible-libraries) (not (string? (cdr keyword))))
+                (set! visible-libraries? #t))
+               ((and (eq? (car keyword) '--boot) (string? (cdr keyword)))
+                (set! boot (cdr keyword)))
                ((and (eq? (car keyword) '--optimize-level)
                      (string->number (cdr keyword))
                      (<= 0 (string->number (cdr keyword)) 3))
+                (set! optimize-level-given? #t)
                 (set! optimize-level* (string->number (cdr keyword))))
                (else (errors (format #f "Dubious keyword: ~a" (car keyword))))))
             (massage-keywords! (cdr keywords)))))
+
+      (define build-boot-file/visible-libraries
+        ;; What letloop has always done: compile every library found under
+        ;; the given directories, then concatenate the objects into a boot
+        ;; file. The libraries stay importable at run time, which letloop
+        ;; itself needs for exec, repl and check. The price is that every
+        ;; library is its own compilation unit, so no call between two of
+        ;; them can ever be inlined.
+        (lambda ()
+
+          (unless (null? directories)
+            ;; XXX: override existing library directories, in particular the current
+            ;; directory.
+            (library-directories directories)
+            (source-directories directories))
+
+          (optimize-level optimize-level*)
+
+          (unless (null? extensions)
+            (library-extensions (append extensions (library-extensions))))
+
+          (dev! dev?)
+          (disable-garbage-collector! disable-garbage-collector?)
+
+          (generate-wpo-files #t)
+          (compile-imported-libraries #f)
+
+          (set! sorted-discovered (topological-sort-libraries (letloop-discover-libraries)))
+          (for-each maybe-compile-file* (map cdr sorted-discovered))
+
+          (unless (and (pk 'main main)
+                       (pk 'library.scm (maybe-library-name (pk 'mylibrary library.scm)))
+                       (pk 'import? (import-procedure? (maybe-library-name (pk 'import library.scm))
+                                                       (string->symbol main))))
+            (format #t "There is something wrong!")
+            (flush-output-port)
+            (exit 1))
+
+          (call-with-output-file program.scm
+            (lambda (port)
+              (write '(suppress-greeting #t) port)
+              (write `(import ,(pk library.scm (maybe-library-name library.scm))) port)
+              (when disable-garbage-collector?
+                (write '(collect-request-handler void) port))
+              (write `(scheme-start ,(string->symbol main)) port)) 'truncate)
+          (maybe-compile-file program.scm)
+
+          (apply make-boot-file
+                 program.boot
+                 (list "scheme" "petite")
+                 (append (filter file-exists? (map .so (map cdr sorted-discovered)))
+                         (list (.so program.scm))))))
+
+      (define build-boot-file/whole-program
+        ;; Compile the program and every library it imports as one
+        ;; compilation unit, so that calls across library boundaries can
+        ;; be inlined.
+        ;;
+        ;; This cannot happen in this process. A library that is already
+        ;; defined here shadows its own source, so it is never recompiled
+        ;; and no .wpo file is produced for it -- and every (letloop ...)
+        ;; library is already defined, they arrive with the boot image.
+        ;; compile-whole-program then has nothing to fold, and it does not
+        ;; complain: it reports the libraries it gave up on through its
+        ;; return value and carries on. That is what silently produced an
+        ;; unamalgamated binary before. So: re-exec ourselves with only
+        ;; petite.boot and scheme.boot registered, and make the child
+        ;; treat a non-empty return value as fatal.
+        (lambda ()
+
+          (define library-name
+            (or (read-library-name library.scm)
+                (begin
+                  (format (current-error-port)
+                          "* Ooops :|\n** Not a library: ~a\n" library.scm)
+                  (exit 1))))
+
+          (define letloop-src
+            (and=> (letloop-library-directory)
+                   (lambda (x) (string-append x "/src"))))
+
+          (define letloop-obj
+            ;; Objects and .wpo files are cached per optimize level,
+            ;; because a .wpo compiled at one level does not carry the
+            ;; code the next one wants: folding letloop's libraries out
+            ;; of a level 0 cache into a level 3 program measured
+            ;; 401k req/s against 456k for a level 3 cache -- the whole
+            ;; benefit of amalgamating, silently forfeited.
+            (and=> (letloop-library-directory)
+                   (lambda (x)
+                     (let ((out (format #f "~a/obj/~a" x optimize-level*)))
+                       (system* (format #f "mkdir -p ~a" out))
+                       (if (writable-directory? out)
+                           out
+                           ;; A prefix nobody may write to: compile into
+                           ;; the build directory instead, correct but
+                           ;; paid for on every build.
+                           (let ((out (string-append temporary-directory "/obj")))
+                             (system* (format #f "mkdir -p ~a" out))
+                             out))))))
+
+          (define forms
+            `(,@(if (null? directories)
+                    ;; Leave Chez's defaults, which include the current
+                    ;; directory.
+                    '()
+                    ;; XXX: as elsewhere, the given directories replace
+                    ;; them outright.
+                    `((library-directories ',directories)
+                      (source-directories ',directories)))
+              ,@(if (and letloop-src (not (member letloop-src directories)))
+                    ;; Last, so that a source tree passed on the command
+                    ;; line wins over the sources letloop ships.
+                    `((library-directories (append (library-directories)
+                                                   (list (cons ,letloop-src ,letloop-obj))))
+                      (source-directories (append (source-directories) (list ,letloop-src))))
+                    '())
+              ,@(if (null? extensions)
+                    '()
+                    `((library-extensions (append ',extensions (library-extensions)))))
+              (optimize-level ,optimize-level*)
+              (generate-wpo-files #t)
+              (compile-imported-libraries #t)
+              ;; The release settings dev! applies when it is handed #f;
+              ;; the child never runs dev! itself.
+              (generate-inspector-information ,dev?)
+              (generate-interrupt-trap ,dev?)
+              (generate-procedure-source-information ,dev?)
+              (generate-allocation-counts ,dev?)
+              (generate-instruction-counts ,dev?)
+              ,@(if dev? '((compile-profile 'source) (debug-level 3)) '())
+              (compile-program ,program.scm)
+              (unless (file-exists? ,(.wpo program.scm))
+                (errorf 'letloop "compile-program wrote no .wpo file: ~a" ,(.wpo program.scm)))
+              (let ((left (compile-whole-program ,(.wpo program.scm) ,whole.so #f)))
+                (unless (null? left)
+                  (errorf 'letloop
+                          (string-append
+                           "these libraries were left out of the program: ~s.~%"
+                           "compile-whole-program needs a .wpo file next to every library it folds, "
+                           "and a boot image does not carry one. Pass the directory holding their "
+                           "sources, or reinstall letloop so that its own sources and .wpo files "
+                           "are available.")
+                          left)))
+              (make-boot-file ,program.boot '("scheme" "petite") ,whole.so)))
+
+          (define exe (or (executable-path)
+                          (begin
+                            (format (current-error-port)
+                                    "* Ooops :|\n** Cannot read /proc/self/exe, needed to spawn the compiler.\n")
+                            (exit 1))))
+
+          (define boot-directory*
+            (or (boot-directory)
+                (begin
+                  (format (current-error-port)
+                          "* Ooops :|\n** Cannot find petite.boot and scheme.boot near ~a.\n" exe)
+                  (format (current-error-port)
+                          "** Set LETLOOP_BOOT_DIRECTORY, or compile with --visible-libraries.\n")
+                  (exit 1))))
+
+          (when (foreign-entry? "petite-boot")
+            ;; A letloop whose boot images are linked into a C program:
+            ;; its main registers them and ignores -b, so it cannot give
+            ;; the child an empty library environment.
+            (format (current-error-port)
+                    "* Ooops :|\n** This letloop cannot compile whole programs: its boot images are\n")
+            (format (current-error-port)
+                    "** linked into the executable. Reinstall it with `make letloop`, or\n")
+            (format (current-error-port)
+                    "** compile with --visible-libraries.\n")
+            (exit 1))
+
+          (call-with-output-file program.scm
+            (lambda (port)
+              ;; A real top-level program, import first:
+              ;; compile-whole-program rejects loose top-level forms.
+              (display "#!chezscheme\n" port)
+              (for-each (lambda (form) (pretty-print form port))
+                        `((import (chezscheme) ,library-name)
+                          (suppress-greeting #t)
+                          ,@(if disable-garbage-collector?
+                                '((collect-request-handler void))
+                                '())
+                          (scheme-start ,(string->symbol main)))))
+            'truncate)
+
+          (call-with-output-file build.scm
+            (lambda (port)
+              (display "#!chezscheme\n" port)
+              (pretty-print
+               `(guard (ex (else (display "* Ooops :|\n" (current-error-port))
+                                 (display "** " (current-error-port))
+                                 (display-condition ex (current-error-port))
+                                 (newline (current-error-port))
+                                 ;; The condition names the generated
+                                 ;; program, which means nothing to
+                                 ;; anyone on its own.
+                                 (format (current-error-port)
+                                         "** while compiling ~s of ~a, starting at ~s\n"
+                                         ',library-name ,library.scm ',(string->symbol main))
+                                 (flush-output-port (current-error-port))
+                                 (exit 1)))
+                  ,@forms)
+               port)
+              (pretty-print '(exit 0) port))
+            'truncate)
+
+          (system*
+           (pk (format #f "~a -b ~apetite.boot -b ~ascheme.boot --quiet --script ~a"
+                       exe boot-directory* boot-directory* build.scm)))))
+
+      (define link-executable!
+        (lambda (letloop.boot*)
+          (call-with-output-file (string-append temporary-directory "/my-letloop-program.c")
+            (lambda (port)
+              (format port letloop-program.c
+                      (petite.boot)
+                      (scheme.boot)
+                      letloop.boot*
+                      (bytevector->u8-list
+                       (get-bytevector-all (open-file-input-port program.boot)))))
+            'truncate)
+
+          (let loop ((todo (list
+                            (cons kernel.o "/kernel.o")
+                            (cons scheme.h "/scheme.h"))))
+            (unless (null? todo)
+              (call-with-port (open-file-output-port
+                               (string-append temporary-directory (cdar todo))
+                               (file-options replace))
+                (lambda (port)
+                  (put-bytevector port (caar todo))))
+              (loop (cdr todo))))
+
+          (system*
+           (pk
+            (format #f "cc -I ~a/ -march=native ~a/my-letloop-program.c ~a/kernel.o -o a.out -ldl -lm -luuid -lpthread ~a"
+                    temporary-directory temporary-directory temporary-directory
+                    (string-join extra))))
+          (display "Produced: ./a.out\n")))
 
       (call-with-values (lambda () (cli-read arguments))
         (lambda (keywords standalone extra*)
@@ -572,76 +1000,34 @@
           (massage-keywords! keywords)
           (set! extra extra*)))
 
+      (unless main
+        (errors "The procedure to start is missing, e.g: letloop compile my-library.scm main"))
+
+      (unless library.scm
+        (errors "The library to compile is missing, e.g: letloop compile my-library.scm main"))
+
+      (when (and dev? optimize-level-given?)
+        (errors "--dev sets its own optimize level, it cannot be combined with --optimize-level"))
+
+      (when (and boot (not visible-libraries?))
+        ;; A boot file exists to be imported from; folding its libraries
+        ;; away would leave nothing to import.
+        (errors "--boot needs --visible-libraries"))
+
       (maybe-display-errors-then-exit errors)
 
-      (unless (null? directories)
-        ;; XXX: override existing library directories, in particular the current
-        ;; directory.
-        (library-directories directories)
-        (source-directories directories))
+      (if visible-libraries?
+          (build-boot-file/visible-libraries)
+          (build-boot-file/whole-program))
 
-      (optimize-level optimize-level*)
-
-      (unless (null? extensions)
-        (library-extensions (append extensions (library-extensions))))
-
-      (dev! dev?)
-      (disable-garbage-collector! disable-garbage-collector?)
-
-      (generate-wpo-files #t)
-      (compile-imported-libraries #f)
-
-      (set! sorted-discovered (topological-sort-libraries (letloop-discover-libraries)))
-      (for-each maybe-compile-file* (map cdr sorted-discovered))
-
-      (unless (and (pk 'main main)
-                   (pk 'library.scm (maybe-library-name (pk 'mylibrary library.scm)))
-                   (pk 'import? (import-procedure? (maybe-library-name (pk 'import library.scm))
-                                                   (string->symbol main))))
-        (format #t "There is something wrong!")
-        (flush-output-port)
-        (exit 1))
-
-      (call-with-output-file (string-append temporary-directory "/program.scm")
-        (lambda (port)
-          (write '(suppress-greeting #t) port)
-          (write `(import ,(pk library.scm (maybe-library-name library.scm))) port)
-          (write `(scheme-start ,(string->symbol main)) port)) 'truncate)
-      (set! program.scm (string-append temporary-directory "/program.scm"))
-      (maybe-compile-file program.scm)
-
-      (apply make-boot-file
-             (string-append temporary-directory "/program.boot")
-             (list "scheme" "petite")
-             (append (filter file-exists? (map .so (map cdr sorted-discovered)))
-                     (list (.so program.scm))))
-
-      (let ((program.boot (bytevector->u8-list
-                           (get-bytevector-all
-                            (open-file-input-port (string-append temporary-directory "/program.boot"))))))
-        (call-with-output-file (string-append temporary-directory "/my-letloop-program.c")
-          (lambda (port)
-            (if (null? letloop.boot)
-                (format port letloop-program.c petite.boot scheme.boot program.boot '())
-                (format port letloop-program.c petite.boot scheme.boot letloop.boot program.boot)))))
-
-      (let loop ((todo (list
-                        (cons kernel.o "/kernel.o")
-                        (cons scheme.h "/scheme.h"))))
-        (unless (null? todo)
-          (call-with-port (open-file-output-port
-                           (string-append temporary-directory (cdar todo))
-                           (file-options replace))
-            (lambda (port)
-              (put-bytevector port (caar todo))))
-          (loop (cdr todo))))
-
-      (system*
-       (pk
-        (format #f "cc -I ~a/ -march=native ~a/my-letloop-program.c ~a/kernel.o -o a.out -ldl -lm -luuid -lpthread ~a"
-                temporary-directory temporary-directory temporary-directory
-                (string-join extra))))
-      (display "Produced: ./a.out\n")))
+      (if boot
+          (begin
+            (call-with-port (open-file-output-port boot (file-options replace))
+              (lambda (port)
+                (put-bytevector port
+                                (get-bytevector-all (open-file-input-port program.boot)))))
+            (format #t "Produced: ~a\n" boot))
+          (link-executable! (if visible-libraries? (letloop.boot) '())))))
 
   (define letloop-compile* (lambda () (letloop-compile (command-line-arguments))))
 

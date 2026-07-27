@@ -31,7 +31,10 @@ int main(int argc, const char **argv) {
   Sscheme_init(0);
   Sregister_boot_file_bytes("petite", (void *) petite_boot, sizeof(petite_boot));
   Sregister_boot_file_bytes("scheme", (void *) scheme_boot, sizeof(scheme_boot));
-  Sregister_boot_file_bytes("letloop", (void *) letloop_boot, sizeof(letloop_boot));
+  /* An amalgamated program carries no letloop boot image: its libraries
+     were folded into the program itself. */
+  if (sizeof(letloop_boot) != 0)
+    Sregister_boot_file_bytes("letloop", (void *) letloop_boot, sizeof(letloop_boot));
   if (sizeof(program_boot) != 0)
     Sregister_boot_file_bytes("program", (void *) program_boot, sizeof(program_boot));
   Sbuild_heap(NULL, custom_init);
