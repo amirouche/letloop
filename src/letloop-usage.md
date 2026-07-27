@@ -30,10 +30,12 @@ The following flags are available:
                       that resolves a library name at run time, with
                       environment or eval, and by --boot.
 
-  --boot=PATH Write a boot file to PATH instead of an executable. This
-              is how letloop itself is built. Requires
-              --visible-libraries, since a boot file exists to be
-              imported from.
+  --boot=PATH Write a boot file to PATH instead of an executable, which
+              needs no C compiler. Chez starts the boot file that goes by
+              the name of the executable, so a copy or hardlink of the
+              scheme binary named PATH without its extension, beside
+              PATH, petite.boot and scheme.boot, is the whole program.
+              This is how letloop itself is built and installed.
 
 By default `letloop compile` amalgamates: the program and every library
 it imports become a single compilation unit, so that calls across
