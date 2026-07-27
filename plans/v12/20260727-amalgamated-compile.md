@@ -97,22 +97,53 @@ Same machine, back to back, `taskset -c 0`, bench.sh methodology.
 
 The 2026-07-27 09:36 hand-built reference was 446,244 / 452,542.
 
-## Not done, and why
+## Not done: the module monolith, settled by measurement
 
-**Rewriting `src/letloop` as one giant `(letloop)` library** built from
-nested Chez `module` forms, merging user code into it at compile time.
-The mechanism works — nested modules isolate private bindings, support
-cross-module import, and carry macros across module boundaries, all
-checked. But the March monolith measured 224k against 221k for
-amalgamated: the two are the same number, and the amalgamated build is
-now at it. Against ~1.4% of headroom it would cost the public import
-surface (`(import (letloop match))` stops resolving, across all 108
-files under `src/` plus every example), a source-to-source R6RS→module
-rewriter for arbitrary user libraries, error locations pointing into a
-generated file instead of user source, and a full recompile of letloop
-on every user build since the compilation unit changes with the user's
-code. `compile-whole-program` is Chez's supported mechanism for exactly
-this.
+**Rewriting `src/letloop` as one compilation unit** built from nested Chez
+`module` forms, merging user code into it at compile time. Prototyped for
+real — a 150-line generator that reads every `library` form, rewrites each
+into a `module`, orders them dependency-first and emits one top-level
+program. It compiles and serves.
+
+Interleaved A/B against the committed whole-program build, same machine
+state, `taskset -c 0`, bench.sh methodology:
+
+| conns | whole-program | monolith | delta |
+|---|---|---|---|
+| 16 | 432,137 / 439,208 | 439,723 / 441,151 | +1.8% / +0.4% |
+| 32 | 427,068 / 438,033 | 441,370 / 447,281 | +3.3% / +2.1% |
+| 64 | 445,205 / 442,181 | 442,983 / 444,602 | -0.5% / +0.5% |
+| mean | 437,306 | 442,852 | **+1.3%** |
+
+**+1.3%, under a noise floor of 2.6%** — the same binary varied
+427,068 → 438,033 at c=32. This reproduces the March table (224k monolith
+vs 221k amalgamated, +1.4%) closely enough to trust both.
+
+Two earlier objections to this design were wrong and should not be
+repeated: build time is *not* a cost (all 74 libraries compile at
+optimize-level 3 in **2.07s**, the hot-path subset in 1.8s including
+`cc`), and the public import surface need *not* break, because the merge
+is a build-time transformation — user source keeps `(import (letloop
+http server))` and the rewriter maps names.
+
+What it does cost is a compiler pass to maintain. Three fidelity bugs
+turned up in an afternoon, on 16 of the 74 libraries, each fatal to the
+compile:
+
+- **Body-level `import` forms.** `letloop/json.scm` keeps two
+  dependencies in its body rather than the header clause, which Chez
+  allows. They have to be rewritten *and* counted as graph edges.
+- **A module must be defined before it is imported**, where Chez resolves
+  libraries in any order. The merge needs a real topological sort, and a
+  dependency cycle between libraries becomes unrepresentable.
+- **A `module` export list rejects `(rename ...)`**, which `(letloop www)`
+  uses. Chez's `alias` covers it — it binds macros and record names too,
+  verified — but every renamed export needs one synthesized.
+
+The 58 libraries left alone include the `define-ftype` ones and
+`base.scm`'s `meta define`, where phase differences would surface.
+`compile-whole-program` is Chez's supported mechanism for the same
+result. The prototype is not committed.
 
 ## Traps worth keeping
 
