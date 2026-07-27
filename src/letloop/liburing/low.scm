@@ -2196,7 +2196,16 @@
                     ;; fd for the next loop-accept instead of leaking it.
                     (hashtable-set! %accept-backlog ms-fd
                                     (append (hashtable-ref %accept-backlog ms-fd '())
-                                            (list res))))))))
+                                            (list res))))
+                   (else
+                    ;; No handler claims this id — loop-close-prep!
+                    ;; already resumed the fd's parked reads with
+                    ;; -ECANCELED and deleted their handlers, but a
+                    ;; recv that completed with data before the async
+                    ;; cancel landed still delivers a CQE with
+                    ;; F_BUFFER, and the stash above just ran. Drop
+                    ;; the orphan or it stays in %buf-data forever.
+                    (hashtable-delete! %buf-data id))))))
             (drain)))
 
         (when (not (fxzero? (io-uring-sq-ready ring)))
