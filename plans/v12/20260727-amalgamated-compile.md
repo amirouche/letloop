@@ -158,6 +158,30 @@ Two consequences worth knowing:
   everything through to `letloop-main`. It is also why the flag is
   `--boot=PATH` and not `--boot PATH`.
 
+  **Fixed since, and it was worse than written here.** The list is 17
+  tokens, not five -- `--optimize-level` and `--libdirs` are among them,
+  and `--optimize-level` is a name letloop documents itself. Worse,
+  interception is *positional*: `letloop check --version` printed Chez's
+  version, because Chez's parser does not stop at the first non-option.
+  `--` ends that parsing and hands the rest to `scheme-start` untouched,
+  so `bin/letloop` is now a generated `sh` wrapper that inserts one.
+  Measured free: 31.9 ms against a 32.0 ms direct-exec floor, but only
+  because it uses `${0%/*}` -- the obvious `readlink -f` plus `dirname`
+  spelling costs two forks and measured 3.4 ms.
+
+  The wrapper must be written via `rm -f` or a temp file and `mv`.
+  `$BOOT/letloop` is a hardlink to the `scheme` binary and the old
+  `$PREFIX/bin/letloop` was a symlink to it, so a plain `>` redirect
+  follows the symlink and truncates the shared inode -- taking `scheme`,
+  `petite` and `scheme-script` with it, since all four are one inode.
+  Restoring it means copying `local/src/chezscheme/ta6le/bin/ta6le/scheme`
+  back and re-making the three hardlinks; no rebuild needed.
+
+  Scope: only `bin/letloop`. `letloop compile` links
+  `src/letloop-program.c`, whose `main` calls `Sscheme_start(argc, argv)`
+  directly, so compiled programs never meet Chez's parser. A
+  `--boot=PATH` artifact does, being run by a renamed `scheme`.
+
 ## Not done: the module monolith, settled by measurement
 
 **Rewriting `src/letloop` as one compilation unit** built from nested Chez
