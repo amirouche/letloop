@@ -1503,6 +1503,11 @@
         (exit 0))
 
       (case (string->symbol (car args))
+        ;; bin/letloop inserts `--` so these reach us at all; see the
+        ;; install recipe in the makefile. The dashless spellings are the
+        ;; ones that cannot collide with Chez whatever the invocation.
+        ((help --help -h) (letloop-usage) (exit 0))
+        ((version --version) (letloop-version) (exit 0))
         ((check) (letloop-check (cdr args)))
         ((compile) (letloop-compile (cdr args)))
         ((exec) (letloop-exec (cdr args)))
@@ -1537,6 +1542,13 @@
   (define letloop-usage
     (lambda ()
       (display-usage letloop-usage.md)))
+
+  (define letloop-version
+    (lambda ()
+      (write `(scheme ,letloop-scheme-version))
+      (newline)
+      (write `(tag ,letloop-tag))
+      (newline)))
 
   (define list-index
     (lambda (predicate? objects)
