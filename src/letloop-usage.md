@@ -1,9 +1,16 @@
 Usage:
 
   Note: letloop is the Chez Scheme executable under another name, so
-  --help, --version, -b, --boot and --verbose are read by Chez itself
-  before letloop sees them. Run letloop with no arguments for this text.
+  Chez's C main would otherwise read --help, --version, --optimize-level,
+  --libdirs and a dozen more before letloop saw them -- at any position,
+  not just the first. bin/letloop is a wrapper that inserts `--` to end
+  that parsing. Two ways around it remain: invoking the binary under
+  lib/ directly, and running a boot file from `letloop compile
+  --boot=PATH`; pass `--` yourself there. Programs built by `letloop
+  compile` are unaffected, they carry their own C main.
 
+  letloop help
+  letloop version
   letloop check [--fail-fast] [DIRECTORY ...] LIBRARY.SCM ...
   letloop compile [DIRECTORY ...] LIBRARY.SCM PROCEDURE [-- CC-FLAGS ...]
   letloop exec [DIRECTORY ...] LIBRARY.SCM PROCEDURE [-- ARGUMENT ...]
