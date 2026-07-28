@@ -484,10 +484,6 @@
               out
               (set! out (cons object out)))))))
 
-  (define letloop-program.c (include-filename-as-string "./src/letloop-program.c"))
-  (define scheme.h (include-chez-file "scheme.h"))
-  (define kernel.o (include-chez-file "kernel.o"))
-
   (define basename-without-extension
     (lambda (filename)
       (let loop ((index (string-length filename)))
@@ -720,53 +716,25 @@
                   (loop index))))
             out)))
 
-      (define boot-file
-        ;; Used when no C host registered the boot images as symbols,
-        ;; which is the case both when bootstrapping with upstream scheme
-        ;; and when letloop is installed as a boot file next to them.
+      (define boot-path
+        ;; make-boot-file takes paths, not bytes. The boot images used to
+        ;; be read whole and emitted as C arrays into a host program; now
+        ;; they are folded into the output boot file by name, so nothing
+        ;; here reads several megabytes into the heap.
         (lambda (name)
-          (bytevector->u8-list
-           (get-bytevector-all
-            (open-file-input-port
-             (string-append (or (boot-directory)
-                                (string-append (scheme-binarypath*) "/"))
-                            name))))))
+          (string-append (or (boot-directory)
+                             (string-append (scheme-binarypath*) "/"))
+                         name)))
 
-      (define petite.boot-fallback (lambda () (boot-file "petite.boot")))
+      (define petite.boot (lambda () (boot-path "petite.boot")))
 
-      (define scheme.boot-fallback (lambda () (boot-file "scheme.boot")))
-
-      ;; Read on demand: several megabytes each, and a build that only
-      ;; produces a boot file never needs them.
-
-      (define petite.boot
-        (lambda ()
-          (guard (ex (else (petite.boot-fallback)))
-            (let ((boot-size (foreign-entry "petite-boot-size"))
-                  (boot (foreign-entry "petite-boot")))
-              (bytevector->u8-list (pointer->bytevector boot boot-size))))))
-
-      (define scheme.boot
-        (lambda ()
-          (guard (ex (else (scheme.boot-fallback)))
-            (let ((boot-size (foreign-entry "scheme-boot-size"))
-                  (boot (foreign-entry "scheme-boot")))
-              (bytevector->u8-list (pointer->bytevector boot boot-size))))))
+      (define scheme.boot (lambda () (boot-path "scheme.boot")))
 
       (define letloop.boot
         ;; The boot image holding letloop's own libraries, so that a
         ;; program built with --visible-libraries can still import them at
-        ;; run time. It comes from the C host that registered it as a
-        ;; symbol, or -- now that letloop ships as a boot file itself --
-        ;; from disk, next to petite.boot.
-        (lambda ()
-          (or (guard (ex (else #f))
-                (let* ((boot-size (foreign-entry "letloop-boot-size"))
-                       (boot (foreign-entry "letloop-boot"))
-                       (out (bytevector->u8-list (pointer->bytevector boot boot-size))))
-                  (and (pair? out) out)))
-              (guard (ex (else '()))
-                (boot-file "letloop.boot")))))
+        ;; run time. It sits next to petite.boot.
+        (lambda () (boot-path "letloop.boot")))
 
       ;; parse ARGUMENTS, and set the following variables:
 
@@ -779,7 +747,6 @@
       (define optimize-level* 0)
       (define optimize-level-given? #f)
       (define visible-libraries? #f)
-      (define boot #f)
       (define extra '())
       (define sorted-discovered #f)
 
@@ -813,8 +780,6 @@
                 (set! disable-garbage-collector? #t))
                ((and (eq? (car keyword) '--visible-libraries) (not (string? (cdr keyword))))
                 (set! visible-libraries? #t))
-               ((and (eq? (car keyword) '--boot) (string? (cdr keyword)))
-                (set! boot (cdr keyword)))
                ((and (eq? (car keyword) '--optimize-level)
                      (string->number (cdr keyword))
                      (<= 0 (string->number (cdr keyword)) 3))
@@ -872,9 +837,15 @@
               (write `(scheme-start ,(string->symbol main)) port)) 'truncate)
           (maybe-compile-file program.scm)
 
+          ;; An empty base list makes the result standalone: the first
+          ;; input must then be a base boot file, and letloop.boot is one
+          ;; -- it already carries petite and scheme. So the program runs
+          ;; beside nothing but itself, and still imports (letloop ...) at
+          ;; run time, which is what --visible-libraries is for.
           (apply make-boot-file
                  program.boot
-                 (list "scheme" "petite")
+                 (list)
+                 (letloop.boot)
                  (append (filter file-exists? (map .so (map cdr sorted-discovered)))
                          (list (.so program.scm))))))
 
@@ -901,6 +872,53 @@
                   (format (current-error-port)
                           "* Ooops :|\n** Not a library: ~a\n" library.scm)
                   (exit 1))))
+
+          (define exe (or (executable-path)
+                          (begin
+                            (format (current-error-port)
+                                    "* Ooops :|\n** Cannot read /proc/self/exe, needed to spawn the compiler.\n")
+                            (exit 1))))
+
+          (define boot-directory*
+            (or (boot-directory)
+                (begin
+                  (format (current-error-port)
+                          "* Ooops :|\n** Cannot find petite.boot and scheme.boot near ~a.\n" exe)
+                  (format (current-error-port)
+                          "** Set LETLOOP_BOOT_DIRECTORY, or compile with --visible-libraries.\n")
+                  (exit 1))))
+
+          (define scheme-executable
+            ;; The child has to be a Chez that still parses -b and
+            ;; --script. letloop's own binary is no use for it: its main
+            ;; hands argv straight to scheme-start without reading a
+            ;; single flag, which is the whole point of that main.
+            (lambda ()
+              (define split
+                (lambda (str sep)
+                  (let loop ((chars (string->list str)) (current '()) (out '()))
+                    (cond
+                     ((null? chars)
+                      (reverse (cons (list->string (reverse current)) out)))
+                     ((char=? (car chars) sep)
+                      (loop (cdr chars) '() (cons (list->string (reverse current)) out)))
+                     (else (loop (cdr chars) (cons (car chars) current) out))))))
+              (define usable
+                (lambda (path) (and path (file-exists? path) path)))
+              (or (usable (getenv "LETLOOP_SCHEME"))
+                  (usable (string-append boot-directory* "scheme"))
+                  (let loop ((rest (split (or (getenv "PATH") "") #\:)))
+                    (cond
+                     ((null? rest) #f)
+                     ((usable (string-append (car rest) "/scheme")))
+                     (else (loop (cdr rest)))))
+                  (begin
+                    (format (current-error-port)
+                            "* Ooops :|\n** Cannot find a scheme binary to compile with.\n")
+                    (format (current-error-port)
+                            "** Tried $LETLOOP_SCHEME, ~ascheme, and scheme on $PATH.\n"
+                            boot-directory*)
+                    (exit 1)))))
 
           (define letloop-src
             (and=> (letloop-library-directory)
@@ -969,34 +987,15 @@
                            "sources, or reinstall letloop so that its own sources and .wpo files "
                            "are available.")
                           left)))
-              (make-boot-file ,program.boot '("scheme" "petite") ,whole.so)))
-
-          (define exe (or (executable-path)
-                          (begin
-                            (format (current-error-port)
-                                    "* Ooops :|\n** Cannot read /proc/self/exe, needed to spawn the compiler.\n")
-                            (exit 1))))
-
-          (define boot-directory*
-            (or (boot-directory)
-                (begin
-                  (format (current-error-port)
-                          "* Ooops :|\n** Cannot find petite.boot and scheme.boot near ~a.\n" exe)
-                  (format (current-error-port)
-                          "** Set LETLOOP_BOOT_DIRECTORY, or compile with --visible-libraries.\n")
-                  (exit 1))))
-
-          (when (foreign-entry? "petite-boot")
-            ;; A letloop whose boot images are linked into a C program:
-            ;; its main registers them and ignores -b, so it cannot give
-            ;; the child an empty library environment.
-            (format (current-error-port)
-                    "* Ooops :|\n** This letloop cannot compile whole programs: its boot images are\n")
-            (format (current-error-port)
-                    "** linked into the executable. Reinstall it with `make letloop`, or\n")
-            (format (current-error-port)
-                    "** compile with --visible-libraries.\n")
-            (exit 1))
+              ;; An empty base list makes the boot standalone, and the
+              ;; first input then has to be a base boot file. petite and
+              ;; scheme go in whole, so the result carries everything and
+              ;; can be appended to the host binary as one payload.
+              (make-boot-file ,program.boot
+                              '()
+                              ,(string-append boot-directory* "petite.boot")
+                              ,(string-append boot-directory* "scheme.boot")
+                              ,whole.so)))
 
           (call-with-output-file program.scm
             (lambda (port)
@@ -1035,36 +1034,87 @@
 
           (system*
            (pk (format #f "~a -b ~apetite.boot -b ~ascheme.boot --quiet --script ~a"
-                       exe boot-directory* boot-directory* build.scm)))))
+                       (scheme-executable) boot-directory* boot-directory* build.scm)))))
 
-      (define link-executable!
-        (lambda (letloop.boot*)
-          (call-with-output-file (string-append temporary-directory "/my-letloop-program.c")
+      (define emit-program!
+        ;; One self-contained file, and no C compiler: the host binary,
+        ;; then the standalone boot image, then a trailer giving its
+        ;; length. src/letloop-main.c finds that trailer by reading
+        ;; /proc/self/exe and registers the boot from memory. Bytes past
+        ;; the end of an ELF image are ignored by the loader, so the
+        ;; result is still an executable.
+        (lambda ()
+
+          (define host
+            (or (executable-path)
+                (begin
+                  (format (current-error-port)
+                          "* Ooops :|\n** Cannot read /proc/self/exe, needed to copy the host binary.\n")
+                  (exit 1))))
+
+          (define read-file
+            (lambda (path)
+              (call-with-port (open-file-input-port path) get-bytevector-all)))
+
+          (define magic #vu8(76 69 84 76 79 79 80 1))
+
+          (define payload-length
+            ;; The little-endian length in the 8 bytes before the magic,
+            ;; or #f when BYTES carries no payload at all.
+            (lambda (bytes)
+              (let ((size (bytevector-length bytes)))
+                (and (> size 16)
+                     (let ((tail (make-bytevector 8)))
+                       (bytevector-copy! bytes (- size 8) tail 0 8)
+                       (and (equal? tail magic)
+                            (let loop ((index 7) (out 0))
+                              (if (< index 0)
+                                  out
+                                  (loop (- index 1)
+                                        (+ (* out 256)
+                                           (bytevector-u8-ref bytes (+ (- size 16) index))))))))))))
+
+          (define host-bytes
+            ;; The bare host to build on. letloop is itself a host with a
+            ;; payload appended, so strip ours rather than shipping a
+            ;; second copy of the binary just to serve as a template.
+            ;; Bootstrapping under upstream scheme there is no payload,
+            ;; and the makefile builds the binary itself -- what this
+            ;; writes then is only good for its boot file.
+            (lambda ()
+              (let* ((all (read-file host))
+                     (length* (payload-length all)))
+                (if length*
+                    (let* ((size (- (bytevector-length all) 16 length*))
+                           (out (make-bytevector size)))
+                      (bytevector-copy! all 0 out 0 size)
+                      out)
+                    all))))
+
+          (define boot (read-file program.boot))
+
+          (define trailer
+            (let ((out (make-bytevector 16 0)))
+              (let loop ((index 0) (rest (bytevector-length boot)))
+                (when (< index 8)
+                  (bytevector-u8-set! out index (modulo rest 256))
+                  (loop (+ index 1) (quotient rest 256))))
+              (bytevector-copy! magic 0 out 8 8)
+              out))
+
+          (call-with-port (open-file-output-port "a.out" (file-options replace))
             (lambda (port)
-              (format port letloop-program.c
-                      (petite.boot)
-                      (scheme.boot)
-                      letloop.boot*
-                      (bytevector->u8-list
-                       (get-bytevector-all (open-file-input-port program.boot)))))
-            'truncate)
+              (put-bytevector port (host-bytes))
+              (put-bytevector port boot)
+              (put-bytevector port trailer)))
+          (system* "chmod 755 a.out")
 
-          (let loop ((todo (list
-                            (cons kernel.o "/kernel.o")
-                            (cons scheme.h "/scheme.h"))))
-            (unless (null? todo)
-              (call-with-port (open-file-output-port
-                               (string-append temporary-directory (cdar todo))
-                               (file-options replace))
-                (lambda (port)
-                  (put-bytevector port (caar todo))))
-              (loop (cdr todo))))
+          ;; A by-product, the way an object file is: ./a.out runs on its
+          ;; own. `make letloop` needs the boot on its own to build the
+          ;; binary it ships, and --visible-libraries folds it.
+          (call-with-port (open-file-output-port "a.out.boot" (file-options replace))
+            (lambda (port) (put-bytevector port boot)))
 
-          (system*
-           (pk
-            (format #f "cc -I ~a/ -march=native ~a/my-letloop-program.c ~a/kernel.o -o a.out -ldl -lm -luuid -lpthread ~a"
-                    temporary-directory temporary-directory temporary-directory
-                    (string-join extra))))
           (display "Produced: ./a.out\n")))
 
       (call-with-values (lambda () (cli-read arguments))
@@ -1088,22 +1138,7 @@
           (build-boot-file/visible-libraries)
           (build-boot-file/whole-program))
 
-      (if boot
-          (begin
-            (call-with-port (open-file-output-port boot (file-options replace))
-              (lambda (port)
-                (put-bytevector port
-                                (get-bytevector-all (open-file-input-port program.boot)))))
-            (format #t "Produced: ~a\n" boot)
-            ;; A boot image needs no C compiler, and an amalgamated one
-            ;; runs as it stands. Chez starts the boot file that goes by
-            ;; the name of the executable, so a copy or hardlink of the
-            ;; scheme binary is the whole program -- which is how letloop
-            ;; itself is installed.
-            (let ((name (basename-without-extension (basename* boot))))
-              (format #t "Start it by naming the scheme binary ~a, beside ~a, petite.boot and scheme.boot~%"
-                      name (basename* boot))))
-          (link-executable! (if visible-libraries? (letloop.boot) '())))))
+      (emit-program!)))
 
   (define letloop-compile* (lambda () (letloop-compile (command-line-arguments))))
 

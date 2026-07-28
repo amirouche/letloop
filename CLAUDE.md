@@ -73,7 +73,7 @@ Prefer these skills for common workflows:
 ## Architecture
 
 ```
-src/letloop-program.c        C host — registers Chez boot files, calls Sscheme_start()
+src/letloop-main.c           C host — parses no flags, finds its boot in its own trailer
 src/letloop/base.scm         Main entry point: letloop-main, letloop-compile, letloop-exec,
                             letloop-repl, letloop-check — handles CLI dispatch, library
                             discovery, and compilation
@@ -92,15 +92,19 @@ src/letloop/www.scm          Web utilities
 src/letloop/cffi.scm         C FFI bindings
 ```
 
-**Build output:** `make letloop` produces `letloop.boot` from `src/letloop/base.scm` and installs it, the way Chez itself ships: the `scheme` executable hardlinked under another name, which makes it load the boot file that goes by that name.
+**Build output:** `make letloop` compiles `src/letloop-main.c` against Chez's `kernel.o`, then appends the amalgamated boot image and a 16-byte trailer to it. The result is one self-contained file that needs nothing beside it.
 
 ```
-$PREFIX/lib/csv<version>/<machine>/letloop        hardlink to the scheme binary
-$PREFIX/lib/csv<version>/<machine>/letloop.boot   amalgamated, the CLI only (678 KB)
-$PREFIX/bin/letloop                               generated sh wrapper, execs the above with `--`
+$PREFIX/lib/csv<version>/<machine>/letloop        host + boot + trailer, one file (4.4 MB)
+$PREFIX/lib/csv<version>/<machine>/letloop-host   the bare host, kept for reference
+$PREFIX/lib/csv<version>/<machine>/letloop.boot   the boot on its own (3.3 MB), what
+                                                  --visible-libraries folds into a program
+$PREFIX/bin/letloop                               relative symlink to the above
 $PREFIX/lib/letloop/src/letloop/**.scm            the sources letloop ships
 $PREFIX/lib/letloop/obj/<optimize-level>/**       their .so and .wpo, per level
 ```
+
+**Building letloop now requires a Chez installation**, for `scheme.h` and `kernel.o`. Compiling a *user* program still requires no C compiler — `letloop compile` copies its own host and appends a different boot — but it does require a real `scheme` binary for its child process.
 
 **`(letloop base)` imports nothing from letloop, on purpose.** It resolves `cli-read`, `transparent`, `letloop-root` and `letloop-review` at first use through `lazy` / `letloop-library-path!`, against the sources installed at `$PREFIX/lib/letloop`. Two reasons, and both bite hard if someone adds an import back:
 
@@ -111,29 +115,28 @@ So the shape tests in `base.scm` are plain list code rather than `(letloop match
 
 One consequence: `(letloop base)` is itself folded, so `letloop check ./src/` skips `src/letloop/base.scm` — it exports no `~check-*`, so no test is lost.
 
-Because `bin/letloop` is the `scheme` binary, Chez's C `main` parses argv before any Scheme runs and claims `--help`, `--version`, `--optimize-level`, `--libdirs`, `-b`/`--boot`, `--verbose` and a dozen more — **at any position**, not just the first, so `letloop check --version` printed Chez's version. **`bin/letloop` is therefore a generated `sh` wrapper, not a symlink**, whose whole job is to insert `--` (which ends Chez's option parsing) before the user's arguments. `letloop help` and `letloop version` also exist as dashless spellings that cannot collide.
+**`src/letloop-main.c` exists to not parse the command line.** Chez's own `c/main.c` reads argv before any Scheme runs and claims `--help`, `--version`, `--optimize-level`, `--libdirs`, `-b`/`--boot`, `--verbose` and a dozen more — **at any position**, not just the first, so a letloop that was the `scheme` binary renamed printed *Chez's* version for `letloop check --version`. letloop's `main` hands `argc`/`argv` to `Sscheme_start` untouched, so every flag reaches `letloop-main`. `letloop help` and `letloop version` exist as dashless spellings too.
 
-Two traps in that wrapper, both learned the hard way:
+Three things about that host are load-bearing:
 
-- It must be written with `rm -f` first, or via a temp file and `mv`. `$BOOT/letloop` is a **hardlink to the `scheme` binary**, and `$PREFIX/bin/letloop` used to be a symlink to it — so a plain `> $PREFIX/bin/letloop` follows the symlink and truncates the shared inode, destroying `scheme`, `petite` and `scheme-script` along with it (they are all one inode, `links=4`).
-- It uses `${0%/*}` rather than `readlink -f`/`dirname`. Two forks measured **3.4 ms against ~0 ms** for the parameter expansion, on a binary whose entire startup is 32 ms. The cost is that a symlink *to* the wrapper is not resolved: install it, do not link to it.
+- **It finds its boot by reading its own trailer**, `[boot][8-byte LE length][magic "LETLOOP\1"]`, via `/proc/self/exe` — not `argv[0]`, which is whatever the caller put there and breaks under a PATH lookup or a symlink. With no trailer it falls back to `Sbuild_heap(argv[0], 0)`, which loads `<basename>.boot`. One binary therefore serves both roles.
+- **It `mmap`s rather than reads.** A `malloc` + `fread` of the 3.3 MB payload on every start measured **~0.8 ms** against the old separate-boot arrangement; `mmap` brought that to ~0.36 ms. On a 27 ms startup that is the difference between 3% and 1.3%.
+- **The whole file is mapped**, because `mmap` offsets must be page-aligned and the payload starts wherever the host happens to end. The mapping is never unmapped — Chez keeps the pointer for the run.
 
-The path the wrapper execs stays *relative*, because `scheme-binarypath*` locates the boot directory through `dirname($SCHEME) + "/" + readlink($SCHEME)`, and the target keeps the basename `letloop` so it still finds `letloop.boot`.
+`$PREFIX/bin/letloop` is a plain *relative* symlink; it must stay relative because `scheme-binarypath*` locates the boot directory through `dirname($SCHEME) + "/" + readlink($SCHEME)`.
 
-**Only `bin/letloop` needs any of this.** `letloop compile` links `src/letloop-program.c`, whose `main` calls `Sscheme_start(argc, argv)` directly, so a compiled program sees every flag intact. The exception is `letloop compile --boot=PATH`, which emits a boot file to be run by a renamed `scheme` binary — that output inherits Chez's argv parsing exactly as letloop itself did.
+**`letloop compile` builds the same shape without a C compiler**: it reads its own binary, strips its own payload to recover the bare host, and appends the new program's boot. That is why `emit-program!` also writes `./a.out.boot` — `make letloop` needs the boot alone to assemble the binary it ships, and `--visible-libraries` folds it. Only `./a.out` is needed to run a program.
+
+**The compiler child cannot be letloop itself** any more, precisely because letloop no longer parses `-b` or `--script`. `scheme-executable` looks up `$LETLOOP_SCHEME`, then `scheme` beside the boot directory, then `$PATH`. A version-mismatched Chez here is the failure CLAUDE.md warns about elsewhere, so the error names all three places it looked.
 
 **`letloop compile` amalgamates by default:** the program and every library it imports become one compilation unit via `compile-program` + `compile-whole-program`, so calls across library boundaries can be inlined — worth ~14% on the HTTP benchmark. Two things make that possible and are easy to break:
 
-- It runs in a **child process** spawned as `<exe> -b petite.boot -b scheme.boot --script build.scm`. A library already defined in the process shadows its own source and is never recompiled, so no `.wpo` is written for it — and every `(letloop ...)` library arrives with the boot image. `compile-whole-program` then folds nothing and reports it only through its return value, which is why the child treats a non-empty return as fatal.
+- It runs in a **child process** spawned as `<scheme> -b petite.boot -b scheme.boot --script build.scm`. A library already defined in the process shadows its own source and is never recompiled, so no `.wpo` is written for it — and every `(letloop ...)` library arrives with the boot image. `compile-whole-program` then folds nothing and reports it only through its return value, which is why the child treats a non-empty return as fatal. `<scheme>` is a **real Chez**, not letloop — letloop's own host parses no flags, so it cannot honour `-b` or `--script`; see `scheme-executable`.
 - The `.wpo` cache is **per optimize level**. Folding a level 0 cache into a level 3 program measured 401k req/s against 456k for a level 3 cache. `CACHE_LEVELS` in the makefile primes 0 and 3; any other level is built on demand.
 
 `--visible-libraries` restores the old behaviour, and is required by a program that resolves a library name at run time with `environment` or `eval`.
 
-**Runtime boot loading order** (relevant when debugging standalone binaries):
-1. `petite.boot`
-2. `scheme.boot`
-3. `letloop.boot` (only with `--visible-libraries`; an amalgamated program carries no letloop boot image)
-4. `program.boot`
+**Runtime boot loading** (relevant when debugging standalone binaries): there is now a *single* boot image, appended to the binary and registered from memory as `program`. `make-boot-file` is called with an **empty base list**, which is what makes it standalone — the first input must then itself be a base boot file. The inputs are `petite.boot`, `scheme.boot`, then the program; with `--visible-libraries` they are `letloop.boot` (already a base boot, it carries petite and scheme) then the libraries.
 
 ## Testing Framework
 
@@ -159,7 +162,7 @@ letloop root create DISTRIBUTION VERSION MACHINE DIRECTORY
 letloop root exec DIRECTORY TARGET-DIRECTORY -- COMMAND ...
 ```
 
-Key flags: `--dev` (debug/profile), `--optimize-level=0-3`, `--disable-garbage-collector`, `--visible-libraries` (do not amalgamate), `--boot=PATH` (emit a boot file instead of an executable; needs `--visible-libraries`).
+Key flags: `--dev` (debug/profile), `--optimize-level=0-3`, `--disable-garbage-collector`, `--visible-libraries` (do not amalgamate).
 
 ## Environment
 
