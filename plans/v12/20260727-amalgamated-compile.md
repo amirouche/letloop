@@ -237,6 +237,57 @@ The 58 libraries left alone include the `define-ftype` ones and
 `compile-whole-program` is Chez's supported mechanism for the same
 result. The prototype is not committed.
 
+## Not done: a flagless scheme binary, and the two shipping shapes
+
+**Forking Chez's `c/main.c`** so the binary does no option parsing at
+all, leaving the wrapper unnecessary and fixing every renamed-scheme
+program rather than just `bin/letloop`. Not obviously wrong: `main.c:114`
+already branches on `path_last(execpath)` to special-case
+`scheme-script`, so keying behaviour off argv[0] is an upstream idiom,
+and letloop already builds its own Chez from a pinned `CHEZ_REF`, so a
+build-time patch costs less than it would elsewhere.
+
+It was dropped because **the compiler depends on the flags it would
+remove**. `base.scm:1037` spawns the child as `<exe> -b petite.boot -b
+scheme.boot --quiet --script build.scm`, where `exe` is `/proc/self/exe`.
+That child is the whole mechanism behind amalgamation -- a library
+already defined in-process is never recompiled and writes no `.wpo` --
+so a flagless letloop cannot build one. This failure mode is already
+known and fenced: `base.scm:989` refuses whole-program compilation when
+`(foreign-entry? "petite-boot")` succeeds, because "its main registers
+them and ignores `-b`, so it cannot give the child an empty library
+environment". A forked flagless `main` is that same shape again.
+
+It is repairable -- point the child at the sibling `$BOOT/scheme`, which
+keeps its flags, and arguably should anyway since it wants a bare Chez --
+but the wrapper already measured free, so the only thing left to buy is
+working CLIs for `--boot` artifacts, and a wrapper emitted beside the
+boot file would buy that without a fork to rebase.
+
+**The two shapes start at the same speed.** `letloop compile` (C-hosted
+`a.out`) against `--boot=PATH` plus a renamed scheme binary, same
+program, interleaved, `taskset -c 0`, 60 runs per round:
+
+| | trivial | library-importing |
+|---|---|---|
+| `a.out` | 26.24-26.70 ms | 26.12-26.73 ms |
+| `--boot` | 26.32-26.52 ms | 26.20-26.50 ms |
+| delta | +85, +77, +30, -178, +280 us | +132, -143, -452, +84, +15 us |
+
+The sign flips in both, three negative rounds out of ten, against a
+~450us per-round spread. There is no resolvable difference, which is
+what the mechanism predicts: both register the same `petite.boot` and
+`scheme.boot` and build the same heap, one from the data segment and one
+from the page cache, and that heap construction dominates. The program's
+own image is rounding error -- 1,970 bytes for the trivial case, 3,280
+for the other. Total bytes shipped are a wash too: one 4.4 MB file
+against four totalling ~4.5 MB.
+
+So choose between them on shipping shape, not speed: `a.out` is
+self-contained but needs `cc` at build time; `--boot` needs no C
+compiler but ships four files that must stay together, and inherits
+Chez's argv parsing.
+
 ## Traps worth keeping
 
 - **`let` does not sequence its initializers, and instrumentation notices.**
