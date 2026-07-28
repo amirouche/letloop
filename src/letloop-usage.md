@@ -1,18 +1,9 @@
 Usage:
 
-  Note: letloop is the Chez Scheme executable under another name, so
-  Chez's C main would otherwise read --help, --version, --optimize-level,
-  --libdirs and a dozen more before letloop saw them -- at any position,
-  not just the first. bin/letloop is a wrapper that inserts `--` to end
-  that parsing. Two ways around it remain: invoking the binary under
-  lib/ directly, and running a boot file from `letloop compile
-  --boot=PATH`; pass `--` yourself there. Programs built by `letloop
-  compile` are unaffected, they carry their own C main.
-
   letloop help
   letloop version
   letloop check [--fail-fast] [DIRECTORY ...] LIBRARY.SCM ...
-  letloop compile [DIRECTORY ...] LIBRARY.SCM PROCEDURE [-- CC-FLAGS ...]
+  letloop compile [DIRECTORY ...] LIBRARY.SCM PROCEDURE
   letloop exec [DIRECTORY ...] LIBRARY.SCM PROCEDURE [-- ARGUMENT ...]
   letloop http serve [--port=PORT] [DIRECTORY ...] LIBRARY.SCM
   letloop repl
@@ -39,14 +30,22 @@ The following flags are available:
                       them into the program. Slower: no call between two
                       libraries can be inlined. Required by a program
                       that resolves a library name at run time, with
-                      environment or eval, and by --boot.
+                      environment or eval.
 
-  --boot=PATH Write a boot file to PATH instead of an executable, which
-              needs no C compiler. Chez starts the boot file that goes by
-              the name of the executable, so a copy or hardlink of the
-              scheme binary named PATH without its extension, beside
-              PATH, petite.boot and scheme.boot, is the whole program.
-              This is how letloop itself is built and installed.
+`letloop compile` writes ./a.out, one self-contained file that needs no
+C compiler and nothing beside it: letloop's own host binary, then a boot
+image carrying the program together with petite and scheme, then a
+trailer giving its length. The host reads that trailer from itself and
+starts the boot from memory. ./a.out.boot is written too, as a
+by-product -- the boot image on its own, which `make letloop` uses to
+build the binary it ships, and which --visible-libraries folds. Only
+./a.out is needed to run the program.
+
+Because that host parses no arguments at all, a compiled program -- and
+letloop itself -- receives --help, --version and every other flag
+untouched. Compiling needs a real `scheme` binary for its child process,
+looked up as $LETLOOP_SCHEME, then beside letloop's boot files, then on
+$PATH.
 
 By default `letloop compile` amalgamates: the program and every library
 it imports become a single compilation unit, so that calls across

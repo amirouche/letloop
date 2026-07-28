@@ -237,6 +237,46 @@ The 58 libraries left alone include the `define-ftype` ones and
 `compile-whole-program` is Chez's supported mechanism for the same
 result. The prototype is not committed.
 
+## Done after all: the flagless host, and one file again
+
+The section below argued against a flagless binary and was overtaken the
+same day. It is kept because its reasoning still holds -- what changed is
+that the objection turned out to be cheap to answer.
+
+**No fork of `c/main.c` was needed.** `Sbuild_heap(execpath, 0)` already
+loads `<name>.boot` when nothing is registered (`c/main.c:294-303`), so
+letloop's host is ~100 lines of its own rather than a patched 390, and
+there is no upstream patch to rebase.
+
+**The compiler-child objection was real and was simply paid.**
+`scheme-executable` resolves `$LETLOOP_SCHEME`, then `scheme` beside the
+boot directory, then `$PATH`; the child is a real Chez, and letloop is
+no longer able to be its own compiler. Building letloop now needs a Chez
+installation for `scheme.h` and `kernel.o`. Compiling a *user* program
+still needs no C compiler at all.
+
+**The single file came back.** Rather than shipping a binary plus a boot
+file, `letloop compile` copies its own host -- stripping its own payload
+to recover the bare prefix -- and appends `[boot][8-byte LE length][magic]`.
+The host finds that trailer through `/proc/self/exe`, not `argv[0]`,
+which is whatever the caller put there. Bytes past an ELF image are
+ignored by the loader, so one 4.4 MB file runs under `env -i` in an
+empty directory. `make-boot-file` with an **empty base list** is what
+makes the image standalone; the first input then has to be a base boot
+file, which `petite.boot` is.
+
+**It costs ~0.36 ms of startup**, measured interleaved against the old
+scheme-plus-separate-boot arrangement (deltas -351, +771, +524, +497 us
+on a 27 ms baseline). The first cut cost twice that: `malloc` + `fread`
+of the 3.3 MB payload measured ~0.8 ms, and `mmap` halved it. The whole
+file is mapped because `mmap` offsets must be page-aligned while the
+payload starts wherever the host ends.
+
+The wrapper committed in `955b4cb` is gone -- the host passes every flag
+through, so there is nothing left to work around -- and with it both of
+its traps, including the hardlink truncation, since `$BOOT/letloop` is
+now its own inode rather than a fourth link to `scheme`.
+
 ## Not done: a flagless scheme binary, and the two shipping shapes
 
 **Forking Chez's `c/main.c`** so the binary does no option parsing at
