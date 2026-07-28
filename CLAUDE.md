@@ -97,7 +97,7 @@ src/letloop/cffi.scm         C FFI bindings
 ```
 $PREFIX/lib/csv<version>/<machine>/letloop        hardlink to the scheme binary
 $PREFIX/lib/csv<version>/<machine>/letloop.boot   amalgamated, the CLI only (678 KB)
-$PREFIX/bin/letloop                               relative symlink to the above
+$PREFIX/bin/letloop                               generated sh wrapper, execs the above with `--`
 $PREFIX/lib/letloop/src/letloop/**.scm            the sources letloop ships
 $PREFIX/lib/letloop/obj/<optimize-level>/**       their .so and .wpo, per level
 ```
@@ -111,9 +111,16 @@ So the shape tests in `base.scm` are plain list code rather than `(letloop match
 
 One consequence: `(letloop base)` is itself folded, so `letloop check ./src/` skips `src/letloop/base.scm` — it exports no `~check-*`, so no test is lost.
 
-Because `bin/letloop` is the `scheme` binary, **Chez's C `main` intercepts `--help`, `--version`, `-b`, `--boot` and `--verbose`** before any Scheme runs: `letloop --help` prints *Chez's* usage. Run `letloop` with no arguments for letloop's. This is also why the flag is spelled `--boot=PATH` and not `--boot PATH`.
+Because `bin/letloop` is the `scheme` binary, Chez's C `main` parses argv before any Scheme runs and claims `--help`, `--version`, `--optimize-level`, `--libdirs`, `-b`/`--boot`, `--verbose` and a dozen more — **at any position**, not just the first, so `letloop check --version` printed Chez's version. **`bin/letloop` is therefore a generated `sh` wrapper, not a symlink**, whose whole job is to insert `--` (which ends Chez's option parsing) before the user's arguments. `letloop help` and `letloop version` also exist as dashless spellings that cannot collide.
 
-The `bin/letloop` symlink has to stay *relative*, because `scheme-binarypath*` locates the boot directory through `dirname($SCHEME) + "/" + readlink($SCHEME)`.
+Two traps in that wrapper, both learned the hard way:
+
+- It must be written with `rm -f` first, or via a temp file and `mv`. `$BOOT/letloop` is a **hardlink to the `scheme` binary**, and `$PREFIX/bin/letloop` used to be a symlink to it — so a plain `> $PREFIX/bin/letloop` follows the symlink and truncates the shared inode, destroying `scheme`, `petite` and `scheme-script` along with it (they are all one inode, `links=4`).
+- It uses `${0%/*}` rather than `readlink -f`/`dirname`. Two forks measured **3.4 ms against ~0 ms** for the parameter expansion, on a binary whose entire startup is 32 ms. The cost is that a symlink *to* the wrapper is not resolved: install it, do not link to it.
+
+The path the wrapper execs stays *relative*, because `scheme-binarypath*` locates the boot directory through `dirname($SCHEME) + "/" + readlink($SCHEME)`, and the target keeps the basename `letloop` so it still finds `letloop.boot`.
+
+**Only `bin/letloop` needs any of this.** `letloop compile` links `src/letloop-program.c`, whose `main` calls `Sscheme_start(argc, argv)` directly, so a compiled program sees every flag intact. The exception is `letloop compile --boot=PATH`, which emits a boot file to be run by a renamed `scheme` binary — that output inherits Chez's argv parsing exactly as letloop itself did.
 
 **`letloop compile` amalgamates by default:** the program and every library it imports become one compilation unit via `compile-program` + `compile-whole-program`, so calls across library boundaries can be inlined — worth ~14% on the HTTP benchmark. Two things make that possible and are easy to break:
 
