@@ -111,6 +111,10 @@
    tls-connect-fds
    tls-connect-servername
    tls-connect-socket
+   tls-handshake-safe
+   tls-read-safe
+   tls-write-safe
+   tls-close-safe
 
    ;; Server accept
    tls-accept-fds
@@ -481,6 +485,30 @@
 
   (define tls-write
     (lazy-foreign-procedure libtls "tls_write" (void* void* size_t) ssize_t))
+
+  ;; __collect_safe variants, for BLOCKING sockets used from worker
+  ;; threads. Chez's collector is stop-the-world, and a thread inside a
+  ;; plain foreign call cannot be stopped -- it blocks every other
+  ;; thread's collection until the call returns. On a non-blocking fd
+  ;; that window is microseconds and the plain variants above are right
+  ;; (collect-safe deactivation costs on every call). On a blocking fd
+  ;; with a 60s SO_RCVTIMEO, one worker parked in recv would freeze GC
+  ;; process-wide for up to a minute; these variants deactivate the
+  ;; thread for the duration instead. Same pattern as liburing's
+  ;; io_uring_wait_cqe_timeout, the one other place letloop blocks in C.
+  ;; Callers must lock any Scheme bytevector whose address they pass --
+  ;; the collector may move unlocked objects mid-call.
+  (define tls-handshake-safe
+    (lazy-foreign-procedure libtls __collect_safe "tls_handshake" (void*) int))
+
+  (define tls-read-safe
+    (lazy-foreign-procedure libtls __collect_safe "tls_read" (void* void* size_t) ssize_t))
+
+  (define tls-write-safe
+    (lazy-foreign-procedure libtls __collect_safe "tls_write" (void* void* size_t) ssize_t))
+
+  (define tls-close-safe
+    (lazy-foreign-procedure libtls __collect_safe "tls_close" (void*) int))
 
   (define tls-close
     (lazy-foreign-procedure libtls "tls_close" (void*) int))
