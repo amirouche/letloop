@@ -39,17 +39,13 @@ jobs:
         if: steps.cache-chez.outputs.cache-hit != 'true'
         run: ./venv $(pwd)/local/ make chezscheme
 
-      - name: Build C dependencies
-        if: steps.cache-local.outputs.cache-hit != 'true'
-        run: ./venv $(pwd)/local/ make opaque argon2 blake3 liburing
-        
       - name: Build letloop
         run: ./venv $(pwd)/local/ make letloop
 
       - name: Run tests
         run: ./venv $(pwd)/local/ make check
 
-        - name: Stress letloop
+      - name: Stress letloop
         run: ./venv $(pwd)/local/ make stress
 
       - name: Package release

@@ -46,10 +46,6 @@ jobs:
         if: steps.cache-local.outputs.cache-hit != 'true'
         run: ./venv $(pwd)/local/ make chezscheme
 
-      - name: Build C dependencies
-        if: steps.cache-local.outputs.cache-hit != 'true'
-        run: ./venv $(pwd)/local/ make opaque argon2 blake3 liburing
-
       - name: Build letloop
         run: ./venv $(pwd)/local/ make letloop
 
