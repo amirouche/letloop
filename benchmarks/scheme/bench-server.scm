@@ -5,7 +5,7 @@
 ;;
 ;; The resulting binary serves benchmarks/scheme/bench-handler.scm's
 ;; routes on the port given as first argument (default 8080),
-;; matching what bench.sh expects: bin/scheme-pico-server PORT
+;; matching what bench.sh expects: bin/letloop-server PORT
 (library (bench-server)
 
   (export main)

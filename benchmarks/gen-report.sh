@@ -14,8 +14,9 @@ fi
 
 # Map CSV filenames to display names, frameworks, and colors
 declare -A NAMES FRAMEWORKS COLORS
-NAMES[scheme-pico]="Scheme"
+NAMES[letloop]="letloop"
 NAMES[bun]="Bun"
+NAMES[bun-canary]="Bun (canary)"
 NAMES[deno]="Deno"
 NAMES[go]="Go"
 NAMES[javascript]="Node.js"
@@ -30,8 +31,9 @@ NAMES[ruby]="Ruby"
 NAMES[java-loom]="Java (Loom)"
 NAMES[java-vertx]="Java (Vert.x)"
 
-FRAMEWORKS[scheme-pico]="pico + io_uring"
+FRAMEWORKS[letloop]="pico + io_uring"
 FRAMEWORKS[bun]="Bun.serve()"
+FRAMEWORKS[bun-canary]="Bun.serve() (canary, Rust)"
 FRAMEWORKS[deno]="Deno.serve()"
 FRAMEWORKS[go]="net/http (stdlib)"
 FRAMEWORKS[javascript]="http (stdlib)"
@@ -46,8 +48,9 @@ FRAMEWORKS[ruby]="Falcon (async)"
 FRAMEWORKS[java-loom]="HttpServer + virtual threads"
 FRAMEWORKS[java-vertx]="Vert.x"
 
-COLORS[scheme-pico]="#ffffff"
+COLORS[letloop]="#ffffff"
 COLORS[bun]="#f5e042"
+COLORS[bun-canary]="#f0b429"
 COLORS[deno]="#01c2a9"
 COLORS[go]="#00acd7"
 COLORS[javascript]="#68a063"
