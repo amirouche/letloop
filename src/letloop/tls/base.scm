@@ -7,7 +7,14 @@
           tls-writer
           tls-shutdown
           url-parse
-          https-request)
+          https-request
+
+          ~check-tls-url-parse-000
+          ~check-tls-url-parse-001
+          ~check-tls-url-parse-002
+          ~check-tls-handshake-timeout
+          ~check-tls-connect-timeout
+          ~check-tls-request-000)
 
   (import (chezscheme)
           (letloop cffi)
@@ -340,4 +347,5 @@
             (lambda ()
               (tls-shutdown ctx fd)))))))
 
-)
+  (include "letloop/tls/base.check.scm")
+  )
