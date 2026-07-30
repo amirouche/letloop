@@ -116,20 +116,81 @@ it accordingly.
 ### 1.2 Enforce environment immutability
 
 Decision 3 is currently a convention, not an invariant (see the caveat there).
-Make it an invariant:
+This section makes it one. The invariant that survives contact with the code is
+not "environments are immutable" — it is **ownership**: *code may only mutate an
+environment whose bindings the compiler can see it owns.*
 
-- Define precisely what is banned. Extension via the `(values news out)`
-  convention stays — that is the mechanism. Structural mutation of a received
-  dynamic environment (`set!` resolving through it, the codegen's
-  `set-car!`/`set-cdr!` fallback at `seed3.scm:2219-2223`) becomes an **error**,
-  in both the interpreter and the emitted code.
-- The interpreter's `set!` operative must distinguish a binding in the
-  operative's own static scope from one reached through a received dynamic
-  environment, and refuse the latter.
+**Inventory.** Every mutation site in seed3, verified 2026-07-30. Two distinct
+operations hide under "mutation" and need separate verdicts:
 
-This gates Part 4: the alist→struct inference of E3 is unsound if any reachable
-`set!` can mutate a binding the compiler flattened. Nothing in Part 4 may be
-built while the invariant is accidental.
+- **Rebinding** — changing an existing binding's value. Exactly **one** site:
+  the interpreter's ground `set!` does `(set-cdr! cell v)` on whatever `assq`
+  finds (`seed3.scm:2537`), with no check of where the binding came from.
+- **Extension** — adding a binding. **Seven** sites, all using the same
+  *head-swap* idiom, which prepends by mutating the head cell so every holder
+  of the reference observes the new binding:
+
+  ```scheme
+  (set-cdr! target (cons (car target) (cdr target)))   ; push old head down
+  (set-car! target (cons name v))                       ; new binding at head
+  ```
+
+  Codegen: the `%news` merge fallback when defines have dynamic names
+  (`:1766-1767`), the 3-arg `define` sub-expression fallback (`:2222-2223`).
+  Interpreter: 3-arg define in `seed-evaluate-statement` (`:2291-2292`), local
+  defines (`:2399-2400`, `:2406-2407`), 3- and 4-arg defines into a target
+  environment (`:2414-2415`, `:2424-2425`).
+- **Sanctioned** — `(set! env (cons ...))` at `:2217-2218` rebinds the *local
+  variable* `env`: extension of the operative's own view plus `%news`
+  accumulation, no shared structure touched. This is the seed2 convention and
+  the model everything else converges to.
+
+**The ownership taxonomy.** Three classes of environment, three verdicts:
+
+| environment | lookup | extension | rebinding |
+| --- | --- | --- | --- |
+| own local frame | yes | yes — sequential `define` / `letrec`, compiles to `let`/`letrec` | yes — `set!` on an owned binding, compiles to Chez `set!` |
+| received dynamic | yes — `vau`'s whole point | only via `(values news out)`: statically-known names, landing as the caller's own bindings | **error** |
+| first-class created (`make-environment`, the `get-module` pattern) | yes | before escape: yes, it is `letrec` in disguise; after escape: not in v13 | same rule |
+
+**The conformance target already obeys this — measured, not hoped.** Auditing
+`library.snk`: 86 of its `$define!`s are top-level (sequential program
+structure), 42 are nested in an operative's own local frame, and all three
+`$set!` uses target environments the mutating code itself created — `local`
+bound to `(get-current-environment)` twice in `guard-dynamic-extent`, and
+`get-module`'s freshly made `env` (`library.snk:713-718`). The single
+`$provide!` exports a statically-known list, which is exactly the news
+convention. **Nothing in R-1RK's derived library rebinds through a received
+dynamic environment.** The subtraction in decision 3 costs the conformance
+target nothing on this axis; `$set!` itself survives as sugar, because the
+ownership check — not a syntactic ban — is what decides each use.
+
+**Enforcement.**
+
+- *Interpreter `set!`:* record the identity of the environment's head cell at
+  operative entry. A binding found by `assq` is owned iff it sits strictly above
+  that entry mark in the alist spine; otherwise it is the caller's, and `set!`
+  errors. Cost is O(own frame) and only on the residual path — a binding BTA
+  resolved statically compiles to a Chez `set!` of a local and never walks.
+- *Extension sites:* replace head-swap with local-variable rebinding
+  (`(set! env (cons pair env))`) wherever the target is the flowing `env` —
+  same visibility for every subsequent lookup through `env`, no shared cell
+  touched. Where the target is a received or escaped first-class environment,
+  **error**, in both the interpreter and the emitted code — the codegen fallback
+  at `:2222-2223` and the `%news` merge at `:1766-1767` are the two to repair.
+- *Checks:* a `~check` asserting that `set!` through a received dynamic
+  environment errors identically in compiled and interpreted code — today they
+  disagree (real mutation interpreted, shadow mutation of the materialised copy
+  compiled), and that divergence is precisely what §1.4's oracle exists to
+  catch. Plus a check that the news convention still passes, and the
+  `library.snk` suite.
+
+**What BTA may then assume.** Between operative entry and exit, caller bindings
+are frozen — no rebinding, no insertion into the caller's frame — so
+substitution and inlining are sound; and every extension is statically visible
+(news lists or own-frame defines), so the alist→struct flattening of E3 is sound
+at monomorphic sites. This gates Part 4: nothing there may be built while the
+invariant is accidental.
 
 ### 1.3 Port seed3 into letloop as `(letloop seed)`
 
