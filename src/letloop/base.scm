@@ -1513,10 +1513,17 @@
                thunks))
 
             (begin
-              ;; Change directory to TEMPORARY-DIRECTORY to produce
-              ;; the profile dump along the CHECK file.
-              (current-directory temporary-directory)
-
+              ;; Do NOT change the current directory here: checks run
+              ;; in the directory letloop was invoked from, like exec.
+              ;; A chdir before EVAL used to break every relative path
+              ;; the invoker relied on -- most notably a relative
+              ;; LD_LIBRARY_PATH entry, because glibc resolves relative
+              ;; entries against the cwd at each dlopen, so every
+              ;; lazy-foreign-procedure whose shared object lives only
+              ;; on such an entry failed with "cannot dlopen shared
+              ;; object" once the first foreign call happened after the
+              ;; chdir. The profile dump lands in TEMPORARY-DIRECTORY
+              ;; via profile-dump-html's path-prefix argument instead.
               (dynamic-wind
                   (lambda () (void))
                   (lambda () (eval program (copy-environment (apply environment '(chezscheme)
@@ -1525,7 +1532,7 @@
                   (lambda ()
                     ;; profile-dump-html may fail if there is no temporary directory
                     (guard (ex (else (void)))
-                      (profile-dump-html)
+                      (profile-dump-html (string-append temporary-directory "/"))
                       (format (current-output-port) "* Coverage profile can be found at: ~a/profile.html\n" temporary-directory)))))))))
 
   (define letloop-main
