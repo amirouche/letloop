@@ -1,4 +1,4 @@
-.PHONY: help build-scheme build-go build-rust build-bun-rust build-fastapi build-flask build-js build-gleam build-h2o build-cl build-ruby build-java-loom build-java-vertx bench bench-perf report clean
+.PHONY: help build-scheme build-go build-rust build-bun-canary build-fastapi build-flask build-js build-gleam build-h2o build-cl build-ruby build-java-loom build-java-vertx bench bench-perf report clean
 
 ROOT := $(shell cd .. && pwd)
 
@@ -6,10 +6,10 @@ help:
 	@echo "Benchmark Suite - HTTP Counter Application"
 	@echo ""
 	@echo "Build targets:"
-	@echo "  make build-scheme   Build Scheme server (my-web-library over io_uring, requires ./venv)"
+	@echo "  make build-scheme   Build letloop server (my-web-library over io_uring, requires ./venv)"
 	@echo "  make build-go       Build Go server (net/http stdlib)"
 	@echo "  make build-rust     Build Rust server (axum + tokio, release mode)"
-	@echo "  make build-bun-rust Check bun-rust binary availability"
+	@echo "  make build-bun-canary Check bun-canary binary availability"
 	@echo "  make build-h2o      Build C server (clones h2o, builds libh2o-evloop, installs to local/lib)"
 	@echo "  make build-gleam    Build Gleam server (mist + gleam_otp on BEAM)"
 	@echo "  make build-cl       Build Common Lisp server (Hunchentoot, SBCL standalone binary)"
@@ -30,13 +30,13 @@ help:
 	@echo "  make help           Show this help"
 
 build-scheme:
-	@echo "Building Scheme implementation..."
+	@echo "Building letloop implementation..."
 	@mkdir -p bin
 	@# No `| tail -1`: letloop reports by name any library it could not
 	@# fold into the program, and that has to be seen, not swallowed.
 	cd .. && ./local/bin/letloop compile --optimize-level=3 ./examples ./benchmarks/scheme ./benchmarks/scheme/bench-server.scm main
-	mv ../a.out bin/scheme-pico-server
-	@echo "✓ Scheme (pico) built"
+	mv ../a.out bin/letloop-server
+	@echo "✓ letloop built"
 
 build-go:
 	@echo "Building Go implementation..."
@@ -113,11 +113,11 @@ build-rust:
 	@cd rust && cargo build --release 2>&1 | grep -v "Compiling\|Finished" || true
 	@echo "✓ Rust built"
 
-build-bun-rust:
-	@if command -v bun-rust >/dev/null 2>&1; then \
-		echo "✓ bun-rust available: $$(bun-rust --version)"; \
+build-bun-canary:
+	@if command -v bun-canary >/dev/null 2>&1; then \
+		echo "✓ bun-canary available: $$(bun-canary --version)"; \
 	else \
-		echo "✗ bun-rust not found"; exit 1; \
+		echo "✗ bun-canary not found"; exit 1; \
 	fi
 
 build-fastapi:

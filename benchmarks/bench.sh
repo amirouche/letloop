@@ -128,15 +128,15 @@ declare -A COMMANDS
 echo "Checking available implementations..."
 echo ""
 
-# Scheme (compiled)
-if [ -x "$BENCHMARK_DIR/bin/scheme-pico-server" ]; then
+# letloop (compiled)
+if [ -x "$BENCHMARK_DIR/bin/letloop-server" ]; then
     # LD_LIBRARY_PATH is not optional: with the distro's liburing-ffi
     # (2.11 on Debian) instead of the 2.14 the makefile builds, the
     # server accepts connections and answers nothing, which shows up as
     # a plausible-looking 0.00 req/s rather than an error.
-    SERVERS[scheme-pico]="Scheme-pico"
-    COMMANDS[scheme-pico]="env LD_LIBRARY_PATH=$BENCHMARK_DIR/../local/lib $BENCHMARK_DIR/bin/scheme-pico-server"
-    echo "✓ Scheme (pico, compiled)"
+    SERVERS[letloop]="letloop"
+    COMMANDS[letloop]="env LD_LIBRARY_PATH=$BENCHMARK_DIR/../local/lib $BENCHMARK_DIR/bin/letloop-server"
+    echo "✓ letloop (compiled)"
 fi
 
 # Go
@@ -167,11 +167,11 @@ if command -v bun &>/dev/null; then
     echo "✓ Bun"
 fi
 
-# Bun (Rust)
-if command -v bun-rust &>/dev/null; then
-    SERVERS[bun-rust]="Bun-rust"
-    COMMANDS[bun-rust]="bun-rust $BENCHMARK_DIR/bun/server.ts"
-    echo "✓ Bun (Rust)"
+# Bun (canary, Rust)
+if command -v bun-canary &>/dev/null; then
+    SERVERS[bun-canary]="Bun-canary"
+    COMMANDS[bun-canary]="bun-canary $BENCHMARK_DIR/bun/server.ts"
+    echo "✓ Bun (canary)"
 fi
 
 # Deno
