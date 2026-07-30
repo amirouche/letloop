@@ -14,16 +14,19 @@ foundation, and two of the three sources contribute layers rather than cores.
 | --- | --- | --- |
 | **seed** | `/mnt/src/scheme/seed` (branch `hello-seeder`) | the spine: `vau` that compiles |
 | **SINK / R-1RK** | `/mnt/src/scheme/kernel-sink` (branch `xp`) | the conformance target and the derived library |
-| **Möbius / bb** | `/mnt/src/scheme/mobius` (`hello-weaver`), `/mnt/src/scheme/bb.scm` | the surface, the predicate story, the store |
+| **Möbius / bb** | `/mnt/src/scheme/mobius` (`hello-weaver`), `/mnt/src/scheme/bb.scm-upstream` | the surface, the predicate story, the store |
 | **letloop** | this repo, branch `dev-feature-literacy` | the host, the toolchain, the shipping vehicle |
 
 Sizes, verified 2026-07-30:
 
 - seed3 — `seed/src/src/seed3/seed3.scm`, 2 631 lines; already an R6RS
-  `(seed3)` library (`seed/src/seed3.scm`) whose body is a single `include`.
-  81 ground bindings at `seed3.scm:2449`; the compiler knows four special forms.
+  `(seed3)` library (`seed/src/seed3.scm`), though its header also imports a
+  local `(match)` (a second SRFI-241 copy that the port must reconcile with
+  `(letloop match)`). 81 ground bindings at `seed3.scm:2449`; the parser
+  recognises `if`, `begin`, `let`, `let*`, `letrec`, `lambda`, `vau`, `define`,
+  `quote` (`seed3.scm:151-221`).
 - SINK — 5 403 lines across `subfiles/*.scm` + `sink.scm`; ~146 primitives;
-  `subfiles/library.snk` is **718 lines and 128 `$define!`s** of R-1RK's derived
+  `subfiles/library.snk` is **718 lines and 131 `$define!`s** of R-1RK's derived
   layer, written in Kernel itself.
 - bb — 12 264 lines under `src/bb/`; 43 primitives at
   `src/bb/evaluator.scm:884-896`, indices 0–42.
@@ -38,22 +41,26 @@ These are settled, and the rest of the document follows from them.
 
 **1. `vau` is the foundation. `gamma` is a library form.**
 
-This reverses R⁰RM's deliberate exclusion of `vau` (named as a design decision in
-`mobius/manual.md:206`, and sought after in open question 13 at `:2532`, which
-hunts for metaprogramming *"without reintroducing `vau`"*).
+This reverses R⁰RM's deliberate exclusion of `vau` (motivated by the economy
+argument, and confirmed as a standing decision by open question 13 at
+`mobius/manual.md:2532`, which hunts for metaprogramming *"without
+reintroducing `vau`"*).
 
-The reason is asymmetry of what survives layering:
+The reason is an asymmetry of derivability — which directions are demonstrated
+and which are open:
 
-- `gamma` **can** be derived over `vau` + `match`. seed's own README already
-  frames catamorphic `match` inside `vau` as the payoff. Nothing is lost at the
-  surface.
+- `gamma` from `vau` + `match` is **demonstrated**: seed's own README frames
+  catamorphic `match` inside `vau` as the payoff, and seed compiles it. The
+  reverse direction — recovering `vau`'s power without `vau` — is exactly what
+  open question 13 is still hoping "trees all the way down" turns out to
+  provide. One direction is running code; the other is an open question.
 - Content addressing **can** be a library over the compiled form. De Bruijn
   normalisation and SHA-256 apply to any tree.
 - R-1RK **can** be a library target rather than a core.
-- **Compilation cannot be a layer.** If the matcher is primitive, the partial
-  evaluator must analyse a pattern matcher rather than an operative — strictly
-  harder. seed's one falsifiable claim, native parity with `syntax-case`, dies
-  if `vau` is not the foundation.
+- Compilation is the layer that must be designed in from the start: seed's
+  falsifiable claim — native parity with `syntax-case` — is a claim about
+  compiling `vau`, and it is the one result in the three sources that already
+  exists and must not be forfeited by the fusion.
 
 Immediate dividend: `gamma` stops being foundation #0. The surface-reduction
 programme begins by removing the thing Möbius currently calls its sole
@@ -69,6 +76,19 @@ the caller's environment; seed forbids it, and that prohibition is the entire
 reason seed compiles. The fused language is therefore **R-1RK minus mutable
 dynamic environments, plus a static replacement for every idiom that used one.**
 Enumerating those idioms and answering them individually is the bulk of Part 1.
+
+Caveat, and a gating work item (§1.2): seed3 does not currently *enforce* this.
+The interpreter's ground environment ships a `set!` operative that does
+`set-cdr!` on whatever environment alist is in scope (`seed3.scm:2531-2538`),
+including a received dynamic environment; and the codegen's `define`
+sub-expression fallback emits `set-car!`/`set-cdr!` on the target environment
+(`seed3.scm:2219-2223`). In compiled code the caller's bindings are Chez lambda
+parameters and the received alist is a fresh materialisation
+(`build-operative-environment-extension`, `seed3.scm:834`), so mutation hits a
+copy — immutability holds *by accident of materialisation*, while interpreted
+code mutates for real. Compiled and interpreted code therefore disagree today,
+which is exactly the kind of divergence the conformance oracle of §1.4 exists to
+catch.
 
 **4. The language is literacy-compatible from the start.** See
 `plans/v12/20260730-literacy-markdown-source-format.md`. Seed sources are
@@ -88,9 +108,30 @@ first-class combiners it is unsound, and it is *also* load-bearing for Part 4:
 unknown operative call sites are exactly the escape that forces a fallback
 representation everywhere.
 
-Fix this before anything else in this document.
+Fix this before anything else in this document. It is a calling-convention
+change at every unknown call site — it interacts with seed2's
+`(values news out)` convention — not a local patch, and the staging table costs
+it accordingly.
 
-### 1.2 Port seed3 into letloop as `(letloop seed)`
+### 1.2 Enforce environment immutability
+
+Decision 3 is currently a convention, not an invariant (see the caveat there).
+Make it an invariant:
+
+- Define precisely what is banned. Extension via the `(values news out)`
+  convention stays — that is the mechanism. Structural mutation of a received
+  dynamic environment (`set!` resolving through it, the codegen's
+  `set-car!`/`set-cdr!` fallback at `seed3.scm:2219-2223`) becomes an **error**,
+  in both the interpreter and the emitted code.
+- The interpreter's `set!` operative must distinguish a binding in the
+  operative's own static scope from one reached through a received dynamic
+  environment, and refuse the latter.
+
+This gates Part 4: the alist→struct inference of E3 is unsound if any reachable
+`set!` can mutate a binding the compiler flattened. Nothing in Part 4 may be
+built while the invariant is accidental.
+
+### 1.3 Port seed3 into letloop as `(letloop seed)`
 
 seed3 is already an R6RS library with an `include`d body, so it drops into this
 repo's three-file convention (`NAME.scm` header + `NAME.body.scm` +
@@ -102,10 +143,10 @@ repo's three-file convention (`NAME.scm` header + `NAME.body.scm` +
 import folds it into the amalgamated letloop program and makes it invisible to
 user programs, and adds its load cost to every startup. See CLAUDE.md.
 
-### 1.3 Run `library.snk` as the conformance target
+### 1.4 Run `library.snk` as the conformance target
 
 Do not write a feature checklist. Take
-`kernel-sink/subfiles/library.snk` — 718 lines, 128 `$define!`s of R-1RK's
+`kernel-sink/subfiles/library.snk` — 718 lines, 131 `$define!`s of R-1RK's
 derived layer — compile it, and run SINK's `test/*.krn` against the result.
 
 **The forms that fail are the worklist.** This discovers the mutable-environment
@@ -119,7 +160,7 @@ existing answer for the `$provide!` / `define-record-type` shape: exported names
 land as lambda parameters, immutably, with no alist mutation. It generalises to
 any case where the export list is statically known.
 
-### 1.4 Encapsulations should compile to nothing
+### 1.5 Encapsulations should compile to nothing
 
 `kernel-sink/subfiles/encapsulation.scm` implements encapsulations as
 closure-based message dispatch with a per-type counter:
@@ -128,18 +169,30 @@ closure-based message dispatch with a per-type counter:
 (lambda (message)
   (case message
     ((type)    'encapsulation)
+    ((name)    name)        ; name = (list #t), fresh per instance
     ((counter) counter)
     ((value)   value)))
 ```
 
-Every input is static: the message is a literal symbol at each call site, the
-counter is a compile-time constant per `make-encapsulation-type` call. So the
-`case` folds, the counter comparison in `this-type?` folds wherever both types
-are known, and what survives is a one-slot box that then unboxes.
+The message is a literal symbol at each call site and the counter is a constant
+per `make-encapsulation-type` call, so the `case` folds, the counter comparison
+in `this-type?` folds wherever both types are known, and what survives is a
+one-slot box that then unboxes.
 
-This is the cheapest early demonstration that the partial evaluator is strong
-enough to make R-1RK's *ergonomics* free. Assert it on the emitted Chez, not on
-a benchmark.
+Two honest limits on "to nothing":
+
+- **`eq?`-identity.** Each instance allocates a fresh `(list #t)` precisely so
+  that instances are `eq?` only to themselves. Full elision is therefore
+  per-site, licensed by an `eq?`-escape analysis: the box disappears only where
+  no `eq?` on the capsule can observe it.
+- **The counter is shared mutable state** (`set!` inside
+  `make-encapsulation-type`). "Compile-time constant per call" holds only where
+  call sites are statically enumerable; a first-class use of
+  `make-encapsulation-type` falls back to the runtime counter.
+
+Still the cheapest early demonstration that the partial evaluator makes R-1RK's
+*ergonomics* free at monomorphic sites. Assert it on the emitted Chez, not on a
+benchmark.
 
 ## Part 2 — The surface: `gamma`, predicates, literacy
 
@@ -158,7 +211,8 @@ pass, but the `gamma` implementation should not foreclose it.
 Möbius open question 1 (`manual.md:2508`) specifies predicate inference:
 predicates propagate from foundation signatures (`car` ⇒ `pair?`, `+` ⇒
 `integer?`/`float?`) through `gamma` clause structure, with `assume` as the
-programmer's hint. `assume` already exists as primitive #40 in
+programmer's hint. `assume` already exists as a primitive (index 39 in bb's
+0-based vector) in
 `bb/src/bb/evaluator.scm:893`. The interaction between capsule-level inference
 and tree-level predicates is listed as open.
 
@@ -200,13 +254,20 @@ splits:
 
 | construct | what licenses representation freedom |
 | --- | --- |
-| capsule | opacity (Annex C) |
-| environment | **immutability** (decision 3) |
+| capsule | opacity (Annex C) — unconditional: no external interface exists |
+| environment | **immutability** (decision 3) — conditional: see below |
 
-Two barriers, one result. Neither source document states the pairing, because
-neither language has both constructs. Environments are also the alist that
-matters most in practice, so this is where the alist → struct/hashtable
-inference actually earns its keep.
+The pairing is not symmetric, and saying so precisely matters. Opacity licenses
+change because no interface exists to depend on the layout. Immutability freezes
+*contents*, but the environment's interface — symbol-keyed lookup, `$binds?`,
+`eval` into it — remains first-class and inspectable; that is `vau`'s whole
+point. So environment representation freedom requires immutability **plus** one
+of: every lookup through the environment resolved statically at the site, or a
+materialise-to-alist coercion on escape. seed3's residual `environment-lookup`
+(`seed3.scm:2232`, a linear alist scan) is exactly that escape hatch, already in
+place. One barrier and one conditional analysis — but environments are still the
+alist that matters most in practice, so this is where the alist → struct
+inference earns its keep.
 
 ### 4.2 Representation belongs to an inlining site, not to a combiner
 
@@ -225,6 +286,25 @@ Two ways out, and only one is admissible:
 
 State this explicitly in the design, because the first option is the tempting
 one and its cost is not local.
+
+**Hashing a `vau` operative.** The store's identity story rests on closed,
+symbol-free de Bruijn trees, and an operative receives its operands as a tree of
+symbols — an apparent conflict. It dissolves under one constraint: **the fused
+foundation set contains neither `symbol->string` nor `string->symbol`.**
+Symbols are then opaque tokens — `eq?`-comparable, usable as environment keys,
+nothing else. No program can fabricate a name (`(string->symbol (string-append
+... ".43"))` is inexpressible), so BTA inside a `vau` cannot be fooled by
+manufactured bindings, bound names normalise positionally as before, and a
+literal symbol matched in a pattern is *logic* and hashes as such — the same
+stance Möbius already takes for string tags. The captured static environment
+normalises to content references (bb's `mobius-constant-ref` already does
+this); the received dynamic environment is a runtime value and is never hashed.
+
+Verified: seed3's ground environment exposes neither procedure, and both are
+absent from bb's 43 primitives. The one hole is **`xeno`** (bb primitive #2),
+which reaches any Chez procedure by string name — `(xeno "string->symbol" ...)`
+would reopen it. The guarantee therefore requires `xeno` to be excluded or
+allowlisted in the fused foundation set.
 
 More generally: the uniform-representation boundary does not disappear, it moves.
 What you get is representation *regions* with coercions at their edges —
@@ -259,17 +339,33 @@ after inference. A program with 500 capsule types is still zero-tag everywhere
 if every site is monomorphic. As a global budget "few disjoint types" would be a
 straitjacket; as a per-site property it is exactly what Part 3 computes.
 
+**The Chez backend cannot express the third row.** Compiled output is Chez
+Scheme source, and Chez cannot hold untagged 64-bit integers in registers from
+Scheme source — 61-bit fixnums or heap bignums are what there is, and unboxing
+in Chez 10 is essentially flonum-local. Zero-tag emission therefore requires a
+native backend, which contradicts decision 2 as long as decision 2 stands. The
+analysis in this section (what monomorphism proves, per-site scarcity) is
+backend-independent and worth doing; the *emission* is deferred until the
+backend question is reopened deliberately. What is reachable through Chez today:
+fixnum-proof arithmetic (eliminating overflow checks the predicates discharge),
+flonum unboxing, and Annex C's flat representations via bytevectors and
+fxvectors.
+
 Two couplings to respect:
 
 - **Overflow.** Dropping the numeric tower needs an answer — trap, wrap, or
   promote — and that is Möbius open question 4 (`manual.md:2514`, the error
-  model). *Promote-on-overflow* is the interesting one: start narrow, observe the
-  overflow, re-specialise wider. That is a polymorphic inline cache under another
-  name, and it is the legitimate form of "fix it at runtime."
+  model). *Promote-on-overflow* is the interesting one — start narrow, observe,
+  re-specialise wider — but it is not cheap: unlike an inline cache, which
+  dispatches at call boundaries, overflow fires mid-arithmetic with live
+  untagged state, so it needs deoptimisation metadata to reconstruct the tagged
+  world at that point. A quarters-scale subsystem in its own right, priced as
+  such in the staging table.
 - **GC.** Tags also tell the collector what is a pointer. Untagged integers
   inside heap objects need a static layout map — which Annex C's fixed-offset
-  structs already supply. It composes, but representation choice and GC map
-  become a single decision rather than two.
+  structs supply — and untagged values live across GC points need stack and
+  register maps, which is native-backend territory again. Representation choice
+  and GC map are a single decision rather than two.
 
 ## Part 5 — The foundation set and the hash namespace
 
@@ -278,14 +374,20 @@ Möbius's 43 runs into the freeze: primitive indices are baked into stored hashe
 and `bb/CLAUDE.md` permits only appending.
 
 So a reduced foundation set is **a new foundation set in a new hash namespace**,
-not an edit to the existing one. That is the shape of Möbius open question 15
-(`manual.md:2542`): parameterise the hash, let the store record what was used.
-Removing `gamma` from the foundations (decision 1) is the first entry, which
-makes this question live immediately rather than eventually.
+not an edit to the existing one. That follows the pattern of Möbius open
+question 15 (`manual.md:2542`) — parameterise the choice, let the store record
+what was used — though open question 15 itself covers only the anchor chain, the
+hash algorithm and the proof format; extending it to foundation sets is **this
+plan's own move**, not something the source flags. Removing `gamma` from the
+foundations (decision 1) is the first entry, which makes the question live
+immediately rather than eventually.
 
-The design question open question 15 already flags stays open here: two stores
-with different foundation sets produce different hashes for the same logic. The
-plan does not close it.
+Two constraints on the fused set are already fixed by this plan: no
+`symbol->string` / `string->symbol` (§4.2 — the hashing story depends on it),
+and `xeno` excluded or allowlisted.
+
+The open difficulty stays open here: two stores with different foundation sets
+produce different hashes for the same logic. The plan does not close it.
 
 ## Part 6 — Verification, and where LLM generation is admissible
 
@@ -316,28 +418,36 @@ unverified, unguarded `assume`.**
 Each is cheap, falsifiable, and decides whether the work after it is worth
 doing. None should be skipped for being obvious.
 
-**E1 — Derived-versus-primitive cost.** Take `library.snk`, derive it over a
-minimal core, compile it, and benchmark against the version calling Chez
-primitives directly.
+**E1 — Derived-versus-primitive cost.** Declare a subset of `library.snk` that
+avoids the mutable-environment idioms (most of its 131 `$define!`s qualify —
+`$sequence`, `list`, `list*`, the combiner utilities), derive it over a minimal
+core, compile it, and benchmark against the version calling Chez primitives
+directly. The subset must be declared up front, because the *full* file needs
+stage 4's idiom replacements — E1 cannot wait for those. Workloads: the four
+benchmarks already in seed's table (n-queens, collatz, abacus, abacus2),
+rewritten against the derived subset. Success criterion: **within 15% of the
+primitive-calling version** on each workload; anything worse is a fail, not a
+judgement call.
 
 *This is the central bet of the whole programme.* seed is fast because Chez's
 thousands of native primitives are one call away; cut to a small core and the
 partial evaluator has to claw back by inference what Chez gets for free. If BTA
 claws it back, everything downstream is viable. If it does not, this is where
-surface reduction stops — learned for the price of a week, before a year is built
-on the assumption.
+surface reduction stops — learned cheaply, before a year is built on the
+assumption.
 
-**E2 — Encapsulations compile to nothing.** §1.4. Assert on the emitted Chez that
-the `case` folded, the counter comparison folded, and the box is gone.
+**E2 — Encapsulations compile to nothing.** §1.5. Assert on the emitted Chez
+that the `case` folded, the counter comparison folded, and — at sites the
+`eq?`-escape analysis clears — the box is gone.
 
 **E3 — Environment representation selection.** Take an environment-as-alist out
-of `library.snk`. Assert that field access is constant-offset and the alist is
-never allocated. Benchmark against a hand-written Chez `define-record-type`.
-Parity is the claim; a gap locates the missing inference.
-
-**E4 — Monomorphic zero-tag.** A kernel of small-integer arithmetic, proven
-monomorphic. Assert untagged 64-bit values in registers, no shift/untag/retag in
-the emitted code, and measure against Chez's 61-bit fixnum path.
+of `library.snk`. At **monomorphic inlined sites**, assert that field access is
+constant-offset and the alist is never allocated; benchmark against a
+hand-written Chez `define-record-type`. Parity there is the claim. An
+environment escaping to an unknown operative site legitimately falls back to the
+materialised alist and does not count against the experiment — that fallback is
+the design (§4.1), not a failure of it. Gated on §1.2: the invariant must be
+enforced, not accidental, before flattening is sound.
 
 ## Staging
 
@@ -348,18 +458,19 @@ nothing.
 
 | stage | content | order of magnitude |
 | --- | --- | --- |
-| 0 | first-class dispatch fix (§1.1) | days |
-| 1 | `(letloop seed)` ported, checks discovered (§1.2) | weeks |
+| 0 | first-class dispatch fix (§1.1) — a calling-convention change, not a patch | weeks |
+| 1 | immutability enforced (§1.2); `(letloop seed)` ported, checks discovered (§1.3) | weeks |
 | 2 | literacy seam shared with seed sources (§decision 4) | weeks |
-| 3 | E1, E2 — the bet and the cheap demo | weeks |
-| 4 | `library.snk` conformance, idiom worklist (§1.3) | months |
+| 3 | E1 on the declared subset, E2 — the bet and the cheap demo | weeks |
+| 4 | `library.snk` conformance, idiom worklist (§1.4); E1 re-run on the full file | months |
 | 5 | `gamma` as library form (Part 2) | months |
 | 6 | BTA × predicate lattice (Part 3), E3 | months |
-| 7 | representation regions, tagging (Part 4), E4 | quarters |
+| 7 | representation regions (Part 4); tagging analysis, emission deferred with the backend question | quarters |
 | 8 | foundation set / hash namespace (Part 5) | quarters |
 | 9 | runtime feedback → re-specialisation, then the verified LLM loop (Part 6) | open-ended |
 
-Stage 3 gates 4 onward. Stage 6 gates 7.
+Stage 3 gates 4 onward. Stage 1's invariant (§1.2) gates stage 6's E3. Stage 6
+gates 7.
 
 ## Out of scope
 
@@ -388,4 +499,12 @@ Stage 3 gates 4 onward. Stage 6 gates 7.
 - **Open question 1's capsule/tree interaction.** Part 3 unifies binding-time
   with predicate inference; it does not settle how capsule-level inference and
   tree-level predicates interact.
+- **The backend.** Decision 2 stands, and §4.3 shows what it forecloses:
+  zero-tag emission, untagged values across GC points, promote-on-overflow with
+  deoptimisation. Reopening the backend question is a deliberate future act,
+  priced at quarters, not a side effect of stage 7.
+- **`gamma` surface fidelity across the symbol gap.** Part 2 says
+  "indistinguishable at the surface", but Möbius has no quote and no
+  symbols-as-values while Kernel is symbol-full; what "indistinguishable"
+  covers below the pattern syntax is not yet scoped.
 - **Whether E1 succeeds.** The entire staging from 4 onward is conditional on it.
