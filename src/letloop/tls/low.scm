@@ -2,6 +2,9 @@
 (library (letloop tls low)
 
   (export
+   ;; Shared object, for check-skip-unless in dependent libraries
+   libtls
+
    ;; Constants
    TLS_API
    TLS_PROTOCOL_TLSv1_0
