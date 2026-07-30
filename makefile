@@ -1,4 +1,4 @@
-.PHONY: help letloop letloop-libraries argon2 blake3 sodium oprf opaque liburing check shaders font-bundle
+.PHONY: help letloop letloop-libraries argon2 blake3 sodium oprf opaque liburing picohttpparser dependencies check shaders font-bundle
 
 SCHEME=$(shell which scheme)
 PWD=$(shell pwd)
@@ -129,96 +129,126 @@ xxx: ## For those born under the eye of a wandering star...
 	@grep -nR --color=always -B 2 -A 2 XXX src/
 
 
-liburing:  ## Build liburing from source
-	rm -rf $(PREFIX)/src/liburing
-	mkdir -p $(PREFIX)/src
-	cd $(PREFIX)/src && git clone https://github.com/axboe/liburing
-	cd $(PREFIX)/src/liburing && git checkout liburing-2.14
-	cd $(PREFIX)/src/liburing && ./configure --prefix=$(PREFIX)/
-	cd $(PREFIX)/src/liburing && make -j$(shell nproc --ignore 1)
-	cd $(PREFIX)/src/liburing && make liburing.pc
-	cd $(PREFIX)/src/liburing && make install
+liburing:  ## Build liburing from source (skips if $(PREFIX)/lib/liburing.a already exists)
+	@if [ -e $(PREFIX)/lib/liburing.a ]; then \
+		echo "liburing: $(PREFIX)/lib/liburing.a exists, skipping"; \
+	else \
+		rm -rf $(PREFIX)/src/liburing && \
+		mkdir -p $(PREFIX)/src && \
+		cd $(PREFIX)/src && git clone https://github.com/axboe/liburing && \
+		cd $(PREFIX)/src/liburing && git checkout liburing-2.14 && \
+		cd $(PREFIX)/src/liburing && ./configure --prefix=$(PREFIX)/ && \
+		cd $(PREFIX)/src/liburing && make -j$(shell nproc --ignore 1) && \
+		cd $(PREFIX)/src/liburing && make liburing.pc && \
+		cd $(PREFIX)/src/liburing && make install; \
+	fi
 
-argon2: ## Build libargon2 from source
-	rm -rf $(PREFIX)/src/argon2
-	mkdir -p $(PREFIX)/src
-	cd $(PREFIX)/src && git clone https://github.com/P-H-C/phc-winner-argon2 argon2
-	cd $(PREFIX)/src/argon2 && git checkout 20190702
-	cd $(PREFIX)/src/argon2 && make -j$(shell nproc --ignore 1)
-	cp $(PREFIX)/src/argon2/libargon2.so.1 $(PREFIX)/lib/
-	cp $(PREFIX)/src/argon2/libargon2.a $(PREFIX)/lib/
+argon2: ## Build libargon2 from source (skips if $(PREFIX)/lib/libargon2.so.1 already exists)
+	@if [ -e $(PREFIX)/lib/libargon2.so.1 ]; then \
+		echo "argon2: $(PREFIX)/lib/libargon2.so.1 exists, skipping"; \
+	else \
+		rm -rf $(PREFIX)/src/argon2 && \
+		mkdir -p $(PREFIX)/src && \
+		cd $(PREFIX)/src && git clone https://github.com/P-H-C/phc-winner-argon2 argon2 && \
+		cd $(PREFIX)/src/argon2 && git checkout 20190702 && \
+		cd $(PREFIX)/src/argon2 && make -j$(shell nproc --ignore 1) && \
+		cp $(PREFIX)/src/argon2/libargon2.so.1 $(PREFIX)/lib/ && \
+		cp $(PREFIX)/src/argon2/libargon2.a $(PREFIX)/lib/; \
+	fi
 
-blake3: ## Build libblake3 from source
-	rm -rf $(PREFIX)/src/blake3
-	mkdir -p $(PREFIX)/src
-	cd $(PREFIX)/src && git clone https://github.com/BLAKE3-team/BLAKE3 blake3
-	cd $(PREFIX)/src/blake3 && git checkout 1.8.3
-	cd $(PREFIX)/src/blake3/c && gcc -shared -O3 -o libblake3.so -fPIC blake3.c blake3_dispatch.c blake3_portable.c blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
-	cd $(PREFIX)/src/blake3/c && gcc -c -O3 -fPIC blake3.c blake3_dispatch.c blake3_portable.c blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S && ar rcs libblake3.a blake3.o blake3_dispatch.o blake3_portable.o blake3_sse2_x86-64_unix.o blake3_sse41_x86-64_unix.o blake3_avx2_x86-64_unix.o blake3_avx512_x86-64_unix.o
-	cp $(PREFIX)/src/blake3/c/libblake3.so $(PREFIX)/lib/
-	cp $(PREFIX)/src/blake3/c/libblake3.a $(PREFIX)/lib/
+blake3: ## Build libblake3 from source (skips if $(PREFIX)/lib/libblake3.so already exists)
+	@if [ -e $(PREFIX)/lib/libblake3.so ]; then \
+		echo "blake3: $(PREFIX)/lib/libblake3.so exists, skipping"; \
+	else \
+		rm -rf $(PREFIX)/src/blake3 && \
+		mkdir -p $(PREFIX)/src && \
+		cd $(PREFIX)/src && git clone https://github.com/BLAKE3-team/BLAKE3 blake3 && \
+		cd $(PREFIX)/src/blake3 && git checkout 1.8.3 && \
+		cd $(PREFIX)/src/blake3/c && gcc -shared -O3 -o libblake3.so -fPIC blake3.c blake3_dispatch.c blake3_portable.c blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S && \
+		cd $(PREFIX)/src/blake3/c && gcc -c -O3 -fPIC blake3.c blake3_dispatch.c blake3_portable.c blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S && ar rcs libblake3.a blake3.o blake3_dispatch.o blake3_portable.o blake3_sse2_x86-64_unix.o blake3_sse41_x86-64_unix.o blake3_avx2_x86-64_unix.o blake3_avx512_x86-64_unix.o && \
+		cp $(PREFIX)/src/blake3/c/libblake3.so $(PREFIX)/lib/ && \
+		cp $(PREFIX)/src/blake3/c/libblake3.a $(PREFIX)/lib/; \
+	fi
 
-picohttpparser: ## Build libpicohttpparser from source
-	rm -rf $(PWD)/local/src/picohttpparser
-	mkdir -p $(PWD)/local/src $(PWD)/local/lib
-	cd $(PWD)/local/src && git clone https://github.com/h2o/picohttpparser
-	cp $(PWD)/src/letloop/picohttpparser_wrapper.c $(PWD)/local/src/picohttpparser/
-	cd $(PWD)/local/src/picohttpparser && gcc -shared -O3 -o libpicohttpparser.so -fPIC picohttpparser_wrapper.c
-	cd $(PWD)/local/src/picohttpparser && gcc -c -O3 -fPIC picohttpparser_wrapper.c && ar rcs libpicohttpparser.a picohttpparser_wrapper.o
-	cp $(PWD)/local/src/picohttpparser/libpicohttpparser.so $(PWD)/local/lib/
-	cp $(PWD)/local/src/picohttpparser/libpicohttpparser.a $(PWD)/local/lib/
+picohttpparser: ## Build libpicohttpparser from source (skips if $(PWD)/local/lib/libpicohttpparser.so already exists)
+	@if [ -e $(PWD)/local/lib/libpicohttpparser.so ]; then \
+		echo "picohttpparser: $(PWD)/local/lib/libpicohttpparser.so exists, skipping"; \
+	else \
+		rm -rf $(PWD)/local/src/picohttpparser && \
+		mkdir -p $(PWD)/local/src $(PWD)/local/lib && \
+		cd $(PWD)/local/src && git clone https://github.com/h2o/picohttpparser && \
+		cp $(PWD)/src/letloop/picohttpparser_wrapper.c $(PWD)/local/src/picohttpparser/ && \
+		cd $(PWD)/local/src/picohttpparser && gcc -shared -O3 -o libpicohttpparser.so -fPIC picohttpparser_wrapper.c && \
+		cd $(PWD)/local/src/picohttpparser && gcc -c -O3 -fPIC picohttpparser_wrapper.c && ar rcs libpicohttpparser.a picohttpparser_wrapper.o && \
+		cp $(PWD)/local/src/picohttpparser/libpicohttpparser.so $(PWD)/local/lib/ && \
+		cp $(PWD)/local/src/picohttpparser/libpicohttpparser.a $(PWD)/local/lib/; \
+	fi
 
-sodium: ## Build libsodium from source
-	rm -rf $(PREFIX)/src/libsodium
-	mkdir -p $(PREFIX)/src
-	cd $(PREFIX)/src && git clone --branch 1.0.21-RELEASE https://github.com/jedisct1/libsodium
-	cd $(PREFIX)/src/libsodium && ./configure --prefix=$(PREFIX)
-	cd $(PREFIX)/src/libsodium && make -j$(shell nproc --ignore 1)
-	cd $(PREFIX)/src/libsodium && make install
+sodium: ## Build libsodium from source (skips if $(PREFIX)/lib/libsodium.so already exists)
+	@if [ -e $(PREFIX)/lib/libsodium.so ]; then \
+		echo "sodium: $(PREFIX)/lib/libsodium.so exists, skipping"; \
+	else \
+		rm -rf $(PREFIX)/src/libsodium && \
+		mkdir -p $(PREFIX)/src && \
+		cd $(PREFIX)/src && git clone --branch 1.0.21-RELEASE https://github.com/jedisct1/libsodium && \
+		cd $(PREFIX)/src/libsodium && ./configure --prefix=$(PREFIX) && \
+		cd $(PREFIX)/src/libsodium && make -j$(shell nproc --ignore 1) && \
+		cd $(PREFIX)/src/libsodium && make install; \
+	fi
 
-oprf: sodium ## Build liboprf from source
-	rm -rf $(PREFIX)/src/liboprf
-	mkdir -p $(PREFIX)/src
-	cd $(PREFIX)/src && git clone --branch v0.9.4 https://github.com/stef/liboprf
-	cd $(PREFIX)/src/liboprf/src && make -C noise_xk all CFLAGS="-Wall -O2 -g -fpic -I$(PREFIX)/include" LDFLAGS="-L$(PREFIX)/lib"
-	cd $(PREFIX)/src/liboprf/src && $(CC) -Wall -O2 -g -fpic -DHAVE_SODIUM_HKDF=1 -I$(PREFIX)/include -Inoise_xk/include -Inoise_xk/include/karmel -Inoise_xk/include/karmel/minimal -c oprf.c toprf.c dkg.c dkg-vss.c utils.c tp-dkg.c mpmult.c stp-dkg.c toprf-update.c
-	cd $(PREFIX)/src/liboprf/src && $(LD) -r -o liboprf_merged.o oprf.o toprf.o dkg.o dkg-vss.o utils.o tp-dkg.o mpmult.o stp-dkg.o toprf-update.o
-	cd $(PREFIX)/src/liboprf/src && $(CC) -Wall -O2 -g -fpic -shared -Wl,-soname,liboprf.so.0 -o liboprf.so liboprf_merged.o -L$(PREFIX)/lib -lsodium -loprf-noiseXK -Lnoise_xk
-	cd $(PREFIX)/src/liboprf/src && ar rcs liboprf.a oprf.o toprf.o dkg.o dkg-vss.o utils.o tp-dkg.o mpmult.o stp-dkg.o toprf-update.o
-	mkdir -p $(PREFIX)/lib $(PREFIX)/include/oprf
-	cp $(PREFIX)/src/liboprf/src/liboprf.so $(PREFIX)/lib/
-	cp $(PREFIX)/src/liboprf/src/liboprf.a $(PREFIX)/lib/
-	cp $(PREFIX)/src/liboprf/src/noise_xk/liboprf-noiseXK.so $(PREFIX)/lib/
-	cp $(PREFIX)/src/liboprf/src/noise_xk/liboprf-noiseXK.a $(PREFIX)/lib/
-	cp $(PREFIX)/src/liboprf/src/oprf.h $(PREFIX)/include/oprf/
-	cp $(PREFIX)/src/liboprf/src/toprf.h $(PREFIX)/include/oprf/
-	cp $(PREFIX)/src/liboprf/src/toprf-update.h $(PREFIX)/include/oprf/
-	cp $(PREFIX)/src/liboprf/src/dkg.h $(PREFIX)/include/oprf/
-	cp $(PREFIX)/src/liboprf/src/tp-dkg.h $(PREFIX)/include/oprf/
-	cp $(PREFIX)/src/liboprf/src/stp-dkg.h $(PREFIX)/include/oprf/
-	cp $(PREFIX)/src/liboprf/src/utils.h $(PREFIX)/include/oprf/
+oprf: sodium ## Build liboprf from source (skips if $(PREFIX)/lib/liboprf.so already exists)
+	@if [ -e $(PREFIX)/lib/liboprf.so ]; then \
+		echo "oprf: $(PREFIX)/lib/liboprf.so exists, skipping"; \
+	else \
+		rm -rf $(PREFIX)/src/liboprf && \
+		mkdir -p $(PREFIX)/src && \
+		cd $(PREFIX)/src && git clone --branch v0.9.4 https://github.com/stef/liboprf && \
+		cd $(PREFIX)/src/liboprf/src && make -C noise_xk all CFLAGS="-Wall -O2 -g -fpic -I$(PREFIX)/include" LDFLAGS="-L$(PREFIX)/lib" && \
+		cd $(PREFIX)/src/liboprf/src && $(CC) -Wall -O2 -g -fpic -DHAVE_SODIUM_HKDF=1 -I$(PREFIX)/include -Inoise_xk/include -Inoise_xk/include/karmel -Inoise_xk/include/karmel/minimal -c oprf.c toprf.c dkg.c dkg-vss.c utils.c tp-dkg.c mpmult.c stp-dkg.c toprf-update.c && \
+		cd $(PREFIX)/src/liboprf/src && $(LD) -r -o liboprf_merged.o oprf.o toprf.o dkg.o dkg-vss.o utils.o tp-dkg.o mpmult.o stp-dkg.o toprf-update.o && \
+		cd $(PREFIX)/src/liboprf/src && $(CC) -Wall -O2 -g -fpic -shared -Wl,-soname,liboprf.so.0 -o liboprf.so liboprf_merged.o -L$(PREFIX)/lib -lsodium -loprf-noiseXK -Lnoise_xk && \
+		cd $(PREFIX)/src/liboprf/src && ar rcs liboprf.a oprf.o toprf.o dkg.o dkg-vss.o utils.o tp-dkg.o mpmult.o stp-dkg.o toprf-update.o && \
+		mkdir -p $(PREFIX)/lib $(PREFIX)/include/oprf && \
+		cp $(PREFIX)/src/liboprf/src/liboprf.so $(PREFIX)/lib/ && \
+		cp $(PREFIX)/src/liboprf/src/liboprf.a $(PREFIX)/lib/ && \
+		cp $(PREFIX)/src/liboprf/src/noise_xk/liboprf-noiseXK.so $(PREFIX)/lib/ && \
+		cp $(PREFIX)/src/liboprf/src/noise_xk/liboprf-noiseXK.a $(PREFIX)/lib/ && \
+		cp $(PREFIX)/src/liboprf/src/oprf.h $(PREFIX)/include/oprf/ && \
+		cp $(PREFIX)/src/liboprf/src/toprf.h $(PREFIX)/include/oprf/ && \
+		cp $(PREFIX)/src/liboprf/src/toprf-update.h $(PREFIX)/include/oprf/ && \
+		cp $(PREFIX)/src/liboprf/src/dkg.h $(PREFIX)/include/oprf/ && \
+		cp $(PREFIX)/src/liboprf/src/tp-dkg.h $(PREFIX)/include/oprf/ && \
+		cp $(PREFIX)/src/liboprf/src/stp-dkg.h $(PREFIX)/include/oprf/ && \
+		cp $(PREFIX)/src/liboprf/src/utils.h $(PREFIX)/include/oprf/; \
+	fi
 
-opaque: oprf ## Build libopaque from source
-	rm -rf $(PREFIX)/src/libopaque
-	mkdir -p $(PREFIX)/src
-	cd $(PREFIX)/src && git clone https://github.com/stef/libopaque && cd libopaque && git checkout 98f6a6e
-	cd $(PREFIX)/src/libopaque/src && make -j$(shell nproc --ignore 1) libopaque.so libopaque.a PREFIX=$(PREFIX) OPRFINCDIR=$(PREFIX)/include SODIUM_NEWER_THAN_1_0_18=0 CFLAGS="-Wall -O2 -g -fpic -I$(PREFIX)/include -DHAVE_SODIUM_HKDF=1" LDFLAGS="-L$(PREFIX)/lib -lsodium -loprf"
-	cp $(PREFIX)/src/libopaque/src/libopaque.so $(PREFIX)/lib/
-	cp $(PREFIX)/src/libopaque/src/libopaque.a $(PREFIX)/lib/
+opaque: oprf ## Build libopaque from source (skips if $(PREFIX)/lib/libopaque.so already exists)
+	@if [ -e $(PREFIX)/lib/libopaque.so ]; then \
+		echo "opaque: $(PREFIX)/lib/libopaque.so exists, skipping"; \
+	else \
+		rm -rf $(PREFIX)/src/libopaque && \
+		mkdir -p $(PREFIX)/src && \
+		cd $(PREFIX)/src && git clone https://github.com/stef/libopaque && cd libopaque && git checkout 98f6a6e && \
+		cd $(PREFIX)/src/libopaque/src && make -j$(shell nproc --ignore 1) libopaque.so libopaque.a PREFIX=$(PREFIX) OPRFINCDIR=$(PREFIX)/include SODIUM_NEWER_THAN_1_0_18=0 CFLAGS="-Wall -O2 -g -fpic -I$(PREFIX)/include -DHAVE_SODIUM_HKDF=1" LDFLAGS="-L$(PREFIX)/lib -lsodium -loprf" && \
+		cp $(PREFIX)/src/libopaque/src/libopaque.so $(PREFIX)/lib/ && \
+		cp $(PREFIX)/src/libopaque/src/libopaque.a $(PREFIX)/lib/; \
+	fi
 
-check: letloop-check.sh clean ## Hit the ground running!
+dependencies: liburing argon2 blake3 picohttpparser opaque ## Build every optional FFI shared-object dependency from source (liburing, argon2, blake3, picohttpparser, sodium, oprf, opaque); each skips if already built
+
+check: dependencies letloop-check.sh clean ## Hit the ground running!
 	echo '(source-directories (list "./src/")) (guard (ex (else (exit 1))) (eval (quote (import (letloop base))) (interaction-environment)) (eval (quote (letloop-check (list "./src/"))) (interaction-environment)) (exit 0))' | LD_LIBRARY_PATH=$(PREFIX)/lib/ $(SCHEME) --quiet --libdirs ./src/
 	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) sh letloop-check.sh
 	LETLOOP=$(LETLOOP) bash checks/letloop/srp.sh
 	LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) bash checks/check-transparenturing.sh
 
-check-integration: ## Run the checks that want live services (PostgreSQL at 127.0.0.1:5432); they SKIP-pass without one
+check-integration: dependencies ## Run the checks that want live services (PostgreSQL at 127.0.0.1:5432); they SKIP-pass without one
 	LD_LIBRARY_PATH=$(PREFIX)/lib/ $(LETLOOP) check src/ src/letloop/postgresql/base.scm
 
 stress: clean ## check stress implementations
 	LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) sh checks/stress-transparenturing.sh
 
-check-fail-fast: letloop-check.sh clean ## Hit the ground running!
+check-fail-fast: dependencies letloop-check.sh clean ## Hit the ground running!
 	echo '(source-directories (list "./src/")) (guard (ex (else (exit 1))) (eval (quote (import (letloop base))) (interaction-environment)) (eval (quote (letloop-check (list "./src/" "--fail-fast"))) (interaction-environment)) (exit 0))' | LD_LIBRARY_PATH=$(PREFIX)/lib/ $(SCHEME) --quiet --libdirs ./src/
 	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) sh letloop-check.sh
 	LETLOOP=$(LETLOOP) bash checks/letloop/srp.sh
