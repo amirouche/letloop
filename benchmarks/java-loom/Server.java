@@ -10,6 +10,18 @@ public class Server {
     private static final AtomicInteger count = new AtomicInteger(0);
 
     public static void main(String[] args) throws IOException {
+        // com.sun.net.httpserver.HttpServer does not set TCP_NODELAY
+        // on accepted sockets unless told to: without this, every
+        // response hits the classic Nagle's-algorithm + delayed-ACK
+        // interaction, an almost perfectly flat ~41ms stall regardless
+        // of load (measured: 41.03-41.25ms avg at every concurrency
+        // from 1 to 128, 24 req/s at c=1). Setting it before the
+        // server is created dropped that to 599us and 60.8k req/s at
+        // c=1 in isolation -- roughly a 2500x difference that has
+        // nothing to do with virtual threads or anything else this
+        // benchmark is meant to measure.
+        System.setProperty("sun.net.httpserver.nodelay", "true");
+
         int port = Integer.parseInt(args[0]);
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
