@@ -19,6 +19,7 @@
           tls-shutdown
           www-request
           www-poll-timeout-seconds
+          www-pool-idle-max
 
           ~check-tls-uring-000)
 
@@ -264,15 +265,26 @@
   ;; HTTP/1.0 needs an explicit keep-alive). Reuse skips DNS, TCP
   ;; connect and the TLS handshake — ~25ms of CPU inside libtls per
   ;; connection; a pooled request costs ~100-200us. At most
-  ;; %www-pool-idle-max idle connections per key; idle connections
+  ;; WWW-POOL-IDLE-MAX idle connections per key; idle connections
   ;; older than %www-pool-ttl-jiffies are closed at borrow time. When
   ;; the first use of a pooled connection fails (peer closed it while
   ;; idle), www-request transparently retries once on a fresh one.
   ;; Responses are parsed with the C picohttpparser, accumulating reads
   ;; with the last-len fast path. The pool is per OS thread, so shards
   ;; never share or close each other's connections.
-
-  (define %www-pool-idle-max 4)
+  ;;
+  ;; WWW-POOL-IDLE-MAX is a parameter, not a constant, because it must
+  ;; be sized to how many requests a caller actually fires
+  ;; concurrently against ONE host -- the default of 4 is fine for
+  ;; occasional traffic, but a caller that bursts, say, 16 concurrent
+  ;; fetches at the same S3 endpoint (one fiber per overlapping
+  ;; sstable) would otherwise tear down and re-handshake most of those
+  ;; connections on every burst instead of reusing them. Set it BEFORE
+  ;; starting the event loop (loop-new / transparent) -- %www-pool is
+  ;; itself a per-OS-thread cache created lazily on first use, so
+  ;; parameterizing this only after fibers are already running and
+  ;; opening connections would not reliably reach every thread's pool.
+  (define www-pool-idle-max (make-parameter 4))
   (define %www-pool-ttl-jiffies (* 30 (expt 10 9)))
 
   (define %www-pool-param (make-thread-parameter #f))
@@ -312,7 +324,7 @@
     (lambda (key ctx fd)
       (let* ((pool (%www-pool))
              (entries (hashtable-ref pool key '())))
-        (if (fx>=? (length entries) %www-pool-idle-max)
+        (if (fx>=? (length entries) (www-pool-idle-max))
             (tls-shutdown ctx fd)
             (hashtable-set! pool key
                             (cons (vector ctx fd (jiffy-current)) entries))))))
