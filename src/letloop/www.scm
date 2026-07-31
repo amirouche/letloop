@@ -48,15 +48,23 @@
                (not port)
                (string=? target "/"))))))
 
+  ;; Needs the network, like ~check-tls-request-000 and
+  ;; ~check-tls-uring-000 (base.check.scm, tls/uring.scm). example.com
+  ;; over httpbin.org: this only ever checks the status code, never
+  ;; httpbin's echo body, and example.com is IANA-run infrastructure
+  ;; rather than a small hobby service that goes down.
   (define ~check-www-000
     (lambda ()
-      (call-with-values (lambda () (www-request 'GET "https://httpbin.org/anything" '() (bytevector)))
+      (call-with-values (lambda () (www-request 'GET "https://example.com/" '() (bytevector)))
         (lambda (code headers body)
           (= code 200)))))
 
   (define ~check-www-001
     (lambda ()
-      (call-with-values (lambda () (www-request 'GET "https://httpbin.org/anything" '((x-letloop . "yes")) (bytevector)))
+      ;; The extra header exercises the request-header-writing path;
+      ;; example.com ignores it rather than echoing it back, but this
+      ;; check only ever asserted the status code, never the echo.
+      (call-with-values (lambda () (www-request 'GET "https://example.com/" '((x-letloop . "yes")) (bytevector)))
         (lambda (code headers body)
           (= code 200)))))
 

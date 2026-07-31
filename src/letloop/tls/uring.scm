@@ -607,7 +607,10 @@
                     (fresh!)))))))))
 
   ;; End-to-end: async HTTPS GET inside the loop (needs network, like
-  ;; the ~check-www-* it mirrors). One retry to absorb httpbin flakes.
+  ;; ~check-tls-request-000 in base.check.scm and the ~check-www-* it
+  ;; mirrors). example.com over httpbin.org: IANA-run infrastructure,
+  ;; not a small hobby service that goes down. One retry regardless,
+  ;; matching ~check-tls-request-000's own pattern.
   (define ~check-tls-uring-000
     (lambda ()
       (define (attempt)
@@ -616,7 +619,7 @@
           (loop-spawn
            (lambda ()
              (call-with-values
-                 (lambda () (www-request 'GET "https://httpbin.org/anything" '() (bytevector)))
+                 (lambda () (www-request 'GET "https://example.com/" '() (bytevector)))
                (lambda (code headers body)
                  (set! result code)
                  (loop-stop)))))
