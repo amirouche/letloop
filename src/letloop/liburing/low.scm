@@ -382,7 +382,8 @@
    loop-jiffy
 
    ;; async I/O operations
-   loop-connect loop-read loop-write loop-close loop-sleep
+   loop-connect loop-connect-timeout-seconds
+   loop-read loop-write loop-close loop-sleep
    loop-accept loop-tcp-serve loop-poll-wait
 
    ;; accept split into its non-blocking poll and its multishot
@@ -2491,21 +2492,59 @@
              ((fx=? res (bytevector-length bv)) #t)
              (else (write-loop (subbytevector bv res)))))))))
 
+  ;; A stalled connect (peer or a middlebox silently drops the SYN, no
+  ;; RST ever arrives) has no other timeout anywhere in the io_uring
+  ;; path -- unlike a poll wait, io_uring gives a bare connect no
+  ;; built-in deadline, so the fiber (and the whole single-threaded
+  ;; reactor behind it) would park forever. Race an IORING_OP_TIMEOUT
+  ;; against the IORING_OP_CONNECT exactly as %tls-poll-wait races one
+  ;; against a poll: whichever completes first cancels the other and
+  ;; resumes the fiber.
+  (define loop-connect-timeout-seconds (make-parameter 30))
+
   (define loop-connect
     (lambda (addr addrlen)
       (let ((fd (loop-socket-new AF-INET SOCK-STREAM 0)))
         (unless fd (error 'loop-connect "socket() failed"))
         (loop-nonblock! fd)
-        (let* ((sqe (loop-get-sqe (loop-ring %loop)))
-               (id  (loop-alloc-id!)))
-          (io-uring-prep-connect sqe fd addr addrlen)
-          (io-uring-sqe-set-data64 sqe id)
-          (let ((res (loop-abort
-                       (lambda (k)
-                         (hashtable-set! (loop-handlers %loop) id k)))))
-            (if (fx<? res 0)
-                (begin (loop-close fd) #f)
-                fd))))))
+        (let* ((ring (loop-ring %loop))
+               (connect-sqe (loop-get-sqe ring))
+               (connect-id  (loop-alloc-id!)))
+          (io-uring-prep-connect connect-sqe fd addr addrlen)
+          (io-uring-sqe-set-data64 connect-sqe connect-id)
+          (let* ((timeout-sqe (loop-get-sqe ring))
+                 (timeout-id  (loop-alloc-id!))
+                 (ts (make-timespec (loop-connect-timeout-seconds) 0)))
+            (io-uring-prep-timeout timeout-sqe (ftype-pointer-address ts) 0 0)
+            (io-uring-sqe-set-data64 timeout-sqe timeout-id)
+            (let ((res (loop-abort
+                         (lambda (k)
+                           (let ((handlers (loop-handlers %loop)))
+                             ;; The drain deletes the fired id's own
+                             ;; handler before calling it; each winner
+                             ;; deletes the loser's handler and preps a
+                             ;; cancel for it, so the loser's eventual
+                             ;; CQE (-ECANCELED or the race's late
+                             ;; completion) finds no handler and is
+                             ;; dropped.
+                             (hashtable-set! handlers connect-id
+                               (lambda (res)
+                                 (hashtable-delete! handlers timeout-id)
+                                 (let ((sqe (loop-get-sqe ring)))
+                                   (io-uring-prep-cancel64 sqe timeout-id 0)
+                                   (io-uring-sqe-set-data64 sqe (loop-alloc-id!)))
+                                 (k res)))
+                             (hashtable-set! handlers timeout-id
+                               (lambda (_res)
+                                 (hashtable-delete! handlers connect-id)
+                                 (let ((sqe (loop-get-sqe ring)))
+                                   (io-uring-prep-cancel64 sqe connect-id 0)
+                                   (io-uring-sqe-set-data64 sqe (loop-alloc-id!)))
+                                 (k 'timeout))))))))
+              (foreign-free (ftype-pointer-address ts))
+              (if (or (eq? res 'timeout) (fx<? res 0))
+                  (begin (loop-close fd) #f)
+                  fd)))))))
 
   (define loop-sleep
     (lambda (seconds)
