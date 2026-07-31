@@ -32,6 +32,10 @@ static int handle_request(h2o_handler_t *self, h2o_req_t *req)
             "</body></html>", count);
         req->res.status = 200;
         req->res.reason = "OK";
+        /* Declare the body length: without it h2o frames the response
+         * as Transfer-Encoding: chunked, unlike every other
+         * implementation in the suite which sends Content-Length. */
+        req->res.content_length = len;
         h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_CONTENT_TYPE, NULL,
                        H2O_STRLIT("text/html; charset=utf-8"));
         h2o_send_inline(req, body, len);
@@ -42,6 +46,7 @@ static int handle_request(h2o_handler_t *self, h2o_req_t *req)
         count++;
         req->res.status = 302;
         req->res.reason = "Found";
+        req->res.content_length = 0;
         h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_LOCATION, NULL,
                        H2O_STRLIT("/"));
         h2o_send_inline(req, H2O_STRLIT(""));
@@ -52,6 +57,7 @@ static int handle_request(h2o_handler_t *self, h2o_req_t *req)
         sleep(1);
         req->res.status = 200;
         req->res.reason = "OK";
+        req->res.content_length = sizeof("<html><body><h1>Slept 1 second (via sleep)</h1></body></html>") - 1;
         h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_CONTENT_TYPE, NULL,
                        H2O_STRLIT("text/html; charset=utf-8"));
         h2o_send_inline(req, H2O_STRLIT("<html><body><h1>Slept 1 second (via sleep)</h1></body></html>"));
@@ -60,6 +66,7 @@ static int handle_request(h2o_handler_t *self, h2o_req_t *req)
 
     req->res.status = 404;
     req->res.reason = "Not Found";
+    req->res.content_length = sizeof("<html><body><h1>Not Found</h1></body></html>") - 1;
     h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_CONTENT_TYPE, NULL,
                    H2O_STRLIT("text/html; charset=utf-8"));
     h2o_send_inline(req, H2O_STRLIT("<html><body><h1>Not Found</h1></body></html>"));
