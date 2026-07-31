@@ -97,7 +97,13 @@ benchmark_implementation() {
 
         RAW_AVG=$(echo "$WRK_OUT" | grep -A 3 "Thread Stats" | grep "Latency" | head -1 | awk '{print $2}')
         RAW_MAX=$(echo "$WRK_OUT" | grep -A 3 "Thread Stats" | grep "Latency" | head -1 | awk '{print $4}')
-        RAW_P99=$(echo "$WRK_OUT" | grep "99%" | awk '{print $2}')
+        # Anchored to the latency-distribution row: wrk's "Thread
+        # Stats" +/- Stdev column can itself contain the substring
+        # "99%" (e.g. "70.99%"), and matching both lines concatenated
+        # two numbers into one CSV cell (seen in rust-scaling.csv:
+        # "0.0850.102"). Those stat rows come first, so a bare
+        # `head -1` would have recorded the avg as the p99.
+        RAW_P99=$(echo "$WRK_OUT" | grep -E "^\s*99%" | head -1 | awk '{print $2}')
 
         AVG_LAT=$(normalize_lat "$RAW_AVG")
         MAX_LAT=$(normalize_lat "$RAW_MAX")
