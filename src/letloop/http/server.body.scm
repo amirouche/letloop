@@ -289,7 +289,14 @@
 (define %idle-sweep-interval 5)
 
 (define transparent
-  (lambda (port-number application context dispatch)
+  (case-lambda
+    ((port-number application context dispatch)
+     (transparent port-number "0.0.0.0" application context dispatch))
+    ((port-number bind-address application context dispatch)
+     (transparent* port-number bind-address application context dispatch))))
+
+(define transparent*
+  (lambda (port-number bind-address application context dispatch)
     (loop-new)
     ;; SIGINT/SIGTERM → graceful shutdown
     (register-signal-handler 2  ;; SIGINT
@@ -322,9 +329,9 @@
     (loop-spawn
       (lambda ()
         (define app-state (application))
-        (call-with-values (lambda () (loop-tcp-serve "0.0.0.0" port-number))
+        (call-with-values (lambda () (loop-tcp-serve bind-address port-number))
           (lambda (accept close)
-            (format #t "transparent server at http://127.0.0.1:~a/\n" port-number)
+            (format #t "transparent server at http://~a:~a/\n" bind-address port-number)
             (flush-output-port)
             (let loop ()
               (when (loop-running? (loop-current))
