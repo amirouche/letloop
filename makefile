@@ -197,7 +197,7 @@ sodium: ## Build libsodium from source (skips if $(PREFIX)/lib/libsodium.so alre
 	else \
 		rm -rf $(PREFIX)/src/libsodium && \
 		mkdir -p $(PREFIX)/src && \
-		cd $(PREFIX)/src && git clone --branch 1.0.21-RELEASE https://github.com/jedisct1/libsodium && \
+		cd $(PREFIX)/src && git clone --branch 1.0.22-RELEASE https://github.com/jedisct1/libsodium && \
 		cd $(PREFIX)/src/libsodium && ./configure --prefix=$(PREFIX) && \
 		cd $(PREFIX)/src/libsodium && make -j$(shell nproc --ignore 1) && \
 		cd $(PREFIX)/src/libsodium && make install; \
