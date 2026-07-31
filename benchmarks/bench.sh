@@ -190,7 +190,12 @@ fi
 # Deno
 if command -v deno &>/dev/null; then
     SERVERS[deno]="Deno"
-    COMMANDS[deno]="env TOKIO_WORKER_THREADS=1 deno run --allow-net $BENCHMARK_DIR/deno/server.ts"
+    # No TOKIO_WORKER_THREADS=1: Deno's runtime uses Tokio in
+    # current_thread mode already, and that variable is only read by
+    # Tokio's multi-thread builder — probed thread count is identical
+    # with or without it. taskset -c 0 is what actually pins the
+    # process.
+    COMMANDS[deno]="deno run --allow-net $BENCHMARK_DIR/deno/server.ts"
     echo "✓ Deno"
 fi
 
