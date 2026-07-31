@@ -9,9 +9,20 @@ const server = http.createServer((req, res) => {
   const parsed = url.parse(req.url, true);
   const pathname = parsed.pathname;
 
+  // An explicit Content-Length on every body-bearing response:
+  // without it Node falls back to Transfer-Encoding: chunked framing
+  // (461 bytes on the wire for GET /, the largest response in the
+  // suite, where everyone else sends a known-length body).
+  const send = (status, body) => {
+    res.writeHead(status, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Length': Buffer.byteLength(body),
+    });
+    res.end(body);
+  };
+
   if (pathname === '/' && (req.method === 'GET' || req.method === 'HEAD')) {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(`<html><body>
+    send(200, `<html><body>
 <h1>Count: ${count}</h1>
 <p>Press Ctrl-C for graceful shutdown</p>
 <form method="POST" action="/increment">
@@ -21,16 +32,14 @@ const server = http.createServer((req, res) => {
 </body></html>`);
   } else if (pathname === '/increment' && req.method === 'POST') {
     count++;
-    res.writeHead(302, { 'Location': '/' });
+    res.writeHead(302, { 'Location': '/', 'Content-Length': 0 });
     res.end();
   } else if (pathname === '/sleep' && req.method === 'GET') {
     setTimeout(() => {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end('<html><body><h1>Slept 1 second (via setTimeout)</h1></body></html>');
+      send(200, '<html><body><h1>Slept 1 second (via setTimeout)</h1></body></html>');
     }, 1000);
   } else {
-    res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end('<html><body><h1>Not Found</h1></body></html>');
+    send(404, '<html><body><h1>Not Found</h1></body></html>');
   }
 });
 
