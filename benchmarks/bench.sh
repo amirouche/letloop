@@ -34,6 +34,40 @@ wait_for_server() {
     return 1
 }
 
+# $! after `eval "taskset -c 0 $cmd $PORT" &` does not reliably name
+# the actual server process: eval re-parsing the string forks an
+# intermediate subshell that exits once the real (grand-)child is up,
+# so $! ends up pointing at a PID that's often already gone by the
+# time we try to kill it (confirmed: `kill: (-N) - No such process`
+# while the real server, two PIDs higher, kept running). Every
+# implementation was leaking its full set of per-concurrency-level
+# server processes as a result — 82 zombies measured after one full
+# run, all still pinned to core 0 via the same taskset -c 0 the live
+# server uses, contending with whichever implementation is actually
+# being measured later in the run. Killing whatever is actually bound
+# to the port sidesteps how many fork/exec hops the launch command
+# went through.
+pids_on_port() {
+    lsof -t -i TCP:"$1" -sTCP:LISTEN 2>/dev/null || true
+}
+
+kill_server() {
+    local port=$1
+    local fallback_pid=$2
+    local pid
+    for pid in $(pids_on_port "$port"); do
+        kill -TERM -- -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    done
+    kill -TERM "$fallback_pid" 2>/dev/null || true
+    wait "$fallback_pid" 2>/dev/null || true
+    sleep 0.3
+    # A leaked process here silently corrupts every later measurement
+    # in the run, so force anything still bound to the port.
+    for pid in $(pids_on_port "$port"); do
+        kill -KILL -- -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    done
+}
+
 benchmark_implementation() {
     local name=$1
     local cmd=$2
@@ -61,8 +95,7 @@ benchmark_implementation() {
 
         if ! wait_for_server $PORT; then
             echo "  FAILED to start on port $PORT"
-            kill $SERVER_PID 2>/dev/null || true
-            wait $SERVER_PID 2>/dev/null || true
+            kill_server $PORT $SERVER_PID
             echo "$CONNS,0,0,0,0,FAILED" >> "$csv_file"
             sleep 0.5
             continue
@@ -125,9 +158,7 @@ benchmark_implementation() {
 
         echo "$CONNS,$RPS,$AVG_LAT,$MAX_LAT,$P99_LAT,$ERROR_COUNT" >> "$csv_file"
 
-        kill -TERM -- -$SERVER_PID 2>/dev/null || kill -TERM $SERVER_PID 2>/dev/null || true
-        wait $SERVER_PID 2>/dev/null || true
-        sleep 0.3
+        kill_server $PORT $SERVER_PID
     done
 
     echo ""
