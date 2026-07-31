@@ -347,7 +347,11 @@
 
   (define %header-value-bytes
     (lambda (v)
-      (cond ((string? v) (string->utf8 v))
+      ;; Bytevector values pass through untouched, so a caller can
+      ;; cache the rendered bytes of a header it sends on every
+      ;; response (the server's Date header does).
+      (cond ((bytevector? v) v)
+            ((string? v) (string->utf8 v))
             ((and (fixnum? v) (fx>=? v 0)) (%integer->utf8 v))
             ((number? v) (string->utf8 (number->string v)))
             (else (string->utf8 (format #f "~a" v))))))

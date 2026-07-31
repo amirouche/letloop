@@ -48,6 +48,43 @@
 (define %hdr-content-length (string->utf8 "content-length"))
 (define %val-close (string->utf8 "close"))
 
+;; RFC 9110 IMF-fixdate for the Date header every response carries
+;; (§6.6.1 says a server with a clock MUST send it, and the reference
+;; implementations this server is benchmarked against all do). The
+;; clock is read per response but the bytes are re-rendered only when
+;; the second changes — the same per-second cache hyper uses — so the
+;; steady-state cost is one clock read and an eqv? test.
+(define %imf-days '#("Sun" "Mon" "Tue" "Wed" "Thu" "Fri" "Sat"))
+(define %imf-months
+  '#("Jan" "Feb" "Mar" "Apr" "May" "Jun"
+     "Jul" "Aug" "Sep" "Oct" "Nov" "Dec"))
+
+(define %date-cache-second -1)
+(define %date-cache-bytes (bytevector))
+
+(define http-date-bytes
+  (lambda ()
+    (let* ((t (current-time 'time-utc))
+           (sec (time-second t)))
+      (unless (eqv? sec %date-cache-second)
+        (let ((d (time-utc->date t 0))
+              (pad2 (lambda (n)
+                      (if (fx<? n 10)
+                          (string-append "0" (number->string n))
+                          (number->string n)))))
+          (set! %date-cache-bytes
+                (string->utf8
+                 (string-append
+                  (vector-ref %imf-days (date-week-day d)) ", "
+                  (pad2 (date-day d)) " "
+                  (vector-ref %imf-months (fx- (date-month d) 1)) " "
+                  (number->string (date-year d)) " "
+                  (pad2 (date-hour d)) ":"
+                  (pad2 (date-minute d)) ":"
+                  (pad2 (date-second d)) " GMT")))
+          (set! %date-cache-second sec)))
+      %date-cache-bytes)))
+
 ;; Canned response for unparsable requests, written best-effort
 ;; before closing the connection.
 (define %response-400
@@ -213,7 +250,9 @@
                         (let* ((reason (status-code->reason status))
                                (body-bv (car response-pair))
                                (content-type (cdr response-pair))
-                               (all-headers (cons (cons 'content-type content-type) extra-headers))
+                               (all-headers (cons (cons 'content-type content-type)
+                                                  (cons (cons 'date (http-date-bytes))
+                                                        extra-headers)))
                                (response-bv
                                 (let ((chunks '()))
                                   (http-response-write
