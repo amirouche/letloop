@@ -1,10 +1,24 @@
 #lang racket/base
 
+;; Served through web-server's core `serve` with a lifted
+;; request->response function (dispatch-lift) rather than
+;; serve/servlet: the servlet path wraps every request in the
+;; stateful-servlet machinery — a threshold-LRU continuation manager,
+;; instance bookkeeping, and a dispatcher-sequence that falls through
+;; to filesystem dispatchers — none of which any other implementation
+;; in this suite pays for. This handler never captures continuations
+;; (no send/suspend), so the lean dispatcher is the honest equivalent
+;; of what Rust/Go/Node do: route, build response, write it.
+;;
+;; `sleep` is Racket's green-thread sleep: it parks only this
+;; connection's thread, the server keeps answering — same
+;; non-blocking behaviour as tokio::time::sleep / setTimeout.
+
 (require racket/cmdline
-         web-server/servlet-env
+         web-server/web-server
+         (prefix-in lift: web-server/dispatchers/dispatch-lift)
          web-server/http/request-structs
          web-server/http/response-structs
-         web-server/http/redirect
          net/url)
 
 (define count 0)
@@ -31,7 +45,15 @@
 
     [(and (bytes=? method #"POST") (string=? path "/increment"))
      (set! count (add1 count))
-     (redirect-to "/" temporarily)]
+     ;; 302 with an explicit empty body: redirect-to builds a
+     ;; response/output, which the server frames as a chunked body
+     ;; even though it is empty — every other implementation sends
+     ;; Content-Length: 0 here.
+     (response/full
+      302 #"Found"
+      (current-seconds) #f
+      (list (make-header #"Location" #"/"))
+      '())]
 
     [(and (bytes=? method #"GET") (string=? path "/sleep"))
      (sleep 1)
@@ -53,10 +75,8 @@
    #:args (port-str)
    (string->number port-str)))
 
-(serve/servlet start
-               #:port port
-               #:listen-ip "127.0.0.1"
-               #:servlet-path "/"
-               #:servlet-regexp #rx""
-               #:command-line? #t
-               #:launch-browser? #f)
+(serve #:dispatch (lift:make start)
+       #:listen-ip "127.0.0.1"
+       #:port port)
+
+(do-not-return)
