@@ -186,7 +186,12 @@ fi
 # Go
 if [ -f "$BENCHMARK_DIR/bin/go-server" ] || (mkdir -p "$BENCHMARK_DIR/bin" && cd "$BENCHMARK_DIR/go" && go build -o ../bin/go-server main.go 2>/dev/null); then
     SERVERS[go]="Go"
-    COMMANDS[go]="env GOMAXPROCS=1 $BENCHMARK_DIR/bin/go-server"
+    # No GOMAXPROCS=1: Go's runtime already reads the CPU affinity
+    # mask taskset -c 0 sets and restricts itself to one core on its
+    # own — probed identical (4 threads, Cpus_allowed: 00000001) with
+    # or without the override. Same class of no-op as Deno's removed
+    # TOKIO_WORKER_THREADS=1.
+    COMMANDS[go]="$BENCHMARK_DIR/bin/go-server"
     echo "✓ Go"
 fi
 
