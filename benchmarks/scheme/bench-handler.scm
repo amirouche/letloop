@@ -27,7 +27,8 @@
 
   (import (chezscheme)
           (letloop match)
-          (letloop http server))
+          (letloop http server)
+          (only (letloop liburing low) loop-sleep))
 
   (define (application) (box 0))
 
@@ -89,7 +90,12 @@
        (set-box! application (+ (unbox application) 1))
        (values 302 (cons (bytevector) "text/plain") '((location . "/"))))
       ((GET "sleep")
-       (values 200 (cons (string->utf8 "<html><body><h1>Slept</h1></body></html>")
+       ;; io_uring timeout op: parks only this connection's
+       ;; coroutine, the loop keeps serving — the same genuinely
+       ;; non-blocking ~1s wait every other implementation does
+       ;; (tokio::time::sleep, setTimeout, green-thread sleep).
+       (loop-sleep 1)
+       (values 200 (cons (string->utf8 "<html><body><h1>Slept 1 second (via loop-sleep)</h1></body></html>")
                          "text/html")
                '()))
       (,_
