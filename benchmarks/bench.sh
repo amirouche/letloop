@@ -5,6 +5,13 @@ set -e
 
 BENCHMARK_DIR="$(cd "$(dirname "$0")" && pwd)"
 RESULTS_DIR="$BENCHMARK_DIR/results"
+
+# bun-canary lives in its own prefix, separate from the stable `bun`
+# install, and a non-interactive shell (cron, CI, this script invoked
+# directly) never sources ~/.bashrc — so `command -v bun-canary` below
+# would silently miss it without this.
+export PATH="$HOME/.bun-canary/bin:$PATH"
+
 HOST=127.0.0.1
 BASE_PORT=18300
 GLOBAL_PORT_OFFSET=0
