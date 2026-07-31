@@ -197,7 +197,12 @@ if command -v python3 &>/dev/null; then
     fi
     if [ -d "$BENCHMARK_DIR/flask/venv" ] || (cd "$BENCHMARK_DIR/flask" && python3 -m venv venv 2>&1 >/dev/null && source venv/bin/activate && pip install -q -r requirements.txt 2>&1 >/dev/null && deactivate); then
         SERVERS[flask]="Flask"
-        COMMANDS[flask]="bash -c 'cd $BENCHMARK_DIR/flask && source venv/bin/activate && exec gunicorn -w 1 -b 127.0.0.1:\"\$1\" server:app --log-level critical' --"
+        # -k gthread --threads 1: gunicorn's default sync worker does
+        # not support HTTP keep-alive (Connection: close, one request
+        # per TCP connection — a ~3x-class handicap nothing else in
+        # the suite pays). gthread keeps connections alive while still
+        # handling requests on a single thread.
+        COMMANDS[flask]="bash -c 'cd $BENCHMARK_DIR/flask && source venv/bin/activate && exec gunicorn -w 1 -k gthread --threads 1 -b 127.0.0.1:\"\$1\" server:app --log-level critical' --"
         echo "✓ Flask"
     fi
 fi

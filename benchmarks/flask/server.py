@@ -17,7 +17,7 @@ def root():
 <form method="POST" action="/increment">
 <button type="submit">Increment</button>
 </form>
-<footer><small>Python {platform.python_version()} | Flask / gunicorn | sync workers</small></footer>
+<footer><small>Python {platform.python_version()} | Flask / gunicorn | gthread, 1 thread</small></footer>
 </body></html>"""
 
 
