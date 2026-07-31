@@ -328,7 +328,29 @@
             (reap)))))
     (loop-spawn
       (lambda ()
-        (define app-state (application))
+        ;; APPLICATION failing here must end the PROCESS, not just
+        ;; this fiber: the loop's own generic fiber-failure handler
+        ;; prints "fiber died" and moves on, and every other fiber
+        ;; already spawned above (the idle reaper, in particular)
+        ;; keeps loop-running? true forever -- a process supervisor
+        ;; (systemd's Restart=on-failure, for instance) only acts on
+        ;; an actual exit, so an application that never finishes
+        ;; building would otherwise sit there indefinitely, reporting
+        ;; healthy while nothing is listening on PORT-NUMBER at all.
+        ;; Found live: a transient DNS failure right at boot (systemd
+        ;; started this before resolution was actually usable, despite
+        ;; ordering after network-online.target) killed application-
+        ;; build, and the process then "ran" for 18 minutes doing
+        ;; nothing before anyone noticed.
+        (define app-state
+          (guard (ex (else
+                       (let ((port (current-error-port)))
+                         (display "transparent: application failed to build, exiting: " port)
+                         (if (condition? ex) (display-condition ex port) (display ex port))
+                         (newline port)
+                         (flush-output-port port))
+                       (exit 1)))
+            (application)))
         (call-with-values (lambda () (loop-tcp-serve bind-address port-number))
           (lambda (accept close)
             (format #t "transparent server at http://~a:~a/\n" bind-address port-number)
