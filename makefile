@@ -164,8 +164,15 @@ blake3: ## Build libblake3 from source (skips if $(PREFIX)/lib/libblake3.so alre
 		mkdir -p $(PREFIX)/src && \
 		cd $(PREFIX)/src && git clone https://github.com/BLAKE3-team/BLAKE3 blake3 && \
 		cd $(PREFIX)/src/blake3 && git checkout 1.8.3 && \
-		cd $(PREFIX)/src/blake3/c && gcc -shared -O3 -o libblake3.so -fPIC blake3.c blake3_dispatch.c blake3_portable.c blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S && \
-		cd $(PREFIX)/src/blake3/c && gcc -c -O3 -fPIC blake3.c blake3_dispatch.c blake3_portable.c blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S && ar rcs libblake3.a blake3.o blake3_dispatch.o blake3_portable.o blake3_sse2_x86-64_unix.o blake3_sse41_x86-64_unix.o blake3_avx2_x86-64_unix.o blake3_avx512_x86-64_unix.o && \
+		cd $(PREFIX)/src/blake3/c && \
+		if [ "$$(uname -m)" = "x86_64" ]; then \
+			BLAKE3_SRC="blake3.c blake3_dispatch.c blake3_portable.c blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S"; \
+		else \
+			BLAKE3_SRC="blake3.c blake3_dispatch.c blake3_portable.c blake3_neon.c"; \
+		fi && \
+		gcc -shared -O3 -o libblake3.so -fPIC $$BLAKE3_SRC && \
+		gcc -c -O3 -fPIC $$BLAKE3_SRC && \
+		ar rcs libblake3.a *.o && \
 		cp $(PREFIX)/src/blake3/c/libblake3.so $(PREFIX)/lib/ && \
 		cp $(PREFIX)/src/blake3/c/libblake3.a $(PREFIX)/lib/; \
 	fi
