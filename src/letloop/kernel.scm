@@ -1,7 +1,7 @@
 ;; Copyright © 2026 Amirouche A. BOUBEKKI <amirouche at hyper dev>
 (library (letloop kernel)
 
-  (export define-kernel
+  (export kernel
           kernel-compile
           kernel-source
 
