@@ -147,6 +147,80 @@ itself leaks overhead.
 reclamation, any DSL above raw mnemonics, general-assembler
 completeness.
 
+## Checkpoint 2026-08-02 — stages 0–2 done, numbers match C
+
+Landed the same day the plan was written. `(letloop asm)` is on
+`dev-dubito-ergo-cogito` (`src/letloop/asm.scm` + body + check);
+all 7 checks pass, differential coverage ~700 instruction forms
+byte-identical to GNU as. The LOUDS port is atlas-stoa commit
+`7644564` (branch `stoa2`): a fourth `jit` tier in
+`benchmarks/louds-simd`, selftest 44 cases ok, lookup and range
+checksums byte-identical to the C tier, 50k lookups 32.6–32.9 ms vs
+30.4–34.9 ms for the .so (~0.65 µs/lookup both), ranges within 2% —
+the jitted path is indistinguishable from the compiled shared
+object (RESULTS.md addendum 8). Next: stage 3, VEX + base64.
+
+## Checkpoint 2026-08-02 (later) — stage 3 done, milestone complete
+
+VEX/AVX2 in the assembler (north `d3ef005`): C5/C4 prefix selection
+matching GNU as, vmovdqu/vinserti128/vzeroupper and the
+three-operand AVX2 group; differential coverage extended
+(~check-asm-007/008). New library `(letloop base64)` (`41ee164`):
+the Muła/Lemire kernel as sexps, constants passed as a fourth
+argument (no RIP-relative addressing), scalar tail in Scheme;
+byte-identical to scalar for every size 0–4096; 335KB encode ~13 µs
+(the .so did ~16 µs). city-explorer gained B64_MODE=jit (invvv
+`deebf70`); letloop compile surfaced and fixed a real shipping
+issue: (letloop aql shims) dragged (letloop cffi) into
+whole-program folds, so the check macro is now local to each check
+file. Pinned-Paris gates: pages byte-identical to the .so encoder;
+5313 req/s median at c=4 vs 5260 (+1%), overlapping ranges at c=1.
+**Zero C in the production kernels. The decision gate is now open:
+stages 4–6 (sum/dubito) in v13.**
+
+## Checkpoint 2026-08-02 (evening) — stage 4 pulled forward and done
+
+`(letloop kernel)` (north `0d78683`, `9e52652`): define-kernel
+compiles a tiny simili-Scheme — named-let loops, let, if, unsigned
+64-bit arithmetic, u8@/u32@/u64@ loads, popcount/tzcnt/pdep — to
+(letloop asm) mnemonics at definition time. No inference, no
+spilling: out-of-registers and out-of-language are compile-time
+errors naming the expression. Allocation is scope+liveness over 12
+registers with reachability-aware loop pinning; callee-saved via
+push/pop (asm `8e41958`); 8-argument kernels fit. define-kernel
+records its own source — (kernel-source 'name) is `sum` for plain
+Chez, ahead of v13's meta operative.
+
+The four LOUDS kernels rewritten as named-let loops
+(atlas-stoa `2ae3c80`, tier `kernel`): selftest 44 ok, checksums
+byte-identical to every tier, 50k lookups ~0.72 µs vs 0.70 for the
+C .so and 0.64 for hand-written assembly — naive codegen from the
+Scheme-looking surface costs ~4% against C on this workload.
+
+Note for stage 5: the v1 language is total with respect to the leaf
+contract — it cannot express allocation, calls out, or continuation
+capture — so `dubito` v1 reduces to what remains: types (u8* vs u64
+are currently unchecked), bounds/entry guards, and termination
+evidence.
+
+## Checkpoint 2026-08-02 (night) — stage 5 done: dubito v1
+
+Surface finalized as expressions along the way: `(define foo
+(kernel ((type arg) ...) [return] (assert t) ... body))` (`768e094`)
+plus the `assembly` escape hatch one floor down (`3e9a80c`), both
+registering source against the procedure value (sum on the value,
+like Kernel's meta on a combiner). Then dubito v1 (`1e69ac4`):
+span/word type discipline run on every kernel at definition time
+(rejections name the offending expression), `(assert ...)` entry
+assumptions checked as O(1) Scheme-side guards with exact integer
+semantics and `(len span)`, and `(dubito proc)` reporting verified /
+trusted / nothing-to-doubt over recovered source. The LOUDS kernel
+tier passes the doubting pass unchanged. The original one-liner now
+exists end to end for plain Chez: sum = kernel-source, dubito =
+the doubting pass, sexp->assembly and assembly->procedure below.
+Remaining, stage 6 (v13): range analysis (prove loads in bounds
+from the asserts), termination evidence, and vectorization.
+
 ## The path — bytes → mnemonics → typed loops → proofs → vectors
 
 Each stage is independently shippable: stopping after any of them
