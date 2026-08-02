@@ -72,8 +72,22 @@
     (r8d . 8) (r9d . 9) (r10d . 10) (r11d . 11)
     (r12d . 12) (r13d . 13) (r14d . 14) (r15d . 15)))
 
+(define %asm-xmm
+  '((xmm0 . 0) (xmm1 . 1) (xmm2 . 2) (xmm3 . 3)
+    (xmm4 . 4) (xmm5 . 5) (xmm6 . 6) (xmm7 . 7)
+    (xmm8 . 8) (xmm9 . 9) (xmm10 . 10) (xmm11 . 11)
+    (xmm12 . 12) (xmm13 . 13) (xmm14 . 14) (xmm15 . 15)))
+
+(define %asm-ymm
+  '((ymm0 . 0) (ymm1 . 1) (ymm2 . 2) (ymm3 . 3)
+    (ymm4 . 4) (ymm5 . 5) (ymm6 . 6) (ymm7 . 7)
+    (ymm8 . 8) (ymm9 . 9) (ymm10 . 10) (ymm11 . 11)
+    (ymm12 . 12) (ymm13 . 13) (ymm14 . 14) (ymm15 . 15)))
+
 (define asm-r64 (lambda (x) (cond ((assq x %asm-r64) => cdr) (else #f))))
 (define asm-r32 (lambda (x) (cond ((assq x %asm-r32) => cdr) (else #f))))
+(define asm-xmm (lambda (x) (cond ((assq x %asm-xmm) => cdr) (else #f))))
+(define asm-ymm (lambda (x) (cond ((assq x %asm-ymm) => cdr) (else #f))))
 (define asm-mem? (lambda (x) (and (pair? x) (eq? (car x) '&))))
 (define asm-int8? (lambda (x) (and (integer? x) (<= -128 x 127))))
 (define asm-int32?
@@ -152,10 +166,11 @@
                  (values base index scale disp)))
               (else (oops "bad memory operand" instruction))))))
 
-      (define emit-modrm-mem!
-        ;; Emit REX (with W per width) + opcode bytes + ModRM/SIB/disp
-        ;; for reg-code against a memory operand.
-        (lambda (w reg mem opcodes instruction)
+      (define mem-bytes
+        ;; ModRM/SIB/disp bytes for reg-code against a memory operand,
+        ;; without any prefix: (values x? b? bytes) so REX and VEX
+        ;; paths share the encoding.
+        (lambda (reg mem instruction)
           (let-values (((base index scale disp) (parse-mem mem instruction)))
             (let* ((base-low (fxand base 7))
                    (need-sib (or index (fx=? base-low 4)))
@@ -163,16 +178,62 @@
                               ((asm-int8? disp) 1)
                               (else 2))))
               (unless (asm-int32? disp) (oops "displacement too large" instruction))
-              (emit-rex! w (fx>=? reg 8) (and index (fx>=? index 8)) (fx>=? base 8))
-              (apply emit! opcodes)
-              (emit! (modrm mod reg (if need-sib 4 base-low)))
-              (when need-sib
-                (emit! (fxior (fxsll (case scale ((1) 0) ((2) 1) ((4) 2) (else 3)) 6)
-                              (fxsll (fxand (or index 4) 7) 3)
-                              base-low)))
-              (case mod
-                ((1) (emit-imm! disp 1))
-                ((2) (emit-imm! disp 4)))))))
+              (values (and index (fx>=? index 8))
+                      (fx>=? base 8)
+                      (append
+                       (list (modrm mod reg (if need-sib 4 base-low)))
+                       (if need-sib
+                           (list (fxior (fxsll (case scale ((1) 0) ((2) 1) ((4) 2) (else 3)) 6)
+                                        (fxsll (fxand (or index 4) 7) 3)
+                                        base-low))
+                           '())
+                       (case mod
+                         ((1) (list (bitwise-and disp #xFF)))
+                         ((2) (map (lambda (shift)
+                                     (bitwise-and (bitwise-arithmetic-shift-right
+                                                   disp shift)
+                                                  #xFF))
+                                   '(0 8 16 24)))
+                         (else '()))))))))
+
+      (define emit-modrm-mem!
+        ;; REX (with W per width) + opcode bytes + ModRM/SIB/disp.
+        (lambda (w reg mem opcodes instruction)
+          (let-values (((x b bytes) (mem-bytes reg mem instruction)))
+            (emit-rex! w (fx>=? reg 8) x b)
+            (apply emit! opcodes)
+            (apply emit! bytes))))
+
+      (define emit-vex!
+        ;; VEX prefix: two-byte C5 form when possible (0F map, no
+        ;; X/B/W), as GNU as chooses, else three-byte C4.
+        (lambda (r x b w vvvv l pp mmmmm)
+          (if (and (not x) (not b) (not w) (fx=? mmmmm 1))
+              (emit! #xC5
+                     (fxior (if r 0 #x80)
+                            (fxsll (fxand (fxnot vvvv) #xF) 3)
+                            (if l #b100 0)
+                            pp))
+              (emit! #xC4
+                     (fxior (if r 0 #x80) (if x 0 #x40) (if b 0 #x20) mmmmm)
+                     (fxior (if w #x80 0)
+                            (fxsll (fxand (fxnot vvvv) #xF) 3)
+                            (if l #b100 0)
+                            pp)))))
+
+      (define emit-vex-op!
+        ;; VEX-encoded op with reg field REG and rm either a vector
+        ;; register code or a memory operand; IMM is #f or one byte.
+        (lambda (reg vvvv l pp mmmmm opcode rm imm instruction)
+          (if (integer? rm)
+              (begin
+                (emit-vex! (fx>=? reg 8) #f (fx>=? rm 8) #f vvvv l pp mmmmm)
+                (emit! opcode (modrm 3 reg rm)))
+              (let-values (((x b bytes) (mem-bytes reg rm instruction)))
+                (emit-vex! (fx>=? reg 8) x b #f vvvv l pp mmmmm)
+                (emit! opcode)
+                (apply emit! bytes)))
+          (when imm (emit! imm))))
 
       (define emit-modrm-reg!
         ;; REX.W + opcodes + ModRM for register-to-register forms.
@@ -231,6 +292,15 @@
                    (emit! #xC1 (modrm 3 /n d64))
                    (emit-imm! count 1))
                   (else (oops "bad shift count" instruction))))))
+
+      ;; AVX2 three-operand ops: mnemonic → (pp mmmmm opcode) with
+      ;; pp 1 = 66 prefix, mmmmm 1/2/3 = 0F/0F38/0F3A.
+      (define %asm-vex3
+        '((vpshufb 1 2 #x00)
+          (vpand 1 1 #xDB) (vpor 1 1 #xEB)
+          (vpaddb 1 1 #xFC) (vpsubb 1 1 #xF8) (vpsubusb 1 1 #xD8)
+          (vpcmpgtb 1 1 #x64)
+          (vpmulhuw 1 1 #xE4) (vpmullw 1 1 #xD5)))
 
       (define %asm-jcc                  ; condition code low nibble
         '((jo . 0) (jno . 1) (jb . 2) (jae . 3) (je . 4) (jne . 5)
@@ -331,6 +401,44 @@
                                #b011)                     ; L=0, pp=F2
                         #xF5
                         (modrm 3 d64 s264))))
+              ((vmovdqu)                ; VEX.F3.0F 6F (load) / 7F (store)
+               (let ((dv (or (asm-ymm dst) (asm-xmm dst)))
+                     (sv (and (symbol? src) (or (asm-ymm src) (asm-xmm src)))))
+                 (cond
+                  ((and dv (asm-mem? src))
+                   (emit-vex-op! dv 0 (and (asm-ymm dst) #t) 2 1 #x6F src
+                                 #f instruction))
+                  ((and (asm-mem? dst) sv)
+                   (emit-vex-op! sv 0 (and (asm-ymm src) #t) 2 1 #x7F dst
+                                 #f instruction))
+                  (else (oops "bad operands" instruction)))))
+              ((vinserti128)            ; VEX.NDS.256.66.0F3A.W0 38 /r ib
+               (let ((d (asm-ymm dst))
+                     (s1 (asm-ymm src))
+                     (s2 (caddr operands))
+                     (sel (cadddr operands)))
+                 (unless (and d s1 (memv sel '(0 1)))
+                   (oops "bad operands" instruction))
+                 (emit-vex-op! d s1 #t 1 3 #x38
+                               (if (asm-mem? s2)
+                                   s2
+                                   (or (asm-xmm s2) (oops "bad operands" instruction)))
+                               sel instruction)))
+              ((vpshufb vpand vpor vpaddb vpsubb vpsubusb vpcmpgtb
+                vpmulhuw vpmullw)       ; (op ymm ymm ymm/mem)
+               (let* ((spec (cdr (assq head %asm-vex3)))
+                      (d (asm-ymm dst))
+                      (s1 (asm-ymm src))
+                      (s2 (caddr operands)))
+                 (unless (and d s1) (oops "bad operands" instruction))
+                 (emit-vex-op! d s1 #t (car spec) (cadr spec) (caddr spec)
+                               (if (asm-mem? s2)
+                                   s2
+                                   (or (asm-ymm s2) (oops "bad operands" instruction)))
+                               #f instruction)))
+              ((vzeroupper)             ; C5 F8 77
+               (emit-vex! #f #f #f #f 0 #f 0 1)
+               (emit! #x77))
               ((jmp) (emit-jump! '(#xE9) dst))
               ((je jne jb jae jbe ja jl jge jle jg js jns jo jno)
                (emit-jump! (list #x0F (fx+ #x80 (cdr (assq head %asm-jcc)))) dst))

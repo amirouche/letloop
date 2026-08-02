@@ -11,7 +11,9 @@
           ~check-asm-003
           ~check-asm-004
           ~check-asm-005
-          ~check-asm-006)
+          ~check-asm-006
+          ~check-asm-007
+          ~check-asm-008)
 
   (import (chezscheme)
           (letloop aql shims))
