@@ -13,11 +13,17 @@
 ;;
 ;;   (define name (kernel ((type arg) ...) body))
 ;;   (define name (kernel ((type arg) ...) return body))
+;;   (define name (assembly ((type arg) ...) instruction ...))
+;;   (define name (assembly ((type arg) ...) return instruction ...))
 ;;
-;; kernel is an expression: it compiles at evaluation time and
-;; returns the procedure. types: u8* (byte span, passed as a
-;; bytevector) and u64; return u64 (the default) or i64. The
-;; language:
+;; kernel and assembly are expressions: they compile at evaluation
+;; time and return the procedure. types: u8* (byte span, passed as a
+;; bytevector) and u64; return u64 (the default) or i64. assembly is
+;; the escape hatch one floor down: the body is (letloop asm)
+;; instruction sexps taken literally — the signature only shapes the
+;; FFI and documents what arrives in rdi, rsi, rdx, rcx, r8, r9 and
+;; on the stack; the value returned is whatever the code leaves in
+;; rax. Both forms register their source. The kernel language:
 ;;
 ;;   expressions   integer literals, variables,
 ;;                 (+ e ...) (- e e) (* e e) (band e ...) (bor e ...)
@@ -88,6 +94,46 @@
              (ffi ...)
              unsigned-64)
             '(kernel ((type arg) ...) body)))))))
+
+(define-syntax assembly
+  (lambda (stx)
+    (define (ffi-type t)
+      (case t
+        ((u8*) 'u8*)
+        ((u64) 'unsigned-64)
+        (else (syntax-violation 'assembly "unknown argument type" t))))
+    (define (ffi-return t)
+      (case t
+        ((u64) 'unsigned-64)
+        ((i64) 'integer-64)
+        (else (syntax-violation 'assembly "unknown return type" t))))
+    (syntax-case stx ()
+      ((_ ((type arg) ...) return instruction0 instruction ...)
+       (memq (syntax->datum #'return) '(u64 i64))
+       (with-syntax (((ffi ...)
+                      (map (lambda (t)
+                             (datum->syntax #'assembly (ffi-type (syntax->datum t))))
+                           #'(type ...)))
+                     (ffi-ret
+                      (datum->syntax #'assembly
+                                     (ffi-return (syntax->datum #'return)))))
+         #'(kernel-register!
+            (assembly->procedure
+             (sexp->assembly '(instruction0 instruction ...))
+             (ffi ...)
+             ffi-ret)
+            '(assembly ((type arg) ...) return instruction0 instruction ...))))
+      ((_ ((type arg) ...) instruction0 instruction ...)
+       (with-syntax (((ffi ...)
+                      (map (lambda (t)
+                             (datum->syntax #'assembly (ffi-type (syntax->datum t))))
+                           #'(type ...))))
+         #'(kernel-register!
+            (assembly->procedure
+             (sexp->assembly '(instruction0 instruction ...))
+             (ffi ...)
+             unsigned-64)
+            '(assembly ((type arg) ...) instruction0 instruction ...)))))))
 
 ;; --- the compiler --------------------------------------------------
 
