@@ -241,7 +241,9 @@
                   (mov rax 2147483648) (mov rax -2147483648)
                   (mov rax -2147483649) (mov r9 1311768467463790320)
                   (mov eax 5) (mov r10d 300)
-                  (not rax) (not r13) (neg rax) (neg r13))
+                  (not rax) (not r13) (neg rax) (neg r13)
+                  (push rax) (push rbp) (push r12) (push r15)
+                  (pop rax) (pop rbp) (pop r12) (pop r15))
                 (apply append
                        (map (lambda (op)
                               (apply append
