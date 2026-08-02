@@ -11,10 +11,13 @@
 ;; contract is the leaf-FFI contract: no allocation, no calls back
 ;; into Scheme, no continuation capture.
 ;;
-;;   (define-kernel (name (arg type) ...) return body)
+;;   (define name (kernel ((type arg) ...) body))
+;;   (define name (kernel ((type arg) ...) return body))
 ;;
-;; types: u8* (byte span, passed as a bytevector) and u64; return
-;; u64 or i64. The language:
+;; kernel is an expression: it compiles at evaluation time and
+;; returns the procedure. types: u8* (byte span, passed as a
+;; bytevector) and u64; return u64 (the default) or i64. The
+;; language:
 ;;
 ;;   expressions   integer literals, variables,
 ;;                 (+ e ...) (- e e) (* e e) (band e ...) (bor e ...)
@@ -29,49 +32,62 @@
 ;;   loops         (let name ((v e) ...) body)     — tail position
 ;;                 only; (name e ...) jumps back, also tail only
 ;;
-;; The kernel body is the return value. define-kernel also records
-;; its own source — (kernel-source 'name) recovers it, which is the
-;; `sum` half of (dubito (sum proc)) for plain Chez code.
+;; The kernel body is the return value. kernel also records its own
+;; source, keyed by the procedure itself — (kernel-source proc)
+;; recovers the definition, which is the `sum` half of
+;; (dubito (sum proc)) for plain Chez code: sum operates on the
+;; value, the way Kernel's meta operative operates on a combiner.
 
-(define %kernel-sources '())
+(define %kernel-sources (make-weak-eq-hashtable))
 
 (define kernel-register!
-  (lambda (name source)
-    (set! %kernel-sources (cons (cons name source) %kernel-sources))))
+  (lambda (procedure source)
+    (eq-hashtable-set! %kernel-sources procedure source)
+    procedure))
 
 (define kernel-source
-  (lambda (name)
-    (cond ((assq name %kernel-sources) => cdr) (else #f))))
+  (lambda (procedure)
+    (eq-hashtable-ref %kernel-sources procedure #f)))
 
-(define-syntax define-kernel
+(define-syntax kernel
   (lambda (stx)
     (define (ffi-type t)
       (case t
         ((u8*) 'u8*)
         ((u64) 'unsigned-64)
-        (else (syntax-violation 'define-kernel "unknown argument type" t))))
+        (else (syntax-violation 'kernel "unknown argument type" t))))
     (define (ffi-return t)
       (case t
         ((u64) 'unsigned-64)
         ((i64) 'integer-64)
-        (else (syntax-violation 'define-kernel "unknown return type" t))))
+        (else (syntax-violation 'kernel "unknown return type" t))))
     (syntax-case stx ()
-      ((_ (name (arg type) ...) return body)
+      ((_ ((type arg) ...) return body)
+       (memq (syntax->datum #'return) '(u64 i64))
        (with-syntax (((ffi ...)
                       (map (lambda (t)
-                             (datum->syntax #'name (ffi-type (syntax->datum t))))
+                             (datum->syntax #'kernel (ffi-type (syntax->datum t))))
                            #'(type ...)))
                      (ffi-ret
-                      (datum->syntax #'name
+                      (datum->syntax #'kernel
                                      (ffi-return (syntax->datum #'return)))))
-         #'(define name
-             (begin
-               (kernel-register!
-                'name '(define-kernel (name (arg type) ...) return body))
-               (assembly->procedure
-                (sexp->assembly (kernel-compile '((arg type) ...) 'body))
-                (ffi ...)
-                ffi-ret))))))))
+         #'(kernel-register!
+            (assembly->procedure
+             (sexp->assembly (kernel-compile '((type arg) ...) 'body))
+             (ffi ...)
+             ffi-ret)
+            '(kernel ((type arg) ...) return body))))
+      ((_ ((type arg) ...) body)
+       (with-syntax (((ffi ...)
+                      (map (lambda (t)
+                             (datum->syntax #'kernel (ffi-type (syntax->datum t))))
+                           #'(type ...))))
+         #'(kernel-register!
+            (assembly->procedure
+             (sexp->assembly (kernel-compile '((type arg) ...) 'body))
+             (ffi ...)
+             unsigned-64)
+            '(kernel ((type arg) ...) body)))))))
 
 ;; --- the compiler --------------------------------------------------
 
@@ -126,7 +142,7 @@
      (else '()))))
 
 (define kernel-compile
-  ;; Compile ARGUMENTS ((name type) ...) and BODY into a list of
+  ;; Compile ARGUMENTS ((type name) ...) and BODY into a list of
   ;; (letloop asm) instructions.
   (lambda (arguments body)
 
@@ -137,7 +153,7 @@
 
     (define oops
       (lambda (message expr)
-        (error 'define-kernel message expr)))
+        (error 'kernel message expr)))
 
     (define emit!
       (lambda (instruction)
@@ -448,11 +464,11 @@
                    (not (eq? (list-ref %kernel-arg-registers index) 'rcx)))
           (let ((reg (list-ref %kernel-arg-registers index)))
             (hold! reg)
-            (set! env (cons (cons (caar arguments) reg) env))))
+            (set! env (cons (cons (cadar arguments) reg) env))))
         (bind (cdr arguments) (fx+ index 1))))
     (let bind ((arguments arguments) (index 0))
       (unless (null? arguments)
-        (let ((name (caar arguments)))
+        (let ((name (cadar arguments)))
           (when (or (fx>=? index 6)
                     (eq? (list-ref %kernel-arg-registers index) 'rcx))
             (let ((reg (allocate! name)))
