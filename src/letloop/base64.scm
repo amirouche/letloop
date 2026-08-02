@@ -9,8 +9,7 @@
           ~check-base64-001)
 
   (import (chezscheme)
-          (letloop asm)
-          (letloop aql shims))
+          (letloop asm))
 
   (begin
     (include "letloop/base64.body.scm")

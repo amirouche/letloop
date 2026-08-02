@@ -10,6 +10,19 @@
 ;;   2. Semantic: assemble small kernels, map them executable, call
 ;;      them through the FFI and compare against a Scheme reference.
 
+;; Local copy of the (letloop aql shims) check macro: importing the
+;; shims would drag (letloop cffi) into consumers' whole-program
+;; compiles, and a boot-image library carries no .wpo to fold.
+(define-syntax check
+  (syntax-rules ()
+    ((check v)
+     (let ((v* v))
+       (eq? v* #t)))
+    ((check a b)
+     (let ((a* a)
+           (b* b))
+       (check (equal? a* b*))))))
+
 (define %asm-check-counter 0)
 
 (define %asm-check-tmpdir
