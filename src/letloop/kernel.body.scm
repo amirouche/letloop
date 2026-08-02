@@ -443,6 +443,13 @@
      (dubito-doubt arguments asserts body)
      (%kernel-compile arguments body))))
 
+(define kernel-addends
+  ;; Catamorphism: flatten a (+ ...) tree into its addends.
+  (lambda (e)
+    (match e
+      ((+ ,(kernel-addends -> parts) ...) (apply append parts))
+      (,other (list other)))))
+
 (define %kernel-compile
   (lambda (arguments body)
 
@@ -472,20 +479,91 @@
                    (not (memq reg used-callee)))
           (set! used-callee (cons reg used-callee)))))
 
+    ;; Available expressions: (expr reg deps owned?) — a pure
+    ;; subexpression already computed in REG, valid on the current
+    ;; straight-line path. DEPS are the registers of its free
+    ;; variables. OWNED entries hold their register (scavenged under
+    ;; pressure before erroring); unowned entries borrow a caller's
+    ;; register. Joins (labels) kill everything: values arriving from
+    ;; two paths may differ.
+    (define available '())
+
+    (define cache-flush!
+      (lambda ()
+        (for-each (lambda (entry)
+                    (when (cadddr entry)
+                      (set! free (cons (cadr entry) free))))
+                  available)
+        (set! available '())))
+
+    (define cache-write!
+      ;; REG is about to be overwritten: kill every entry that lives
+      ;; in it or depends on it, freeing owned casualties.
+      (lambda (reg)
+        (let ((dead (filter (lambda (entry)
+                              (or (eq? (cadr entry) reg)
+                                  (memq reg (caddr entry))))
+                            available)))
+          (unless (null? dead)
+            (set! available (filter (lambda (e) (not (memq e dead))) available))
+            (for-each (lambda (entry)
+                        (when (and (cadddr entry)
+                                   (not (eq? (cadr entry) reg)))
+                          (release! (cadr entry))))
+                      dead)))))
+
+    (define cache-ref
+      (lambda (e)
+        (cond ((assoc e available) => cadr) (else #f))))
+
+    (define cache-add!
+      (lambda (e reg env owned?)
+        (unless (or (eq? reg 'rax) (eq? reg 'rcx))
+          (let ((deps (fold-left (lambda (out v)
+                                   (cond ((assq v env) => (lambda (x) (cons (cdr x) out)))
+                                         (else out)))
+                                 '()
+                                 (kernel-free-variables e '()))))
+            (set! available (cons (list e reg deps owned?) available))))))
+
+    (define cache-own!
+      ;; Transfer ownership of REG's entry to the cache (the caller
+      ;; will not release it).
+      (lambda (e reg)
+        (set! available
+              (map (lambda (entry)
+                     (if (and (eq? (cadr entry) reg) (equal? (car entry) e))
+                         (list (car entry) (cadr entry) (caddr entry) #t)
+                         entry))
+                   available))))
+
     (define allocate!
       (lambda (context)
         ;; Prefer caller-saved: keep pool order, not release order.
-        (let loop ((pool %kernel-pool))
-          (cond ((null? pool)
-                 (oops "out of registers (too many live variables) at" context))
-                ((memq (car pool) free)
-                 (hold! (car pool))
-                 (car pool))
-                (else (loop (cdr pool)))))))
+        ;; Under pressure, scavenge cache-owned registers before
+        ;; giving up.
+        (let try ()
+          (let loop ((pool %kernel-pool))
+            (cond ((null? pool)
+                   (let ((victim (find (lambda (e) (cadddr e)) available)))
+                     (if victim
+                         (begin (release! (cadr victim)) (try))
+                         (oops "out of registers (too many live variables) at"
+                               context))))
+                  ((memq (car pool) free)
+                   (hold! (car pool))
+                   (car pool))
+                  (else (loop (cdr pool))))))))
 
     (define release!
       (lambda (reg)
-        (set! free (cons reg free))))
+        (set! free (cons reg free))
+        (cache-write! reg)))
+
+    (define emit-label!
+      (lambda (name)
+        (cache-flush!)
+        (emit! (list 'label name))))
 
     (define lookup
       (lambda (variable env)
@@ -499,14 +577,63 @@
       (lambda (reg) (cdr (assq reg %kernel-r32))))
 
     (define operand
-      ;; Evaluate E for use as a second operand: returns (values reg
-      ;; release?) — a variable's own register, or a fresh temporary.
+      ;; Evaluate E for use as a source operand: returns (values reg
+      ;; release?) — a variable's own register, a cached
+      ;; computation, or a fresh temporary whose ownership passes to
+      ;; the available-expression cache (scavenged under pressure,
+      ;; never released by the caller).
       (lambda (e env)
-        (if (and (symbol? e) (assq e env))
-            (values (lookup e env) #f)
-            (let ((r (allocate! e)))
-              (comp-expr e r env)
-              (values r #t)))))
+        (cond
+         ((and (symbol? e) (assq e env))
+          (values (lookup e env) #f))
+         ((and (pair? e) (cache-ref e))
+          (values (cache-ref e) #f))
+         ((pair? e)
+          (let ((r (allocate! e)))
+            (comp-expr e r env)
+            (cache-own! e r)
+            (values r #f)))
+         (else
+          (let ((r (allocate! e)))
+            (comp-expr e r env)
+            (values r #t))))))
+
+    (define comp-lea!
+      ;; Synthesize a (+ ...) whose addends fit base + index*scale +
+      ;; disp32 into a single lea. #f falls back to comp-binop!.
+      (lambda (e target env)
+        (let sort ((addends (kernel-addends e))
+                   (bases '()) (index #f) (disp 0))
+          (if (pair? addends)
+              (match (car addends)
+                (,n
+                 (guard (integer? n))
+                 (sort (cdr addends) bases index (+ disp n)))
+                ((<< ,x ,k)
+                 (guard (and (symbol? x) (assq x env)
+                             (memv k '(1 2 3)) (not index)))
+                 (sort (cdr addends) bases
+                       (cons (lookup x env) (expt 2 k)) disp))
+                (,v
+                 (guard (and (symbol? v) (assq v env)))
+                 (sort (cdr addends) (cons (lookup v env) bases) index disp))
+                (,_ #f))
+              (and (int32? disp)
+                   (cond
+                    ((and (fx=? (length bases) 1) index)
+                     (emit! (list 'lea target
+                                  (list '& (car bases) (car index)
+                                        (cdr index) disp)))
+                     #t)
+                    ((and (fx=? (length bases) 2) (not index))
+                     (emit! (list 'lea target
+                                  (list '& (car bases) (cadr bases) 1 disp)))
+                     #t)
+                    ((and (fx=? (length bases) 1) (not index)
+                          (not (zero? disp)))
+                     (emit! (list 'lea target (list '& (car bases) disp)))
+                     #t)
+                    (else #f)))))))
 
     (define comp-binop!
       (lambda (op e target env)
@@ -546,6 +673,11 @@
             (emit! (list mnemonic target 'cl)))))))
 
     (define comp-load!
+      ;; SIB fusion: fold the offset's constant part into the
+      ;; displacement and one (<< i k) addend into index*scale, so
+      ;; the address unit computes what would otherwise be explicit
+      ;; shifts and adds. One further variable addend costs a single
+      ;; lea; more than that falls back to the generic path.
       (lambda (e target env)
         (let ((width (car e)) (pointer (cadr e)) (offset (caddr e)))
           (let-values (((p prelease?) (operand pointer env)))
@@ -554,14 +686,62 @@
                 ((u8@) (emit! (list 'movzx target address)))
                 ((u32@) (emit! (list 'mov (r32 target) address)))
                 (else (emit! (list 'mov target address)))))
-            (if (int32? offset)
-                (emit-load! (list '& p offset))
-                (let-values (((o orelease?) (operand offset env)))
-                  (emit-load! (list '& p o 1 0))
-                  (when orelease? (release! o))))
+            (define (generic!)
+              (let-values (((o orelease?) (operand offset env)))
+                (emit-load! (list '& p o 1 0))
+                (when orelease? (release! o))))
+            (let sort ((addends (kernel-addends offset))
+                       (others '()) (index #f) (disp 0))
+              (cond
+               ((pair? addends)
+                (match (car addends)
+                  (,n
+                   (guard (integer? n))
+                   (sort (cdr addends) others index (+ disp n)))
+                  ((<< ,x ,k)
+                   (guard (and (memv k '(1 2 3)) (not index)))
+                   (sort (cdr addends) others (cons x (expt 2 k)) disp))
+                  (,other
+                   (sort (cdr addends) (cons other others) index disp))))
+               ((or (not (int32? disp)) (fx>? (length others) 1))
+                (generic!))
+               (else
+                (let ((base (if (null? others)
+                                p
+                                (let-values (((o orelease?)
+                                              (operand (car others) env)))
+                                  (let ((t (allocate! offset)))
+                                    (emit! (list 'lea t (list '& p o 1 0)))
+                                    (when orelease? (release! o))
+                                    t)))))
+                  (if index
+                      (let-values (((i irelease?) (operand (car index) env)))
+                        (emit-load! (list '& base i (cdr index) disp))
+                        (when irelease? (release! i)))
+                      (emit-load! (if (zero? disp)
+                                      (list '& base)
+                                      (list '& base disp))))
+                  (unless (eq? base p) (release! base))))))
             (when prelease? (release! p))))))
 
     (define comp-expr
+      ;; Common subexpression reuse sits here: a pair expression
+      ;; already available on this straight-line path is a register
+      ;; move (or nothing), not a recomputation.
+      (lambda (e target env)
+        (let ((cached (and (pair? e) (cache-ref e))))
+          (cond
+           ((eq? cached target))        ; already in place
+           (cached
+            (cache-write! target)
+            (emit! (list 'mov target cached)))
+           (else
+            (cache-write! target)
+            (comp-dispatch! e target env)
+            (when (pair? e)
+              (cache-add! e target env #f)))))))
+
+    (define comp-dispatch!
       (lambda (e target env)
         (cond
          ((integer? e)
@@ -574,7 +754,9 @@
               (emit! (list 'mov target reg)))))
          ((pair? e)
           (case (car e)
-            ((+ - * band bor) (comp-binop! (car e) e target env))
+            ((+) (unless (comp-lea! e target env)
+                   (comp-binop! '+ e target env)))
+            ((- * band bor) (comp-binop! (car e) e target env))
             ((<< >>) (comp-shift! e target env))
             ((bnot)
              (comp-expr (cadr e) target env)
@@ -595,9 +777,9 @@
                (comp-test (cadr e) otherwise env)
                (comp-expr (caddr e) target env)
                (emit! (list 'jmp join))
-               (emit! (list 'label otherwise))
+               (emit-label! otherwise)
                (comp-expr (cadddr e) target env)
-               (emit! (list 'label join))))
+               (emit-label! join)))
             ((let)
              (when (symbol? (cadr e))
                (oops "loops are only allowed in tail position" e))
@@ -675,15 +857,20 @@
 
     (define comp-tail
       (lambda (e env loops)
+        (cache-flush!)
         (let ((env (prune! e env loops)))
           (cond
            ((and (pair? e) (eq? (car e) 'if))
             (let ((otherwise (fresh-label "else")))
               (comp-test (cadr e) otherwise env)
+              ;; flush before the free-pool snapshot so cache-owned
+              ;; registers cannot straddle the branch bookkeeping
+              (cache-flush!)
               (let ((snapshot free))
                 (comp-tail (caddr e) env loops)
+                (cache-flush!)
                 (set! free snapshot))
-              (emit! (list 'label otherwise))
+              (emit-label! otherwise)
               (comp-tail (cadddr e) env loops)))
            ((and (pair? e) (eq? (car e) 'let) (symbol? (cadr e)))
             ;; named let: a loop
@@ -706,7 +893,7 @@
                                              (cons (cdr entry) out)
                                              out))
                                        '() env))))
-              (emit! (list 'label label))
+              (emit-label! label)
               (comp-tail body
                          (append (map (lambda (b reg) (cons (car b) reg))
                                       bindings regs)
