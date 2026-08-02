@@ -37,6 +37,14 @@
 ;;   binding       (let ((v e) ...) body)          — sequential
 ;;   loops         (let name ((v e) ...) body)     — tail position
 ;;                 only; (name e ...) jumps back, also tail only
+;;   assumptions   (assert test) ... before the body — O(1) entry
+;;                 guards on the Scheme side of the call, exact
+;;                 integer semantics, (len span) available
+;;
+;; Every kernel is doubted at definition time (type discipline:
+;; spans vs words); (dubito proc) doubts any procedure with
+;; recoverable source and returns a report — verdict verified for
+;; kernels, trusted for assembly.
 ;;
 ;; The kernel body is the return value. kernel also records its own
 ;; source, keyed by the procedure itself — (kernel-source proc)
@@ -55,6 +63,220 @@
   (lambda (procedure)
     (eq-hashtable-ref %kernel-sources procedure #f)))
 
+;; --- dubito: the doubting pass -------------------------------------
+;;
+;; Doubt verifies; it does not optimize. The v1 kernel language is
+;; total with respect to the leaf contract — it cannot express
+;; allocation, calls out, or continuation capture — so what remains
+;; to doubt is: the type discipline (spans u8* versus words u64,
+;; checked below on every kernel at definition time), and the entry
+;; assumptions. (assert test) forms before the body become O(1)
+;; guards checked on the Scheme side of the call boundary, amortized
+;; over the O(n) kernel; they evaluate with exact integer semantics
+;; (no 64-bit wraparound), and (len span) — available only inside
+;; assert — is the span's byte length. Rejection is an error naming
+;; the offending expression; the fallback is the caller's scalar
+;; Scheme.
+
+(define dubito-doubt
+  ;; Type discipline over ARGUMENTS ((type name) ...), ASSERTS
+  ;; (test ...) and BODY. Raises on violation; returns 'verified.
+  (lambda (arguments asserts body)
+
+    (define oops
+      (lambda (message expr)
+        (error 'dubito message expr)))
+
+    (define word!
+      (lambda (t e)
+        (unless (eq? t 'u64) (oops "expected a word, got a span" e))
+        'u64))
+
+    (define unify
+      ;; #f is the type of a loop jump: it never returns a value.
+      (lambda (a b e)
+        (cond ((not a) b)
+              ((not b) a)
+              ((eq? a b) a)
+              (else (oops "branches disagree: span on one side, word on the other" e)))))
+
+    (define expr-type
+      (lambda (e env loops len?)
+        (cond
+         ((integer? e) 'u64)
+         ((symbol? e)
+          (cond ((assq e env) => cdr)
+                (else (oops "unbound variable" e))))
+         ((pair? e)
+          (case (car e)
+            ((+)
+             (let ((spans (filter (lambda (t) (eq? t 'u8*))
+                                  (map (lambda (x) (expr-type x env loops len?))
+                                       (cdr e)))))
+               (cond ((null? spans) 'u64)
+                     ((null? (cdr spans)) 'u8*)
+                     (else (oops "adding two spans" e)))))
+            ((- * band bor << >>)
+             (for-each (lambda (x) (word! (expr-type x env loops len?) x))
+                       (cdr e))
+             'u64)
+            ((bnot popcount tzcnt)
+             (word! (expr-type (cadr e) env loops len?) (cadr e)))
+            ((pdep)
+             (word! (expr-type (cadr e) env loops len?) (cadr e))
+             (word! (expr-type (caddr e) env loops len?) (caddr e)))
+            ((u8@ u32@ u64@)
+             (unless (eq? (expr-type (cadr e) env loops len?) 'u8*)
+               (oops "load needs a span" e))
+             (word! (expr-type (caddr e) env loops len?) (caddr e)))
+            ((len)
+             (unless len? (oops "len is only available inside assert" e))
+             (unless (eq? (expr-type (cadr e) env loops len?) 'u8*)
+               (oops "len needs a span" e))
+             'u64)
+            ((if)
+             (test-check (cadr e) env loops len?)
+             (unify (expr-type (caddr e) env loops len?)
+                    (expr-type (cadddr e) env loops len?)
+                    e))
+            ((let)
+             (if (symbol? (cadr e))
+                 (let* ((bindings (caddr e))
+                        (types (map (lambda (b)
+                                      (expr-type (cadr b) env loops len?))
+                                    bindings)))
+                   (expr-type (cadddr e)
+                              (append (map (lambda (b t) (cons (car b) t))
+                                           bindings types)
+                                      env)
+                              (cons (cons (cadr e) types) loops)
+                              len?))
+                 (let walk ((bindings (cadr e)) (env env))
+                   (if (null? bindings)
+                       (expr-type (caddr e) env loops len?)
+                       (walk (cdr bindings)
+                             (cons (cons (caar bindings)
+                                         (expr-type (cadar bindings) env loops len?))
+                                   env))))))
+            (else
+             (cond
+              ((assq (car e) loops)
+               => (lambda (loop)
+                    (unless (fx=? (length (cdr e)) (length (cdr loop)))
+                      (oops "loop arity mismatch" e))
+                    (for-each
+                     (lambda (arg t)
+                       (unless (eq? (expr-type arg env loops len?) t)
+                         (oops "loop argument changes type across iterations" e)))
+                     (cdr e) (cdr loop))
+                    #f))
+              (else (oops "unknown expression" e))))))
+         (else (oops "unknown expression" e)))))
+
+    (define test-check
+      (lambda (t env loops len?)
+        (cond
+         ((and (pair? t) (eq? (car t) 'and))
+          (for-each (lambda (x) (test-check x env loops len?)) (cdr t)))
+         ((and (pair? t) (memq (car t) '(= < <= > >=)))
+          (word! (expr-type (cadr t) env loops len?) (cadr t))
+          (word! (expr-type (caddr t) env loops len?) (caddr t)))
+         (else
+          (word! (expr-type t env loops len?) t)))))
+
+    (let ((env (map (lambda (a) (cons (cadr a) (car a))) arguments)))
+      (for-each (lambda (t) (test-check t env '() #t)) asserts)
+      (when (eq? (expr-type body env '() #f) 'u8*)
+        (oops "a kernel returns a word, not a span" body))
+      'verified)))
+
+(define dubito-eval
+  ;; Evaluate an assert test on the Scheme side of the boundary:
+  ;; exact integer semantics, spans are bytevectors.
+  (lambda (e env)
+    (cond
+     ((integer? e) e)
+     ((symbol? e) (cdr (assq e env)))
+     ((pair? e)
+      (let ((operands (lambda () (map (lambda (x) (dubito-eval x env)) (cdr e)))))
+        (case (car e)
+          ((and) (for-all (lambda (x) (dubito-eval x env)) (cdr e)))
+          ((=) (apply = (operands)))
+          ((<) (apply < (operands)))
+          ((<=) (apply <= (operands)))
+          ((>) (apply > (operands)))
+          ((>=) (apply >= (operands)))
+          ((+) (apply + (operands)))
+          ((-) (apply - (operands)))
+          ((*) (apply * (operands)))
+          ((band) (apply bitwise-and (operands)))
+          ((bor) (apply bitwise-ior (operands)))
+          ((bnot) (bitwise-not (dubito-eval (cadr e) env)))
+          ((<<) (bitwise-arithmetic-shift-left
+                 (dubito-eval (cadr e) env) (dubito-eval (caddr e) env)))
+          ((>>) (bitwise-arithmetic-shift-right
+                 (dubito-eval (cadr e) env) (dubito-eval (caddr e) env)))
+          ((len) (bytevector-length (dubito-eval (cadr e) env)))
+          (else (error 'dubito "unsupported form in assert" e)))))
+     (else (error 'dubito "unsupported form in assert" e)))))
+
+(define kernel-wrap
+  ;; Guard RAW behind the kernel's entry assumptions. Kernels
+  ;; without asserts pay nothing.
+  (lambda (raw parameters asserts)
+    (if (null? asserts)
+        raw
+        (lambda args
+          (let ((env (map cons parameters args)))
+            (for-each (lambda (test)
+                        (unless (dubito-eval test env)
+                          (error 'kernel "entry assumption violated"
+                                 (list 'assert test))))
+                      asserts))
+          (apply raw args)))))
+
+(define kernel-parse
+  ;; Split a registered (kernel sig [return] (assert t) ... body)
+  ;; source into (values arguments return asserts body).
+  (lambda (source)
+    (let* ((arguments (cadr source))
+           (rest (cddr source))
+           (return (if (and (pair? rest) (memq (car rest) '(u64 i64)))
+                       (car rest)
+                       'u64))
+           (rest (if (and (pair? rest) (memq (car rest) '(u64 i64)))
+                     (cdr rest)
+                     rest)))
+      (let split ((rest rest) (asserts '()))
+        (cond ((and (pair? (car rest)) (eq? (caar rest) 'assert))
+               (split (cdr rest) (cons (cadar rest) asserts)))
+              (else (values arguments return (reverse asserts) (car rest))))))))
+
+(define dubito
+  ;; Doubt a procedure: recover its source (sum) and verify the
+  ;; kernel contract. Returns a report alist; raises when the source
+  ;; violates the contract, or when there is nothing to doubt. An
+  ;; assembly procedure cannot be verified, only believed: its
+  ;; verdict is trusted.
+  (lambda (procedure)
+    (let ((source (kernel-source procedure)))
+      (unless source
+        (error 'dubito "nothing to doubt: no recoverable source" procedure))
+      (case (car source)
+        ((kernel)
+         (let-values (((arguments return asserts body) (kernel-parse source)))
+           (dubito-doubt arguments asserts body)
+           (list '(form . kernel)
+                 (cons 'arguments arguments)
+                 (cons 'return return)
+                 (cons 'asserts (length asserts))
+                 '(verdict . verified))))
+        ((assembly)
+         (list '(form . assembly)
+               (cons 'arguments (cadr source))
+               '(verdict . trusted)))
+        (else (error 'dubito "unrecognized source" source))))))
+
 (define-syntax kernel
   (lambda (stx)
     (define (ffi-type t)
@@ -67,33 +289,56 @@
         ((u64) 'unsigned-64)
         ((i64) 'integer-64)
         (else (syntax-violation 'kernel "unknown return type" t))))
+    (define (split-body forms)
+      ;; leading (assert test) forms, then exactly one body expression
+      (let loop ((forms forms) (asserts '()))
+        (cond ((null? forms)
+               (syntax-violation 'kernel "missing kernel body" stx))
+              ((and (pair? (car forms)) (eq? (caar forms) 'assert))
+               (unless (and (pair? (cdar forms)) (null? (cddar forms)))
+                 (syntax-violation 'kernel "assert takes a single test"
+                                   (car forms)))
+               (loop (cdr forms) (cons (cadar forms) asserts)))
+              ((null? (cdr forms))
+               (values (reverse asserts) (car forms)))
+              (else
+               (syntax-violation 'kernel "kernel body is a single expression"
+                                 (cadr forms))))))
+    (define (build return-stx forms)
+      (lambda (sig-stx source-stx)
+        (let-values (((asserts body) (split-body forms)))
+          (with-syntax ((((type arg) ...) sig-stx)
+                        (ffi-ret (datum->syntax #'kernel
+                                                (ffi-return
+                                                 (syntax->datum return-stx))))
+                        (body-d (datum->syntax #'kernel body))
+                        (asserts-d (datum->syntax #'kernel asserts))
+                        (source source-stx))
+            (with-syntax (((ffi ...)
+                           (map (lambda (t)
+                                  (datum->syntax #'kernel
+                                                 (ffi-type (syntax->datum t))))
+                                #'(type ...))))
+              #'(kernel-register!
+                 (kernel-wrap
+                  (assembly->procedure
+                   (sexp->assembly
+                    (kernel-compile '((type arg) ...) 'body-d 'asserts-d))
+                   (ffi ...)
+                   ffi-ret)
+                  '(arg ...)
+                  'asserts-d)
+                 'source))))))
     (syntax-case stx ()
-      ((_ ((type arg) ...) return body)
+      ((_ ((type arg) ...) return e0 e* ...)
        (memq (syntax->datum #'return) '(u64 i64))
-       (with-syntax (((ffi ...)
-                      (map (lambda (t)
-                             (datum->syntax #'kernel (ffi-type (syntax->datum t))))
-                           #'(type ...)))
-                     (ffi-ret
-                      (datum->syntax #'kernel
-                                     (ffi-return (syntax->datum #'return)))))
-         #'(kernel-register!
-            (assembly->procedure
-             (sexp->assembly (kernel-compile '((type arg) ...) 'body))
-             (ffi ...)
-             ffi-ret)
-            '(kernel ((type arg) ...) return body))))
-      ((_ ((type arg) ...) body)
-       (with-syntax (((ffi ...)
-                      (map (lambda (t)
-                             (datum->syntax #'kernel (ffi-type (syntax->datum t))))
-                           #'(type ...))))
-         #'(kernel-register!
-            (assembly->procedure
-             (sexp->assembly (kernel-compile '((type arg) ...) 'body))
-             (ffi ...)
-             unsigned-64)
-            '(kernel ((type arg) ...) body)))))))
+       ((build #'return (syntax->datum #'(e0 e* ...)))
+        #'((type arg) ...)
+        #'(kernel ((type arg) ...) return e0 e* ...)))
+      ((_ ((type arg) ...) e0 e* ...)
+       ((build #'u64 (syntax->datum #'(e0 e* ...)))
+        #'((type arg) ...)
+        #'(kernel ((type arg) ...) e0 e* ...))))))
 
 (define-syntax assembly
   (lambda (stx)
@@ -188,8 +433,17 @@
      (else '()))))
 
 (define kernel-compile
-  ;; Compile ARGUMENTS ((type name) ...) and BODY into a list of
-  ;; (letloop asm) instructions.
+  ;; Doubt, then compile ARGUMENTS ((type name) ...) and BODY into a
+  ;; list of (letloop asm) instructions. ASSERTS take part in the
+  ;; doubting only — their runtime lives on the Scheme side, in
+  ;; kernel-wrap.
+  (case-lambda
+    ((arguments body) (kernel-compile arguments body '()))
+    ((arguments body asserts)
+     (dubito-doubt arguments asserts body)
+     (%kernel-compile arguments body))))
+
+(define %kernel-compile
   (lambda (arguments body)
 
     (define code '())                   ; reversed instructions
