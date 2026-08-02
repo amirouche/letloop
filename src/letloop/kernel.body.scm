@@ -441,7 +441,10 @@
     ((arguments body) (kernel-compile arguments body '()))
     ((arguments body asserts)
      (dubito-doubt arguments asserts body)
-     (%kernel-compile arguments body))))
+     ;; hoisting adds bindings; if they overflow the pool, compile
+     ;; the untransformed source instead
+     (guard (ex ((%kernel-pressure? ex) (%kernel-compile arguments body)))
+       (%kernel-compile arguments (kernel-licm body))))))
 
 (define kernel-addends
   ;; Catamorphism: flatten a (+ ...) tree into its addends.
@@ -449,6 +452,211 @@
     (match e
       ((+ ,(kernel-addends -> parts) ...) (apply append parts))
       (,other (list other)))))
+
+;; --- loop-invariant code motion, source to source ------------------
+;;
+;; Two rewrites, applied to every named let from the inside out:
+;; load addresses split so that invariant addends migrate into the
+;; pointer — (u8@ base (+ wrel-off (+ w 1))) becomes
+;; (u8@ (+ base wrel-off) (+ w 1)) — and maximal invariant
+;; pure-arithmetic subexpressions of the body (no loads: hoisting
+;; never speculates a memory access) are bound outside the loop:
+;;
+;;   (let name ((v i) ...) body)
+;;   ⇒ (let ((%licm-1 E1) ...) (let name ((v i') ...) body'))
+;;
+;; Hoisted values are ordinary variables, so allocation, pinning and
+;; pruning guarantee their registers survive exactly as long as the
+;; loop can still be reached — no special cases. If the extra
+;; bindings overflow the register pool, kernel-compile retries on
+;; the untransformed source: the transform can never reject a
+;; program that compiled without it.
+
+(define %kernel-licm-arith
+  '(+ - * band bor bnot << >> popcount tzcnt pdep))
+
+(define kernel-licm
+  (lambda (body)
+    (define counter 0)
+    (define fresh!
+      (lambda ()
+        (set! counter (fx+ counter 1))
+        (string->symbol (format "%licm-~a" counter))))
+
+    (define pure-arith?
+      (lambda (e)
+        (cond ((integer? e) #t)
+              ((symbol? e) #t)
+              ((pair? e) (and (memq (car e) %kernel-licm-arith)
+                              (for-all pure-arith? (cdr e))))
+              (else #f))))
+
+    (define invariant?
+      ;; references at least one variable, none of them variant
+      (lambda (e variant)
+        (let ((frees (kernel-free-variables e '())))
+          (and (pair? frees)
+               (not (exists (lambda (v) (memq v variant)) frees))))))
+
+    (define hoistable?
+      (lambda (e variant)
+        (and (pair? e)
+             (memq (car e) %kernel-licm-arith)
+             (pure-arith? e)
+             (invariant? e variant))))
+
+    (define collect
+      ;; maximal hoistable subexpressions; VARIANT grows with every
+      ;; local binding so shadowed names disqualify
+      (lambda (e variant out)
+        (cond
+         ((not (pair? e)) out)
+         ((hoistable? e variant)
+          (if (member e out) out (cons e out)))
+         (else
+          (case (car e)
+            ((let)
+             (if (symbol? (cadr e))
+                 (let ((out (fold-left (lambda (o b) (collect (cadr b) variant o))
+                                       out (caddr e))))
+                   (collect (cadddr e)
+                            (append (map car (caddr e)) variant)
+                            out))
+                 (let walk ((bindings (cadr e)) (variant variant) (out out))
+                   (if (null? bindings)
+                       (collect (caddr e) variant out)
+                       (walk (cdr bindings)
+                             (cons (caar bindings) variant)
+                             (collect (cadar bindings) variant out))))))
+            (else (fold-left (lambda (o x) (collect x variant o))
+                             out (cdr e))))))))
+
+    (define split-loads
+      ;; only meaningful under a loop (VARIANT non-empty)
+      (lambda (e variant)
+        (cond
+         ((not (pair? e)) e)
+         (else
+          (case (car e)
+            ((u8@ u32@ u64@)
+             (let ((p (split-loads (cadr e) variant))
+                   (off (split-loads (caddr e) variant)))
+               (if (or (null? variant) (not (invariant? p variant)))
+                   (list (car e) p off)
+                   (let-values (((still moved)
+                                 (partition
+                                  (lambda (a)
+                                    (or (not (pure-arith? a))
+                                        (not (invariant? a variant))))
+                                  (kernel-addends off))))
+                     (if (or (null? moved) (null? still))
+                         (list (car e) p off)
+                         (list (car e)
+                               (cons '+ (cons p moved))
+                               (if (null? (cdr still))
+                                   (car still)
+                                   (cons '+ still))))))))
+            ((let)
+             (if (symbol? (cadr e))
+                 (list 'let (cadr e)
+                       (map (lambda (b)
+                              (list (car b) (split-loads (cadr b) variant)))
+                            (caddr e))
+                       (split-loads (cadddr e)
+                                    (append (map car (caddr e)) variant)))
+                 (let walk ((bindings (cadr e)) (variant variant) (acc '()))
+                   (if (null? bindings)
+                       (list 'let (reverse acc)
+                             (split-loads (caddr e) variant))
+                       (walk (cdr bindings)
+                             (cons (caar bindings) variant)
+                             (cons (list (caar bindings)
+                                         (split-loads (cadar bindings) variant))
+                                   acc))))))
+            (else (cons (car e)
+                        (map (lambda (x) (split-loads x variant)) (cdr e)))))))))
+
+    (define substitute
+      ;; replace candidate occurrences by their hoisted names,
+      ;; skipping scopes that shadow any of the candidate's inputs
+      (lambda (e table bound)
+        (cond
+         ((and (pair? e) (assoc e table))
+          => (lambda (hit)
+               (if (exists (lambda (v) (memq v bound))
+                           (kernel-free-variables (car hit) '()))
+                   (cons (car e)
+                         (map (lambda (x) (substitute x table bound)) (cdr e)))
+                   (cdr hit))))
+         ((not (pair? e)) e)
+         (else
+          (case (car e)
+            ((let)
+             (if (symbol? (cadr e))
+                 (list 'let (cadr e)
+                       (map (lambda (b)
+                              (list (car b) (substitute (cadr b) table bound)))
+                            (caddr e))
+                       (substitute (cadddr e) table
+                                   (append (map car (caddr e)) bound)))
+                 (let walk ((bindings (cadr e)) (bound bound) (acc '()))
+                   (if (null? bindings)
+                       (list 'let (reverse acc)
+                             (substitute (caddr e) table bound))
+                       (walk (cdr bindings)
+                             (cons (caar bindings) bound)
+                             (cons (list (caar bindings)
+                                         (substitute (cadar bindings) table bound))
+                                   acc))))))
+            (else (cons (car e)
+                        (map (lambda (x) (substitute x table bound)) (cdr e)))))))))
+
+    (define transform
+      (lambda (e variant)
+        (cond
+         ((not (pair? e)) e)
+         (else
+          (case (car e)
+            ((let)
+             (if (symbol? (cadr e))
+                 (let* ((name (cadr e))
+                        (bindings (map (lambda (b)
+                                         (list (car b) (transform (cadr b) variant)))
+                                       (caddr e)))
+                        (variant* (append (map car (caddr e)) variant))
+                        (body (split-loads (transform (cadddr e) variant*)
+                                           variant*))
+                        (candidates (collect body variant* '())))
+                   (if (null? candidates)
+                       (list 'let name bindings body)
+                       (let* ((names (map (lambda (c) (fresh!)) candidates))
+                              (table (map cons candidates names)))
+                         (list 'let (map (lambda (c n) (list n c))
+                                         candidates names)
+                               (list 'let name
+                                     (map (lambda (b)
+                                            (list (car b)
+                                                  (substitute (cadr b) table '())))
+                                          bindings)
+                                     (substitute body table '()))))))
+                 (let walk ((bindings (cadr e)) (variant variant) (acc '()))
+                   (if (null? bindings)
+                       (list 'let (reverse acc) (transform (caddr e) variant))
+                       (walk (cdr bindings)
+                             (cons (caar bindings) variant)
+                             (cons (list (caar bindings)
+                                         (transform (cadar bindings) variant))
+                                   acc))))))
+            (else (cons (car e)
+                        (map (lambda (x) (transform x variant)) (cdr e)))))))))
+
+    (transform body '())))
+
+(define %kernel-pressure?
+  (lambda (ex)
+    (and (message-condition? ex)
+         (string=? (condition-message ex)
+                   "out of registers (too many live variables) at"))))
 
 (define %kernel-compile
   (lambda (arguments body)
@@ -705,6 +913,16 @@
                    (sort (cdr addends) (cons other others) index disp))))
                ((or (not (int32? disp)) (fx>? (length others) 1))
                 (generic!))
+               ((and (null? others) (not index))
+                (emit-load! (if (zero? disp)
+                                (list '& p)
+                                (list '& p disp))))
+               ((and (pair? others) (not index))
+                ;; one variable addend, no scaled index: the SIB
+                ;; carries it directly, no lea needed
+                (let-values (((o orelease?) (operand (car others) env)))
+                  (emit-load! (list '& p o 1 disp))
+                  (when orelease? (release! o))))
                (else
                 (let ((base (if (null? others)
                                 p
@@ -714,13 +932,9 @@
                                     (emit! (list 'lea t (list '& p o 1 0)))
                                     (when orelease? (release! o))
                                     t)))))
-                  (if index
-                      (let-values (((i irelease?) (operand (car index) env)))
-                        (emit-load! (list '& base i (cdr index) disp))
-                        (when irelease? (release! i)))
-                      (emit-load! (if (zero? disp)
-                                      (list '& base)
-                                      (list '& base disp))))
+                  (let-values (((i irelease?) (operand (car index) env)))
+                    (emit-load! (list '& base i (cdr index) disp))
+                    (when irelease? (release! i)))
                   (unless (eq? base p) (release! base))))))
             (when prelease? (release! p))))))
 
