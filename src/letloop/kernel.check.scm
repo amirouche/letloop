@@ -87,6 +87,51 @@
                               (lea rax (& rdi rsi 1 0))
                               (ret)))))))
 
+;; dubito rejects contract violations at definition time, naming
+;; the offending expression
+(define ~check-kernel-005
+  (lambda ()
+    (define rejected?
+      (lambda (thunk)
+        (guard (ex (else #t)) (thunk) #f)))
+    (check #t (and (rejected? (lambda () (kernel ((u8* p) (u8* q)) (+ p q))))
+                   (rejected? (lambda () (kernel ((u64 a)) (u8@ a 0))))
+                   (rejected? (lambda () (kernel ((u8* p)) p)))
+                   (rejected? (lambda () (kernel ((u8* p) (u64 n)) (len p))))
+                   (rejected? (lambda () (kernel ((u8* p) (u64 n))
+                                           (let loop ((x n))
+                                             (if (= x 0) 0 (loop p))))))))))
+
+;; entry assumptions: O(1) Scheme-side guards, exact semantics
+(define %kernel-check-guarded
+  (kernel ((u8* p) (u64 off) (u64 n))
+    (assert (<= (+ off n) (len p)))
+    (let loop ((i 0) (acc 0))
+      (if (= i n)
+          acc
+          (loop (+ i 1) (+ acc (u8@ p (+ off i))))))))
+
+(define ~check-kernel-006
+  (lambda ()
+    (let ((bytes (u8-list->bytevector '(1 2 3 4 5))))
+      (check #t (and (= (%kernel-check-guarded bytes 1 3) 9)
+                     (= (%kernel-check-guarded bytes 0 5) 15)
+                     (guard (ex (else #t))          ; off+n out of bounds
+                       (%kernel-check-guarded bytes 3 3)
+                       #f))))))
+
+;; dubito reports: verified for kernels, trusted for assembly,
+;; nothing-to-doubt for opaque procedures
+(define ~check-kernel-007
+  (lambda ()
+    (check #t (and (equal? (assq 'verdict (dubito %kernel-check-count))
+                           '(verdict . verified))
+                   (equal? (assq 'asserts (dubito %kernel-check-guarded))
+                           '(asserts . 1))
+                   (equal? (assq 'verdict (dubito %kernel-check-asm-add))
+                           '(verdict . trusted))
+                   (guard (ex (else #t)) (dubito car) #f)))))
+
 (define ~check-kernel-003
   (lambda ()
     (check #t (and (= (%kernel-check-select 1 #b10110010) 1)

@@ -3,6 +3,7 @@
 
   (export kernel
           assembly
+          dubito
           kernel-compile
           kernel-source
 
@@ -10,7 +11,10 @@
           ~check-kernel-001
           ~check-kernel-002
           ~check-kernel-003
-          ~check-kernel-004)
+          ~check-kernel-004
+          ~check-kernel-005
+          ~check-kernel-006
+          ~check-kernel-007)
 
   (import (chezscheme)
           (letloop asm))
