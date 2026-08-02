@@ -318,6 +318,10 @@
                (set! labels (cons (cons dst offset) labels)))
               ((ret) (emit! #xC3))
               ((nop) (emit! #x90))
+              ((push pop)               ; 50+r / 58+r, 64-bit implicit
+               (let ((d64 (or (asm-r64 dst) (oops "bad operands" instruction))))
+                 (emit-rex! #f #f #f (fx>=? d64 8))
+                 (emit! (fx+ (if (eq? head 'push) #x50 #x58) (fxand d64 7)))))
               ((mov)
                (let ((d64 (asm-r64 dst)) (d32 (asm-r32 dst)))
                  (cond
