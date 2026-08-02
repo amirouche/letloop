@@ -321,22 +321,35 @@
                   (emit! (list 'je false-label))))))
          (else (oops "unknown test" test)))))
 
+    (define calls-loop?
+      ;; Does E contain a call to the loop named NAME?
+      (lambda (e name)
+        (and (pair? e)
+             (or (eq? (car e) name)
+                 (exists (lambda (x) (calls-loop? x name))
+                         (cdr e))))))
+
     (define pinned
-      ;; Registers a later loop iteration may still read: every loop
-      ;; variable, and every outer variable the loop body references.
-      ;; Loop records are (name label (reg ...) (pinned-reg ...)).
-      (lambda (loops)
+      ;; Registers a later iteration of a still-reachable loop may
+      ;; read: its loop variables, and every outer variable its body
+      ;; references. A loop the tail expression E never calls cannot
+      ;; be re-entered, so its pins do not apply. Loop records are
+      ;; (name label (reg ...) (pinned-reg ...)).
+      (lambda (e loops)
         (apply append (map (lambda (loop)
-                             (append (caddr loop) (cadddr loop)))
+                             (if (calls-loop? e (car loop))
+                                 (append (caddr loop) (cadddr loop))
+                                 '()))
                            loops))))
 
     (define prune!
       ;; Release environment entries not referenced by tail
       ;; expression E (control never returns to this scope), except
-      ;; loop variables. Returns the pruned environment.
+      ;; registers a reachable loop still needs. Returns the pruned
+      ;; environment.
       (lambda (e env loops)
         (let ((needed (kernel-free-variables e '()))
-              (keep (pinned loops)))
+              (keep (pinned e loops)))
           (filter (lambda (entry)
                     (if (or (memq (car entry) needed)
                             (memq (cdr entry) keep))
@@ -426,22 +439,27 @@
     (define env '())
     (define deferred '())               ; (reg . entry-thunk-data)
 
+    ;; Two passes: pin every in-register argument in its home
+    ;; register first, so relocations (the rcx argument, stack
+    ;; arguments) cannot be handed a home register still to come.
+    (let bind ((arguments arguments) (index 0))
+      (unless (null? arguments)
+        (when (and (fx<? index 6)
+                   (not (eq? (list-ref %kernel-arg-registers index) 'rcx)))
+          (let ((reg (list-ref %kernel-arg-registers index)))
+            (hold! reg)
+            (set! env (cons (cons (caar arguments) reg) env))))
+        (bind (cdr arguments) (fx+ index 1))))
     (let bind ((arguments arguments) (index 0))
       (unless (null? arguments)
         (let ((name (caar arguments)))
-          (cond
-           ((and (fx<? index 6)
-                 (not (eq? (list-ref %kernel-arg-registers index) 'rcx)))
-            (let ((reg (list-ref %kernel-arg-registers index)))
-              (hold! reg)
-              (set! env (cons (cons name reg) env))))
-           (else
-            ;; the rcx argument and stack arguments move into the pool
+          (when (or (fx>=? index 6)
+                    (eq? (list-ref %kernel-arg-registers index) 'rcx))
             (let ((reg (allocate! name)))
               (set! deferred
                     (cons (cons reg (if (fx<? index 6) 'rcx (fx- index 6)))
                           deferred))
-              (set! env (cons (cons name reg) env))))))
+              (set! env (cons (cons name reg) env)))))
         (bind (cdr arguments) (fx+ index 1))))
 
     (comp-tail body env '())
