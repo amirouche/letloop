@@ -71,6 +71,7 @@
         ((label) (format "~a:" (car operands)))
         ((ret) "ret")
         ((nop) "nop")
+        ((vzeroupper) "vzeroupper")
         ((movzx) (format "movzx ~a, byte ptr ~a"
                          (car operands)
                          (%asm-check-gas-mem* (cadr operands))))
@@ -246,6 +247,69 @@
                  (tzcnt rax rcx) (tzcnt r9 rdx) (tzcnt rax rax) (tzcnt r12 r13)
                  (pdep rax rcx rdx) (pdep r8 r9 r10)
                  (pdep rax r13 rbp) (pdep r15 rax r8))))))
+
+;; --- 007: AVX2 differential ----------------------------------------
+
+(define ~check-asm-007
+  (lambda ()
+    (check #t (%asm-check-differential
+               (append
+                ;; three-operand forms over low/high register mixes
+                (apply append
+                       (map (lambda (op)
+                              (map (lambda (regs)
+                                     (cons op regs))
+                                   '((ymm0 ymm1 ymm2) (ymm3 ymm4 ymm5)
+                                     (ymm0 ymm8 ymm15) (ymm12 ymm1 ymm9)
+                                     (ymm8 ymm9 ymm10))))
+                            '(vpshufb vpand vpor vpaddb vpsubb vpsubusb
+                              vpcmpgtb vpmulhuw vpmullw)))
+                ;; memory source forms
+                '((vpaddb ymm0 ymm1 (& rdi))
+                  (vpand ymm2 ymm3 (& rsi 32))
+                  (vpshufb ymm8 ymm9 (& r8 64))
+                  (vpmulhuw ymm1 ymm2 (& rax rcx 1 0))
+                  ;; loads and stores, both widths
+                  (vmovdqu ymm0 (& rdi)) (vmovdqu ymm8 (& rdi 32))
+                  (vmovdqu ymm3 (& r13 -8)) (vmovdqu xmm0 (& rdi))
+                  (vmovdqu xmm9 (& rsp 16))
+                  (vmovdqu (& rdi) ymm0) (vmovdqu (& rsi 32) ymm12)
+                  (vmovdqu (& r9 8) xmm4)
+                  ;; vinserti128, register and memory sources
+                  (vinserti128 ymm0 ymm0 xmm1 1)
+                  (vinserti128 ymm2 ymm3 xmm10 0)
+                  (vinserti128 ymm8 ymm0 (& rdi 12) 1)
+                  (vinserti128 ymm1 ymm1 (& r10 12) 1)
+                  (vzeroupper)))))))
+
+;; --- 008: executed AVX2 semantics ----------------------------------
+
+(define ~check-asm-008
+  (lambda ()
+    ;; dst[0..31] = src[0..31] + src[32..63] (bytewise, mod 256)
+    (let ((add32 (assembly->procedure
+                  (sexp->assembly '((vmovdqu ymm0 (& rdi))
+                                    (vpaddb ymm0 ymm0 (& rdi 32))
+                                    (vmovdqu (& rsi) ymm0)
+                                    (vzeroupper)
+                                    (ret)))
+                  (u8* u8*) void))
+          (source (make-bytevector 64))
+          (target (make-bytevector 32 0)))
+      (let loop ((i 0) (state 7))
+        (unless (fx=? i 64)
+          (let ((state (mod (+ (* state 1103515245) 12345) 2147483648)))
+            (bytevector-u8-set! source i (mod state 256))
+            (loop (fx+ i 1) state))))
+      (add32 source target)
+      (check #t (let loop ((i 0))
+                  (cond ((fx=? i 32) #t)
+                        ((fx=? (bytevector-u8-ref target i)
+                               (fxand (fx+ (bytevector-u8-ref source i)
+                                           (bytevector-u8-ref source (fx+ i 32)))
+                                      #xFF))
+                         (loop (fx+ i 1)))
+                        (else #f)))))))
 
 ;; --- 005: executed bit-manipulation semantics ----------------------
 
