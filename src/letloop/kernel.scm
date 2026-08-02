@@ -17,7 +17,8 @@
           ~check-kernel-007)
 
   (import (chezscheme)
-          (letloop asm))
+          (letloop asm)
+          (letloop match))
 
   (begin
     (include "letloop/kernel.body.scm")
