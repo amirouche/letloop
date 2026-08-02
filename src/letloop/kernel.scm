@@ -2,13 +2,15 @@
 (library (letloop kernel)
 
   (export kernel
+          assembly
           kernel-compile
           kernel-source
 
           ~check-kernel-000
           ~check-kernel-001
           ~check-kernel-002
-          ~check-kernel-003)
+          ~check-kernel-003
+          ~check-kernel-004)
 
   (import (chezscheme)
           (letloop asm))

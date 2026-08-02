@@ -71,6 +71,22 @@
   (kernel ((u64 r) (u64 w))
     (tzcnt (pdep (<< 1 (- r 1)) w))))
 
+;; the assembly escape hatch: raw mnemonics, same signature shape,
+;; same source registry
+(define %kernel-check-asm-add
+  (assembly ((u64 a) (u64 b))
+    (lea rax (& rdi rsi 1 0))
+    (ret)))
+
+(define ~check-kernel-004
+  (lambda ()
+    (check #t (and (= (%kernel-check-asm-add 40 2) 42)
+                   (= (%kernel-check-asm-add 1099511627776 1) 1099511627777)
+                   (equal? (kernel-source %kernel-check-asm-add)
+                           '(assembly ((u64 a) (u64 b))
+                              (lea rax (& rdi rsi 1 0))
+                              (ret)))))))
+
 (define ~check-kernel-003
   (lambda ()
     (check #t (and (= (%kernel-check-select 1 #b10110010) 1)
