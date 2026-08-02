@@ -15,8 +15,7 @@
           ~check-asm-007
           ~check-asm-008)
 
-  (import (chezscheme)
-          (letloop aql shims))
+  (import (chezscheme))
 
   (begin
     (include "letloop/asm.body.scm")

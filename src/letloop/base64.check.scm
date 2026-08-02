@@ -1,5 +1,17 @@
 ;; Copyright © 2026 Amirouche A. BOUBEKKI <amirouche at hyper dev>
 
+;; Local copy of the (letloop aql shims) check macro; see the note in
+;; asm.check.scm.
+(define-syntax check
+  (syntax-rules ()
+    ((check v)
+     (let ((v* v))
+       (eq? v* #t)))
+    ((check a b)
+     (let ((a* a)
+           (b* b))
+       (check (equal? a* b*))))))
+
 ;; RFC 4648 test vectors.
 (define ~check-base64-000
   (lambda ()
