@@ -107,9 +107,6 @@ Blocked on credentials:
 
 Milestone hygiene (mechanical, one session):
 
-- jit: migrate (letloop base64)'s AVX2 kernel to the (assembly ...)
-  expression form — the last production kernel whose source is not
-  registered, so dubito cannot even answer `trusted` for it.
 - jit: flip city-explorer's default base64 mode to jit (B64_MODE=jit
   proved byte-identical pages and +1% throughput); demote b64simd.c
   to reference/fallback so "zero C toolchain" holds without env vars.

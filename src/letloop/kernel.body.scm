@@ -351,10 +351,11 @@
       (case t
         ((u64) 'unsigned-64)
         ((i64) 'integer-64)
+        ((void) 'void)                  ; side-effect kernels: no value
         (else (syntax-violation 'assembly "unknown return type" t))))
     (syntax-case stx ()
       ((_ ((type arg) ...) return instruction0 instruction ...)
-       (memq (syntax->datum #'return) '(u64 i64))
+       (memq (syntax->datum #'return) '(u64 i64 void))
        (with-syntax (((ffi ...)
                       (map (lambda (t)
                              (datum->syntax #'assembly (ffi-type (syntax->datum t))))
