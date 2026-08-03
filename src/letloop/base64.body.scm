@@ -99,48 +99,46 @@
 ;; whole 24-byte blocks, write 32 characters each. Per 128-bit lane:
 ;; shuffle 12 input bytes into four 6-bit groups per 32-bit word,
 ;; then map sextets to ASCII with saturating-subtract + pshufb.
-(define %base64-kernel-code
-  '((vmovdqu ymm8 (& rcx 0))            ; shuffle
-    (vmovdqu ymm9 (& rcx 32))           ; 0x0fc0fc00
-    (vmovdqu ymm10 (& rcx 64))          ; 0x04000040
-    (vmovdqu ymm11 (& rcx 96))          ; 0x003f03f0
-    (vmovdqu ymm12 (& rcx 128))         ; 0x01000010
-    (vmovdqu ymm13 (& rcx 160))         ; LUT
-    (vmovdqu ymm14 (& rcx 192))         ; 51s
-    (vmovdqu ymm15 (& rcx 224))         ; 25s
-    (test rsi rsi)
-    (je done)
-    (label loop)
-    ;; lanes: 16 bytes at src and at src+12 (12 consumed each)
-    (vmovdqu xmm0 (& rdi))
-    (vinserti128 ymm0 ymm0 (& rdi 12) 1)
-    ;; reshuffle
-    (vpshufb ymm0 ymm0 ymm8)
-    (vpand ymm1 ymm0 ymm9)              ; t0
-    (vpmulhuw ymm1 ymm1 ymm10)          ; t1
-    (vpand ymm2 ymm0 ymm11)             ; t2
-    (vpmullw ymm2 ymm2 ymm12)           ; t3
-    (vpor ymm0 ymm1 ymm2)               ; sextets
-    ;; translate
-    (vpsubusb ymm1 ymm0 ymm14)          ; saturated class
-    (vpcmpgtb ymm2 ymm0 ymm15)          ; > 25
-    (vpsubb ymm1 ymm1 ymm2)
-    (vpshufb ymm3 ymm13 ymm1)           ; per-class ASCII offset
-    (vpaddb ymm0 ymm0 ymm3)
-    (vmovdqu (& rdx) ymm0)
-    (add rdi 24)
-    (add rdx 32)
-    (sub rsi 1)
-    (jne loop)
-    (label done)
-    (vzeroupper)
-    (ret)))
-
+;; Hand-coded through the (assembly ...) expression form, so the
+;; source is registered and (dubito %base64-kernel) answers trusted.
 (define %base64-kernel
   (guard (ex (else #f))
-    (assembly->procedure (sexp->assembly %base64-kernel-code)
-      (u8* unsigned-64 u8* u8*)
-      void)))
+    (assembly ((u8* src) (u64 k) (u8* dst) (u8* constants)) void
+      (vmovdqu ymm8 (& rcx 0))          ; shuffle
+      (vmovdqu ymm9 (& rcx 32))         ; 0x0fc0fc00
+      (vmovdqu ymm10 (& rcx 64))        ; 0x04000040
+      (vmovdqu ymm11 (& rcx 96))        ; 0x003f03f0
+      (vmovdqu ymm12 (& rcx 128))       ; 0x01000010
+      (vmovdqu ymm13 (& rcx 160))       ; LUT
+      (vmovdqu ymm14 (& rcx 192))       ; 51s
+      (vmovdqu ymm15 (& rcx 224))       ; 25s
+      (test rsi rsi)
+      (je done)
+      (label loop)
+      ;; lanes: 16 bytes at src and at src+12 (12 consumed each)
+      (vmovdqu xmm0 (& rdi))
+      (vinserti128 ymm0 ymm0 (& rdi 12) 1)
+      ;; reshuffle
+      (vpshufb ymm0 ymm0 ymm8)
+      (vpand ymm1 ymm0 ymm9)            ; t0
+      (vpmulhuw ymm1 ymm1 ymm10)        ; t1
+      (vpand ymm2 ymm0 ymm11)           ; t2
+      (vpmullw ymm2 ymm2 ymm12)         ; t3
+      (vpor ymm0 ymm1 ymm2)             ; sextets
+      ;; translate
+      (vpsubusb ymm1 ymm0 ymm14)        ; saturated class
+      (vpcmpgtb ymm2 ymm0 ymm15)        ; > 25
+      (vpsubb ymm1 ymm1 ymm2)
+      (vpshufb ymm3 ymm13 ymm1)         ; per-class ASCII offset
+      (vpaddb ymm0 ymm0 ymm3)
+      (vmovdqu (& rdx) ymm0)
+      (add rdi 24)
+      (add rdx 32)
+      (sub rsi 1)
+      (jne loop)
+      (label done)
+      (vzeroupper)
+      (ret))))
 
 (define base64-jit?
   (lambda ()
