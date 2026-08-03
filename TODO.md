@@ -87,3 +87,55 @@
 - web: structured logging: JSON log output, log levels, request-scoped context propagation.
 - web: template engine: server-side HTML rendering (Mustache/Jinja-style); composable, escapable, streaming-friendly.
 - web: wasm target: compile Scheme to WebAssembly for in-browser execution.
+
+## dubito ergo cogito — sexp assembler JIT
+
+State as of 2026-08-03: stages 0–5 plus codegen quality are done on
+branch `dev-dubito-ergo-cogito` — (letloop asm), (letloop base64),
+(letloop kernel) with the kernel/assembly expression forms, dubito v1,
+and SIB fusion + lea synthesis + CSE + LICM; the simili-Scheme LOUDS
+tier measures ahead of the C .so and within ~4% of hand-written
+assembly (atlas-stoa benchmarks/louds-simd, RESULTS.md addenda 8–9).
+Plan: plans/v12/20260802-sexp-assembler-jit.md. Spec artifact:
+https://claude.ai/code/artifact/16d0776d-cb06-4026-9933-d1a8187ad3a1
+
+Blocked on credentials:
+
+- push: `dev-dubito-ergo-cogito` (north), `stoa2` (atlas-stoa) and
+  `main` (invvv) are committed but unpushed — ssh-agent/GH_TOKEN
+  unavailable in the working session.
+
+Milestone hygiene (mechanical, one session):
+
+- jit: migrate (letloop base64)'s AVX2 kernel to the (assembly ...)
+  expression form — the last production kernel whose source is not
+  registered, so dubito cannot even answer `trusted` for it.
+- jit: flip city-explorer's default base64 mode to jit (B64_MODE=jit
+  proved byte-identical pages and +1% throughput); demote b64simd.c
+  to reference/fallback so "zero C toolchain" holds without env vars.
+- jit: one clean end-to-end gate run as the closing record: full
+  atlas-stoa run.sh (5 tiers + writer parity + checksum agreement)
+  and the official invvv bench.sh sweep with the letloop-jit key.
+- jit: review pass over the ~2000 new lines before merging —
+  the CSE/LICM interaction with the register allocator most of all.
+- jit: merge decision: dev-dubito-ergo-cogito → dev gates other
+  branches consuming (letloop kernel).
+
+Stage 6 / v13 research, in order of leverage:
+
+- kernel: vector simili Scheme: a v256 type with shuffle/arith ops so
+  the base64 kernel can climb from the assembly floor to the kernel
+  floor; VEX encoding and the translator already exist below it.
+- dubito: range analysis: derive from the (assert ...) entry guards
+  that every load is in bounds, upgrading the verdict from verified
+  (well-typed) toward sound (memory-safe).
+- dubito: termination evidence for kernel loops.
+- kernel: sum via SINK's meta operative once the v13 vau fusion lands
+  (plans/v13/20260730-fusion-vau-primary-language.md), retiring the
+  procedure-keyed registry.
+
+Deliberately deferred (fine to leave): the last ~4% to hand assembly
+(value-preserving copy movs, rename-eliminated on modern cores),
+code-page reclamation, cpuid-based feature detection instead of
+/proc/cpuinfo, ARM/NEON, base64 decode kernel, sar/div/cmov and other
+mnemonics until a kernel needs them.
