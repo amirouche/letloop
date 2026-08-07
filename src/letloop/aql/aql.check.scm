@@ -254,8 +254,12 @@
            (lambda (tx)
              (for-each (lambda (p) (aql-set! tx (car p) (cdr p)))
                        pairs)))
-         ;; Range query over everything
-         (let* ((result (aql-query db (bytevector 0) (bytevector 255 255)))
+         ;; Range query over everything. Keys are up to 16 random bytes
+         ;; (see random-bytevector above), so the upper bound must be a
+         ;; bytevector that no such key can reach or equal: 17 bytes of
+         ;; 255 is strictly greater than any bytevector of length <= 16
+         ;; regardless of its content.
+         (let* ((result (aql-query db (bytevector 0) (make-bytevector 17 255)))
                 (expected (sort-alist (dedup-alist pairs))))
            (assert (= (length result) (length expected)))
            (for-each
