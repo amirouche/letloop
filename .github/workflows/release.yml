@@ -80,8 +80,6 @@ jobs:
           files: |
             artifacts/letloop-linux-amd64
             artifacts/letloop-linux-amd64.sha256
-            artifacts/letloop-linux-aarch64
-            artifacts/letloop-linux-aarch64.sha256
           generate_release_notes: true
 
       - name: Log in to GitHub Container Registry
@@ -97,14 +95,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Prepare artifacts for Docker
-        run: cp artifacts/letloop-linux-aarch64 artifacts/letloop-linux-arm64
-
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: |
             ghcr.io/${{ github.repository }}:${{ github.ref_name }}
