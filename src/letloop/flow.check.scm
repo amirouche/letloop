@@ -928,7 +928,70 @@
                        (/ (- (time-nanosecond now) (time-nanosecond started))
                           1000000)))))))))) 
   (flow-worker-tick-until (lambda () (fx=? done 4)) 400)
+  ;; Stop the pool before returning -- a check that leaves it running
+  ;; makes the NEXT check fail on "worker pool already running", which
+  ;; is a confusing way to learn about a missing cleanup.
+  (flow-worker-stop!)
   (assert (fx=? done 4))
   (assert elapsed)
   (assert (< elapsed 400))
+  #t)
+
+;; flow-worker-io: a thunk submitted from a worker must run on the LOOP
+;; thread (so it may use the ring), and its value must come back to the
+;; worker. Identity is checked with flow-worker-current? rather than a
+;; thread id: that is the predicate the storage layer itself branches
+;; on, so this checks the thing that actually matters.
+(define (~check-flow-worker-io-runs-on-loop)
+  (define where-thunk-ran #f)
+  (define where-caller-was #f)
+  (define value #f)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-worker-start! 2)
+     (set! value
+           (flow-worker-call
+            (lambda ()
+              (set! where-caller-was (flow-worker-current?))
+              (flow-worker-io
+               (lambda ()
+                 (set! where-thunk-ran (flow-worker-current?))
+                 'from-loop)))))
+     (flow-worker-stop!)))
+  (flow-worker-tick-until (lambda () value) 400)
+  (assert (eq? value 'from-loop))
+  ;; the caller really was a worker...
+  (assert (eq? where-caller-was #t))
+  ;; ...and the thunk really was not
+  (assert (eq? where-thunk-ran #f))
+  #t)
+
+;; Both hand-offs must be multiple-value transparent. This is not
+;; hypothetical: marshalling that kept only the first value made every
+;; S3 read in h9p3r return garbage, and the symptom was not an error
+;; but queries quietly returning zero results -- www-request returns
+;; five values, and only the first survived the trip.
+(define (~check-flow-worker-multiple-values)
+  (define call-result #f)
+  (define io-result #f)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-worker-start! 2)
+     (set! call-result
+           (call-with-values
+             (lambda () (flow-worker-call (lambda () (values 1 2 3))))
+             list))
+     (set! io-result
+           (call-with-values
+             (lambda ()
+               (flow-worker-call
+                (lambda ()
+                  (flow-worker-io (lambda () (values 'a 'b 'c 'd 'e))))))
+             list))
+     (flow-worker-stop!)))
+  (flow-worker-tick-until (lambda () (and call-result io-result)) 400)
+  (assert (equal? call-result '(1 2 3)))
+  (assert (equal? io-result '(a b c d e)))
   #t)
