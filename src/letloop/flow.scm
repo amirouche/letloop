@@ -37,9 +37,12 @@
           flow-log flow-log-start! flow-log-stop! flow-log-drain!
 
           flow-worker-start! flow-worker-stop! flow-worker-call
+          flow-worker-io flow-worker-current?
           ~check-flow-worker-runs-off-loop
           ~check-flow-worker-propagates-raise
           ~check-flow-worker-overlaps
+          ~check-flow-worker-io-runs-on-loop
+          ~check-flow-worker-multiple-values
 
           ~check-flow-000/always-ready
           ~check-flow-000/wrap-order
@@ -1176,6 +1179,59 @@
             (foreign-free buffer)
             res)))))
 
+  ;; #t only on threads forked by flow-worker-start!, so code shared by
+  ;; both sides can ask which thread it is on. A thread parameter, so
+  ;; the loop thread never observes another thread's value.
+  (define %worker-current? (make-thread-parameter #f))
+
+  (define (flow-worker-current?) (%worker-current?))
+
+  ;; One I/O request marshalled from a worker to the loop thread. The
+  ;; worker blocks on MUTEX/CONDITION -- blocking an OS thread that has
+  ;; nothing else to do, never the loop.
+  (define-record-type* <flow-io-request>
+    (make-flow-io-request% thunk done? result mutex condition)
+    flow-io-request?
+    (thunk     flow-io-request-thunk)
+    (done?     flow-io-request-done?     flow-io-request-done?-set!)
+    (result    flow-io-request-result    flow-io-request-result-set!)
+    (mutex     flow-io-request-mutex)
+    (condition flow-io-request-condition))
+
+  (define %io-requests (box '()))
+
+  ;; Run THUNK on the loop thread and return its value, wherever the
+  ;; caller happens to be.
+  ;;
+  ;; This is what lets compute workers do I/O without ever touching the
+  ;; ring: a worker submits the thunk, the loop runs it in a fiber of
+  ;; its own -- so several workers' I/O overlaps exactly as ordinary
+  ;; fiber I/O does, over ONE connection pool -- and the worker blocks
+  ;; until the reply. Called on the loop thread it simply runs the
+  ;; thunk, so the same storage code path serves warm-up and queries.
+  (define flow-worker-io
+    (lambda (thunk)
+      (if (not (%worker-current?))
+        (thunk)
+        (let ((request (make-flow-io-request% thunk #f #f
+                                              (make-mutex) (make-condition))))
+          (flow-box-cons! %io-requests request)
+          (%worker-eventfd-signal! %worker-eventfd)
+          (with-mutex (flow-io-request-mutex request)
+            (let wait ()
+              (unless (flow-io-request-done? request)
+                (condition-wait (flow-io-request-condition request)
+                                (flow-io-request-mutex request))
+                (wait))))
+          (let ((outcome (flow-io-request-result request)))
+            (if (eq? (car outcome) 'value)
+              ;; Multiple-value transparent: www-request returns five
+              ;; values, and a marshalling layer that quietly kept only
+              ;; the first turned every S3 read into garbage -- queries
+              ;; still "worked", they just returned no results.
+              (apply values (cdr outcome))
+              (raise (cdr outcome))))))))
+
   (define %worker-mutex (make-mutex))
   (define %worker-available (make-condition))
   (define %worker-jobs-in '())          ;; pushed here (reversed)
@@ -1205,6 +1261,7 @@
 
   (define %worker-body
     (lambda ()
+      (%worker-current? #t)
       (let loop ()
         (let ((job (with-mutex %worker-mutex (%worker-job-pop!))))
           (when job
@@ -1212,7 +1269,7 @@
             ;; fiber that submitted it parks forever and its connection
             ;; hangs until the idle reaper closes it.
             (let ((outcome (guard (exception (#t (cons 'raised exception)))
-                             (cons 'value ((cdr job))))))
+                             (cons 'value (call-with-values (cdr job) list)))))
               (flow-box-cons! %worker-results (cons (car job) outcome))
               (%worker-eventfd-signal! %worker-eventfd))
             (loop))))))
@@ -1224,6 +1281,24 @@
       (let loop ()
         (when %worker-running?
           (%worker-eventfd-wait %worker-eventfd)
+          ;; I/O requests first: a worker is blocked on each one, and
+          ;; every fiber spawned here can be in flight at the same
+          ;; time, which is what keeps several workers' fetches
+          ;; overlapping on the one ring.
+          (for-each
+            (lambda (request)
+              (loop-spawn
+                (lambda ()
+                  (let ((outcome (guard (exception (#t (cons 'raised exception)))
+                                   (cons 'value
+                                         (call-with-values
+                                           (flow-io-request-thunk request)
+                                           list)))))
+                    (with-mutex (flow-io-request-mutex request)
+                      (flow-io-request-result-set! request outcome)
+                      (flow-io-request-done?-set! request #t)
+                      (condition-broadcast (flow-io-request-condition request)))))))
+            (flow-box-drain! %io-requests))
           (for-each
             (lambda (entry)
               (let ((k (hashtable-ref %worker-pending (car entry) #f)))
@@ -1278,7 +1353,7 @@
         (let ((outcome (loop-abort
                          (lambda (k) (hashtable-set! %worker-pending id k)))))
           (if (eq? (car outcome) 'value)
-            (cdr outcome)
+            (apply values (cdr outcome))
             (raise (cdr outcome)))))))
 
   (include "letloop/flow.check.scm"))
