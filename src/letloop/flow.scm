@@ -43,6 +43,7 @@
           ~check-flow-worker-overlaps
           ~check-flow-worker-io-runs-on-loop
           ~check-flow-worker-multiple-values
+          ~check-flow-channel-crosses-threads
 
           ~check-flow-000/always-ready
           ~check-flow-000/wrap-order
@@ -213,7 +214,62 @@
   ;; as flow-poll applies wrap on the ready path — so no block
   ;; implementation has to remember to wrap its own raw completion
   ;; value (a real io_uring res code, an object off a channel, ...).
+  ;; Off-loop callers cannot loop-abort: a worker thread is not a
+  ;; fiber, there is no prompt to abort to. It blocks on a condition
+  ;; variable instead, and its resume fills a slot and broadcasts
+  ;; rather than spawning a continuation. Everything else -- the state
+  ;; box, the CAS that picks one winner, the cancel bookkeeping -- is
+  ;; shared with the fiber path below, so a rendezvous between a worker
+  ;; and a fiber works in either direction with one implementation of
+  ;; the protocol.
+  (define flow-block-and-wait-off-loop
+    (lambda (bases)
+      (let ((state (box 'waiting))
+            (cancels (box '()))
+            (mutex (make-mutex))
+            (ready (make-condition))
+            (slot #f)
+            (done? #f))
+        (define resume-from
+          (lambda (tag value)
+            (and (box-cas! state 'waiting 'synched)
+                 (begin
+                   ;; Cancels touch the ring, so they must run ON the
+                   ;; loop even though we are not on it.
+                   (%flow-spawn-safe
+                     (lambda ()
+                       (for-each (lambda (pair)
+                                   (unless (eq? (car pair) tag)
+                                     ((cdr pair))))
+                                 (unbox cancels))))
+                   (with-mutex mutex
+                     (set! slot value)
+                     (set! done? #t)
+                     (condition-broadcast ready))
+                   #t))))
+        (for-each (lambda (base)
+                    (let ((tag (cons #f #f)))
+                      ((flow-block-proc base) state
+                       (lambda (raw)
+                         (resume-from tag ((flow-wrap-proc base) raw)))
+                       (lambda (thunk)
+                         (set-box! cancels
+                                   (cons (cons tag thunk) (unbox cancels)))))))
+                  bases)
+        (with-mutex mutex
+          (let wait ()
+            (unless done?
+              (condition-wait ready mutex)
+              (wait))))
+        slot)))
+
   (define flow-block-and-wait
+    (lambda (bases)
+      (if (%worker-current?)
+        (flow-block-and-wait-off-loop bases)
+        (flow-block-and-wait-on-loop bases))))
+
+  (define flow-block-and-wait-on-loop
     (lambda (bases)
       (let ((state (box 'waiting))
             (cancels (box '())))
@@ -245,13 +301,19 @@
              (lambda (tag value)
                (and (box-cas! state 'waiting 'synched)
                     (begin
-                      (loop-spawn
+                      ;; %flow-spawn-safe, not loop-spawn: the party
+                      ;; completing this rendezvous may be a worker
+                      ;; thread, and loop-spawn conses onto the loop's
+                      ;; unsynchronized thunk list. On the loop thread
+                      ;; it IS loop-spawn, so the common path is
+                      ;; unchanged.
+                      (%flow-spawn-safe
                        (lambda ()
                          (for-each (lambda (pair)
                                      (unless (eq? (car pair) tag)
                                        ((cdr pair))))
                                    (unbox cancels))))
-                      (loop-spawn (lambda () (k value)))
+                      (%flow-spawn-safe (lambda () (k value)))
                       #t))))
            (for-each (lambda (base)
                        ;; one fresh tag per registration — see the
@@ -1200,6 +1262,29 @@
 
   (define %io-requests (box '()))
 
+  ;; Thunks a foreign OS thread wants run on the loop thread. This is
+  ;; the "mailbox indirection" the channel contract above says FL-7's
+  ;; removal deleted: with it, completing a rendezvous from another
+  ;; thread is safe again, because the peer's resume is queued here and
+  ;; performed BY the loop rather than conses onto the loop's
+  ;; unsynchronized thunk list by whoever happened to complete it.
+  (define %cross-thread-spawns (box '()))
+
+  ;; loop-spawn from the loop thread (the hot path, untouched), queue +
+  ;; wake from anywhere else. A worker completing a rendezvous with no
+  ;; pool running has nothing to wake, which can only mean the pool was
+  ;; stopped underneath it -- better to say so than to enqueue a thunk
+  ;; nobody will ever run.
+  (define %flow-spawn-safe
+    (lambda (thunk)
+      (if (%worker-current?)
+        (begin
+          (unless %worker-eventfd
+            (error 'flow "cross-thread resume with no worker pool running"))
+          (flow-box-cons! %cross-thread-spawns thunk)
+          (%worker-eventfd-signal! %worker-eventfd))
+        (loop-spawn thunk))))
+
   ;; Run THUNK on the loop thread and return its value, wherever the
   ;; caller happens to be.
   ;;
@@ -1281,6 +1366,9 @@
       (let loop ()
         (when %worker-running?
           (%worker-eventfd-wait %worker-eventfd)
+          ;; Resumes handed over by foreign threads: run them as the
+          ;; loop's own thunks, which is the whole point of the queue.
+          (for-each loop-spawn (flow-box-drain! %cross-thread-spawns))
           ;; I/O requests first: a worker is blocked on each one, and
           ;; every fiber spawned here can be in flight at the same
           ;; time, which is what keeps several workers' fetches
