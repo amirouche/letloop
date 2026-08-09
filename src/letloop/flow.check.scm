@@ -995,3 +995,34 @@
   (assert (equal? call-result '(1 2 3)))
   (assert (equal? io-result '(a b c d e)))
   #t)
+
+;; The consolidation this was all heading toward: an ORDINARY channel,
+;; used with flow-put!/flow-get!, rendezvousing between a fiber on the
+;; loop and a compute worker -- in both directions, with no
+;; worker-specific API in sight. Before the resume step was made
+;; thread-aware this could not work: completing a rendezvous conses
+;; onto the loop's unsynchronized thunk list, so doing it from a
+;; foreign thread corrupted loop state.
+(define (~check-flow-channel-crosses-threads)
+  (define to-worker (make-flow-channel))
+  (define from-worker (make-flow-channel))
+  (define got #f)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-worker-start! 2)
+     ;; a fiber feeds the worker and reads its answer back
+     (loop-spawn
+      (lambda ()
+        (flow-put! to-worker 20)
+        (set! got (flow-get! from-worker))))
+     ;; the worker blocks on the channel from OFF the loop, computes,
+     ;; and answers over another channel
+     (flow-worker-call
+      (lambda ()
+        (let ((n (flow-get! to-worker)))
+          (flow-put! from-worker (* n 2)))))))
+  (flow-worker-tick-until (lambda () got) 600)
+  (flow-worker-stop!)
+  (assert (eqv? got 40))
+  #t)
