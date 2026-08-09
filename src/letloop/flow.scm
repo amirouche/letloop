@@ -36,6 +36,11 @@
 
           flow-log flow-log-start! flow-log-stop! flow-log-drain!
 
+          flow-worker-start! flow-worker-stop! flow-worker-call
+          ~check-flow-worker-runs-off-loop
+          ~check-flow-worker-propagates-raise
+          ~check-flow-worker-overlaps
+
           ~check-flow-000/always-ready
           ~check-flow-000/wrap-order
           ~check-flow-000/guard
@@ -1090,5 +1095,190 @@
         (unless (unbox flow-log-stopped?)
           (sleep (make-time 'time-duration 10000000 0))
           (wait)))))
+
+  ;;------------------------------------------------------------
+  ;; flow-worker: run CPU-bound work on OS threads
+  ;;------------------------------------------------------------
+  ;;
+  ;; The loop is one OS thread, so a fiber doing sustained CPU work
+  ;; blocks every other fiber for its whole duration -- cooperative
+  ;; scheduling only overlaps I/O WAITS, never computation. This gives
+  ;; a fiber a way to hand a pure-CPU thunk to a pool of OS threads and
+  ;; park until it is done, so the loop keeps serving other connections
+  ;; meanwhile.
+  ;;
+  ;; This is deliberately NOT FL-7. Workers never touch the ring, never
+  ;; call loop-spawn/loop-read/loop-write, never see %loop; they compute
+  ;; and push a result. Only the loop thread ever resumes a fiber. The
+  ;; loop's unsynchronized state (its thunk list, its handler table)
+  ;; therefore stays owned by exactly one thread, which is the invariant
+  ;; FL-7's removal restored and this must not break.
+  ;;
+  ;; Two queues, each matched to its direction:
+  ;;
+  ;; - jobs (loop thread -> workers): a mutex and condition variable,
+  ;;   because idle workers must BLOCK rather than spin, and that is
+  ;;   what a condvar is for. FIFO, so a burst cannot starve its own
+  ;;   oldest request.
+  ;; - results (workers -> loop thread): flow-box-cons!/flow-box-drain!,
+  ;;   the lock-free CAS list already used by flow-log, already
+  ;;   documented safe for concurrent push from any number of threads.
+  ;;
+  ;; The wake-up is an eventfd. Without one, a result would still be
+  ;; noticed on the loop's next tick, but that tick can be up to
+  ;; %wait-timeout (100ms) away -- fine for correctness, useless for a
+  ;; request whose whole budget is tens of milliseconds. A worker
+  ;; writes 8 bytes; the collector fiber is parked on an io_uring read
+  ;; of that fd and wakes through the ordinary completion path, so no
+  ;; new scheduler machinery is involved.
+
+  (define %worker-eventfd-create
+    (let ((func (foreign-procedure __atomic __disable_interrupts __errno
+                                   "eventfd" (unsigned-int int) int)))
+      (lambda ()
+        (call-with-values (lambda () (func 0 0))
+          (lambda (fd errno)
+            (when (fx<? fd 0)
+              (error 'flow-worker-start! "eventfd failed" errno))
+            fd)))))
+
+  ;; Called from a WORKER thread, never the loop thread. An eventfd
+  ;; write of 8 bytes cannot block short of the counter saturating at
+  ;; 2^64-2, which no real run reaches, so this needs no async path.
+  (define %worker-eventfd-signal!
+    (let ((func (foreign-procedure __atomic __disable_interrupts __errno
+                                   "write" (int void* size_t) integer-64)))
+      (lambda (fd)
+        (let ((ptr (foreign-alloc 8)))
+          (foreign-set! 'unsigned-64 ptr 0 1)
+          (call-with-values (lambda () (func fd ptr 8))
+            (lambda (n errno)
+              (foreign-free ptr)
+              (>= n 0)))))))
+
+  (define %worker-eventfd-close
+    (let ((func (foreign-procedure __atomic __disable_interrupts __errno
+                                   "close" (int) int)))
+      (lambda (fd) (call-with-values (lambda () (func fd)) (lambda (r e) r)))))
+
+  ;; Park the calling fiber on FD until a worker signals it, consuming
+  ;; the counter. Structured exactly like loop-read: one SQE, register
+  ;; the continuation under its id, loop-abort.
+  (define %worker-eventfd-wait
+    (lambda (fd)
+      (let ((buffer (foreign-alloc 8)))
+        (let* ((sqe (loop-get-sqe (loop-ring (loop-current))))
+               (id (loop-alloc-id!)))
+          (io-uring-prep-read sqe fd buffer 8 0)
+          (io-uring-sqe-set-data64 sqe id)
+          (let ((res (loop-abort
+                       (lambda (k) (hashtable-set! (loop-handlers (loop-current)) id k)))))
+            (foreign-free buffer)
+            res)))))
+
+  (define %worker-mutex (make-mutex))
+  (define %worker-available (make-condition))
+  (define %worker-jobs-in '())          ;; pushed here (reversed)
+  (define %worker-jobs-out '())         ;; popped here
+  (define %worker-results (box '()))
+  (define %worker-pending #f)           ;; id -> continuation, loop thread only
+  (define %worker-eventfd #f)
+  (define %worker-next-id (box 0))
+  (define %worker-stop? #f)
+  (define %worker-running? #f)
+
+  (define %worker-job-pop!
+    ;; Caller holds %worker-mutex. #f means "stop requested".
+    (lambda ()
+      (let wait ()
+        (cond
+          (%worker-stop? #f)
+          ((pair? %worker-jobs-out)
+           (let ((job (car %worker-jobs-out)))
+             (set! %worker-jobs-out (cdr %worker-jobs-out))
+             job))
+          ((pair? %worker-jobs-in)
+           (set! %worker-jobs-out (reverse %worker-jobs-in))
+           (set! %worker-jobs-in '())
+           (wait))
+          (else (condition-wait %worker-available %worker-mutex) (wait))))))
+
+  (define %worker-body
+    (lambda ()
+      (let loop ()
+        (let ((job (with-mutex %worker-mutex (%worker-job-pop!))))
+          (when job
+            ;; A raising thunk must still produce a result, or the
+            ;; fiber that submitted it parks forever and its connection
+            ;; hangs until the idle reaper closes it.
+            (let ((outcome (guard (exception (#t (cons 'raised exception)))
+                             (cons 'value ((cdr job))))))
+              (flow-box-cons! %worker-results (cons (car job) outcome))
+              (%worker-eventfd-signal! %worker-eventfd))
+            (loop))))))
+
+  ;; Drains finished results and resumes their fibers. Runs as one
+  ;; fiber ON the loop thread -- which is what makes resuming safe.
+  (define %worker-collector
+    (lambda ()
+      (let loop ()
+        (when %worker-running?
+          (%worker-eventfd-wait %worker-eventfd)
+          (for-each
+            (lambda (entry)
+              (let ((k (hashtable-ref %worker-pending (car entry) #f)))
+                (when k
+                  (hashtable-delete! %worker-pending (car entry))
+                  (loop-spawn (lambda () (k (cdr entry)))))))
+            (flow-box-drain! %worker-results))
+          (loop)))))
+
+  ;; Start COUNT worker threads. Must be called from inside a running
+  ;; loop (it spawns the collector fiber).
+  (define flow-worker-start!
+    (lambda (count)
+      (when %worker-running?
+        (error 'flow-worker-start! "worker pool already running"))
+      (set! %worker-stop? #f)
+      (set! %worker-pending (make-eqv-hashtable))
+      (set! %worker-eventfd (%worker-eventfd-create))
+      (set! %worker-running? #t)
+      (do ((i 0 (fx+ i 1))) ((fx=? i count))
+        (fork-thread %worker-body))
+      (loop-spawn %worker-collector)))
+
+  (define flow-worker-stop!
+    (lambda ()
+      (when %worker-running?
+        (set! %worker-running? #f)
+        (with-mutex %worker-mutex
+          (set! %worker-stop? #t)
+          (condition-broadcast %worker-available))
+        ;; Wake the collector so it observes %worker-running? and exits
+        ;; instead of staying parked on a read nobody will satisfy.
+        (%worker-eventfd-signal! %worker-eventfd))))
+
+  ;; Run THUNK on a worker thread; park this fiber until it finishes.
+  ;; Returns the thunk's value, or re-raises whatever it raised, so a
+  ;; caller cannot tell the work happened on another thread except that
+  ;; the loop kept running.
+  ;;
+  ;; No race between queueing and parking: both happen on the loop
+  ;; thread, and the collector is itself a fiber on that same thread,
+  ;; so it cannot observe the result until this fiber has parked and
+  ;; registered its continuation below.
+  (define flow-worker-call
+    (lambda (thunk)
+      (unless %worker-running?
+        (error 'flow-worker-call "worker pool not running"))
+      (let ((id (flow-box-increment! %worker-next-id)))
+        (with-mutex %worker-mutex
+          (set! %worker-jobs-in (cons (cons id thunk) %worker-jobs-in))
+          (condition-signal %worker-available))
+        (let ((outcome (loop-abort
+                         (lambda (k) (hashtable-set! %worker-pending id k)))))
+          (if (eq? (car outcome) 'value)
+            (cdr outcome)
+            (raise (cdr outcome)))))))
 
   (include "letloop/flow.check.scm"))

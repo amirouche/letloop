@@ -854,3 +854,81 @@
   (and (eq? result 'won)
        loser-cancelled
        (not winner-cancelled)))
+
+;; ---- flow-worker (CPU offload to OS threads) ----
+;;
+;; Ticking rather than loop-run: these checks must drive the loop
+;; themselves and still terminate if something never completes, so a
+;; bounded tick loop with a done-counter is used throughout, exactly
+;; like the flow-011 checks above.
+
+(define (flow-worker-tick-until done? limit)
+  (let tick ((n 0))
+    (cond
+      ((done?) #t)
+      ((fx>=? n limit) #f)
+      (else (loop-run-once) (tick (fx+ n 1))))))
+
+;; A worker's value comes back to the fiber that asked for it.
+(define (~check-flow-worker-runs-off-loop)
+  (define result #f)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-worker-start! 2)
+     (set! result (flow-worker-call (lambda () (fx* 6 7))))
+     (flow-worker-stop!)))
+  (flow-worker-tick-until (lambda () result) 200)
+  (assert (eqv? result 42))
+  #t)
+
+;; A thunk that raises must re-raise in the CALLING fiber, not vanish
+;; into the worker thread leaving the fiber parked forever.
+(define (~check-flow-worker-propagates-raise)
+  (define outcome #f)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-worker-start! 2)
+     (set! outcome
+           (guard (exception (#t (list 'caught (condition-message exception))))
+             (flow-worker-call (lambda () (error 'worker-thunk "boom")))))
+     (flow-worker-stop!)))
+  (flow-worker-tick-until (lambda () outcome) 200)
+  (assert (pair? outcome))
+  (assert (eq? (car outcome) 'caught))
+  (assert (string=? (cadr outcome) "boom"))
+  #t)
+
+;; The point of the whole exercise: several calls in flight at once
+;; must overlap instead of serialising. Four 150ms thunks across four
+;; workers finish in well under the 600ms they would take one after
+;; another. The threshold is deliberately loose (400ms) so a loaded
+;; machine does not make this flaky -- it still cannot pass if the
+;; calls ran sequentially.
+(define (~check-flow-worker-overlaps)
+  (define done 0)
+  (define started #f)
+  (define elapsed #f)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-worker-start! 4)
+     (set! started (current-time 'time-monotonic))
+     (do ((i 0 (fx+ i 1))) ((fx=? i 4))
+       (loop-spawn
+        (lambda ()
+          (flow-worker-call
+           (lambda () (sleep (make-time 'time-duration 150000000 0))))
+          (set! done (fx+ done 1))
+          (when (fx=? done 4)
+            (let ((now (current-time 'time-monotonic)))
+              (set! elapsed
+                    (+ (* 1000 (- (time-second now) (time-second started)))
+                       (/ (- (time-nanosecond now) (time-nanosecond started))
+                          1000000)))))))))) 
+  (flow-worker-tick-until (lambda () (fx=? done 4)) 400)
+  (assert (fx=? done 4))
+  (assert elapsed)
+  (assert (< elapsed 400))
+  #t)
