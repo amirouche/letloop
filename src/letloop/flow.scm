@@ -1016,7 +1016,19 @@
                                       (lambda (res)
                                         (resume (and (fx>=? res 0) res))))))))
 
-  (define flow-spawn loop-spawn)
+  ;; %flow-spawn-safe, not loop-spawn: on the loop thread this IS
+  ;; loop-spawn, so nothing changes for existing callers, but it also
+  ;; lets a compute worker fan work out onto the loop.
+  ;;
+  ;; That is what makes an ordinary concurrent-fetch helper -- spawn N
+  ;; fibers, have each flow-put! its result, flow-get! them all -- work
+  ;; unchanged when called from a worker: the spawns land on the loop,
+  ;; the puts happen there, and the worker's gets block off-loop on a
+  ;; condition variable. Without it a worker had to fall back to
+  ;; fetching one object at a time, which measured 2x SLOWER than the
+  ;; single-threaded server on cold, I/O-bound queries.
+  (define flow-spawn
+    (lambda (thunk) (%flow-spawn-safe thunk)))
   (define flow-run loop-run)
   (define flow-stop loop-stop)
 
