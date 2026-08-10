@@ -138,3 +138,65 @@ Deliberately deferred (fine to leave): the last ~4% to hand assembly
 code-page reclamation, cpuid-based feature detection instead of
 /proc/cpuinfo, ARM/NEON, base64 decode kernel, sar/div/cmov and other
 mnemonics until a kernel needs them.
+
+## flow-block-and-wait-off-loop registers ring events from the worker thread
+
+`flow-block-and-wait` dispatches on `%worker-current?`. The off-loop
+variant then calls each event's block-proc INLINE, on the worker:
+
+```scheme
+(for-each (lambda (base)
+            ((flow-block-proc base) state resume register-cancel!))
+          bases)
+```
+
+For channel events that is safe -- their block-procs only touch CAS
+boxes -- which is why `flow-worker-call` and `flow-worker-io` work and
+why worker mode looks fine until it does not. For anything that preps an
+SQE (`flow-timeout`, `flow-read`, `flow-write`, `flow-accept`,
+`flow-open`, `flow-read-at`) the block-proc calls `loop-get-sqe`,
+`io-uring-prep-*`, `io-uring-sqe-set-data64` and `hashtable-set!` on
+`(loop-handlers (loop-current))` -- all loop-thread-only state, from the
+wrong thread.
+
+Observed downstream as a hard crash: atlas-stoa's h9p3r server, running
+query workers, died with `nonrecoverable invalid memory reference` /
+`status=6/ABRT` under ~20 simultaneous requests, and hung for 25 minutes
+on another occasion. Worker mode has been forced off there ever since.
+
+**The same file already applies the correct rule to cancels**, twenty
+lines above, with the comment "Cancels touch the ring, so they must run
+ON the loop even though we are not on it", marshalling them through
+`%flow-spawn-safe`. Registrations were not given the same treatment. The
+asymmetry is the bug.
+
+**Fix**: marshal the registration for-each through `%flow-spawn-safe`
+too, so SQE preparation happens on the loop while only the
+condition-variable wakeup happens on the worker. Registration becoming
+asynchronous is safe: `resume-from`'s `box-cas!` still elects one
+winner, and the worker either finds `done?` already set or waits as it
+does now.
+
+**Check that must exist before worker mode is trusted again** (its
+absence is why this shipped): perform a `flow-timeout` -- or any
+ring-touching event -- from a worker thread and assert it completes
+correctly rather than corrupting the ring. Today nothing fails when an
+SQE is prepped off-loop; it simply breaks later, somewhere else.
+`~check-flow-worker-io-runs-on-loop` covers the path that was already
+right.
+
+Measured while investigating: three different queries on three workers
+took 5,435ms against 11,538ms serial -- a real 2.1x, with the parallel
+total equal to the slowest single query. Worker mode is worth fixing,
+not deleting. That harness had no HTTP server, so it never exercised
+`flow-accept`/`flow-read` off-loop, which is consistent with the crash
+living in the serving path rather than in query execution.
+
+### Consumer note
+
+Anything that performs a ring event must run on the loop. In atlas-stoa
+that means hedged requests (`(atlas-stoa hedge)`, which uses
+`flow-timeout`) have to wrap the INNER client inside the
+`flow-worker-io` thunk, not the outer request function -- wrapping
+outside would prep the timeout SQE from the worker and reproduce this
+crash exactly.
