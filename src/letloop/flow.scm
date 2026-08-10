@@ -42,6 +42,7 @@
           ~check-flow-worker-propagates-raise
           ~check-flow-worker-overlaps
           ~check-flow-worker-io-runs-on-loop
+          ~check-flow-worker-ring-event-off-loop
           ~check-flow-worker-multiple-values
           ~check-flow-channel-crosses-threads
 
@@ -247,15 +248,38 @@
                      (set! done? #t)
                      (condition-broadcast ready))
                    #t))))
-        (for-each (lambda (base)
-                    (let ((tag (cons #f #f)))
-                      ((flow-block-proc base) state
-                       (lambda (raw)
-                         (resume-from tag ((flow-wrap-proc base) raw)))
-                       (lambda (thunk)
-                         (set-box! cancels
-                                   (cons (cons tag thunk) (unbox cancels)))))))
-                  bases)
+        ;; Registration runs ON THE LOOP, for exactly the reason the
+        ;; cancels above do: a block-proc for anything other than a
+        ;; channel operation preps an SQE and mutates
+        ;; (loop-handlers (loop-current)) -- flow-timeout, flow-read,
+        ;; flow-write, flow-accept, flow-open. Doing that from a worker
+        ;; thread corrupts the ring, and it does not fail where it
+        ;; happens: it surfaces later as a segfault somewhere unrelated.
+        ;; A downstream server died with "nonrecoverable invalid memory
+        ;; reference" under load this way, and hung for 25 minutes on
+        ;; another occasion.
+        ;;
+        ;; Channel block-procs touch only CAS boxes and were always
+        ;; safe here, which is why worker mode appeared to work: every
+        ;; event a compute worker actually performed happened to be a
+        ;; channel operation.
+        ;;
+        ;; Deferring registration is safe against the wait below. RESUME-FROM
+        ;; elects a single winner with box-cas! on STATE regardless of which
+        ;; thread it runs on, and the worker either finds DONE? already set
+        ;; and never waits, or waits and is broadcast to. The mutex is held
+        ;; only around the slot, and condition-wait releases it.
+        (%flow-spawn-safe
+          (lambda ()
+            (for-each (lambda (base)
+                        (let ((tag (cons #f #f)))
+                          ((flow-block-proc base) state
+                           (lambda (raw)
+                             (resume-from tag ((flow-wrap-proc base) raw)))
+                           (lambda (thunk)
+                             (set-box! cancels
+                                       (cons (cons tag thunk) (unbox cancels)))))))
+                      bases)))
         (with-mutex mutex
           (let wait ()
             (unless done?

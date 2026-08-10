@@ -882,6 +882,68 @@
   (assert (eqv? result 42))
   #t)
 
+;; A worker performing a RING-TOUCHING event -- anything whose block-proc
+;; preps an SQE, as flow-timeout does -- must work. It did not: the
+;; off-loop path called block-procs inline on the worker thread, so the
+;; SQE was prepared and (loop-handlers (loop-current)) mutated from the
+;; wrong thread.
+;;
+;; This has to CONTEND to be worth anything. A single quiet timeout on
+;; one worker passes with or without the fix -- verified -- because
+;; nothing else is competing for the ring at that moment. The corruption
+;; is a race between a worker preparing an SQE and the loop preparing
+;; its own, and it took roughly twenty simultaneous requests to bring a
+;; production server down. So: several workers, each performing many
+;; timeouts, while the loop keeps its own timeout traffic going.
+(define flow-worker-ring-stress-workers 8)
+(define flow-worker-ring-stress-rounds 40)
+
+(define (~check-flow-worker-ring-event-off-loop)
+  (define done 0)
+  (define failures 0)
+  (define loop-side 0)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-worker-start! flow-worker-ring-stress-workers)
+     ;; Loop-side timeout traffic, so the ring is never idle while the
+     ;; workers are arming theirs.
+     (let noise ((n 0))
+       (when (fx<? n (fx* flow-worker-ring-stress-rounds 4))
+         (loop-spawn (lambda () (flow-sleep 0.001) (set! loop-side (fx+ loop-side 1))))
+         (noise (fx+ n 1))))
+     (let each ((w 0))
+       (when (fx<? w flow-worker-ring-stress-workers)
+         (loop-spawn
+          (lambda ()
+            (let ((outcome
+                   (guard (exception (#t 'raised))
+                     (flow-worker-call
+                      (lambda ()
+                        (let round ((r 0))
+                          (if (fx=? r flow-worker-ring-stress-rounds)
+                              'ok
+                              (begin (flow-sleep 0.001) (round (fx+ r 1))))))))))
+              (unless (eq? outcome 'ok) (set! failures (fx+ failures 1)))
+              (set! done (fx+ done 1))
+              ;; The pool is process-global: leaving it running makes
+              ;; every later check fail with "worker pool already
+              ;; running". Stopped by the last worker to finish, on the
+              ;; loop thread, as flow-worker-stop! requires.
+              (when (fx=? done flow-worker-ring-stress-workers)
+                (flow-worker-stop!)))))
+         (each (fx+ w 1))))))
+  ;; Generous tick budget: 8 workers x 40 x 1ms of real sleeping, plus
+  ;; the loop's own noise.
+  (flow-worker-tick-until
+   (lambda () (fx=? done flow-worker-ring-stress-workers)) 200000)
+  (assert (fx=? done flow-worker-ring-stress-workers))
+  (assert (fx=? failures 0))
+  ;; The loop's own timeouts must also have completed -- a corrupted
+  ;; ring shows up here as loop-side work that silently never finishes.
+  (assert (fx>? loop-side 0))
+  #t)
+
 ;; A thunk that raises must re-raise in the CALLING fiber, not vanish
 ;; into the worker thread leaving the fiber parked forever.
 (define (~check-flow-worker-propagates-raise)
