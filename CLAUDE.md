@@ -106,6 +106,8 @@ $PREFIX/lib/letloop/obj/<optimize-level>/**       their .so and .wpo, per level
 
 **Building letloop now requires a Chez installation**, for `scheme.h` and `kernel.o`. Compiling a *user* program still requires no C compiler — `letloop compile` copies its own host and appends a different boot — but it does require a real `scheme` binary for its child process.
 
+**`letloop compile` output is self-contained: `a.out` alone is the deliverable.** The boot image is appended to the executable itself (same host+boot+trailer shape as the letloop binary above), so the `a.out.boot` sibling it also writes is NOT needed at run time — deploy just the executable; do not copy the `.boot` file alongside it.
+
 **`(letloop base)` imports nothing from letloop, on purpose.** It resolves `cli-read`, `transparent`, `letloop-root` and `letloop-review` at first use through `lazy` / `letloop-library-path!`, against the sources installed at `$PREFIX/lib/letloop`. Two reasons, and both bite hard if someone adds an import back:
 
 - A library imported by `(letloop base)` gets folded into the amalgamated letloop program, and a folded library is **invisible** — its name then blocks *user* programs from importing that same library. `(environment '(letloop match))` fails with "attempt to import invisible library" even with the source on the path.
