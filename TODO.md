@@ -139,6 +139,51 @@ code-page reclamation, cpuid-based feature detection instead of
 /proc/cpuinfo, ARM/NEON, base64 decode kernel, sar/div/cmov and other
 mnemonics until a kernel needs them.
 
+## flow: monitored trees with automatic timeout-and-cancel
+
+A `flow-choice(primary, flow-timeout(...))` race per REQUEST already
+exists (atlas-stoa's hedged reads use exactly this), but nothing here
+scopes a timeout over a WHOLE TREE of concurrent work -- N fibers doing
+network I/O and/or compute, fanned out together, where "this query's
+budget ran out" should cancel every still-running branch (every
+in-flight read, every nested spawn) at once, not just race one read
+against one clock.
+
+Concretely missing, hit live: atlas-stoa's stoa3-v4-search-serve.scm
+fans one query out into one fiber per ngram (each doing a real S3
+read), then waits for ALL of them via a `flow-get!` loop expecting
+EXACTLY `(length ngrams)` messages -- there is no primitive for "give
+this whole fan-out N milliseconds, and whatever hasn't answered by
+then, cancel its I/O and stop waiting on its message." Two pieces of
+defensive plumbing stand in for it today, neither of which actually
+bounds the query's own latency: (1) every fetch fiber must be guarded
+so a raise still `flow-put!`s SOMETHING, or the wait loop hangs
+forever on a message a dead fiber will never send (this was live: a
+connection flood hung every worker thread and leaked ~10GB in minutes
+before the guard was added); (2) the top-level HTTP framework's idle-
+connection reaper eventually notices, on its own sweep interval, long
+after the fact.
+
+Shape sketch: `(flow-monitor timeout-seconds (lambda () ...spawn a
+subtree of fibers/network ops... ))`, tracking every fiber and ring op
+spawned inside its dynamic extent, firing real cancellation for each on
+timeout (or on the thunk itself raising) -- the same
+`register-cancel!`/`IORING_OP_*_CANCEL` machinery `flow-choice` already
+uses per-base, generalized from a fixed vector known at `flow-choice`
+call time to an arbitrary, dynamically-grown set. Open question: a
+fiber spawned INSIDE the monitored thunk that itself spawns MORE
+fibers -- swept transitively (a tree) or only one level (a set)? The
+former is what "cancel a query's whole outstanding work" actually
+needs.
+
+Related: the flow-block-and-wait-off-loop entry directly below (ring
+events prepped from a worker thread) -- any monitored-tree primitive
+used from worker-dispatched code inherits the same off-loop hazard and
+needs the same flow-worker-io wrapping discipline; stoa3-v4-search-
+serve.scm hit this too (hedged-www-request's flow-timeout called
+directly from a flow-worker-call-dispatched fiber) while chasing the
+leak above.
+
 ## flow-block-and-wait-off-loop registers ring events from the worker thread
 
 `flow-block-and-wait` dispatches on `%worker-current?`. The off-loop
