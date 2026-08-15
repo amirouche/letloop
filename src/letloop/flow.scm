@@ -21,7 +21,14 @@
   (export make-flow flow? flow-wrap flow-guard flow-choice flow-perform
 
           make-flow-channel flow-channel? flow-put flow-get
-          flow-put! flow-get!
+          flow-put! flow-get! flow-put-try!
+          ;; Diagnostic only: raw internal list lengths, to tell apart
+          ;; "logically empty" (put-count = get-count) from "channel
+          ;; has released its internal state" -- see the entries in
+          ;; letloop TODO.md for the full diagnosis this was built for
+          ;; (a downstream indexing pipeline's unbounded RSS growth on
+          ;; a large corpus pass).
+          flow-channel-puts-length flow-channel-pops-length
           flow-same-channel-choice-condition?
           flow-same-channel-choice-channel
 
@@ -422,6 +429,12 @@
     (lambda ()
       (make-flow-channel% (box '()) (box '()) (box 0))))
 
+  ;; Diagnostic only -- see the export comment above.
+  (define flow-channel-puts-length
+    (lambda (channel) (length (unbox (flow-channel-puts channel)))))
+  (define flow-channel-pops-length
+    (lambda (channel) (length (unbox (flow-channel-pops channel)))))
+
   ;; A pending party: the (possibly choice-shared) state box and
   ;; resume from flow-perform, plus — for puts only — the value being
   ;; offered — plus CLAIMED, a channel-local guard independent of
@@ -500,6 +513,19 @@
         (unless (box-cas! box lst (filter flow-channel-entry-waiting? lst))
           (flow-channel-compact! box)))))
 
+  ;; Atomically unlink ONE specific entry from BOX's list right at the
+  ;; moment it is matched via the non-blocking try path (flow-put-try/
+  ;; flow-get-try below), instead of leaving it for the next periodic
+  ;; flow-channel-compact! sweep. remq compares by eq?, so this removes
+  ;; exactly the matched cons cell and nothing else; retries against a
+  ;; fresh snapshot on a concurrent racing push/removal, same shape as
+  ;; flow-channel-compact! above.
+  (define flow-channel-remove!
+    (lambda (box entry)
+      (let ((lst (unbox box)))
+        (unless (box-cas! box lst (remq entry lst))
+          (flow-channel-remove! box entry)))))
+
   ;; Bump the shared gc-counter on every enqueue; once it reaches the
   ;; threshold, drop every dead entry from both lists and reset the
   ;; counter (§4.4). If a concurrent bump also crossed the threshold
@@ -546,6 +572,22 @@
                  ((flow-channel-entry-resume (car pops)) obj))
             (%flow-trace! "put-try hit e" (%flow-trace-entry-id (car pops))
                           " ch" (%flow-trace-channel-id channel))
+            ;; Bug fix, 2026-08-14: the try path resolves a rendezvous
+            ;; without ever removing the matched entry from POPS,
+            ;; which previously only happened via the periodic batch
+            ;; flow-channel-compact! sweep (triggered only from the
+            ;; BLOCKING path's counter -- a channel whose traffic
+            ;; mostly resolves via try, the common, healthy,
+            ;; non-backlogged case, almost never triggered it). Every
+            ;; matched-but-unremoved entry, and the payload its VALUE
+            ;; field still references, piled up in the channel's
+            ;; internal list for the channel's whole lifetime -- see
+            ;; letloop TODO.md's top entry for the full diagnosis (a
+            ;; downstream indexing pipeline leaking unbounded RSS on
+            ;; a large corpus pass). This unlinks the ONE matched
+            ;; entry immediately -- a small targeted CAS, not a
+            ;; periodic whole-list rebuild.
+            (flow-channel-remove! (flow-channel-pops channel) (car pops))
             (lambda () (void)))
            (else (scan (cdr pops))))))))
 
@@ -604,7 +646,11 @@
                  ((flow-channel-entry-resume (car puts)) (void)))
             (%flow-trace! "get-try hit e" (%flow-trace-entry-id (car puts))
                           " ch" (%flow-trace-channel-id channel))
+            ;; Bug fix, 2026-08-14: see the matching comment in
+            ;; flow-put-try -- immediate targeted removal, not a
+            ;; compaction-counter bump.
             (let ((obj (flow-channel-entry-value (car puts))))
+              (flow-channel-remove! (flow-channel-puts channel) (car puts))
               (lambda () obj)))
            (else (scan (cdr puts))))))))
 
@@ -644,6 +690,22 @@
 
   (define flow-get!
     (lambda (channel) (flow-perform (flow-get channel))))
+
+  ;; Attempt a PUT without ever suspending: if a waiting GET exists
+  ;; right now, deliver OBJ to it and return #t; otherwise return #f
+  ;; immediately instead of registering and blocking. For a producer
+  ;; that would rather drop a value than park forever waiting for a
+  ;; consumer that may never arrive (e.g. the request this value was
+  ;; computed for has already been abandoned and nothing is calling
+  ;; flow-get! on this channel anymore) -- the non-blocking counterpart
+  ;; to flow-put!, added 2026-08-14 alongside the flow-put-try/
+  ;; flow-get-try immediate-removal fix above, for exactly this use.
+  ;; (flow-put-try channel obj) returns a THUNK to attempt one
+  ;; non-blocking match, not the attempt itself -- this wraps that
+  ;; shape into a plain #t/#f call.
+  (define flow-put-try!
+    (lambda (channel obj)
+      (and ((flow-put-try channel obj)) #t)))
 
   ;; A choice containing both a put and a get on the same channel can
   ;; never rendezvous with anything but itself and would deadlock;
