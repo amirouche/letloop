@@ -1,5 +1,58 @@
 # TODO
 
+- **CONFIRMED BUG, found 2026-08-14: `(letloop flow)` channels
+  (`flow.scm`) never compact dead entries under sustained
+  low-backlog, high-throughput use, leaking every payload ever put
+  through them for the channel's whole lifetime.** Root cause:
+  `flow-channel-compact!` (the `filter flow-channel-entry-waiting?`
+  pass that actually drops dead entries from a channel's `puts`/`pops`
+  lists) only runs from `flow-channel-bump-gc!`, called ONLY on the
+  blocking-registration path (`flow-put-block`/`flow-get-block`) when
+  its shared counter crosses `%flow-channel-gc-threshold` (1024). A
+  rendezvous resolved via the non-blocking `flow-put-try`/
+  `flow-get-try` path -- the common case when a channel's producer and
+  consumer are both keeping up, i.e. exactly steady-state healthy
+  operation -- matches and resumes the waiting peer's entry but never
+  removes it from the list and never bumps the counter. So a channel
+  under sustained throughput where most operations resolve via try
+  accumulates dead entries indefinitely; each `<flow-channel-entry>`
+  still holds its `value` field (the real payload) even once "resolved",
+  so nothing it ever carried is ever collected.
+
+  Found chasing a downstream indexing pipeline's unbounded RSS growth
+  (44GB and climbing on a large corpus pass, no plateau across chunk
+  boundaries). The compute-step business logic (html->sxml,
+  capsule-extract, language-detect, stemmer, document-postings) was
+  proven completely clean by direct repeated-allocation testing --
+  identical bytes-allocated across 8 passes over the same 197
+  documents, and actually DECREASING bytes-allocated over 1750
+  distinct documents. The channels between io-source/compute/owner
+  were the only remaining candidate, and adding raw internal list-
+  length instrumentation (`flow-channel-puts-length`/
+  `flow-channel-pops-length`, temporary diagnostic export) confirmed
+  it directly: at 70 total batch-channel puts (with logical pending
+  always exactly 0 -- every message already matched to a consumer),
+  the raw internal `puts` list still held 62 entries; at 68 total
+  kv-channel gets, the raw `pops` list held 54. The ratio stayed
+  ~80-90% of cumulative throughput the entire run, never dropping --
+  i.e. essentially nothing was ever actually being freed, despite the
+  channel LOOKING logically balanced the whole time.
+
+  Fix candidates: (1) bump the gc-counter (or otherwise trigger
+  compaction) on every successful match, not only on blocking
+  registrations -- cheapest, keeps the existing periodic-filter
+  design; (2) remove a matched entry from its list immediately upon
+  claim in `flow-put-try`/`flow-get-try`/the block-path rendezvous,
+  rather than deferring to periodic compaction at all -- more
+  correct, no threshold-dependent lag window, but touches the hot
+  path on every single operation instead of amortizing over 1024.
+  Long-lived, high-throughput channels (this indexer's kv-channel/
+  batch-channel, one per chunk, thousands of messages each) are where
+  this bites; short-lived per-request channels (e.g. a search
+  server's per-query `ngram-channel`, discarded whole after each
+  query) are far less exposed since the channel itself becomes
+  garbage before the lag matters.
+
 - api: cookies: parse and set cookies with a Map-like API.
 - api: http router: dynamic paths and wildcards.
 - api: http server: harden (letloop http server) and `letloop http serve`: chunked request bodies, streaming responses, richer error handling.
