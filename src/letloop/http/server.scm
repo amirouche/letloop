@@ -21,6 +21,18 @@
           uri-parse/range
           try-parse-http-request
 
+          ;; Per-request cancellation, added 2026-08-14: DISPATCH now
+          ;; receives an extra REQUEST-CONTEXT argument. Its NEEDED?
+          ;; field starts #t and is flipped to #f by the server itself
+          ;; when it gives up on the request (timeout or the
+          ;; connection dying mid-dispatch) -- a handler doing
+          ;; long-running fanned-out work (e.g. multiple upstream
+          ;; fetches) should check it periodically and stop spawning/
+          ;; waiting on more work once it reads #f, rather than
+          ;; running to completion for a response nobody will ever
+          ;; receive.
+          request-context? request-context-needed?
+
           ;; re-exports for dispatch procedures inspecting REQ
           phr-request-body
           phr-request-method-symbol
@@ -45,7 +57,14 @@
           (letloop http)
           (rename (only (letloop www) www-percent-decode www-query-read)
                   (www-percent-decode percent-decode))
-          (letloop liburing low))
+          (letloop liburing low)
+          ;; Per-request dispatch-timeout race only (flow-choice over
+          ;; the dispatch-result channel, a timer, and a read on the
+          ;; connection's own fd) -- NOT the per-byte read loop, which
+          ;; is why this re-import doesn't repeat ec70498/05ab523's
+          ;; ~19-45% throughput cost: it runs once per REQUEST, not
+          ;; once per read.
+          (letloop flow))
 
   (begin
     (include "letloop/http/server.body.scm")

@@ -91,6 +91,44 @@
   (string->utf8
    "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"))
 
+;; Canned response for a request DISPATCH did not finish within
+;; %dispatch-timeout-seconds. See the request-context/handle-connection
+;; comments below for the full mechanism.
+(define %response-504
+  (string->utf8
+   "HTTP/1.1 504 Gateway Timeout\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"))
+
+;; A request that takes longer than this to answer gets a real 504,
+;; not a bare connection reset from the idle reaper's unrelated
+;; %idle-timeout-seconds sweep (the bug this replaces: a handler doing
+;; genuine upstream work -- e.g. multiple S3 fetches -- produces no
+;; read/write activity on ITS OWN fd while it runs, so the reaper's
+;; per-fd timestamp goes stale and eventually kills the connection out
+;; from under an in-flight, healthy request, silently, with no log
+;; line anywhere).
+(define %dispatch-timeout-seconds 25)
+
+;; Cooperative cancellation handed to DISPATCH alongside REQ. NEEDED?
+;; starts #t; the server flips it to #f once it has given up on this
+;; request (timeout, or the connection dying mid-dispatch) so a
+;; handler fanning work out over multiple fibers can stop starting new
+;; work and stop waiting on stragglers instead of running to
+;; completion for a response nobody will ever receive.
+;;
+;; Backed by a box (box-cas!), not a plain mutable field: a DISPATCH
+;; implementation is free to run its fan-out via flow-worker-call on a
+;; real OS thread (a downstream search handler's query dispatch does
+;; exactly this), so NEEDED? is genuinely read and written across threads --
+;; matching the box/box-cas! discipline this codebase already uses
+;; everywhere else two threads touch shared state (e.g.
+;; flow-channel-entry-claimed).
+(define-record-type request-context
+  (fields needed-box))
+
+(define (request-context-make) (make-request-context (box #t)))
+(define (request-context-needed? rctx) (unbox (request-context-needed-box rctx)))
+(define (request-context-cancel! rctx) (box-cas! (request-context-needed-box rctx) #t #f))
+
 ;; ---- Bytevector-range URI parsing ----
 
 ;; Scan buf[start..end) for a byte value, return index or #f.
@@ -199,7 +237,7 @@
          (if done (eof-object) (begin (set! done #t) body-bv)))))))
 
 (define handle-connection
-  (lambda (application context dispatch peer-ip read write close)
+  (lambda (application context dispatch peer-ip read write close fd)
     (define request-state #f)
     (define out (make-phr-out))
     (define req-vec (vector 'phr-request #f #f 0))
@@ -244,35 +282,93 @@
               (let ((method (phr-request-method-symbol req)))
                 (let-values (((path-offset path-len) (phr-request-path-range req)))
                   (let-values (((path params) (uri-parse/range (phr-request-buffer req) path-offset path-len)))
-                    (let ((params (or params '())))
-                      (let-values (((status response-pair extra-headers)
-                                    (dispatch application request-state method path params req)))
-                        (let* ((reason (status-code->reason status))
-                               (body-bv (car response-pair))
-                               (content-type (cdr response-pair))
-                               (all-headers (cons (cons 'content-type content-type)
-                                                  (cons (cons 'date (http-date-bytes))
-                                                        extra-headers)))
-                               (response-bv
-                                (let ((chunks '()))
-                                  (http-response-write
-                                   (lambda (bv) (set! chunks (cons bv chunks)) #t)
-                                   "HTTP/1.1" status reason all-headers
-                                   (let ((done #f))
-                                     (lambda ()
-                                       (if done (eof-object) (begin (set! done #t) body-bv)))))
-                                  ;; http-response-write hands back the
-                                  ;; whole response in one piece, so the
-                                  ;; common case is a single chunk and
-                                  ;; re-appending it would copy every
-                                  ;; response a second time for nothing.
-                                  (if (and (pair? chunks) (null? (cdr chunks)))
-                                      (car chunks)
-                                      (apply bytevector-append (reverse chunks))))))
-                          (write response-bv)))))))
-              (if (phr-request-header-value-ci=? req %hdr-connection %val-close)
-                  (cleanup)
-                  (handle-loop remainder))))))
+                    (let ((params (or params '()))
+                          (rctx (request-context-make))
+                          (result-channel (make-flow-channel)))
+                      ;; DISPATCH runs as its own fiber so it can be
+                      ;; raced against a timeout and against the
+                      ;; connection dying, rather than blocking this
+                      ;; fiber (and therefore this connection's own
+                      ;; read/write activity) unconditionally until it
+                      ;; returns. flow-put-try, not flow-put!: if
+                      ;; nobody is listening on result-channel anymore
+                      ;; (the race below already resolved via timeout
+                      ;; or a dead connection), a blocking put would
+                      ;; park this fiber forever waiting for a
+                      ;; rendezvous that will never come -- the exact
+                      ;; shape of the leak fixed in flow.scm's
+                      ;; flow-put-try/flow-get-try 2026-08-14. A
+                      ;; dropped-on-the-floor late result is fine: the
+                      ;; response it would have produced has nowhere
+                      ;; left to go.
+                      (flow-spawn
+                        (lambda ()
+                          (let ((result
+                                  (guard (exception (#t (cons 'dispatch-raised exception)))
+                                    (call-with-values
+                                      (lambda ()
+                                        (dispatch application request-state method
+                                                  path params req rctx))
+                                      (lambda (status response-pair extra-headers)
+                                        (cons 'dispatch-ok
+                                              (vector status response-pair extra-headers)))))))
+                            (flow-put-try! result-channel result))))
+                      (let ((outcome
+                              (flow-perform
+                                (flow-choice (flow-get result-channel)
+                                             (flow-timeout %dispatch-timeout-seconds)
+                                             (flow-read fd)))))
+                        (cond
+                          ((and (pair? outcome) (eq? (car outcome) 'dispatch-ok))
+                           (let* ((v (cdr outcome))
+                                  (status (vector-ref v 0))
+                                  (response-pair (vector-ref v 1))
+                                  (extra-headers (vector-ref v 2))
+                                  (reason (status-code->reason status))
+                                  (body-bv (car response-pair))
+                                  (content-type (cdr response-pair))
+                                  (all-headers (cons (cons 'content-type content-type)
+                                                     (cons (cons 'date (http-date-bytes))
+                                                           extra-headers)))
+                                  (response-bv
+                                   (let ((chunks '()))
+                                     (http-response-write
+                                      (lambda (bv) (set! chunks (cons bv chunks)) #t)
+                                      "HTTP/1.1" status reason all-headers
+                                      (let ((done #f))
+                                        (lambda ()
+                                          (if done (eof-object) (begin (set! done #t) body-bv)))))
+                                     ;; http-response-write hands back the
+                                     ;; whole response in one piece, so the
+                                     ;; common case is a single chunk and
+                                     ;; re-appending it would copy every
+                                     ;; response a second time for nothing.
+                                     (if (and (pair? chunks) (null? (cdr chunks)))
+                                         (car chunks)
+                                         (apply bytevector-append (reverse chunks))))))
+                             (write response-bv)
+                             (if (phr-request-header-value-ci=? req %hdr-connection %val-close)
+                                 (cleanup)
+                                 (handle-loop remainder))))
+                          ((and (pair? outcome) (eq? (car outcome) 'dispatch-raised))
+                           (request-context-cancel! rctx)
+                           (cleanup)
+                           (raise (cdr outcome)))
+                          ((eq? outcome (void))
+                           ;; flow-timeout won: DISPATCH is taking too
+                           ;; long. A real 504, not a bare reset.
+                           (request-context-cancel! rctx)
+                           (write %response-504)
+                           (cleanup))
+                          (else
+                           ;; flow-read won: the peer sent EOF, an
+                           ;; error, or (a misbehaving/pipelining
+                           ;; client) unexpected bytes while DISPATCH
+                           ;; was still running. Either way this
+                           ;; connection is no longer trustworthy --
+                           ;; abandon the response, don't write to it.
+                           (request-context-cancel! rctx)
+                           (cleanup))))))))))))
 
     ;; No dynamic-wind here: coroutine suspensions (loop-read /
     ;; loop-write) are non-local exits through the wind and would run
@@ -362,7 +458,7 @@
                     (lambda (read write close peer-ip fd)
                       (when (and read write close)
                         (loop-spawn
-                          (lambda () (handle-connection app-state context dispatch peer-ip read write close)))))))
+                          (lambda () (handle-connection app-state context dispatch peer-ip read write close fd)))))))
                 (loop)))))))
     (loop-run)
     ;; Cleanup after loop exits
