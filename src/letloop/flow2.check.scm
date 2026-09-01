@@ -682,6 +682,61 @@
   (and timed-out
        (equal? result (string->utf8 "late"))))
 
+;; The accept-side counterpart of read-or-timeout-leaves-fd-usable, and
+;; the check flow never had either. A cancelled flow-accept used to
+;; leave its handler registered against the multishot's id, so the next
+;; flow-accept on that listener raised "concurrent accept on fd" --
+;; permanently, for as long as no client arrived to clear the slot.
+;; What is asserted is the part that matters: after the cancellation the
+;; listener still ACCEPTS, and the client that connects afterwards is
+;; delivered intact. Reproducer: checks/repro-flow2-accept-cancel.scm.
+(define (~check-flow2-006/accept-cancel-leaves-listener-usable)
+  (define PORT 18247)
+  (define timed-out #f)
+  (define accepted #f)
+  (define received #f)
+  (flow-run
+   (lambda (workers)
+     (let ((listen-fd (loop-socket-new AF-INET SOCK-STREAM 0)))
+       (loop-bind listen-fd "127.0.0.1" PORT)
+       (loop-listen listen-fd 128)
+       (flow-spawn
+        (lambda ()
+          ;; The whole body is guarded so a regression FAILS this check
+          ;; rather than hanging the suite: an unguarded raise here
+          ;; would kill the fiber before it reaches flow-stop, and
+          ;; flow-run would never return.
+          (guard (ex (#t (set! accepted 'raised)))
+            ;; nothing is connecting yet, so the monitor's deadline
+            ;; cancels this accept
+            (set! timed-out
+                  (guard (ex ((flow-error-timeout? ex) #t))
+                    (flow-monitor 0.05
+                                  (lambda ()
+                                    (flow-perform (flow-accept listen-fd))))
+                    #f))
+            ;; the listener must still be usable
+            (let ((client (flow-perform (flow-accept listen-fd))))
+              (set! accepted (fixnum? client))
+              (set! received (flow-perform (flow-read client)))
+              (loop-close client)))
+          (loop-close listen-fd)
+          (flow-stop)))
+       (flow-spawn
+        (lambda ()
+          ;; connect only after the first accept has been cancelled
+          (flow-sleep 0.15)
+          (call-with-values (lambda () (make-sockaddr-in 127 0 0 1 PORT))
+            (lambda (addr addrlen)
+              (let ((fd (loop-connect addr addrlen)))
+                (foreign-free addr)
+                (flow-perform (flow-write fd (string->utf8 "after-cancel")))
+                (flow-sleep 0.05)
+                (loop-close fd)))))))))
+  (and timed-out
+       (eq? accepted #t)
+       (equal? received (string->utf8 "after-cancel"))))
+
 ;; A per-connection request/echo loop that races each read against an
 ;; idle timeout and closes gracefully once the peer goes silent -- the
 ;; realistic consumer shape, and the one http/server.body.scm's dispatch
