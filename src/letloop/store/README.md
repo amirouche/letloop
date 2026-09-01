@@ -15,9 +15,10 @@ design are in the session's implementation plan, not duplicated here.
 
 ## Issues
 
-**Statically-linked musl builds of `letloop` crash on almost any real
-operation, via a bug in ChezScheme's own C runtime — open, unresolved
-as of 2026-08-23.**
+**Statically-linked musl builds of `letloop` crashed on almost any real
+operation, via a NULL-unsafe path in ChezScheme's own C runtime —
+root-caused and fixed 2026-08-23.** Skip to point 9 for the fix and its
+verification if you don't need the investigation trail.
 
 The original motivation for this subsystem includes shipping
 relocatable binaries: a `letloop store build` output should run when
@@ -119,33 +120,83 @@ root`):
    `load-shared-object` calls anywhere. This is the exact function
    (`mkdtemp`) that crashes today via `make-temporary-directory`.
 
-**Conclusion**: this is not a letloop build-flag problem, and not
-purely a ChezScheme bug either — `dlopen(NULL, ...)` genuinely cannot
-work under static linking, by design, regardless of any NULL-check
-patch. But there is a real, scoped, working fix, needing no patch to
-vendored ChezScheme:
-- add a `CUSTOM_INIT` hook to `src/letloop-main.c` that calls
-  `Sforeign_symbol()` for the handful of libc functions this codebase
-  currently obtains via `(load-shared-object #f)` (`mkdtemp`,
-  `strerror`, `unsetenv`, `environ`, and whatever else `cffi.scm`/
-  `root.scm`/`base.scm` resolve that way — needs an audit, not just
-  the two proven here);
-- and remove those `(load-shared-object #f)` calls from the Scheme
-  side, since calling it *at all* is what crashes — `foreign-procedure`
-  itself needs no change, it already searches the table `Sforeign_symbol`
-  populates regardless of whether `load-shared-object` was ever called.
-- optional/named `.so` loads (`libtls.so`, `libblake3.so`, ...) are a
-  separate question — real `dlopen("path", ...)` (not `dlopen(NULL,
-  ...)`) was not tested here and may or may not have the same problem
-  under static musl; worth checking before assuming it's fine.
+9. **Implemented, with one real surprise along the way.** An audit of
+   every `foreign-procedure`/`foreign-entry` call reachable from
+   `letloop store build`'s actual dependency chain (`root.scm`, and
+   `tls/base.scm` for the fixed-output fetch step's HTTPS client) found
+   more than the two symbols prototyped above: `strerror`, `mkdtemp`,
+   `readlink`, `unsetenv`, `execve`, plus `getaddrinfo`, `freeaddrinfo`,
+   `socket`, `connect`, `setsockopt`, `close` for TLS.
 
-Not yet implemented — this needs an audit of every `foreign-procedure`
-call in the codebase to enumerate exactly which symbols need
-registering, then the `CUSTOM_INIT` hook and the corresponding
-Scheme-side cleanup, then re-verifying against the real `letloop store
-build` pipeline end to end. Until it lands, `make letloop`'s host link
-has no `-static`/`-luuid` special case (reverted to plain dynamic
-linking, `-ldl -lm -lpthread`), and a musl/Alpine build of `letloop` is
-relocatable only to other musl-compatible hosts, not to arbitrary
-glibc systems — the original "ship relocatable binaries" goal is not
-yet met, but the path to it is now concrete rather than open-ended.
+   Converting every call site to try-then-fall-back individually was
+   tried first and **broke the ordinary dynamic build**: most files
+   (`tls/base.scm` among them) do a *bare* `foreign-procedure` call with
+   no `load-shared-object` of their own, silently riding on some *other*
+   file's eager, unconditional `(load-shared-object #f)` as a
+   process-wide side effect. Converting the handful of files that
+   originally made that eager call into "only call it if this specific
+   symbol isn't already registered" meant that call was never reached
+   at all once `Sforeign_symbol` covered their own narrow needs —
+   silently pulling the rug out from every *other* file's bare lookup,
+   even on glibc. `make check` across the whole tree went from
+   498/498 to a dead stop on the first unrelated symbol it hit
+   (`getaddrinfo`, then `bind`, ...).
+
+   The actual fix: probe once, safely, in C, before any Scheme runs.
+   `letloop-main.c`'s `CUSTOM_INIT` hook calls `dlopen(NULL, RTLD_LAZY)`
+   itself (plain C, nothing Chez-level that could crash), and exposes
+   the result via an always-registered `letloop_self_dlopen_safe()`
+   (`Sforeign_symbol`, independent of `dlopen`). `cffi.scm`'s
+   `ensure-self-loaded!` (duplicated inline in `base.scm`, which
+   imports nothing from letloop on purpose) checks that flag once and
+   calls `(load-shared-object #f)` — exactly as every version of this
+   codebase always has — only when it is actually safe. Not found at
+   all (a plain `scheme`/`petite` with no letloop-main.c registration,
+   e.g. the child process `letloop compile` spawns to do the real
+   compilation) is treated as safe too, correctly, since that process
+   is never statically linked. This preserves the dynamic build's
+   behavior byte for byte and skips the crash exactly where it would
+   happen.
+
+   One more real bug surfaced fixing this: registering `"environ"` via
+   `Sforeign_symbol("environ", (void*)&environ)` — needed for
+   `execve!`'s raw `execve(2)` wrapper — broke
+   `environment-variables` (`environment.scm`) on the *ordinary dynamic
+   build* with the same "invalid memory reference" crash, reproducibly,
+   confirmed by disabling just that one registration. Not fully
+   root-caused (a suspected ELF data-symbol aliasing issue between this
+   registration's `&environ` and a later `dlsym(handle, "environ")` on
+   a separately dlopen'd `libc.so.6` — plausible but unconfirmed).
+   Dropped from the registration table rather than chased further: it
+   isn't needed for `letloop store build` anyway (`sandbox-build!`
+   shells out to `/usr/bin/bwrap` directly, never touching
+   `root.scm`'s `execve!`) — only the interactive `letloop root exec`
+   uses it, which remains unsupported under a static build until this
+   is understood properly.
+
+**Fixed and verified end to end**, against the same static Alpine 3.22
+toolchain used throughout this investigation:
+- `make letloop`'s host link now passes `-static` when the compiler's
+  target triple contains `musl` (`cc -dumpmachine`), leaving glibc
+  builds untouched — confirmed via host rebuild, `make check` 498/498
+  green both before and after, on both glibc and the Alpine static
+  build.
+- `letloop root exec /alpine-rootfs / -- letloop compile hello.scm main`
+  — the exact operation that used to crash — now runs cleanly inside
+  the static Alpine sandbox and produces a static `a.out`.
+- The full `letloop store build store-static-hello.derivation.scm`
+  pipeline (not just the manual steps above) ran end to end and
+  produced a statically linked `hello` binary in the store.
+- **Relocatability, the actual goal**: that binary was copied out of
+  the store to this session's Ubuntu/glibc host and run directly —
+  `hello, letloop store`, exit 0 — with zero dependency on the Alpine
+  sandbox, the store layout, or a musl runtime being present. Built on
+  musl, runs on glibc, no shared loader involved at all.
+
+The dead `-luuid` flag (point 2) stays removed on both platforms. The
+`(cs)load_shared_object` NULL-format bug in ChezScheme itself (point 7)
+is unpatched and technically still there, but no longer reachable: this
+codebase never calls `(load-shared-object #f)` in the one context where
+it would hit it. `environ`/`execve!`/interactive `letloop root exec`
+under static linking remains a named, deliberate gap (see point 9)
+rather than a silently accepted one.
