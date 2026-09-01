@@ -137,6 +137,21 @@
      (flow-stop)))
   (and (eq? first 'late) (eq? second 'fast)))
 
+;; Every channel is identifiable, whether or not the caller named it --
+;; a saturation warning that cannot say WHICH channel filled is barely
+;; a warning. The auto name is deliberately a fixnum and not a symbol
+;; built from one: Chez interns symbols for the life of the process, so
+;; a program creating channels in a loop would leak one per channel.
+(define (~check-flow2-002/channel-name)
+  (define a (make-flow-channel))
+  (define b (make-flow-channel))
+  (define named (make-flow-channel 'sstable-writes))
+  (assert (fixnum? (flow-channel-name a)))
+  (assert (fixnum? (flow-channel-name b)))
+  (assert (not (eqv? (flow-channel-name a) (flow-channel-name b))))
+  (assert (eq? 'sstable-writes (flow-channel-name named)))
+  #t)
+
 ;; Finding 7 of the 2026-08-17 review. flow-get's block proc, when it
 ;; finds the channel non-empty at registration time, claims its entry
 ;; and dequeues -- and then used to ignore resume's return value.
