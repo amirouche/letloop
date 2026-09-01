@@ -8,6 +8,39 @@
   ;; startup costs 36ms nobody asked for.
   (import (chezscheme))
 
+  ;; (load-shared-object #f) -- dlopen(NULL, ...) -- is how bare
+  ;; foreign-procedure calls in this file (mkdtemp, readlink) and,
+  ;; transitively, in most of the rest of this codebase, reach ordinary
+  ;; libc functions. It cannot work on a statically-linked letloop (see
+  ;; src/letloop/store/README.md's Issues section: no dynamic linker to
+  ;; service it, and Chez's own error path for that failure crashes).
+  ;; letloop-main.c's CUSTOM_INIT hook always registers
+  ;; letloop_self_dlopen_safe (via Sforeign_symbol, independent of
+  ;; dlopen) reporting whether dlopen(NULL, ...) actually works here,
+  ;; probed once in C before any Scheme runs. Not found at all (guard
+  ;; below) means a plain `scheme`/`petite` with no letloop-main.c
+  ;; registration -- e.g. this very library, compiled under a stock
+  ;; Chez during letloop's own bootstrap build -- which is always
+  ;; dynamically linked, hence safe. Duplicated from cffi.scm's
+  ;; identical helper: this library imports nothing from letloop, on
+  ;; purpose (see the note above).
+  (define ensure-self-loaded!
+    (let ((done #f))
+      (lambda ()
+        (unless done
+          (set! done #t)
+          (let ((unsafe? (guard (ex (#t #f))
+                            (fx=? ((foreign-procedure "letloop_self_dlopen_safe" () int)) 0))))
+            (unless unsafe?
+              (load-shared-object #f)))))))
+
+  ;; A definition, not a bare expression: library bodies require every
+  ;; internal define to precede any expression, and this file has many
+  ;; more defines below. Nothing here is actually CALLED until after
+  ;; the whole library finishes loading, so running the self-load once
+  ;; more is fine wherever this sits in the define sequence.
+  (define self-loaded-eagerly! (ensure-self-loaded!))
+
   (define pk
     (lambda args
       (when (getenv "LETLOOP_DEBUG")
@@ -464,8 +497,6 @@
 
   (define (make-temporary-directory prefix)
 
-    (define stdlib (load-shared-object #f))
-
     (define mkdtemp
       (foreign-procedure "mkdtemp" (string) string))
 
@@ -568,8 +599,7 @@
         (unless cached
           (set! cached
                 (guard (ex (else #f))
-                  (let* ((stdlib (load-shared-object #f))
-                         (readlink (foreign-procedure "readlink" (string u8* uptr) iptr))
+                  (let* ((readlink (foreign-procedure "readlink" (string u8* uptr) iptr))
                          (buffer (make-bytevector 4096))
                          (count (readlink "/proc/self/exe" buffer (bytevector-length buffer))))
                     (and (fx> count 0)

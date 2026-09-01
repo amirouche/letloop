@@ -53,8 +53,10 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 	@# The same shape is what `letloop compile` produces, by copying its
 	@# own host and appending a different boot. No C compiler runs there.
 	BOOT=$$(dirname $$(readlink -f $(SCHEME))); \
+	  STATIC_FLAG=""; \
+	  case "$$(cc -dumpmachine)" in *musl*) STATIC_FLAG="-static" ;; esac; \
 	  cc -I"$$BOOT" src/letloop-main.c "$$BOOT/kernel.o" \
-	     -o "$$BOOT/letloop-host" -ldl -lm -lpthread; \
+	     -o "$$BOOT/letloop-host" $$STATIC_FLAG -ldl -lm -lpthread; \
 	  install -m 644 a.out.boot "$$BOOT/letloop.boot"; \
 	  { cat "$$BOOT/letloop-host" a.out.boot; \
 	    n=$$(stat -c%s a.out.boot); i=0; \

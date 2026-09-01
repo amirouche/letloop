@@ -26,14 +26,93 @@
  * appended it runs that instead.
  */
 
+#include <dlfcn.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include "scheme.h"
+
+extern char **environ;
+
+/* (load-shared-object #f) -- dlopen(NULL, ...), "hand me the main
+ * program's own handle" -- is how nearly every (foreign-procedure
+ * ...) call in this codebase reaches ordinary libc functions: one
+ * file calls it eagerly at library-instantiation time (e.g. cffi.scm,
+ * imported almost everywhere) and every other file's bare
+ * foreign-procedure calls, with no load-shared-object of their own,
+ * ride on that as a process-wide side effect. There is no dynamic
+ * linker to service dlopen(NULL, ...) in a statically-linked binary,
+ * so it fails there, and Chez's own error-formatting code for that
+ * failure crashes on the NULL path it was given (see
+ * src/letloop/store/README.md's Issues section for the full trace).
+ *
+ * Rather than convert every call site (tried, and it breaks: it loses
+ * the "one eager call unlocks everything else" side effect even for
+ * ordinary dynamic builds, since a site that already resolves its own
+ * symbol via Sforeign_symbol never falls back to load-shared-object
+ * for anything ELSE that used to ride along with it), this probes
+ * once, safely, in C, before any Scheme runs, and exposes the result:
+ * letloop_self_dlopen_safe() is always registered (so callers can
+ * always ask), and reports 1 only when dlopen(NULL, ...) actually
+ * works here. Scheme-side code (see cffi.scm's ensure-self-loaded!)
+ * calls (load-shared-object #f) eagerly, exactly as before, only when
+ * this says it is safe -- preserving today's behavior byte for byte
+ * on a dynamic build. When it is not safe, the small, hand-audited
+ * set of libc symbols below -- exactly what (letloop store build)'s
+ * own dependency chain needs (root.scm, and tls/base.scm for the
+ * fixed-output fetch step's HTTPS client) -- is registered instead,
+ * via Sforeign_symbol, a public Chez embedding API independent of
+ * dlopen that (foreign-procedure ...) and foreign-entry already
+ * search first. This list is not exhaustive by construction: a static
+ * build exercising a file outside that chain, with no
+ * load-shared-object of its own, needs its own entry added here.
+ */
+static int letloop_self_dlopen_safe_result = 0;
+
+static int letloop_self_dlopen_safe(void) {
+  return letloop_self_dlopen_safe_result;
+}
+
+static void letloop_register_foreign_symbols(void) {
+  void *probe = dlopen(NULL, RTLD_LAZY);
+  if (probe != NULL) {
+    letloop_self_dlopen_safe_result = 1;
+    dlclose(probe);
+  }
+
+  Sforeign_symbol("letloop_self_dlopen_safe", (void *)letloop_self_dlopen_safe);
+  Sforeign_symbol("strerror", (void *)strerror);
+  Sforeign_symbol("mkdtemp", (void *)mkdtemp);
+  Sforeign_symbol("readlink", (void *)readlink);
+  Sforeign_symbol("unsetenv", (void *)unsetenv);
+  Sforeign_symbol("getaddrinfo", (void *)getaddrinfo);
+  Sforeign_symbol("freeaddrinfo", (void *)freeaddrinfo);
+  Sforeign_symbol("socket", (void *)socket);
+  Sforeign_symbol("connect", (void *)connect);
+  Sforeign_symbol("setsockopt", (void *)setsockopt);
+  Sforeign_symbol("close", (void *)close);
+  Sforeign_symbol("execve", (void *)execve);
+  /* Deliberately NOT registering "environ": doing so broke
+   * environment-variables (letloop/environment.scm) even on an
+   * ordinary dynamic build, reproducibly, with an otherwise
+   * unexplained "invalid memory reference" -- some ELF data-symbol
+   * aliasing subtlety between this registration's &environ and
+   * dlsym(handle, "environ") on a later, separate (load-shared-object
+   * "libc.so.6"), not fully root-caused. Not needed for the store
+   * build path either way: root.scm's execve!/environ lookup backs
+   * `letloop root exec` (interactive use), not
+   * `letloop store build`'s sandbox-build!, which shells out to
+   * /usr/bin/bwrap directly and never touches this code path. A
+   * static `letloop root exec` remains unsupported until this is
+   * understood properly.
+   */
+}
 
 #define LETLOOP_MAGIC "LETLOOP\1"
 #define LETLOOP_MAGIC_SIZE 8
@@ -104,9 +183,9 @@ int main(int argc, const char *argv[]) {
 
   if (boot != NULL) {
     Sregister_boot_file_bytes("program", boot, size);
-    Sbuild_heap(NULL, 0);
+    Sbuild_heap(NULL, letloop_register_foreign_symbols);
   } else {
-    Sbuild_heap(argv[0], 0);
+    Sbuild_heap(argv[0], letloop_register_foreign_symbols);
   }
 
   status = Sscheme_start(argc, argv);

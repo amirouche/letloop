@@ -16,6 +16,18 @@
 
    ;; helpers
 
+   ;; cffi.scm's ensure-self-loaded! runs the one dlopen(NULL, ...)
+   ;; call this whole codebase relies on for ordinary libc symbols,
+   ;; skipping it when it would crash a statically-linked letloop --
+   ;; see cffi.scm's own comment for the full story. Calling it
+   ;; explicitly here, not just relying on it happening via some other
+   ;; import, keeps this library correct regardless of import order.
+   ;; A definition, not a bare expression: this file has many more
+   ;; defines below, and library bodies require defines before
+   ;; expressions. Nothing here is actually called until after the
+   ;; whole library finishes loading.
+   (define self-loaded-eagerly! (ensure-self-loaded!))
+
    (define pk
      (lambda args
        (when #t #;(environment-variable-ref "LETLOOP_DEBUG_ROOT")
@@ -23,8 +35,6 @@
          (write args (current-error-port))
          (newline (current-error-port)))
        (car (reverse args))))
-
-   (define stdlib (load-shared-object #f))
 
    (define root-temporary-directory
      (lambda (prefix)
