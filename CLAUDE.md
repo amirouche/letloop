@@ -8,6 +8,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Main branch for PRs: `dev`
 
+## Commits
+
+Use [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/):
+`<type>(<scope>): <description>`, lowercase, imperative, no trailing period.
+
+- **Types:** `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`.
+- **Scope** is the library or subsystem, matching its source path — `flow`,
+  `flow2`, `liburing`, `http`, `aql`, `kernel`, `checks`. Omit it only for
+  changes that genuinely span the tree.
+- **Breaking changes** take a `!` before the colon (`feat(flow)!: ...`) and a
+  `BREAKING CHANGE:` footer saying what callers must do.
+- The body is where the reasoning goes: what was wrong, why the fix is shaped
+  the way it is, and what a reader would otherwise have to rediscover. A
+  `fix:` for a defect that was observed in practice should say how it
+  presented — this repository's history is one of the main debugging tools.
+
+Keep commits small and focused, one architectural change each. Do not push
+unless explicitly asked.
+
 ## System Dependencies
 
 ### Optional shared objects (dlopen'd lazily, on first use)
