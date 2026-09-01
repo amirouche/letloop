@@ -554,6 +554,28 @@ Fibers spawned outside a nursery live in the root scope: never
 cancelled, no bookkeeping cost. This is the HTTP server's hot path
 and it compiles to exactly what flow does today.
 
+Inside a nursery it is not free, and the difference is worth knowing
+before you decide every fiber should belong to one. Every perform in a
+cancellable scope carries one extra base event, and
+`benchmarks/flow2-nursery-bench.scm` measures what that costs:
+
+| workload | root | in a nursery | |
+|---|---|---|---|
+| ping-pong, every operation parks | 1.20M ops/s | 1.03M ops/s | **+16%** |
+| drain, nothing parks | 12.99M ops/s | 10.47M ops/s | **+24%** |
+
+`flow-monitor` measures the same as `flow-nursery` to within 1
+percentage point, which is the expected result — a deadline adds one
+ring timeout for the whole scope, not per operation — and is what the
+benchmark uses as its own sanity check.
+
+For scale: a per-connection `flow-choice` read timeout was added to
+this repository's HTTP server in `ec70498` and reverted in `05ab523`,
+costing "~19% throughput to CML bookkeeping overhead" (TODO.md:60).
+A nursery is the same shape of change and the same order of cost. Use
+one where you want its guarantee — that no fiber outlives its scope —
+and not by reflex on the hottest path you have.
+
 ### Fan out, gather, and never hang
 
 The pattern that motivated the nursery. No guard in the fetch fiber,
