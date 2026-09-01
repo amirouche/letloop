@@ -64,17 +64,6 @@ fully deliver:
   it no longer loops internally and registers the same cancel
   `flow-read` does. "Every in-flight ring operation belonging to the
   subtree is cancelled", below, still overstates the remaining two.
-- **A nursery does not wait for the compute tasks it owns.**
-  `flow-submit!` tags a task with the current scope but never
-  increments the scope's child count, so a join can return while a
-  scope-tagged task is still running on a worker and can still put
-  afterwards. Cancellation flags such tasks; ownership is not
-  implemented.
-- **A cancelled parent abandons its grandchildren.** `%scope-finish`
-  performs the join under the parent scope on purpose, so an enclosing
-  cancellation reaches it — but when it does, the join raises with the
-  child scope's own children still running and uncounted, and the
-  subscope is never unlinked from the parent.
 - **Shutdown does not join workers.** `flow-run` puts the stop message,
   signals the eventfd and closes it without waiting. A worker still
   inside a task can then find the eventfd already `#f`, or race the
@@ -560,7 +549,14 @@ A **scope** owns fibers and, transitively, everything they do: their
 in-flight ring operations, their child fibers, and the compute tasks
 they submit. Scopes form a tree by inheritance — `flow-spawn` and
 `flow-submit!` performed inside a scope's dynamic extent belong to
-that scope. Fibers outside any nursery belong to the *root scope*,
+that scope. A cancelled scope drains before it propagates: when an
+enclosing cancellation interrupts a nursery's join, the nursery kills
+its own scope, waits — uninterruptibly this time — for its children to
+finish unwinding, and only then re-raises. Nothing outlives its scope,
+including on the cancellation path. The cost is that a child parked in
+an operation that cannot be cancelled will hold its parent there; see
+Issues for the two that still cannot be. Fibers outside any nursery
+belong to the *root scope*,
 which is never cancelled and costs nothing on the hot path.
 
 #### `(flow-nursery proc)`
@@ -635,10 +631,12 @@ task:
 #### `(flow-submit! worker-channel thunk response-channel)`
 
 Enqueues the task `(THUNK . RESPONSE-CHANNEL)` on `WORKER-CHANNEL`,
-tagged with the current scope. Returns immediately unless the worker
-channel is full, in which case it parks like any other put — that is
-the pool exerting backpressure on its submitters, and it means
-`flow-submit!` is a suspension point and a cancellation point. The
+tagged with the current scope **and counted as one of its children**,
+so the enclosing nursery's join waits for the task exactly as it waits
+for a fiber. Returns immediately unless the worker channel is full, in
+which case it parks like any other put — that is the pool exerting
+backpressure on its submitters, and it means `flow-submit!` is a
+suspension point and a cancellation point. The
 submitting side then reads `RESPONSE-CHANNEL` and interprets whatever
 protocol it and the thunk agreed on. `THUNK` runs on the compute
 thread with no arguments; by convention it closes over
