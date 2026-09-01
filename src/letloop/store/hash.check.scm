@@ -59,3 +59,49 @@
                                       (shell-single-quote (string-append directory "/a-renamed.txt")))))
             (after (store-hash-directory directory)))
        (not (string=? before after))))))
+
+;; a tree containing symlinks hashes at all, and does so
+;; deterministically -- the bootstrap rootfs is mostly symlinks
+(define ~check-hash-004/symlinks
+  (lambda ()
+    (check-skip-unless-blake3
+     (let ((directory "/tmp/letloop/hash-check-004"))
+       (hash-check-fixture directory)
+       (system! (format #f "ln -s a.txt ~a" (shell-single-quote (string-append directory "/link"))))
+       ;; an absolute link pointing outside the tree: normal for
+       ;; /bin/sh -> /bin/busybox, and must not be followed
+       (system! (format #f "ln -s /nonexistent/elsewhere ~a"
+                         (shell-single-quote (string-append directory "/dangling"))))
+       (string=? (store-hash-directory directory) (store-hash-directory directory))))))
+
+;; retargeting a symlink changes the digest, even though no file
+;; content changed -- the target string is what gets hashed
+(define ~check-hash-005/symlink-target-matters
+  (lambda ()
+    (check-skip-unless-blake3
+     (let* ((directory "/tmp/letloop/hash-check-005")
+            (link (string-append directory "/link"))
+            (ignore (hash-check-fixture directory))
+            (ignore (system! (format #f "ln -s a.txt ~a" (shell-single-quote link))))
+            (before (store-hash-directory directory))
+            (ignore (system! (format #f "rm ~a && ln -s sub/b.txt ~a"
+                                      (shell-single-quote link)
+                                      (shell-single-quote link))))
+            (after (store-hash-directory directory)))
+       (not (string=? before after))))))
+
+;; a symlink to a file and a copy of that file are not the same tree
+(define ~check-hash-006/symlink-is-not-its-target
+  (lambda ()
+    (check-skip-unless-blake3
+     (let* ((directory "/tmp/letloop/hash-check-006")
+            (entry (string-append directory "/entry"))
+            (ignore (hash-check-fixture directory))
+            (ignore (system! (format #f "ln -s a.txt ~a" (shell-single-quote entry))))
+            (as-link (store-hash-directory directory))
+            (ignore (system! (format #f "rm ~a && cp ~a ~a"
+                                      (shell-single-quote entry)
+                                      (shell-single-quote (string-append directory "/a.txt"))
+                                      (shell-single-quote entry))))
+            (as-copy (store-hash-directory directory)))
+       (not (string=? as-link as-copy))))))
