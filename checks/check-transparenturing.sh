@@ -8,8 +8,9 @@
 #          -> transparent / transparent*  src/letloop/http/server.body.scm
 #               -> loop-new, register-signal-handler, handle-connection
 #
-# (The name is historical. There is no (letloop transparent) library,
-# and the examples/transparent*.scm files are unrelated to this test.)
+# (The name is historical. There is no (letloop transparent) library;
+# the unrelated examples/transparent*.scm files this could be confused
+# with have been removed.)
 #
 # Covers: startup, GET, POST, per-application state surviving across
 # connections, 404 fall-through, a request that holds an io_uring
