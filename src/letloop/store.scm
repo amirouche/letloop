@@ -7,7 +7,10 @@
           store-path
 
           ~check-store-000
-          ~check-store-001/fetch-only)
+          ~check-store-001/fetch-only
+          ~check-store-002/derivation-input
+          ~check-store-003/derivation-root
+          ~check-store-004/cyclic-reference)
 
   (import (chezscheme)
           (letloop root)

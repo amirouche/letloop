@@ -31,19 +31,38 @@
 ;; -> a host directory holding the build-environment's toolchain
 ;; rootfs, downloading and caching it under .roots/ first if the
 ;; derivation named a distribution rather than an already-provisioned
-;; directory.
-(define (resolve-build-environment-rootfs build-environment)
-  (if (build-environment-directory? build-environment)
-      (build-environment-directory build-environment)
-      (let* ((distribution (build-environment-distribution build-environment))
-             (version (build-environment-version build-environment))
-             (machine (build-environment-machine build-environment))
-             (cache-directory (string-append (store-roots-directory) "/"
-                                              distribution "-" version "-" machine)))
-        (unless (file-exists? cache-directory)
-          (system! (format #f "mkdir -p ~a" (shell-single-quote cache-directory)))
-          (root-create distribution version machine cache-directory))
-        cache-directory)))
+;; directory. A (derivation "path.scm") root is built first, through
+;; RESOLVE-DERIVATION, and its own store output used as the rootfs.
+(define (resolve-build-environment-rootfs build-environment resolve-derivation)
+  (cond
+   ((build-environment-directory? build-environment)
+    (build-environment-directory build-environment))
+   ((build-environment-derivation? build-environment)
+    (resolve-derivation (build-environment-directory build-environment)))
+   (else
+    (let* ((distribution (build-environment-distribution build-environment))
+           (version (build-environment-version build-environment))
+           (machine (build-environment-machine build-environment))
+           (cache-directory (string-append (store-roots-directory) "/"
+                                            distribution "-" version "-" machine)))
+      (unless (file-exists? cache-directory)
+        (system! (format #f "mkdir -p ~a" (shell-single-quote cache-directory)))
+        (root-create distribution version machine cache-directory))
+      cache-directory))))
+
+;; A (derivation "...") reference resolves relative to the directory of
+;; the derivation file that names it, not the invoker's cwd -- so a
+;; chain of derivations sitting next to each other can reference
+;; siblings by bare filename and keep working wherever it is built from.
+(define (derivation-reference-path referrer-path reference)
+  (if (char=? (string-ref reference 0) #\/)
+      reference
+      (let loop ((index (fx- (string-length referrer-path) 1)))
+        (cond
+         ((fx<? index 0) reference)
+         ((char=? (string-ref referrer-path index) #\/)
+          (string-append (substring referrer-path 0 (fx+ index 1)) reference))
+         (else (loop (fx- index 1)))))))
 
 (define (run-fetches! fetches scratch-directory)
   (let ((fetch-directory (string-append scratch-directory "/fetch")))
@@ -96,29 +115,63 @@
                      (string-append output-directory "/" (fetch-name f))))
    fetches))
 
-(define (run-sandboxed-build! d scratch-directory)
-  (let ((rootfs-directory (resolve-build-environment-rootfs (derivation-build-environment d))))
+(define (run-sandboxed-build! d scratch-directory resolve-derivation)
+  (let ((rootfs-directory (resolve-build-environment-rootfs (derivation-build-environment d)
+                                                             resolve-derivation))
+        (inputs (map (lambda (input)
+                       (if (input-derivation-reference? input)
+                           (resolve-derivation (input-derivation-path input))
+                           input))
+                     (derivation-inputs d))))
     (run-fetches! (derivation-fetches d) scratch-directory)
     (write-build-script! scratch-directory (derivation-script d))
-    (sandbox-build! rootfs-directory scratch-directory (derivation-inputs d))))
+    (sandbox-build! rootfs-directory scratch-directory inputs)))
+
+;; Builds DERIVATION-PATH, first building anything it references
+;; through (derivation "...") -- as its build-environment root, as an
+;; input, or transitively through either.
+;;
+;; BUILDING is the list of paths on the current resolution stack, so a
+;; reference cycle raises rather than looping forever. BUILT is a
+;; shared mutable cell (one per top-level store-build) memoizing
+;; path -> store path, so a diamond -- two inputs naming the same
+;; nested derivation -- builds it once instead of redoing the whole
+;; fetch-and-build before store-place!'s content-addressed dedup
+;; finally no-ops the move. Both last only for one store-build call:
+;; this is deliberately not a persistent build cache and not a
+;; scheduler, just depth-first resolution, one derivation at a time.
+(define (store-build/resolving derivation-path building built)
+  (define mkdtemp (foreign-procedure "mkdtemp" (string) string))
+  (when (member derivation-path building)
+    (error 'store-build "cyclic derivation reference" derivation-path building))
+  (let ((memoized (assoc derivation-path (unbox built))))
+    (if memoized
+        (cdr memoized)
+        (let* ((d (derivation-read derivation-path))
+               (resolve-derivation
+                (lambda (reference)
+                  (store-build/resolving
+                   (derivation-reference-path derivation-path reference)
+                   (cons derivation-path building)
+                   built)))
+               (ignore-0 (system! (format #f "mkdir -p ~a" (shell-single-quote (store-tmp-directory)))))
+               (scratch-directory (mkdtemp (string-append (store-tmp-directory) "/build-XXXXXX")))
+               (output-directory (string-append scratch-directory "/" (derivation-output d))))
+          (if (derivation-script d)
+              (run-sandboxed-build! d scratch-directory resolve-derivation)
+              (run-fetch-only-build! (derivation-fetches d) output-directory))
+          (unless (file-exists? output-directory)
+            (error 'store-build "declared output not produced by the build" (derivation-output d)))
+          (let ((hash (store-hash-directory output-directory)))
+            (verify-expected-output-hash! (derivation-expected-output-hash d) hash derivation-path)
+            (let ((destination (store-place! output-directory hash (derivation-name d))))
+              (store-write-drv! destination derivation-path)
+              (set-box! built (cons (cons derivation-path destination) (unbox built)))
+              destination))))))
 
 ;; -> the resulting store path.
 (define (store-build derivation-path)
-  (define mkdtemp (foreign-procedure "mkdtemp" (string) string))
-  (let* ((d (derivation-read derivation-path))
-         (ignore-0 (system! (format #f "mkdir -p ~a" (shell-single-quote (store-tmp-directory)))))
-         (scratch-directory (mkdtemp (string-append (store-tmp-directory) "/build-XXXXXX")))
-         (output-directory (string-append scratch-directory "/" (derivation-output d))))
-    (if (derivation-script d)
-        (run-sandboxed-build! d scratch-directory)
-        (run-fetch-only-build! (derivation-fetches d) output-directory))
-    (unless (file-exists? output-directory)
-      (error 'store-build "declared output not produced by the build" (derivation-output d)))
-    (let ((hash (store-hash-directory output-directory)))
-      (verify-expected-output-hash! (derivation-expected-output-hash d) hash derivation-path)
-      (let ((destination (store-place! output-directory hash (derivation-name d))))
-        (store-write-drv! destination derivation-path)
-        destination))))
+  (store-build/resolving derivation-path '() (box '())))
 
 (define (letloop-store args)
   (if (null? args)

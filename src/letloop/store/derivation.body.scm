@@ -10,9 +10,14 @@
 ;;     (output "out")
 ;;     (expected-output-hash (blake3 "...")))
 ;;
-;; build-environment's root is either (distribution ...) (version ...)
-;; (machine ...), naming a rootfs `letloop root create` can fetch, or a
-;; (directory ...) pointing straight at an already-provisioned rootfs.
+;; build-environment's root is one of: (distribution ...) (version ...)
+;; (machine ...), naming a rootfs `letloop root create` can fetch; a
+;; (directory ...) pointing straight at an already-provisioned rootfs;
+;; or (derivation "path.scm"), another derivation whose own output is
+;; the rootfs, built first. That last form -- also accepted in place of
+;; any literal store path in `inputs` -- is what makes a chain of
+;; derivations possible at all, e.g. a toolchain fetch feeding a rootfs
+;; assembly feeding everything built against it.
 ;;
 ;; build-environment and script are both optional, but only together: a
 ;; derivation with neither is fetch-only -- its declared fetches are
@@ -51,6 +56,14 @@
 
 (define (build-environment-directory? environment)
   (eq? (build-environment-kind environment) 'directory))
+
+;; (root (derivation "path.scm")) -- the build environment is another
+;; derivation's own output, built first. The referenced path is carried
+;; in the same slot as a plain directory: both end up being "a host
+;; directory to bind as the rootfs", they just differ in whether
+;; store-build has to produce it first.
+(define (build-environment-derivation? environment)
+  (eq? (build-environment-kind environment) 'derivation))
 
 (define-record-type* <fetch>
   (make-fetch name url hash-algorithm hash-hex)
@@ -95,20 +108,48 @@
     (and build-environment
          (let* ((root (required-clause (cdr build-environment) 'root build-environment))
                 (directory (find-clause (cdr root) 'directory))
-                (distribution (find-clause (cdr root) 'distribution)))
+                (distribution (find-clause (cdr root) 'distribution))
+                (derivation (find-clause (cdr root) 'derivation)))
            (cond
             (directory
              (make-build-environment 'directory #f #f #f (cadr directory)))
+            (derivation
+             (make-build-environment 'derivation #f #f #f (cadr derivation)))
             (distribution
              (let ((version (required-clause (cdr root) 'version root))
                    (machine (required-clause (cdr root) 'machine root)))
                (make-build-environment 'rootfs (cadr distribution) (cadr version) (cadr machine) #f)))
             (else
-             (error 'derivation-read "root must be (distribution ...) or (directory ...)" root)))))))
+             (error 'derivation-read
+                    "root must be (distribution ...), (directory ...) or (derivation ...)"
+                    root)))))))
+
+;; An input is either a literal store path -- a string, bind-mounted at
+;; the same absolute path inside the sandbox as outside -- or
+;; (derivation "path/to/other.derivation.scm"), which store-build
+;; resolves by building that derivation first and bind-mounting its
+;; resulting store path. The reader keeps the reference as-is; nothing
+;; here reads the filesystem or builds anything, so parsing stays pure.
+(define (parse-input entry)
+  (cond
+   ((string? entry) entry)
+   ((and (pair? entry) (eq? (car entry) 'derivation) (pair? (cdr entry))
+         (string? (cadr entry)))
+    entry)
+   (else
+    (error 'derivation-read
+           "an input must be a store path string or (derivation \"path.scm\")"
+           entry))))
 
 (define (parse-inputs clauses)
   (let ((inputs (find-clause clauses 'inputs)))
-    (if inputs (cadr inputs) '())))
+    (if inputs (map parse-input (cadr inputs)) '())))
+
+(define (input-derivation-reference? input)
+  (and (pair? input) (eq? (car input) 'derivation)))
+
+(define (input-derivation-path input)
+  (cadr input))
 
 (define (parse-fetch-entry entry)
   (unless (and (pair? entry) (symbol? (car entry)))

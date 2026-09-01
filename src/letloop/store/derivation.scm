@@ -15,10 +15,14 @@
           build-environment?
           build-environment-rootfs?
           build-environment-directory?
+          build-environment-derivation?
           build-environment-distribution
           build-environment-version
           build-environment-machine
           build-environment-directory
+
+          input-derivation-reference?
+          input-derivation-path
 
           fetch?
           fetch-name
