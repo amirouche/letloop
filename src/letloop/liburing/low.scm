@@ -2404,6 +2404,17 @@
   ;; a race to a sibling event); a declined client is pushed onto the
   ;; backlog exactly like a multishot completion nobody was waiting
   ;; for, rather than being leaked.
+  ;;
+  ;; Returns the id HANDLER was registered under, so a caller that must
+  ;; UNregister it can — a composed accept whose sibling event wins, or
+  ;; whose scope is cancelled, has to take its handler back out of
+  ;; loop-handlers or the slot stays occupied and the very next
+  ;; loop-accept-block on that fd hits the concurrent-accept error
+  ;; below, permanently poisoning the listener. Deleting the handler is
+  ;; enough and loses nothing: a client the multishot accepts with no
+  ;; handler registered lands on %accept-backlog, exactly as it does
+  ;; for any other unwaited-for completion. (Previously the return
+  ;; value was hashtable-set!'s, which no caller used.)
   (define loop-accept-block
     (lambda (fd handler)
       (let ((active-id (hashtable-ref %multishots fd #f)))
@@ -2433,7 +2444,8 @@
                   (unless (handler client)
                     (hashtable-set! %accept-backlog fd
                       (append (hashtable-ref %accept-backlog fd '())
-                              (list client)))))))))))
+                              (list client))))))))
+        active-id)))
 
   (define loop-accept
     (lambda (fd)
