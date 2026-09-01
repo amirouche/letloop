@@ -348,6 +348,56 @@
   (and (equal? (reverse echoed) (list (string->utf8 "one") (string->utf8 "two")))
        closed-on-timeout))
 
+;; A cancelled/losing flow-accept must leave the listener usable. Its
+;; block registers a handler against the multishot's id, and
+;; loop-accept-block refuses a second waiter on that id -- so an accept
+;; that lost a choice and left its handler behind poisoned the fd, and
+;; every later flow-accept on it raised "concurrent accept on fd" for
+;; as long as no client arrived to clear the slot, i.e. exactly while
+;; the server was idle. The whole server fiber is guarded so a
+;; regression FAILS this check rather than hanging the suite on a
+;; loop-stop that never runs.
+(define (~check-flow-006/accept-cancel-leaves-listener-usable)
+  (define PORT 18237)
+  (define listen-fd (loop-socket-new AF-INET SOCK-STREAM 0))
+  (define timed-out #f)
+  (define accepted #f)
+  (define received #f)
+  (loop-new)
+  (loop-bind listen-fd "127.0.0.1" PORT)
+  (loop-listen listen-fd 128)
+  (loop-spawn
+   (lambda ()
+     (guard (ex (#t (set! accepted 'raised)))
+       ;; nothing is connecting yet, so the timeout wins and the
+       ;; accept is cancelled
+       (set! timed-out
+             (eq? (flow-perform
+                   (flow-choice (flow-accept listen-fd) (flow-timeout 0.05)))
+                  (void)))
+       ;; the listener must still accept
+       (let ((client (flow-perform (flow-accept listen-fd))))
+         (set! accepted (fixnum? client))
+         (set! received (flow-perform (flow-read client)))
+         (loop-close client)))
+     (loop-close listen-fd)
+     (loop-stop)))
+  (loop-spawn
+   (lambda ()
+     ;; connect only after the first accept has been cancelled
+     (flow-sleep 0.15)
+     (call-with-values (lambda () (make-sockaddr-in 127 0 0 1 PORT))
+       (lambda (addr addrlen)
+         (let ((fd (loop-connect addr addrlen)))
+           (foreign-free addr)
+           (flow-perform (flow-write fd (string->utf8 "after-cancel")))
+           (flow-sleep 0.05)
+           (loop-close fd))))))
+  (loop-run)
+  (and timed-out
+       (eq? accepted #t)
+       (equal? received (string->utf8 "after-cancel"))))
+
 ;;------------------------------------------------------------
 ;; File I/O (flow-open / flow-read-at / flow-write-at / flow-close)
 ;;------------------------------------------------------------

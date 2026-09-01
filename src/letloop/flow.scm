@@ -74,6 +74,7 @@
 
           ~check-flow-006/echo-pair
           ~check-flow-006/read-or-timeout-leaves-fd-usable
+          ~check-flow-006/accept-cancel-leaves-listener-usable
           ~check-flow-006/request-loop-idle-timeout
 
           ~check-flow-009/file-write-read-roundtrip
@@ -953,13 +954,24 @@
                       (submit! bv))))))
 
   ;; try/block delegate directly to loop-accept-try/loop-accept-block
-  ;; (§4.5's one hook into (letloop liburing low)). No register-cancel!
-  ;; — the multishot is per-fd infrastructure, never torn down just
-  ;; because one choice touching it loses; a client accepted after we
-  ;; already lost is pushed back onto the accept backlog by
-  ;; loop-accept-block itself rather than leaked. resume's return
+  ;; (§4.5's one hook into (letloop liburing low)). resume's return
   ;; value (#t on winning the CAS, #f otherwise) is exactly the
-  ;; claim/decline signal loop-accept-block's handler expects.
+  ;; claim/decline signal loop-accept-block's handler expects, so a
+  ;; client accepted after we already lost is pushed back onto the
+  ;; accept backlog rather than leaked.
+  ;;
+  ;; This block DOES need a register-cancel!, which it long lacked. The
+  ;; old reasoning — the multishot is per-fd infrastructure and must
+  ;; not be torn down just because one choice touching it lost — is
+  ;; right, and the cancel below does not tear it down. What it missed
+  ;; is the HANDLER: loop-accept-block keys a single continuation slot
+  ;; by the multishot's id and refuses a second waiter on it, so a
+  ;; losing accept that left its handler behind poisons the listening
+  ;; fd — every later flow-accept on it raises "concurrent accept on
+  ;; fd", for as long as no client happens to arrive to clear the slot,
+  ;; i.e. precisely while the server is idle. Deleting just the handler
+  ;; costs nothing: a client the multishot accepts with none registered
+  ;; lands on the backlog exactly as above.
   (define flow-accept
     (lambda (fd)
       (make-flow% 'base #f
@@ -968,7 +980,12 @@
                     (let ((client (loop-accept-try fd)))
                       (and client (lambda () client))))
                   (lambda (state resume register-cancel!)
-                    (loop-accept-block fd (lambda (client) (resume client)))))))
+                    (let ((id (loop-accept-block
+                               fd (lambda (client) (resume client)))))
+                      (register-cancel!
+                       (lambda ()
+                         (hashtable-delete! (loop-handlers (loop-current))
+                                            id))))))))
 
   ;;------------------------------------------------------------
   ;; File I/O events (§4.5, regular-file variant)
