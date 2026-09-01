@@ -81,7 +81,23 @@
 
 (define ~check-morton-007/random
   (lambda ()
-    ;; Property-based: random points, query box, compare with brute-force
+    ;; Property-based: random points, query box, compare with brute-force.
+    ;;
+    ;; Unseeded on purpose -- a fresh point set every run is the whole
+    ;; value of a property test -- but that makes a failure a one-shot
+    ;; event, so it prints everything needed to reproduce and classify
+    ;; it. `check` only returns a boolean, so a bare mismatch reaches the
+    ;; runner as ** FAILED with no detail at all; this was observed once
+    ;; during a full `make check` on 2026-08-17 and could not be
+    ;; reproduced afterwards in ~10 further whole-tree runs or in 300
+    ;; seeded trials, which is precisely the situation that needs the
+    ;; evidence captured at the moment it happens.
+    ;;
+    ;; Two candidate explanations worth separating in the output:
+    ;; duplicate points (the store keeps one key per point while the
+    ;; brute-force list counts both, so expected > got with no genuine
+    ;; disagreement about membership), and a real disagreement, where
+    ;; MISSING or EXTRA is non-empty.
     (let* ((okvs (make-aql))
            (m (make-morton (bytevector 203) 2 32))
            (points (map (lambda (_) (list (random 1000) (random 1000)))
@@ -93,12 +109,37 @@
                     points)))
       (let ((mins '(200 200))
             (maxs '(500 500)))
-        (let ((expected (filter (lambda (p) (morton-in-box? p mins maxs)) points)))
-          (check (length expected)
-                 (aql-in-transaction okvs
-                   (lambda (tx)
-                     (length (generator->list
-                              (morton-query tx m mins maxs)))))))))))
+        (let* ((expected (filter (lambda (p) (morton-in-box? p mins maxs)) points))
+               (got (aql-in-transaction okvs
+                      (lambda (tx)
+                        (generator->list (morton-query tx m mins maxs)))))
+               (got-points (map (lambda (pair) (morton-decode m (car pair))) got)))
+          (unless (= (length expected) (length got))
+            (let* ((port (current-error-port))
+                   (uniq (lambda (l)
+                           (fold-left (lambda (acc x) (if (member x acc) acc (cons x acc)))
+                                      '() l)))
+                   (say (lambda args
+                          (for-each (lambda (a) (display a port)) args)
+                          (newline port))))
+              (say "~check-morton-007/random MISMATCH")
+              (say "  expected " (length expected) ", got " (length got))
+              (say "  unique expected " (length (uniq expected))
+                   ", unique got " (length (uniq got-points)))
+              (say "  duplicate points in the box: "
+                   (- (length expected) (length (uniq expected)))
+                   "   (a non-zero here explains the count with no")
+              (say "                                    disagreement about membership)")
+              (say "  in the box but not returned: "
+                   (filter (lambda (p) (not (member p got-points))) expected))
+              (say "  returned but not in the box: "
+                   (filter (lambda (p) (not (member p expected))) got-points))
+              (say "  keys stored: " (aql-approximate-keys okvs)
+                   " of " (length points) " points")
+              ;; replayable: the exact input this run happened to draw
+              (say "  points: " points)
+              (flush-output-port port)))
+          (check (length expected) (length got)))))))
 
 (define ~check-morton-008
   (lambda ()
