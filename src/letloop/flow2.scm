@@ -66,6 +66,7 @@
    ~check-flow2-002/channel-bound-below-length
    ~check-flow2-002/channel-get-try-default
    ~check-flow2-002/channel-get-or-timeout
+   ~check-flow2-002/losing-get-does-not-eat-a-value
    ~check-flow2-003/nursery-join-waits-children
    ~check-flow2-003/nursery-child-raise-cancels-siblings
    ~check-flow2-003/nursery-scope-cancel
@@ -782,6 +783,31 @@
           (unless ((flow-getter-resume entry) obj)
             (try))))))
 
+  ;; Return OBJ to CHANNEL after a getter that had already claimed and
+  ;; dequeued it turned out to have synched on another base — the value
+  ;; is out of the queue and its claimant will never receive it, so
+  ;; without this it is simply gone. Hand it to another parked getter
+  ;; if there is one, exactly as a put would; otherwise push it back at
+  ;; the HEAD of the queue, because that is where it was taken from and
+  ;; appending it would reorder a FIFO. The bound is not consulted: the
+  ;; value was already inside it a moment ago, so re-admitting it
+  ;; cannot violate it, and raising overflow here would destroy the
+  ;; value this procedure exists to preserve.
+  (define (%channel-unget! channel obj)
+    (let try ()
+      (let ((entry
+             (with-mutex (flow-channel-mutex channel)
+               (or (%channel-pop-getter! channel)
+                   (begin
+                     (flow-channel-out!
+                      channel (cons obj (flow-channel-out channel)))
+                     (flow-channel-length!
+                      channel (fx+ (flow-channel-length channel) 1))
+                     #f)))))
+        (when entry
+          (unless ((flow-getter-resume entry) obj)
+            (try))))))
+
   (define (flow-put! channel obj)
     (when (and (%worker-current?)
                (let ((scope (%task-scope)))
@@ -816,8 +842,17 @@
                                     (append (flow-channel-getters channel)
                                             (list entry)))
                                    #f)))))
+                      ;; resume reports #f when an earlier base of this
+                      ;; same perform already won — registration is a
+                      ;; for-each with no early exit, so a base that
+                      ;; resumed inline is followed by every later
+                      ;; base's block. The value is already out of the
+                      ;; queue at that point, so put it back rather than
+                      ;; drop it. %channel-put! has made the same test
+                      ;; since day one.
                       (when immediate
-                        (resume (cdr immediate))))))))
+                        (unless (resume (cdr immediate))
+                          (%channel-unget! channel (cdr immediate)))))))))
 
   (define (flow-get! channel)
     (flow-perform (flow-get channel)))
