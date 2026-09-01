@@ -87,20 +87,65 @@ root`):
    symbol table, in case musl's static-dlopen needed it to resolve the
    self-handle — no effect).
 
-**Conclusion**: this is not a letloop build-flag problem. It is
-ChezScheme's C runtime not defending against what `dlopen(NULL, ...)`
-actually returns under static musl linking. A real fix needs one of:
-- a patch to ChezScheme's `load_shared_object` (a NULL check before
-  `Sstring_utf8`) — against a vendored upstream dependency, not this
-  repository's own code;
-- or reworking letloop's FFI layer to stop routing ordinary libc calls
-  (`mkdtemp`, `strerror`, ...) through `(load-shared-object #f)` in the
-  first place — a genuine core-runtime redesign.
+7. Reading ChezScheme's own `c/foreign.c` (source available locally
+   under the build tree once `make chezscheme` has run) pins the exact
+   mechanism: `load_shared_object`'s error path calls
+   `Sstring_utf8(path, -1)` to format `dlerror()`'s message — but only
+   reaches that branch when `dlopen(path, RTLD_NOW)` itself returns
+   NULL. And it does: `dlopen(NULL, ...)` — "hand me the main
+   program's own handle" — has nothing to service it in a fully static
+   binary (no dynamic linker in the picture at all), so it fails, and
+   `path` at that point *is* NULL (that is literally what `#f` becomes
+   in C), so the error-formatting call itself crashes. A NULL check
+   there would only turn the crash into a clean failure — `(load-shared-
+   object #f)` still could not work under static musl, on principle,
+   not just as an unhandled edge case.
+8. **Prototyped a working fix**, independent of `dlopen` entirely.
+   `S_foreign_entry`'s lookup (`foreign.c`) and plain
+   `(foreign-procedure "name" ...)` both search `S_G.foreign_static`, a
+   table populated not by `dlopen` but by `Sforeign_symbol(name, addr)`
+   — a public, documented Chez embedding API (`scheme.h`,
+   `EXPORT void Sforeign_symbol(const char *, void *);`), meant
+   exactly for this: `main.c` has a `CUSTOM_INIT` hook
+   (`Sbuild_heap(execpath, CUSTOM_INIT)`) documented as "perform
+   boot-time initialization, e.g., registering foreign symbols."
+   Compiled a throwaway static host (`#define CUSTOM_INIT
+   my_init` before `#include "main.c"`, `my_init` calling
+   `Sforeign_symbol("getpid", (void*)getpid)` and
+   `Sforeign_symbol("mkdtemp", (void*)mkdtemp)`) against the same
+   static Alpine toolchain. Result: `((foreign-procedure "getpid" ()
+   int))` returned a real pid, and `(mkdtemp "/tmp/proto-XXXXXX")`
+   returned a real created directory — both with **zero**
+   `load-shared-object` calls anywhere. This is the exact function
+   (`mkdtemp`) that crashes today via `make-temporary-directory`.
 
-Neither was attempted here; both are a deliberate choice for whoever
-picks this up next, not something to decide unilaterally mid-fix. Until
-one lands, `make letloop`'s host link has no `-static`/`-luuid` special
-case (reverted to plain dynamic linking, `-ldl -lm -lpthread`), and a
-musl/Alpine build of `letloop` is relocatable only to other
-musl-compatible hosts, not to arbitrary glibc systems — the original
-"ship relocatable binaries" goal is not yet met.
+**Conclusion**: this is not a letloop build-flag problem, and not
+purely a ChezScheme bug either — `dlopen(NULL, ...)` genuinely cannot
+work under static linking, by design, regardless of any NULL-check
+patch. But there is a real, scoped, working fix, needing no patch to
+vendored ChezScheme:
+- add a `CUSTOM_INIT` hook to `src/letloop-main.c` that calls
+  `Sforeign_symbol()` for the handful of libc functions this codebase
+  currently obtains via `(load-shared-object #f)` (`mkdtemp`,
+  `strerror`, `unsetenv`, `environ`, and whatever else `cffi.scm`/
+  `root.scm`/`base.scm` resolve that way — needs an audit, not just
+  the two proven here);
+- and remove those `(load-shared-object #f)` calls from the Scheme
+  side, since calling it *at all* is what crashes — `foreign-procedure`
+  itself needs no change, it already searches the table `Sforeign_symbol`
+  populates regardless of whether `load-shared-object` was ever called.
+- optional/named `.so` loads (`libtls.so`, `libblake3.so`, ...) are a
+  separate question — real `dlopen("path", ...)` (not `dlopen(NULL,
+  ...)`) was not tested here and may or may not have the same problem
+  under static musl; worth checking before assuming it's fine.
+
+Not yet implemented — this needs an audit of every `foreign-procedure`
+call in the codebase to enumerate exactly which symbols need
+registering, then the `CUSTOM_INIT` hook and the corresponding
+Scheme-side cleanup, then re-verifying against the real `letloop store
+build` pipeline end to end. Until it lands, `make letloop`'s host link
+has no `-static`/`-luuid` special case (reverted to plain dynamic
+linking, `-ldl -lm -lpthread`), and a musl/Alpine build of `letloop` is
+relocatable only to other musl-compatible hosts, not to arbitrary
+glibc systems — the original "ship relocatable binaries" goal is not
+yet met, but the path to it is now concrete rather than open-ended.
