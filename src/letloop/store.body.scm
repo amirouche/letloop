@@ -115,15 +115,47 @@
                      (string-append output-directory "/" (fetch-name f))))
    fetches))
 
-(define (run-sandboxed-build! d scratch-directory resolve-derivation)
-  (let ((rootfs-directory (resolve-build-environment-rootfs (derivation-build-environment d)
-                                                             resolve-derivation))
-        (inputs (map (lambda (input)
-                       (if (input-derivation-reference? input)
-                           (resolve-derivation (input-derivation-path input))
-                           input))
-                     (derivation-inputs d))))
+;; A store path is content-addressed, so a build script cannot name its
+;; own inputs: their hashes are not known until they are built, and by
+;; then the script is already written. Nix solves this by substituting
+;; the resolved paths into the build environment; the equivalent here
+;; is a symlink per input under <scratch>/inputs/<name>, which the
+;; script sees as /build/inputs/<name> -- a stable name it can be
+;; written against. The link points at the input's real store path,
+;; which is separately bind-mounted at that same absolute path inside
+;; the sandbox, so following it works.
+;;
+;; Only (derivation "...") inputs get one: a literal store path in
+;; `inputs` was already something the author typed out and can type
+;; again.
+(define (link-derivation-inputs! scratch-directory named-inputs)
+  (unless (null? named-inputs)
+    (let ((inputs-directory (string-append scratch-directory "/inputs")))
+      (system! (format #f "mkdir -p ~a" (shell-single-quote inputs-directory)))
+      (for-each
+       (lambda (named)
+         (system! (format #f "ln -s ~a ~a"
+                           (shell-single-quote (cdr named))
+                           (shell-single-quote (string-append inputs-directory "/" (car named))))))
+       named-inputs))))
+
+(define (run-sandboxed-build! d derivation-path scratch-directory resolve-derivation)
+  (let* ((rootfs-directory (resolve-build-environment-rootfs (derivation-build-environment d)
+                                                              resolve-derivation))
+         (named-inputs
+          (map (lambda (input)
+                 (let* ((reference (input-derivation-path input))
+                        (path (derivation-reference-path derivation-path reference)))
+                   (cons (derivation-name (derivation-read path))
+                         (resolve-derivation reference))))
+               (filter input-derivation-reference? (derivation-inputs d))))
+         (inputs (map (lambda (input)
+                        (if (input-derivation-reference? input)
+                            (resolve-derivation (input-derivation-path input))
+                            input))
+                      (derivation-inputs d))))
     (run-fetches! (derivation-fetches d) scratch-directory)
+    (link-derivation-inputs! scratch-directory named-inputs)
     (write-build-script! scratch-directory (derivation-script d))
     (sandbox-build! rootfs-directory scratch-directory inputs)))
 
@@ -158,7 +190,7 @@
                (scratch-directory (mkdtemp (string-append (store-tmp-directory) "/build-XXXXXX")))
                (output-directory (string-append scratch-directory "/" (derivation-output d))))
           (if (derivation-script d)
-              (run-sandboxed-build! d scratch-directory resolve-derivation)
+              (run-sandboxed-build! d derivation-path scratch-directory resolve-derivation)
               (run-fetch-only-build! (derivation-fetches d) output-directory))
           (unless (file-exists? output-directory)
             (error 'store-build "declared output not produced by the build" (derivation-output d)))

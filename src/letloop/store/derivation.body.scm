@@ -130,6 +130,10 @@
 ;; resolves by building that derivation first and bind-mounting its
 ;; resulting store path. The reader keeps the reference as-is; nothing
 ;; here reads the filesystem or builds anything, so parsing stays pure.
+;;
+;; A (derivation ...) input is additionally reachable inside the build
+;; at /build/inputs/<that derivation's name>, since its real store path
+;; is content-addressed and so unknowable to whoever writes the script.
 (define (parse-input entry)
   (cond
    ((string? entry) entry)

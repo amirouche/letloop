@@ -107,11 +107,11 @@
                 (name "referrer")
                 (build-environment (root (directory ,rootfs)))
                 (inputs ((derivation "dependency.scm")))
-                ;; every input is bind-mounted at its own absolute store
-                ;; path, so the script finds it by globbing the store
+                ;; /build/inputs/<name> is how a script names an input
+                ;; whose real store path it cannot know in advance
                 (script "set -e\n"
                         "mkdir -p out\n"
-                        "cat /tmp/letloop/store-check-002-store/*-dependency/marker > out/copied\n")
+                        "cat /build/inputs/dependency/marker > out/copied\n")
                 (output "out")))
             (let ((destination (store-build referrer-path)))
               (and (file-exists? (string-append destination "/copied"))
