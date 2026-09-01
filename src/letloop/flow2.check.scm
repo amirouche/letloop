@@ -361,3 +361,552 @@
        (flow-stop)))
    1)
   (eqv? result 42))
+
+;;------------------------------------------------------------
+;; Block-and-wait machinery
+;;------------------------------------------------------------
+;;
+;; Ported 2026-08-17 from (letloop flow)'s ~check-flow-011 series,
+;; which the fork had also dropped. These cover flow-block-and-wait-on-
+;; loop itself -- synchronous wins during registration, a raising cancel
+;; thunk, and which cancels fire -- i.e. exactly the procedure finding 1
+;; of the review lives in.
+;;
+;; They deliberately drive the loop with BOUNDED loop-run-once ticks
+;; rather than flow-run, keeping flow's rationale verbatim: a buggy
+;; build must FAIL these rather than hang `make check`. That also means
+;; they run outside flow-run, which never gets to reset %scope-current
+;; -- so each sets it explicitly, the way flow-run does, rather than
+;; inheriting whatever scope the previous check happened to leave in
+;; that global.
+
+;; A base that resumes INLINE, during the registration for-each, wins
+;; before the bases after it have registered their cancels. The cancel
+;; list is therefore unboxed inside a spawned thunk rather than at
+;; resume time; snapshotting it at resume would fire an incomplete list
+;; and leave the later base armed forever.
+(define (~check-flow2-011/sync-resume-runs-later-cancels)
+  (define cancelled #f)
+  (define result #f)
+  (define sync (make-flow (lambda (x) x)
+                          (lambda () #f)        ;; try: not ready
+                          (lambda (state resume register-cancel!)
+                            (resume 'sync))))   ;; resume inline, mid-registration
+  (define parked (make-flow (lambda (x) x)
+                            (lambda () #f)
+                            (lambda (state resume register-cancel!)
+                              (register-cancel!
+                               (lambda () (set! cancelled #t))))))
+  (loop-new)
+  (set! %scope-current %root-scope)
+  (loop-spawn
+   (lambda ()
+     (set! result (flow-perform (flow-choice sync parked)))))
+  (let tick ((n 0))
+    (when (fx<? n 4)
+      (loop-run-once)
+      (tick (fx+ n 1))))
+  (and (eq? result 'sync) cancelled))
+
+;; A cancel thunk that raises -- loop-get-sqe does exactly that on a
+;; full submission queue -- must not take the winning continuation down
+;; with it: the state box has already CASed to 'synched, so if k is lost
+;; here no other base can ever resume the fiber and it is gone for good,
+;; silently. The raise itself is reported by loop-apply's guard, which
+;; is fine; what this pins down is that the fiber still gets its value.
+(define (~check-flow2-011/raising-cancel-does-not-lose-fiber)
+  (define result #f)
+  (define winner (make-flow (lambda (x) x)
+                            (lambda () #f)
+                            (lambda (state resume register-cancel!)
+                              (loop-spawn (lambda () (resume 'won))))))
+  (define raising (make-flow (lambda (x) x)
+                             (lambda () #f)
+                             (lambda (state resume register-cancel!)
+                               (register-cancel!
+                                (lambda ()
+                                  (error 'raising-cancel "boom"))))))
+  (loop-new)
+  (set! %scope-current %root-scope)
+  (loop-spawn
+   (lambda ()
+     (set! result (flow-perform (flow-choice winner raising)))))
+  (let tick ((n 0))
+    (when (fx<? n 6)
+      (loop-run-once)
+      (tick (fx+ n 1))))
+  (eq? result 'won))
+
+;; The winner of a choice must not fire its OWN cancel: its operation
+;; already completed, so the cancel SQE it would prep is a guaranteed
+;; no-op the kernel answers with -ENOENT -- one wasted SQE + CQE round
+;; trip per completed operation, on the hottest path this bookkeeping
+;; has. Losers' cancels must of course still all fire.
+(define (~check-flow2-011/winner-own-cancel-not-fired)
+  (define winner-cancelled #f)
+  (define loser-cancelled #f)
+  (define result #f)
+  (define winner (make-flow (lambda (x) x)
+                            (lambda () #f)
+                            (lambda (state resume register-cancel!)
+                              (register-cancel!
+                               (lambda () (set! winner-cancelled #t)))
+                              (loop-spawn (lambda () (resume 'won))))))
+  (define loser (make-flow (lambda (x) x)
+                           (lambda () #f)
+                           (lambda (state resume register-cancel!)
+                             (register-cancel!
+                              (lambda () (set! loser-cancelled #t))))))
+  (loop-new)
+  (set! %scope-current %root-scope)
+  (loop-spawn
+   (lambda ()
+     (set! result (flow-perform (flow-choice winner loser)))))
+  (let tick ((n 0))
+    (when (fx<? n 6)
+      (loop-run-once)
+      (tick (fx+ n 1))))
+  (and (eq? result 'won)
+       loser-cancelled
+       (not winner-cancelled)))
+
+;;------------------------------------------------------------
+;; Network and file I/O
+;;------------------------------------------------------------
+;;
+;; Ported 2026-08-17 from (letloop flow)'s ~check-flow-006/* and
+;; ~check-flow-009/*, which the flow2 fork dropped along with the other
+;; fd- and ring-touching checks (flow ships 40 checks, flow2 shipped
+;; 21, and all 11 I/O ones were on the missing side). The numbering is
+;; kept deliberately -- 006 for sockets, 009 for files -- so each check
+;; here is traceable to the flow original it came from.
+;;
+;; Two adaptations, no semantic changes: they drive the loop through
+;; flow-run / flow-spawn / flow-stop rather than loop-new / loop-spawn /
+;; loop-run, per this file's header, and they use ports 1824x + 10 so a
+;; single `make check` process running both suites never contends for a
+;; listening address.
+
+;; Under /tmp/letloop so `make clean` sweeps anything a crashed check
+;; leaves behind; each check also deletes its own file on the way out.
+(define %flow2-check-directory "/tmp/letloop")
+
+(define (flow2-check-path name)
+  (unless (file-exists? %flow2-check-directory)
+    (mkdir %flow2-check-directory))
+  (string-append %flow2-check-directory "/" name))
+
+(define (flow2-check-remove! path)
+  (when (file-exists? path)
+    (delete-file path)))
+
+;; Deterministic filler, so a mis-offset read is caught by content and
+;; not merely by length.
+(define (flow2-check-bytes size)
+  (let ((bv (make-bytevector size)))
+    (let loop ((i 0))
+      (if (fx=? i size)
+          bv
+          (begin (bytevector-u8-set! bv i (fxmod (fx* i 7) 251))
+                 (loop (fx+ i 1)))))))
+
+(define (flow2-check-concatenate bvs)
+  (let ((out (make-bytevector (apply + (map bytevector-length bvs)))))
+    (let loop ((bvs bvs) (offset 0))
+      (if (null? bvs)
+          out
+          (let ((n (bytevector-length (car bvs))))
+            (bytevector-copy! (car bvs) 0 out offset n)
+            (loop (cdr bvs) (fx+ offset n)))))))
+
+;; flow-write-at reports what it actually wrote rather than looping, so
+;; a caller that wants "all of it" writes the loop itself -- as here.
+(define (flow2-check-write-all fd offset bv)
+  (let loop ((offset offset) (bv bv))
+    (let ((n (flow-perform (flow-write-at fd offset bv))))
+      (cond
+       ((not n) #f)
+       ((fx=? n (bytevector-length bv)) #t)
+       (else (loop (fx+ offset n) (subbytevector bv n)))))))
+
+(define (flow2-check-create! path bv)
+  (let ((fd (flow-perform
+             (flow-open path (fxior O-WRONLY O-CREAT O-TRUNC) #o600))))
+    (and fd
+         (let ((ok (flow2-check-write-all fd 0 bv)))
+           (flow-perform (flow-close fd))
+           ok))))
+
+;; Real loopback TCP: a listener accepts via flow-accept, echoes one
+;; message back via flow-read/flow-write; the peer connects, sends, and
+;; reads the echo back via flow-write/flow-read too, so both directions
+;; of both events run over a real socket pair.
+(define (~check-flow2-006/echo-pair)
+  (define PORT 18244)
+  (define result #f)
+  (flow-run
+   (lambda (workers)
+     (let ((listen-fd (loop-socket-new AF-INET SOCK-STREAM 0)))
+       (loop-bind listen-fd "127.0.0.1" PORT)
+       (loop-listen listen-fd 128)
+       (flow-spawn
+        (lambda ()
+          (let* ((client (flow-perform (flow-accept listen-fd)))
+                 (data   (flow-perform (flow-read client))))
+            (flow-perform (flow-write client data))
+            (loop-close client))))
+       (flow-spawn
+        (lambda ()
+          (call-with-values (lambda () (make-sockaddr-in 127 0 0 1 PORT))
+            (lambda (addr addrlen)
+              (let ((fd (loop-connect addr addrlen)))
+                (foreign-free addr)
+                (flow-perform (flow-write fd (string->utf8 "hello")))
+                (set! result (flow-perform (flow-read fd)))
+                (loop-close fd))))
+          (loop-close listen-fd)
+          (flow-stop))))))
+  (equal? result (string->utf8 "hello")))
+
+;; A read racing a short timeout on a silent socket must resolve via
+;; the timeout (not hang), and -- the actual point of this check -- the
+;; fd must still be usable afterward: a fresh flow-read on the same fd
+;; must see the client's message once it actually arrives, proving the
+;; cancelled/lost read did not consume or corrupt the connection.
+;;
+;; This is the check whose accept-side analogue flow2 still lacks: see
+;; checks/repro-flow2-accept-cancel.scm, where a cancelled flow-accept
+;; leaves its handler registered and poisons the listening fd. flow-read
+;; passes here because it calls register-cancel! and flow-accept does
+;; not.
+(define (~check-flow2-006/read-or-timeout-leaves-fd-usable)
+  (define PORT 18245)
+  (define timed-out #f)
+  (define result #f)
+  (flow-run
+   (lambda (workers)
+     (let ((listen-fd (loop-socket-new AF-INET SOCK-STREAM 0)))
+       (loop-bind listen-fd "127.0.0.1" PORT)
+       (loop-listen listen-fd 128)
+       (flow-spawn
+        (lambda ()
+          (let ((client (flow-perform (flow-accept listen-fd))))
+            (set! timed-out
+                  (eq? (flow-perform
+                        (flow-choice (flow-read client) (flow-timeout 0.05)))
+                       (void)))
+            (set! result (flow-perform (flow-read client)))
+            (loop-close client)
+            (loop-close listen-fd)
+            (flow-stop))))
+       (flow-spawn
+        (lambda ()
+          (call-with-values (lambda () (make-sockaddr-in 127 0 0 1 PORT))
+            (lambda (addr addrlen)
+              (let ((fd (loop-connect addr addrlen)))
+                (foreign-free addr)
+                ;; stay silent well past the server's 50ms
+                ;; read-or-timeout before finally sending
+                (flow-sleep 0.2)
+                (flow-perform (flow-write fd (string->utf8 "late")))
+                (loop-close fd)))))))))
+  (and timed-out
+       (equal? result (string->utf8 "late"))))
+
+;; A per-connection request/echo loop that races each read against an
+;; idle timeout and closes gracefully once the peer goes silent -- the
+;; realistic consumer shape, and the one http/server.body.scm's dispatch
+;; race now uses on flow (see fbacb46).
+(define (~check-flow2-006/request-loop-idle-timeout)
+  (define PORT 18246)
+  (define echoed '())
+  (define closed-on-timeout #f)
+  (flow-run
+   (lambda (workers)
+     (let ((listen-fd (loop-socket-new AF-INET SOCK-STREAM 0)))
+       (loop-bind listen-fd "127.0.0.1" PORT)
+       (loop-listen listen-fd 128)
+       (flow-spawn
+        (lambda ()
+          (let ((client (flow-perform (flow-accept listen-fd))))
+            (let request-loop ()
+              (let ((result (flow-perform
+                             (flow-choice (flow-read client)
+                                          (flow-timeout 0.1)))))
+                (cond
+                 ((eq? result (void))     ;; idle timeout won
+                  (set! closed-on-timeout #t)
+                  (loop-close client))
+                 ((eq? result #t)         ;; peer EOF
+                  (loop-close client))
+                 (else
+                  (set! echoed (cons result echoed))
+                  (flow-perform (flow-write client result))
+                  (request-loop)))))
+            (loop-close listen-fd)
+            (flow-stop))))
+       (flow-spawn
+        (lambda ()
+          (call-with-values (lambda () (make-sockaddr-in 127 0 0 1 PORT))
+            (lambda (addr addrlen)
+              (let ((fd (loop-connect addr addrlen)))
+                (foreign-free addr)
+                (flow-perform (flow-write fd (string->utf8 "one")))
+                (flow-perform (flow-read fd))
+                (flow-perform (flow-write fd (string->utf8 "two")))
+                (flow-perform (flow-read fd))
+                ;; go silent well past the server's 100ms per-read idle
+                ;; timeout before closing
+                (flow-sleep 0.3)
+                (loop-close fd)))))))))
+  (and (equal? (reverse echoed)
+               (list (string->utf8 "one") (string->utf8 "two")))
+       closed-on-timeout))
+
+;; Round trip through a real file: create + write + close, then reopen
+;; read-only and read the whole thing back in one call.
+(define (~check-flow2-009/file-write-read-roundtrip)
+  (define path (flow2-check-path "flow2-009-roundtrip.bin"))
+  (define payload (string->utf8 "the quick brown fox jumps over the lazy dog"))
+  (define written #f)
+  (define result #f)
+  (flow2-check-remove! path)
+  (flow-run
+   (lambda (workers)
+     (let ((fd (flow-perform
+                (flow-open path (fxior O-WRONLY O-CREAT O-TRUNC) #o600))))
+       (set! written (flow-perform (flow-write-at fd 0 payload)))
+       (flow-perform (flow-close fd)))
+     (let ((fd (flow-perform (flow-open path O-RDONLY 0))))
+       (set! result (flow-perform (flow-read-at fd 0 65536)))
+       (flow-perform (flow-close fd)))
+     (flow-stop)))
+  (flow2-check-remove! path)
+  (and (eqv? written (bytevector-length payload))
+       (equal? result payload)))
+
+;; A file deliberately larger than the chunk size and not a multiple of
+;; it: the loop must see two full chunks, one short chunk, and then
+;; 'eof -- the caller tracking its own offset the whole way, since these
+;; primitives keep no cursor.
+(define (~check-flow2-009/chunked-read-until-eof)
+  (define path (flow2-check-path "flow2-009-chunked.bin"))
+  (define chunk 4096)
+  (define payload (flow2-check-bytes 10000))
+  (define created #f)
+  (define pieces '())
+  (define saw-eof #f)
+  (flow2-check-remove! path)
+  (flow-run
+   (lambda (workers)
+     (set! created (flow2-check-create! path payload))
+     (let ((fd (flow-perform (flow-open path O-RDONLY 0))))
+       (let read-loop ((offset 0))
+         (let ((piece (flow-perform (flow-read-at fd offset chunk))))
+           (cond
+            ((eq? piece 'eof) (set! saw-eof #t))
+            ((not piece) (void))     ;; error: fall through, check fails
+            (else
+             (set! pieces (cons piece pieces))
+             (read-loop (fx+ offset (bytevector-length piece)))))))
+       (flow-perform (flow-close fd)))
+     (flow-stop)))
+  (flow2-check-remove! path)
+  (let ((pieces (reverse pieces)))
+    (and created
+         saw-eof
+         (fx=? (length pieces) 3)                    ;; 4096 + 4096 + 1808
+         (fx=? (bytevector-length (list-ref pieces 2)) 1808)
+         (equal? (flow2-check-concatenate pieces) payload))))
+
+;; Neither the write nor the read starts at 0: the marker must land at
+;; exactly OFFSET (the head of the file untouched), and reading it back
+;; from OFFSET must return it -- an offset silently ignored would fail
+;; both halves.
+(define (~check-flow2-009/nonzero-offset)
+  (define path (flow2-check-path "flow2-009-offset.bin"))
+  (define offset 4000)
+  (define payload (flow2-check-bytes 8192))
+  (define marker (string->utf8 "MARKER-AT-4000"))
+  (define created #f)
+  (define patched #f)
+  (define read-back #f)
+  (define head #f)
+  (flow2-check-remove! path)
+  (flow-run
+   (lambda (workers)
+     (set! created (flow2-check-create! path payload))
+     (let ((fd (flow-perform (flow-open path O-RDWR 0))))
+       (set! patched (flow-perform (flow-write-at fd offset marker)))
+       (set! read-back (flow-perform
+                        (flow-read-at fd offset (bytevector-length marker))))
+       (set! head (flow-perform (flow-read-at fd 0 16)))
+       (flow-perform (flow-close fd)))
+     (flow-stop)))
+  (flow2-check-remove! path)
+  (and created
+       (eqv? patched (bytevector-length marker))
+       (equal? read-back marker)
+       (equal? head (subbytevector payload 0 16))))
+
+;; The file-fd counterpart of the socket check above. A regular-file
+;; read cannot be made to hang the way a silent socket can, so which
+;; base wins is genuinely racy here (a 0-second timeout against an
+;; already-satisfiable read) and neither outcome is asserted; what is
+;; asserted is the part that matters -- after the choice resolves,
+;; whichever way it went, a plain flow-read-at on the same fd still
+;; returns the right bytes, so a losing/cancelled read leaves neither
+;; the fd nor the loop's handler table in a half-submitted state.
+(define (~check-flow2-009/read-or-timeout-leaves-fd-usable)
+  (define path (flow2-check-path "flow2-009-choice.bin"))
+  (define payload (flow2-check-bytes 512))
+  (define created #f)
+  (define slow #f)
+  (define racy #f)
+  (define after #f)
+  (flow2-check-remove! path)
+  (flow-run
+   (lambda (workers)
+     (set! created (flow2-check-create! path payload))
+     (let ((fd (flow-perform (flow-open path O-RDONLY 0))))
+       ;; a read that cannot lose: 1s is forever next to a 512-byte
+       ;; read off the page cache
+       (set! slow (flow-perform
+                   (flow-choice (flow-read-at fd 0 512) (flow-timeout 1.0))))
+       ;; a read that may well lose
+       (set! racy (flow-perform
+                   (flow-choice (flow-read-at fd 0 512) (flow-timeout 0.0))))
+       (set! after (flow-perform (flow-read-at fd 0 512)))
+       (flow-perform (flow-close fd)))
+     (flow-stop)))
+  (flow2-check-remove! path)
+  (and created
+       (equal? slow payload)
+       (or (equal? racy payload) (eq? racy (void)))
+       (equal? after payload)))
+
+;; Opening a missing path without O-CREAT must yield #f -- the same
+;; shape flow-read/flow-write use for failure -- rather than hanging or
+;; handing back a negative "fd" that would then be used as one.
+(define (~check-flow2-009/open-nonexistent-fails)
+  (define path (flow2-check-path "flow2-009-does-not-exist.bin"))
+  (define result 'not-set)
+  (flow2-check-remove! path)
+  (flow-run
+   (lambda (workers)
+     (set! result (flow-perform (flow-open path O-RDONLY 0)))
+     (flow-stop)))
+  (eq? result #f))
+
+;; flow-open on the losing side of a choice: the loser-with-success
+;; path in flow-open's completion handler must close the fd nobody now
+;; owns (detected via resume's #f "did I win" return) rather than leak
+;; it. Which base wins each round is genuinely racy (a 0-second timeout
+;; against a page-cache openat), so run many rounds and assert the
+;; invariant that holds either way: the process's open-fd count is back
+;; at its baseline once the dust settles -- a leaked orphan would grow
+;; it by one per round the timeout won.
+;;
+;; flow-open is the ONE place flow2 kept this careful resume-returns-#f
+;; handling (flow2.scm:857); this is the check that keeps it honest.
+(define (~check-flow2-009/open-loses-choice-no-fd-leak)
+  (define path (flow2-check-path "flow2-009-open-choice.bin"))
+  (define rounds 50)
+  (define failures 0)
+  (define baseline #f)
+  (define final #f)
+  (flow2-check-remove! path)
+  (flow-run
+   (lambda (workers)
+     (flow2-check-create! path (flow2-check-bytes 64))
+     (set! baseline (length (directory-list "/proc/self/fd")))
+     (let round ((n 0))
+       (unless (fx=? n rounds)
+         (let ((r (flow-perform
+                   (flow-choice (flow-open path O-RDONLY 0)
+                                (flow-timeout 0.0)))))
+           (cond
+            ((fixnum? r) (flow-perform (flow-close r)))  ;; open won: ours to close
+            ((eq? r (void)) (void))                      ;; timeout won: orphan path
+            (else (set! failures (fx+ failures 1)))))
+         (round (fx+ n 1))))
+     ;; give straggler orphan-close CQEs from the last rounds a tick or
+     ;; two to land before counting
+     (flow-sleep 0.05)
+     (set! final (length (directory-list "/proc/self/fd")))
+     (flow-stop)))
+  (flow2-check-remove! path)
+  (and (fxzero? failures)
+       (fixnum? baseline)
+       (eqv? final baseline)))
+
+;; flow-close composed under flow-choice: per its committed-at-block
+;; caveat, once the choice reaches the block phase the close happens
+;; whichever base wins -- so afterward the fd must actually be closed,
+;; and a probe read on it must yield #f (EBADF), never data. Nothing
+;; opens another fd between the close and the probe, so the descriptor
+;; number cannot have been reused out from under the test.
+(define (~check-flow2-009/close-under-choice-fd-actually-closed)
+  (define path (flow2-check-path "flow2-009-close-choice.bin"))
+  (define created #f)
+  (define chosen 'not-set)
+  (define after 'not-set)
+  (flow2-check-remove! path)
+  (flow-run
+   (lambda (workers)
+     (set! created (flow2-check-create! path (flow2-check-bytes 64)))
+     (let ((fd (flow-perform (flow-open path O-RDONLY 0))))
+       (set! chosen (flow-perform
+                     (flow-choice (flow-close fd) (flow-timeout 1.0))))
+       ;; in the unlikely event the timeout won, the committed close's
+       ;; CQE still needs a tick to land before the probe
+       (flow-sleep 0.02)
+       (set! after (flow-perform (flow-read-at fd 0 16))))
+     (flow-stop)))
+  (flow2-check-remove! path)
+  (and created
+       (or (eqv? chosen 0) (eq? chosen (void)))
+       (eq? after #f)))
+
+;; flow-close while another fiber's flow-read-at is parked on the same
+;; fd, both submitted in the same tick: exercises loop-close-block's
+;; IORING_OP_ASYNC_CANCEL(CANCEL_ALL) actually matching an in-flight
+;; file op. The assertions are liveness and shape: the reader fiber
+;; resumes (not stranded) with either the payload or #f, and the close
+;; itself succeeds.
+(define (~check-flow2-009/close-while-read-in-flight)
+  (define path (flow2-check-path "flow2-009-close-inflight.bin"))
+  (define payload (flow2-check-bytes 512))
+  (define created #f)
+  (define read-result 'not-set)
+  (define read-done #f)
+  (define close-result 'not-set)
+  (define close-done #f)
+  (flow2-check-remove! path)
+  (flow-run
+   (lambda (workers)
+     (set! created (flow2-check-create! path payload))
+     (let ((fd (flow-perform (flow-open path O-RDONLY 0))))
+       ;; spawn is LIFO within a tick: spawn the closer first so the
+       ;; reader's block runs first next tick and its SQE is already
+       ;; prepped (handler parked) when loop-close-block preps the
+       ;; cancel + close right after it.
+       (flow-spawn
+        (lambda ()
+          (set! close-result (flow-perform (flow-close fd)))
+          (set! close-done #t)))
+       (flow-spawn
+        (lambda ()
+          (set! read-result (flow-perform (flow-read-at fd 0 512)))
+          (set! read-done #t)))
+       (let wait ((n 0))
+         (flow-sleep 0.01)
+         (if (or (and read-done close-done) (fx>? n 500))
+             (flow-stop)
+             (wait (fx+ n 1)))))))
+  (flow2-check-remove! path)
+  (and created
+       read-done
+       close-done
+       (eqv? close-result 0)
+       (or (equal? read-result payload) (eq? read-result #f))))
