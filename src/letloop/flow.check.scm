@@ -1007,6 +1007,47 @@
   (assert (not ((flow-try-proc (flow-get ch)))))
   #t)
 
+;; The dual, on the put side. flow-put-block resumed the GETTER first
+;; and then discarded its own resume's return value -- so when an
+;; earlier base of the same perform had already won, the peer received
+;; a value from a put that, as far as its own caller could tell, never
+;; happened: the caller returns through the other base and may well
+;; retry or discard the value it believes was not sent.
+;;
+;; Nothing is lost here, unlike the get side -- this is an EXTRA
+;; delivery, not a dropped one -- which is why it is the milder half.
+;; The fix is the ordering, not a redeposit: commit our own side first,
+;; and if it reports #f release the peer's claim untouched, because a
+;; put that did not happen must not be observable by anyone.
+;;
+;; Latent for the same reason as its dual; driven directly for the same
+;; reason.
+(define (~check-flow-011/lost-put-does-not-deliver)
+  (define ch (make-flow-channel))
+  (define got 'not-set)
+  (loop-new)
+  (loop-spawn (lambda () (set! got (flow-get! ch))))
+  ;; let the getter register and park
+  (flow-worker-tick-until (lambda () #f) 3)
+  (assert (fx=? 1 (flow-channel-pops-length ch)))
+  (assert (eq? got 'not-set))
+  ;; A perform that has already synched on another base, reaching
+  ;; flow-put's block: its resume reports #f, as the real one would.
+  ((flow-block-proc (flow-put ch 'never-sent))
+   (box 'synched)
+   (lambda (value) #f)
+   (lambda (thunk) (void)))
+  (flow-worker-tick-until (lambda () (not (eq? got 'not-set))) 20)
+  ;; The put did not happen, so nobody may have received its value.
+  (assert (eq? got 'not-set))
+  ;; The getter must still be parked and still usable -- releasing the
+  ;; peer's claim is what keeps it discoverable by a real put.
+  (assert (fx=? 1 (flow-channel-pops-length ch)))
+  (loop-spawn (lambda () (flow-put! ch 'really-sent)))
+  (flow-worker-tick-until (lambda () (not (eq? got 'not-set))) 20)
+  (assert (eq? got 'really-sent))
+  #t)
+
 ;; ---- flow-worker (CPU offload to OS threads) ----
 ;;
 ;; Ticking rather than loop-run: these checks must drive the loop

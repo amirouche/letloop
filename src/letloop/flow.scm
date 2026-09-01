@@ -96,7 +96,8 @@
           ~check-flow-011/winner-own-cancel-not-fired
           ~check-flow-011/block-raise-reaches-the-caller
           ~check-flow-011/block-raise-does-not-strand-a-worker
-          ~check-flow-011/lost-get-does-not-eat-a-value)
+          ~check-flow-011/lost-get-does-not-eat-a-value
+          ~check-flow-011/lost-put-does-not-deliver)
 
   (import (chezscheme)
           (letloop r999)
@@ -722,12 +723,29 @@
                ((null? pops)
                 (set-box! (flow-channel-entry-claimed entry) #f))
                ((and (flow-channel-entry-waiting? (car pops))
-                     (flow-channel-entry-claim! (car pops))
-                     ((flow-channel-entry-resume (car pops)) obj))
+                     (flow-channel-entry-claim! (car pops)))
                 (%flow-trace! "put-block rendezvous e"
                               (%flow-trace-entry-id entry)
                               " with e" (%flow-trace-entry-id (car pops)))
-                ((flow-channel-entry-resume entry) (void)))
+                ;; Commit OUR side before delivering, not after. This
+                ;; resume reports #f when an earlier base of the same
+                ;; perform won during registration — the put did not
+                ;; happen, its caller is about to return through the
+                ;; other base — and delivering anyway would hand a peer
+                ;; a value from a put that, as far as its own caller can
+                ;; tell, never took place. Release the peer's claim
+                ;; untouched and stop: there is nothing left to deliver.
+                (if ((flow-channel-entry-resume entry) (void))
+                    ;; Committed: the put HAS happened, so from here the
+                    ;; value must reach someone. Under the claim!
+                    ;; invariant this resume cannot fail; if it ever
+                    ;; does, redeposit rather than drop — same reasoning
+                    ;; as flow-get-block's side.
+                    (unless ((flow-channel-entry-resume (car pops)) obj)
+                      (%flow-channel-redeposit! channel obj))
+                    (begin
+                      (set-box! (flow-channel-entry-claimed (car pops)) #f)
+                      (set-box! (flow-channel-entry-claimed entry) #f))))
                (else (scan (cdr pops))))))))))
 
   (define flow-put
