@@ -152,6 +152,74 @@ Known gaps, all of them deliberate:
 - **x86_64-linux-musl only.** No cross-compilation, no other
   architecture.
 
+## Direction, and what is deliberately not being built yet
+
+Decided in design rather than in code, recorded so it is not
+rediscovered.
+
+**The root is bundling package definitions with the letloop release.**
+Everything the intended workflow needs sits on it: `letloop store
+build libgegl` taking a bare name needs a name to resolve against, and
+`letloop store build letloop` needs letloop's own source to be a
+hash-pinned fetch rather than the bind-mounted working tree
+`bootstrap-letloop.derivation.scm` uses today — that path only exists
+because the derivations are still test fixtures under `checks/`.
+
+**`letloop update` is gated on something outside code**: there have to
+be releases, and a user replacing their own binary needs a source of
+truth for what is newest. Reproducibility softened this — a published
+binary can be verified by rebuilding it — but did not remove it.
+
+**Static linking is the default** for a compiled program.
+
+**Inferring C dependencies from the import closure is parked.** The
+data for it is already in the source: nine libraries name their shared
+object with `define-shared-object`, and letloop already computes the
+import closure for amalgamation, so importing `(letloop blake3)` is
+itself the statement that libblake3 is wanted — no symbol-level
+analysis needed. What parks it is that a program's identity would then
+include *which* archive it linked, so a binary would only be
+reproducible if that were pinned, and would arguably need addressing
+by its whole closure.
+
+That dissolves rather than needs managing if a binding pins its
+package by a conventional name instead of naming a bare `.so`: the
+version is then fixed by the letloop release, which already bundles
+the definitions, so a program's identity is its source plus a letloop
+version and nothing further. Which puts inference back behind the same
+prerequisite as everything else.
+
+Three things it will still have to answer, none solved by pinning:
+
+- C libraries have C dependencies of their own — libtls pulls libssl
+  and libcrypto — and static archives are order-sensitive, so
+  inference needs a closure emitted dependency-first, not the flat
+  list `letloop compile`'s `.a` arguments take today.
+- Two archives defining one symbol resolve silently by link order.
+  With explicit arguments a person chose them; with inference nobody
+  did.
+- `define-shared-object` cannot say whether a library is required or
+  merely faster. blake3 is now the latter, since `(letloop blake3
+  pure)` is the floor.
+
+**Inference makes a substituter matter more than it did when it was
+deferred.** Deferring was right for explicit builds: asking for
+`store build libgegl` is asking for a wait. Inference makes the build
+implicit, so compiling a hello-world that happens to import
+`(letloop blake3)` could trigger a sandboxed build, or on a cold
+machine most of the chain, with no visible cause. Prebuilt outputs
+stop being an optimisation at that point.
+
+**A program's own C library keeps the explicit path.** Inference only
+covers bindings letloop ships, so `letloop compile prog.scm main
+libfoo.a` stays the escape hatch; the two compose.
+
+**`letloop exec` stays** until the cost of compiling under this design
+is known. It is the fast-iteration path, and the argument for removing
+it — that a program run through `exec` links dlopen'd shared objects
+while a compiled one links static archives, so the two are not quite
+the same program — only outweighs that if compiling stays cheap.
+
 ## Issues
 
 **Statically-linked musl builds of `letloop` crashed on almost any real
