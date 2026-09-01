@@ -25,6 +25,10 @@
 #                             no distribution ever touched
 #  11. bootstrap-flow2       that letloop running the io_uring checks
 #                             for real, not merely linking them
+#  11b. bootstrap-scheme-hello  a Scheme program compiled to a
+#                             standalone static binary -- what the
+#                             store is actually for, and the only gate
+#                             that fails when just that breaks
 #  12. bootstrap-review      letloop review compiled -- the widest
 #                             dependency chain in the repo
 #  13. bootstrap-static-lib  that letloop compiling a Scheme program
@@ -292,6 +296,26 @@ echo "flow2 checks: $FLOW2_DESTINATION"
 FLOW2_PASSED=$(grep -c '\*\* SUCCESS' "$FLOW2_DESTINATION/result")
 [ "$FLOW2_PASSED" -ge 50 ] || {
     echo "FAIL: only $FLOW2_PASSED flow2 checks ran; expected the full suite"
+    exit 1
+}
+
+# The core promise on its own: a Scheme program in, a standalone static
+# binary out. bootstrap-hello above compiles C and so proves the
+# toolchain; this proves what the store is actually for. No archive, so
+# `letloop compile` takes its ordinary path and invokes no C compiler.
+SCHEME_HELLO_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-scheme-hello.derivation.scm" | tail -1)
+echo "scheme hello: $SCHEME_HELLO_DESTINATION"
+
+SCHEME_HELLO_HEADERS=$(readelf -l "$SCHEME_HELLO_DESTINATION/hello")
+case "$SCHEME_HELLO_HEADERS" in
+    *interpreter*) echo "FAIL: the compiled Scheme program needs a dynamic loader"
+                   exit 1 ;;
+esac
+
+cp "$SCHEME_HELLO_DESTINATION/hello" "$ELSEWHERE/scheme-hello"
+SCHEME_HELLO_OUTPUT=$("$ELSEWHERE/scheme-hello")
+[ "$SCHEME_HELLO_OUTPUT" = "hello from a scheme program the store built" ] || {
+    echo "FAIL: the compiled Scheme program does not run relocated: $SCHEME_HELLO_OUTPUT"
     exit 1
 }
 

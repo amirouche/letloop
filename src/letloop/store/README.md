@@ -83,6 +83,55 @@ Things worth knowing before touching it:
   practice, but a cleared cache produces a different set of store
   paths for the same inputs.
 
+## What "done" means, and what is not done
+
+Written down because it was twice claimed complete while it was not.
+Both misses were of the same kind: a stage skipped, and nothing that
+would say so. The makefile's probes for optional libraries fail
+*silently*, so a letloop missing io_uring or BLAKE3 links cleanly,
+runs, prints its version, and only fails once something reaches the
+part that needed them. "It built" and "it is broken" look identical
+until a gate distinguishes them.
+
+So every claim below names the gate that checks it. If a claim has no
+gate, it is not a claim.
+
+| must be able to | gated by |
+| --- | --- |
+| Fetch a pinned artifact with no rootfs at all | `~check-store-001/fetch-only` |
+| Build a derivation from another's output, and refuse a cycle | `~check-store-00{2,3,4}` |
+| Skip an unchanged build, and *not* skip a changed one | `~check-store-00{5,6}` |
+| Assemble a rootfs that compiles C, from two pinned binaries | `bootstrap-rootfs`, `bootstrap-hello` |
+| **Compile a Scheme program to a standalone static binary** | `bootstrap-scheme-hello` — the thing the store is actually for, and the one gate that fails when only *that* is broken |
+| Rebuild its own shell and build driver from source | `bootstrap-{busybox,make}`, and `bootstrap.sh` comparing bytes against the fetched BusyBox |
+| Build ChezScheme and letloop with no distribution involved | `bootstrap-{chezscheme,letloop}` |
+| Produce a letloop that needs no dynamic loader, anywhere | absent `INTERP` segment, checked per artifact |
+| Actually drive io_uring, not merely link it | `bootstrap-flow2` — the full flow2 suite |
+| Actually run the store that built it | `bootstrap.sh`'s self-hosted build, which needs BLAKE3 |
+| Compile a Scheme program against a C archive | `bootstrap-static-lib`, and `letloop-check.sh` on the host |
+| Run all of the above relocated, on a foreign libc | copied to a fresh directory and run there |
+
+Known gaps, all of them deliberate:
+
+- **No cold start.** Every `fetch` derivation needs `libtls`, which is
+  not in the chain, so a statically linked letloop can drive a *warm*
+  store but cannot bootstrap one from nothing. Adding LibreSSL would
+  close this; nothing else does.
+- **Not a fixpoint byte-for-byte.** letloop rebuilds letloop, and the
+  third generation is as complete as the second and produces identical
+  output hashes — but the two binaries differ, because the build is not
+  reproducible (see above).
+- **The compiler is trusted, not built.** musl.cc's gcc and one
+  BusyBox binary are taken on their hashes. Retiring the compiler means
+  a full source bootstrap, which this chain does not attempt.
+- **ChezScheme diverges.** The chain pins the 10.4.1 release, because
+  release tarballs bundle the submodules a network-off sandbox cannot
+  fetch and because the makefile's `CHEZ_REF=main` is not a fixed
+  point. The host build still tracks `main` (10.5.0-pre-release.1), so
+  the two disagree.
+- **x86_64-linux-musl only.** No cross-compilation, no other
+  architecture.
+
 ## Issues
 
 **Statically-linked musl builds of `letloop` crashed on almost any real
