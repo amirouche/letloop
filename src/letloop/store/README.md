@@ -201,7 +201,7 @@ it would hit it. `environ`/`execve!`/interactive `letloop root exec`
 under static linking remains a named, deliberate gap (see point 9)
 rather than a silently accepted one.
 
-## `(letloop liburing low)` under static linking — a second, separate gap
+## `(letloop liburing low)` under static linking — resolved
 
 **`letloop review`** (and anything else reaching `tea/loop.scm` — the
 async terminal I/O loop `termbox.scm`/`tea.scm` build on, in turn
@@ -222,14 +222,33 @@ above fixes for ordinary libc calls, with its own twist:
   already ships `liburing-ffi.a`, a **static** archive of the same
   symbol set `liburing-ffi.so` exports at runtime — built specifically
   because most of `liburing.h`'s API (`io_uring_prep_*`, the sqe/cqe
-  accessors) is `static inline` in the header and has no linkable
-  symbol otherwise. Confirmed empirically: `#include <liburing.h>`
-  plus `-luring` (the plain, non-"-ffi" archive) links every symbol
-  `low.scm` calls, inline or not — taking an inline function's address
-  in C forces the compiler to materialize a local, statically-linked
-  copy with identical behavior, no link-time conflict with anything
-  liburing-ffi.a would separately export.
-- `cffi.scm`'s `lazy-foreign-procedure` macro now tries a bare
+  accessors, and — this mattered below — the ring-index bookkeeping in
+  `io_uring_cq_advance`/`io_uring_cqe_seen`, which calls the memory
+  barrier primitives in `liburing/barrier.h`) is `static inline` in
+  the header and has no linkable symbol otherwise.
+- An earlier version of this fix took each `static inline` function's
+  address directly in C (`#include <liburing.h>` + `-luring`,
+  unmodified), reasoning that address-taking forces the compiler to
+  materialize an equivalent out-of-line copy. That copy is a
+  *different* compiled instantiation of the barrier-dependent code
+  than the one upstream ships in `liburing-ffi.a` — not provably
+  wrong, but an unresolved gap while this bug was still open. The
+  fix that actually landed: reference `liburing-ffi.a`'s own
+  pre-built symbols directly, via GCC's asm-label extension
+  (`extern void name_stub(void) __asm__("name");`) so this
+  translation unit never redefines or re-inlines any of them itself —
+  it only takes the address the archive already provides, byte-for-byte
+  identical to what a dynamic FFI consumer would dlopen. Linking
+  `liburing-ffi.a` directly with `IOURINGINLINE` defined empty in this
+  file's *own* compilation was tried first and rejected: `liburing.a`'s
+  `queue.ol` already carries real, non-inline definitions of a handful
+  of these names (`io_uring_get_sqe`, `io_uring_get_events` — kept for
+  ABI back-compat from before they became header-only), and duplicating
+  them collided at link time ("multiple definition of io_uring_get_sqe").
+  The makefile links `liburing-ffi.a` (`-luring-ffi`, replacing plain
+  `-luring` — it is a strict superset) instead of taking on that
+  conflict.
+- `cffi.scm`'s `lazy-foreign-procedure` macro tries a bare
   `foreign-procedure` lookup first, falling back to `(shared-object)`
   (the named dlopen) only on failure — the same probe-first shape as
   `ensure-self-loaded!`, but per-symbol instead of a single global
@@ -238,38 +257,45 @@ above fixes for ordinary libc calls, with its own twist:
   `Sforeign_symbol` (mechanically extracted from every
   `lazy-foreign-procedure liburing-ffi ...` call in `low.scm`), guarded
   behind `LETLOOP_LIBURING_STATIC` so a build without `liburing-dev`
-  installed is entirely unaffected — the makefile only defines it
-  after probing that `#include <liburing.h>` + `-luring` actually
-  links.
-- **Verified working, in isolation**: `foreign-entry`/`foreign-procedure`
-  calls to a registered symbol (`io_uring_major_version`) succeed
-  directly, no dlopen reached. A minimal two-file reproduction of
-  `low.scm`'s exact `define-shared-object`/`lazy-foreign-procedure`
-  pattern, cross-library reference included, also works. Referencing a
-  genuinely-missing shared object (`blake3`, not installed in this
-  container) fails *cleanly* through the same fallback path — ruling
-  out both the registration mechanism and the macro logic as the
-  problem, and ruling out "large/whole-program-optimized library" as a
-  general cause.
-- **Not working**: the real `(letloop liburing low)` — 171
-  `lazy-foreign-procedure` wrappers plus a real fiber/event-loop
-  runtime (`~check-low-*` exports reference suspend/resume/cqe
-  semantics, this is not just FFI bindings) — crashes with the exact
-  `dlopen(NULL, ...)` signature (`strlen → Sstring_utf8 →
-  load_shared_object`) the instant *any* of its exports is referenced
-  or called, even the trivial, no-argument `io-uring-major-version`.
-  Attempted to bisect by truncating a copy of the real file to isolate
-  whether this is about scale or something structural in `low.scm`
-  itself; stopped without a clean answer rather than risk drawing a
-  conclusion from a broken repro (the truncated file's export list
-  outran the body kept).
+  installed is entirely unaffected.
 
-**Net effect**: `letloop compile` of anything that only *imports*
-`(letloop liburing low)` without calling into it works fine statically
-(confirmed: compiling `letloop review` itself succeeds, see
-`checks/letloop/store-review-static.derivation.scm`). *Running* a
-statically-linked binary that actually drives the io_uring event loop
-— `letloop review`'s TUI, `letloop http serve`, anything using
-`flow`/`flow2` — does not yet work under static linking. Tracked here,
-not chased further this pass, the same call made for `environ` above:
-a real, separate root cause, not yet found.
+**The actual root cause of the runtime crash was unrelated to any of
+the above.** `low.scm` had its own raw, unconditional
+`(define stdlib (load-shared-object #f))` at its top level —
+completely bypassing `ensure-self-loaded!`'s probe, and running the
+instant the library was instantiated regardless of whether dlopen was
+actually safe. `stdlib` itself was dead: exported, but never
+referenced anywhere else in the file. This explained every earlier
+observation exactly: a trivial program never instantiates `low.scm` so
+never hits it; *importing* `low.scm` without referencing any of its
+bindings let dead-code elimination skip instantiation entirely
+(looked like success); referencing even a bare, non-FFI constant
+forced full instantiation and hit this line before anything else in
+the file ran, including the io_uring registration this section
+originally suspected. Removed rather than reharnessed — the same
+`(letloop cffi)` import already used for `with-lock`/`bytevector-pointer`
+/`strerror` forces that library's own body (and its `ensure-self-loaded!`
+call) to run first, per R6RS import ordering, which is all `low.scm`'s
+own eager, unwrapped `foreign-procedure` calls further down
+(`%strlen`, `memcpy`, `fcntl`, `socket`, `setsockopt`, `getsockopt`,
+`bind`, `listen`, `getpeername`) actually need. Those symbols, plus
+`eventfd`/`write` from `flow.scm`/`flow2.scm`'s own eager calls, were
+missing from `letloop-main.c`'s registration table and needed adding —
+each failed *cleanly* once `stdlib`'s crash was out of the way
+(`Exception in foreign-procedure: no entry for "strlen"`), which is
+what made them straightforward to find one at a time.
+
+The same `(define stdlib (load-shared-object #f))` anti-pattern exists
+in `desktop/ioctl.scm` and `desktop/evdev.scm` — not exercised by
+anything in this session's static-linking path (`letloop desktop`
+needs Vulkan/DRM, out of scope per this file's own non-goals), but the
+identical latent bug if either is ever built statically.
+
+**Verified**: `letloop check src/ src/letloop/flow2.scm` — 58 checks,
+real io_uring ring setup/submit/wait/cancel plus socket and file I/O —
+passes cleanly on the static build
+(`checks/letloop/store-flow2-static.derivation.scm`, wired into
+`checks/letloop/store-static-hello.sh`). `letloop review` still
+compiles statically as before
+(`checks/letloop/store-review-static.derivation.scm`) but is not run
+there — it is an interactive TUI needing a real terminal, not a gap.
