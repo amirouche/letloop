@@ -200,3 +200,76 @@ codebase never calls `(load-shared-object #f)` in the one context where
 it would hit it. `environ`/`execve!`/interactive `letloop root exec`
 under static linking remains a named, deliberate gap (see point 9)
 rather than a silently accepted one.
+
+## `(letloop liburing low)` under static linking — a second, separate gap
+
+**`letloop review`** (and anything else reaching `tea/loop.scm` — the
+async terminal I/O loop `termbox.scm`/`tea.scm` build on, in turn
+reachable from `flow.scm`/`flow2.scm`) transitively imports
+`(letloop liburing low)`, which resolves ~170 `io_uring_*` functions via
+`lazy-foreign-procedure` against a *named* dlopen of `liburing-ffi.so`
+— a second, independent instance of the same class of problem point 9
+above fixes for ordinary libc calls, with its own twist:
+
+- `dlopen("liburing-ffi.so.2", RTLD_NOW)` — a real, named `.so`, not
+  `dlopen(NULL, ...)` — **also fails** under this Alpine's static musl,
+  with musl's own clean `"Dynamic loading not supported"` (not a
+  crash: `path` is a real string here, so `load_shared_object`'s
+  NULL-format bug from point 7 doesn't trigger). Confirmed: this
+  static libc supports no `dlopen` at all, named or not — a stronger
+  limit than point 7's `dlopen(NULL, ...)`-specific one.
+- No upstream liburing work needed: Alpine's `liburing-dev` package
+  already ships `liburing-ffi.a`, a **static** archive of the same
+  symbol set `liburing-ffi.so` exports at runtime — built specifically
+  because most of `liburing.h`'s API (`io_uring_prep_*`, the sqe/cqe
+  accessors) is `static inline` in the header and has no linkable
+  symbol otherwise. Confirmed empirically: `#include <liburing.h>`
+  plus `-luring` (the plain, non-"-ffi" archive) links every symbol
+  `low.scm` calls, inline or not — taking an inline function's address
+  in C forces the compiler to materialize a local, statically-linked
+  copy with identical behavior, no link-time conflict with anything
+  liburing-ffi.a would separately export.
+- `cffi.scm`'s `lazy-foreign-procedure` macro now tries a bare
+  `foreign-procedure` lookup first, falling back to `(shared-object)`
+  (the named dlopen) only on failure — the same probe-first shape as
+  `ensure-self-loaded!`, but per-symbol instead of a single global
+  gate, since here there is no one call that "unlocks everything
+  else." `letloop-main.c` registers the ~170 symbols via
+  `Sforeign_symbol` (mechanically extracted from every
+  `lazy-foreign-procedure liburing-ffi ...` call in `low.scm`), guarded
+  behind `LETLOOP_LIBURING_STATIC` so a build without `liburing-dev`
+  installed is entirely unaffected — the makefile only defines it
+  after probing that `#include <liburing.h>` + `-luring` actually
+  links.
+- **Verified working, in isolation**: `foreign-entry`/`foreign-procedure`
+  calls to a registered symbol (`io_uring_major_version`) succeed
+  directly, no dlopen reached. A minimal two-file reproduction of
+  `low.scm`'s exact `define-shared-object`/`lazy-foreign-procedure`
+  pattern, cross-library reference included, also works. Referencing a
+  genuinely-missing shared object (`blake3`, not installed in this
+  container) fails *cleanly* through the same fallback path — ruling
+  out both the registration mechanism and the macro logic as the
+  problem, and ruling out "large/whole-program-optimized library" as a
+  general cause.
+- **Not working**: the real `(letloop liburing low)` — 171
+  `lazy-foreign-procedure` wrappers plus a real fiber/event-loop
+  runtime (`~check-low-*` exports reference suspend/resume/cqe
+  semantics, this is not just FFI bindings) — crashes with the exact
+  `dlopen(NULL, ...)` signature (`strlen → Sstring_utf8 →
+  load_shared_object`) the instant *any* of its exports is referenced
+  or called, even the trivial, no-argument `io-uring-major-version`.
+  Attempted to bisect by truncating a copy of the real file to isolate
+  whether this is about scale or something structural in `low.scm`
+  itself; stopped without a clean answer rather than risk drawing a
+  conclusion from a broken repro (the truncated file's export list
+  outran the body kept).
+
+**Net effect**: `letloop compile` of anything that only *imports*
+`(letloop liburing low)` without calling into it works fine statically
+(confirmed: compiling `letloop review` itself succeeds, see
+`checks/letloop/store-review-static.derivation.scm`). *Running* a
+statically-linked binary that actually drives the io_uring event loop
+— `letloop review`'s TUI, `letloop http serve`, anything using
+`flow`/`flow2` — does not yet work under static linking. Tracked here,
+not chased further this pass, the same call made for `environ` above:
+a real, separate root cause, not yet found.
