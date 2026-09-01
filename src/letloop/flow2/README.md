@@ -86,13 +86,18 @@ disappear; a dead fiber is accounted for by the scope, always.
 
 Three further choices deserve justification:
 
-**Channels never park on put.** A channel is unbounded by default;
-bounding it makes an over-capacity put *raise* rather than wait.
-This is deliberately fail-fast: during development a flooded channel
-surfaces immediately as an error with a short feedback loop, instead
-of as silent memory growth (the Erlang mailbox failure mode) or as a
-producer mysteriously stalled (hidden backpressure). A consequence
-worth its own sentence: since put never waits, **put is not an
+**Channels are bounded by default, and a full put parks.** Unbounded
+is not a capacity choice; it is the decision to convert a rate
+mismatch into unbounded memory growth and discover it as an OOM hours
+later — the Erlang mailbox failure mode, and the shape of the 44GB
+incident in `(letloop flow)`'s own history. So every channel gets a
+finite bound (43) unless the call site says `#f`, and a put that finds
+the channel full waits for room.
+
+Waiting for *room* is not a rendezvous: it does not need a matching
+getter, only space. That distinction is what lets put park without
+becoming an event. A consequence worth its own sentence: since no put
+**event** is exported, **put is not an
 event** — only get composes with `flow-choice`. This deletes flow's
 same-channel-choice hazard (put and get of one channel racing in a
 single choice) by making it inexpressible.
@@ -152,7 +157,8 @@ to the nursery, and cancelling the nursery kills exactly them.
   process cannot hang. flow2's nursery join and the worker guard's
   always-a-reply rule are that guarantee in two places. The
   properties flow2 deliberately does not copy: unbounded mailboxes
-  (bounded channels raise instead), unstructured `spawn`/link/trap
+  (channels are bounded by default and put parks), unstructured
+  `spawn`/link/trap
   (nurseries instead), untrappable `exit(kill)` that skips cleanup
   (cancellation is a raise, so explicit close-on-both-paths cleanup
   runs), and restart-based supervision (in a shared heap a restart
@@ -191,7 +197,7 @@ The taxonomy, by symbol:
 |----------------|---------------------------------------------------------------|
 | `cancelled`    | the scope owning this fiber or task was cancelled             |
 | `timeout`      | a `flow-monitor` deadline expired                             |
-| `overflow`     | a put exceeded a channel's configured buffer bound            |
+| `overflow`     | a full channel with no scheduler to park on, or a re-bound below the current length |
 | `compute`      | a worker task raised; the original object is in the cause     |
 | `wrong-thread` | a main-thread-only operation was attempted on a compute thread|
 
@@ -321,14 +327,24 @@ operations (reads, timeouts, accepts) are cancelled on the ring.
 A flow2 channel is a buffered many-producer many-consumer queue, and
 the only primitive that crosses OS threads. One channel type serves
 every role: fiber-to-fiber on the main thread, worker request
-channels, response channels. Unbounded by default. When the main
+channels, response channels. Bounded by default. When the main
 thread is parked in the ring waiting for completions, a put from a
 compute thread wakes it through an eventfd registered on the ring;
 this is internal.
 
-#### `(make-flow-channel)`
+#### `(make-flow-channel [name [bound]])`
 
-Returns a fresh unbounded channel.
+Returns a fresh channel bounded at 43 values. `NAME` is any object; it
+appears in the saturation warning and in nothing else, so give it one
+you will recognise in a log. A channel created without a name still
+gets a process-unique integer, because a diagnostic that cannot say
+which channel is in trouble is barely a diagnostic. Pass `#f` as
+`BOUND` for a genuinely unbounded channel — deliberately, and visibly
+at the call site.
+
+#### `(flow-channel-name channel)`
+
+The channel's name.
 
 #### `(flow-channel? obj)`
 
@@ -336,20 +352,36 @@ Returns `#t` if `OBJ` is a channel, otherwise `#f`.
 
 #### `(flow-channel-buffer-size! channel n)`
 
-Bounds `CHANNEL` at `N` queued values; a put that would exceed the
-bound raises `overflow`. If `CHANNEL` already holds more than `N`
-values, the call itself raises `overflow` — the bound is never
-observably violated, and the mismatch surfaces at the call site that
-created it. Intended as a development and hardening tool: start
-unbounded, bound the channels the design says should stay small, and
-let violations surface as errors during testing.
+Re-bounds `CHANNEL` at `N` queued values. If `CHANNEL` already holds
+more than `N` values, the call itself raises `overflow` — the bound is
+never observably violated, and the mismatch surfaces at the call site
+that created it. Prefer passing the bound to `make-flow-channel`;
+this is for adjusting a channel you did not create.
 
 #### `(flow-put! channel obj)`
 
-Enqueues `OBJ` on `CHANNEL` and returns immediately. Never parks and
-never blocks a thread; raises `overflow` if the channel is bounded
-and full. Callable from any thread. Put is a procedure, not an
-event — see Rationale.
+Enqueues `OBJ` on `CHANNEL`. Returns immediately unless the channel is
+full, in which case it **parks until there is room** — so `flow-put!`
+is a suspension point and a cancellation point: a putter parked on a
+full channel inside a cancelled scope is woken and raises `cancelled`.
+
+Parking needs a scheduler. On a fiber it parks on the loop, on a
+compute thread on its condition variable, and with neither — a bare
+`flow-put!` outside `flow-run` — a full channel raises `overflow`
+instead, because there is nothing to park on and hanging with no
+diagnosis would be worse.
+
+The first put to park on a given channel logs one
+`(flow2 channel-full NAME BOUND)` warning through `flow-log`, re-armed
+once the queue drains to half the bound. One line per saturation
+episode, not per blocked put.
+
+Callable from any thread. Put is a procedure, not an event — see
+Rationale.
+
+**Deadlock is now expressible**, as it is with any backpressure: a
+fiber that fills a channel only it would drain waits forever. Bound
+channels according to who drains them.
 
 #### `(flow-get channel)`
 

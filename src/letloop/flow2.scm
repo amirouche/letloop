@@ -7,9 +7,11 @@
 ;; - Only the main thread touches the ring. Compute threads have no
 ;;   I/O verbs; the only cross-thread primitive is the channel, and
 ;;   channels here are buffered mutex-protected queues rather than
-;;   rendezvous — put never parks (a bounded channel raises overflow
-;;   instead), so put is a plain procedure, not an event, and flow's
-;;   same-channel-choice hazard is inexpressible.
+;;   rendezvous, and bounded by default. A put parks when the channel
+;;   is full — backpressure, not a rendezvous: it waits for room, never
+;;   for a matching getter. put nonetheless stays a plain procedure and
+;;   no put EVENT is exported, and that, not the absence of parking, is
+;;   what keeps flow's same-channel-choice hazard inexpressible here.
 ;;
 ;; - Every fiber belongs to a scope (nursery). A scope join waits for
 ;;   all children; the first child error cancels the siblings' parked
@@ -73,6 +75,10 @@
    ~check-flow2-000/log-is-nonblocking-and-drains
    ~check-flow2-000/log-flush-thread-lifecycle
    ~check-flow2-002/channel-name
+   ~check-flow2-002/default-bound-is-finite
+   ~check-flow2-002/put-parks-when-full
+   ~check-flow2-002/put-parked-on-full-is-cancellable
+   ~check-flow2-002/channel-full-warns-once
    ~check-flow2-002/losing-get-does-not-eat-a-value
    ~check-flow2-002/losing-get-leaves-no-getter
    ~check-flow2-003/nursery-join-waits-children
@@ -775,7 +781,7 @@
   (define (%base-off-loop-safe? base)
     (let ((tag (flow-data base)))
       (and (pair? tag)
-           (memq (car tag) '(flow2-get flow2-scope))
+           (memq (car tag) '(flow2-get flow2-space flow2-scope))
            #t)))
 
   (define (%flow-perform-off-loop event)
@@ -833,7 +839,8 @@
   ;; the value queue (two-stack FIFO), the parked getters and the
   ;; bound; it is held only for list surgery, never across a resume.
   (define-record-type* <flow2-channel>
-    (make-flow-channel% name mutex in out length bound getters)
+    (make-flow-channel% name mutex in out length bound getters
+                        space saturated?)
     flow-channel?
     (name    flow-channel-name)
     (mutex   flow-channel-mutex)
@@ -841,7 +848,12 @@
     (out     flow-channel-out     flow-channel-out!)
     (length  flow-channel-length  flow-channel-length!)
     (bound   flow-channel-bound   flow-channel-bound!)
-    (getters flow-channel-getters flow-channel-getters!))
+    (getters flow-channel-getters flow-channel-getters!)
+    ;; Putters parked because the channel is full, oldest first.
+    (space   flow-channel-space   flow-channel-space!)
+    ;; Edge-trigger for the saturation warning; see
+    ;; %channel-warn-saturated!.
+    (saturated? flow-channel-saturated? flow-channel-saturated?!))
 
   ;; Every channel carries a name, and one created without a name still
   ;; gets a process-unique integer rather than nothing. A diagnostic
@@ -858,10 +870,28 @@
   ;; channel diagnostics you end up reading.
   (define %flow-channel-counter (box 0))
 
+  ;; Bounded by default, because unbounded is not a capacity choice —
+  ;; it is the decision to convert a rate mismatch into unbounded
+  ;; memory growth and discover it as an OOM hours later. flow's own
+  ;; history is the argument: a channel that accumulated entries for a
+  ;; process lifetime cost 44GB before anyone could name the cause.
+  ;;
+  ;; The particular number matters far less than its being finite, and
+  ;; a full put PARKS rather than raising, so a bound set too low costs
+  ;; throughput and never correctness. Pass #f for a genuinely
+  ;; unbounded channel, deliberately and visibly at the call site.
+  (define %flow-channel-default-bound 43)
+
   (define make-flow-channel
     (case-lambda
       (() (make-flow-channel (flow-box-increment! %flow-channel-counter)))
-      ((name) (make-flow-channel% name (make-mutex) '() '() 0 #f '()))))
+      ((name) (make-flow-channel name %flow-channel-default-bound))
+      ((name bound)
+       (unless (or (not bound) (and (fixnum? bound) (fx>? bound 0)))
+         (error 'make-flow-channel
+                "bound must be a positive fixnum, or #f for unbounded"
+                bound))
+       (make-flow-channel% name (make-mutex) '() '() 0 bound '() '() #f))))
 
   ;; A parked getter: the perform's shared state box and this base's
   ;; own wrap-applying resume, plus the claimed box that gives one
@@ -895,6 +925,14 @@
        (else (loop (cdr getters) kept)))))
 
   ;; Caller holds the channel mutex.
+  (define (%channel-room? channel)
+    (let ((bound (flow-channel-bound channel)))
+      (or (not bound) (fx<? (flow-channel-length channel) bound))))
+
+  ;; Caller holds the channel mutex. Callers that dequeue must call
+  ;; %channel-wake-space! afterwards, OUTSIDE the mutex — a resume can
+  ;; run arbitrary continuation code and must never do so under a lock
+  ;; this library takes on both the loop thread and a worker.
   (define (%channel-dequeue! channel)
     (when (null? (flow-channel-out channel))
       (flow-channel-out! channel (reverse (flow-channel-in channel)))
@@ -902,7 +940,56 @@
     (let ((value (car (flow-channel-out channel))))
       (flow-channel-out! channel (cdr (flow-channel-out channel)))
       (flow-channel-length! channel (fx- (flow-channel-length channel) 1))
+      ;; Re-arm the saturation warning only once the queue has drained
+      ;; to half the bound, not on the first dequeue. Without the
+      ;; hysteresis a channel sitting AT its bound with a brisk consumer
+      ;; warns on every single item — a log flood at exactly the moment
+      ;; the log is worth reading.
+      (let ((bound (flow-channel-bound channel)))
+        (when (and (flow-channel-saturated? channel)
+                   bound
+                   (fx<=? (flow-channel-length channel) (fxdiv bound 2)))
+          (flow-channel-saturated?! channel #f)))
       value))
+
+  ;; Wake putters parked on a full channel, now that there is room.
+  ;; Called outside the mutex. A waiter whose resume reports #f synched
+  ;; on another base — a scope cancellation, say — so move to the next;
+  ;; nothing is lost either way, since a space waiter carries no value.
+  (define (%channel-wake-space! channel)
+    (let again ()
+      (let ((waiter
+             (with-mutex (flow-channel-mutex channel)
+               (and (%channel-room? channel)
+                    (let ((waiters (flow-channel-space channel)))
+                      (and (pair? waiters)
+                           (begin
+                             (flow-channel-space! channel (cdr waiters))
+                             (car waiters))))))))
+        (when waiter
+          (unless ((cdr waiter) #t)
+            (again))))))
+
+  (define (%channel-remove-space! channel waiter)
+    (with-mutex (flow-channel-mutex channel)
+      (flow-channel-space!
+       channel
+       (remq waiter (flow-channel-space channel)))))
+
+  ;; One line per saturation episode, not per blocked put. The flag is
+  ;; set here and cleared by %channel-dequeue! at the half-bound
+  ;; watermark, so a channel that stays pinned at its bound produces one
+  ;; warning, and a channel that recovers and saturates again produces a
+  ;; second — which is the signal you actually want.
+  (define (%channel-warn-saturated! channel)
+    (let ((warn?
+           (with-mutex (flow-channel-mutex channel)
+             (and (not (flow-channel-saturated? channel))
+                  (begin (flow-channel-saturated?! channel #t) #t)))))
+      (when warn?
+        (flow-log (list 'flow2 'channel-full
+                        (flow-channel-name channel)
+                        (flow-channel-bound channel))))))
 
   ;; Deliver OBJ to a parked getter, or enqueue it. FORCE? skips the
   ;; bound — the worker guard's error reply uses it, so always-a-reply
@@ -915,20 +1002,85 @@
              (with-mutex (flow-channel-mutex channel)
                (let ((getter (%channel-pop-getter! channel)))
                  (or getter
-                     (let ((bound (flow-channel-bound channel)))
-                       (when (and bound (not force?)
-                                  (fx>=? (flow-channel-length channel) bound))
-                         (raise (make-flow-error
-                                 'overflow "flow2: channel over its bound"
-                                 (list bound) #f)))
-                       (flow-channel-in!
-                        channel (cons obj (flow-channel-in channel)))
-                       (flow-channel-length!
-                        channel (fx+ (flow-channel-length channel) 1))
-                       #f))))))
-        (when entry
+                     ;; Handing a value straight to a parked getter does
+                     ;; not grow the queue, so the bound is only
+                     ;; consulted once there is nobody waiting for it.
+                     (if (and (not force?) (not (%channel-room? channel)))
+                         'full
+                         (begin
+                           (flow-channel-in!
+                            channel (cons obj (flow-channel-in channel)))
+                           (flow-channel-length!
+                            channel (fx+ (flow-channel-length channel) 1))
+                           #f)))))))
+        (cond
+         ((eq? entry 'full)
+          (%channel-await-space! channel)
+          ;; Room existed when we were woken, but another putter may
+          ;; have taken it in between, so this is a retry and not an
+          ;; assumption.
+          (try))
+         (entry
           (unless ((flow-getter-resume entry) obj)
-            (try))))))
+            (try)))
+         (else (void))))))
+
+  ;; Park until the channel has room. Parking needs a scheduler: a
+  ;; worker parks on its condition variable, a fiber parks on the loop.
+  ;; With neither — a bare flow-put! outside flow-run — there is nothing
+  ;; to park on, and pretending otherwise would hang the caller with no
+  ;; diagnosis, so that case keeps the old behaviour and raises.
+  (define (%channel-await-space! channel)
+    (%channel-warn-saturated! channel)
+    (if (or (%worker-current?)
+            (let ((loop (loop-current)))
+              (and loop (loop-running? loop))))
+        (flow-perform (%flow-space channel))
+        (raise (make-flow-error
+                'overflow
+                "flow2: channel full and no scheduler to park on"
+                (list (flow-channel-name channel)
+                      (flow-channel-bound channel))
+                #f))))
+
+  ;; "There is room in this channel." Deliberately not exported and
+  ;; never handed to a caller: flow-put! performs it internally, which
+  ;; is what lets put block without becoming an event. That distinction
+  ;; is the whole reason flow's same-channel-choice hazard stays
+  ;; inexpressible here — the hazard needs a put EVENT to compose into a
+  ;; choice, not a put that happens to suspend.
+  (define (%flow-space channel)
+    (make-flow% 'base (cons 'flow2-space channel)
+                (lambda (x) x)
+                (lambda ()
+                  (with-mutex (flow-channel-mutex channel)
+                    (and (%channel-room? channel)
+                         (lambda () #t))))
+                (lambda (state resume register-cancel!)
+                  (let ((waiter (cons state resume)))
+                    ;; Armed before the waiter is reachable, with the
+                    ;; recheck below closing the rest of the window —
+                    ;; same discipline as flow-get's getter entry, and
+                    ;; for the same reason: off-loop, resume-from
+                    ;; snapshots the cancel list at resume time.
+                    (register-cancel!
+                     (lambda () (%channel-remove-space! channel waiter)))
+                    (let ((room?
+                           (with-mutex (flow-channel-mutex channel)
+                             (or (%channel-room? channel)
+                                 (begin
+                                   (flow-channel-space!
+                                    channel
+                                    (append (flow-channel-space channel)
+                                            (list waiter)))
+                                   #f)))))
+                      (if room?
+                          ;; No value rides on this resume, so a #f
+                          ;; needs no recovery: the caller simply stays
+                          ;; committed to whichever base did win.
+                          (resume #t)
+                          (unless (eq? (unbox state) 'waiting)
+                            (%channel-remove-space! channel waiter))))))))
 
   ;; Return OBJ to CHANNEL after a getter that had already claimed and
   ;; dequeued it turned out to have synched on another base — the value
@@ -982,10 +1134,16 @@
     (make-flow% 'base (cons 'flow2-get channel)
                 (lambda (x) x)
                 (lambda ()
-                  (with-mutex (flow-channel-mutex channel)
-                    (and (fx>? (flow-channel-length channel) 0)
-                         (let ((value (%channel-dequeue! channel)))
-                           (lambda () value)))))
+                  (let ((value
+                         (with-mutex (flow-channel-mutex channel)
+                           (and (fx>? (flow-channel-length channel) 0)
+                                (list (%channel-dequeue! channel))))))
+                    (and value
+                         (begin
+                           ;; outside the mutex: a resume runs
+                           ;; continuation code
+                           (%channel-wake-space! channel)
+                           (lambda () (car value))))))
                 (lambda (state resume register-cancel!)
                   (let ((entry (make-flow-getter state resume (box #f))))
                     ;; Armed BEFORE the entry is reachable, and the
@@ -1011,6 +1169,7 @@
                                     (append (flow-channel-getters channel)
                                             (list entry)))
                                    #f)))))
+                      (when immediate (%channel-wake-space! channel))
                       (if immediate
                           ;; resume reports #f when an earlier base of
                           ;; this same perform already won — registration
@@ -1039,10 +1198,16 @@
                (let ((scope (%task-scope)))
                  (and scope (%scope-dead? scope))))
       (raise (%flow-cancelled-error)))
-    (with-mutex (flow-channel-mutex channel)
-      (if (fx>? (flow-channel-length channel) 0)
-          (%channel-dequeue! channel)
-          default)))
+    (let ((value
+           (with-mutex (flow-channel-mutex channel)
+             (and (fx>? (flow-channel-length channel) 0)
+                  (list (%channel-dequeue! channel))))))
+      (cond
+       (value
+        ;; outside the mutex: a resume runs continuation code
+        (%channel-wake-space! channel)
+        (car value))
+       (else default))))
 
   ;; Raises overflow right here when the channel already holds more
   ;; than N values: the bound is never observably violated, and the
