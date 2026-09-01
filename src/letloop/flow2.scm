@@ -140,7 +140,7 @@
   ;; Events: the Concurrent ML core, unchanged from flow
   ;;------------------------------------------------------------
 
-  (define-record-type* <flow>
+  (define-record-type* <flow2-event>
     (make-flow% type data wrap try block)
     flow?
     (type  flow-type)
@@ -311,7 +311,7 @@
   ;; channel registers its scope waiter from its own thread — of
   ;; (state . resume) pairs; children, join-waiters and subscopes are
   ;; loop-thread-only.
-  (define-record-type* <flow-scope>
+  (define-record-type* <flow2-scope>
     (make-flow-scope% parent state waiters waiter-count
                       children join-waiters subscopes)
     flow-scope?
@@ -580,7 +580,7 @@
   ;; an over-capacity put into a raised overflow. The mutex guards
   ;; the value queue (two-stack FIFO), the parked getters and the
   ;; bound; it is held only for list surgery, never across a resume.
-  (define-record-type* <flow-channel>
+  (define-record-type* <flow2-channel>
     (make-flow-channel% mutex in out length bound getters)
     flow-channel?
     (mutex   flow-channel-mutex)
@@ -599,7 +599,7 @@
   ;; discipline flow's rendezvous used; scope cancellation may still
   ;; win the underlying state CAS, which is why %channel-deliver!
   ;; rechecks resume's own return value).
-  (define-record-type* <flow-getter>
+  (define-record-type* <flow2-getter>
     (make-flow-getter state resume claimed)
     flow-getter?
     (state   flow-getter-state)
@@ -1040,7 +1040,7 @@
   ;; A task, as the framework sees it: the thunk, the response
   ;; channel the guard's error reply targets, and the scope current
   ;; at submission — what a nursery's cancellation flags.
-  (define-record-type* <flow-task>
+  (define-record-type* <flow2-task>
     (make-flow-task thunk response scope)
     flow-task?
     (thunk    flow-task-thunk)
