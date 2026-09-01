@@ -519,6 +519,43 @@
   (assert at-join)
   #t)
 
+;; Cancellation must be observable through a channel operation on
+;; EITHER thread. Both checks used to test only %worker-current?, so a
+;; main-thread fiber in a cancelled scope could keep putting and
+;; draining indefinitely as long as it never performed a suspending
+;; event -- while the identical code on a worker raised at once. The
+;; README's "channel operations check it implicitly" claimed the
+;; universal version of this.
+;;
+;; Driven through flow-scope-cancel! rather than a deadline so the
+;; scope is dead at a known point with nothing else in flight.
+(define (~check-flow2-003/cancel-is-visible-to-non-suspending-ops)
+  (define ch (make-flow-channel 'sym 8))
+  (define put-raised #f)
+  (define get-raised #f)
+  (define before-cancel #f)
+  (flow-run
+   (lambda (workers)
+     (guard (ex ((flow-error-cancelled? ex) (void)))
+       (flow-nursery
+        (lambda (scope)
+          ;; while the scope is alive both work normally
+          (flow-put! ch 'first)
+          (set! before-cancel (flow-get-try ch 'EMPTY))
+          (flow-scope-cancel! scope)
+          ;; and once it is dead, neither may pretend otherwise
+          (set! put-raised
+                (guard (ex ((flow-error-cancelled? ex) #t)) (flow-put! ch 'second) #f))
+          (set! get-raised
+                (guard (ex ((flow-error-cancelled? ex) #t)) (flow-get-try ch 'EMPTY) #f)))))
+     (flow-stop)))
+  (assert (eq? 'first before-cancel))
+  (assert put-raised)
+  (assert get-raised)
+  ;; the put that raised must not have enqueued anything
+  (assert (eq? 'EMPTY (flow-get-try ch 'EMPTY)))
+  #t)
+
 ;; A cancelled parent must not abandon its grandchildren. %scope-finish
 ;; performs the join under the PARENT scope on purpose, so an enclosing
 ;; cancellation reaches it -- but it used to raise on the spot with this

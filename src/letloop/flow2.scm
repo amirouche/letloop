@@ -101,6 +101,7 @@
    ~check-flow2-004/monitor-deadline
    ~check-flow2-005/shutdown-joins-the-worker-pool
    ~check-flow2-005/nursery-waits-for-its-compute-task
+   ~check-flow2-003/cancel-is-visible-to-non-suspending-ops
    ~check-flow2-003/cancelled-parent-drains-grandchildren
    ~check-flow2-005/worker-task-replies
    ~check-flow2-005/worker-raise-becomes-compute-error
@@ -1178,12 +1179,18 @@
        channel
        (remq entry (flow-channel-getters channel)))))
 
+  ;; A cancelled sender's sends are dropped — the raise is how it
+  ;; observes its own death at the next channel operation.
+  ;;
+  ;; flow-cancelled?, not a compute-thread test. This used to check only
+  ;; when running on a worker, so the guarantee held on one side of the
+  ;; thread boundary and not the other: a main-thread fiber in a
+  ;; cancelled scope could keep putting indefinitely as long as it never
+  ;; performed a suspending event, while the identical code on a worker
+  ;; raised at once. The README's "channel operations check it
+  ;; implicitly" reads as universal, and now is.
   (define (flow-put! channel obj)
-    (when (and (%worker-current?)
-               (let ((scope (%task-scope)))
-                 (and scope (%scope-dead? scope))))
-      ;; A cancelled task's sends are dropped — the raise is how the
-      ;; task observes its own death at the next channel operation.
+    (when (flow-cancelled?)
       (raise (%flow-cancelled-error)))
     (%channel-put! channel obj #f))
 
@@ -1254,10 +1261,12 @@
   (define (flow-get! channel)
     (flow-perform (flow-get channel)))
 
+  ;; Same symmetry as flow-put!: a non-suspending get is still a channel
+  ;; operation, and a cancelled scope must be observable through it on
+  ;; either thread. Without this a main-thread fiber could drain a
+  ;; channel for as long as it liked after its scope died.
   (define (flow-get-try channel default)
-    (when (and (%worker-current?)
-               (let ((scope (%task-scope)))
-                 (and scope (%scope-dead? scope))))
+    (when (flow-cancelled?)
       (raise (%flow-cancelled-error)))
     (let ((value
            (with-mutex (flow-channel-mutex channel)
