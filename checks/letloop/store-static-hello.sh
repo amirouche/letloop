@@ -9,7 +9,7 @@
 # ChezScheme + letloop from source inside an Alpine container, a
 # multi-minute, network-heavy operation (see CLAUDE.md's own
 # first-time-setup timing), unlike every other check under checks/.
-set -ex
+set -exo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LETLOOP="${LETLOOP:-$ROOT/local/bin/letloop}"
@@ -62,7 +62,10 @@ fi
 
 # --- Build the derivation ---
 export LETLOOP_STORE="$WORKDIR/store"
-DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/store-static-hello.derivation.scm")
+# letloop compile's own progress lines ("compiling ...", "Produced:
+# ./a.out") go to stdout too, ahead of store-build's final printed
+# store path -- only the last line is the path itself.
+DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/store-static-hello.derivation.scm" | tail -1)
 echo "store path: $DESTINATION"
 
 # --- Statically linked: no dynamic interpreter/loader ---
