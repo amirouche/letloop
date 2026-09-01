@@ -34,17 +34,48 @@
 ;; -> a host directory to bind as the build's rootfs: either one that
 ;; already exists, or the output of the derivation that builds it,
 ;; produced first through RESOLVE-DERIVATION.
-(define (resolve-build-environment-rootfs build-environment resolve-derivation)
-  (if (build-environment-derivation? build-environment)
-      (resolve-derivation (build-environment-directory build-environment))
+(define (resolve-build-environment-rootfs build-environment resolve-reference)
+  (if (or (build-environment-derivation? build-environment)
+          (build-environment-package? build-environment))
+      (resolve-reference (build-environment-directory build-environment))
       (build-environment-directory build-environment)))
+
+;; A reference is what one derivation names another by: either a path
+;; to a file, or the name of a library that carries the derivation as a
+;; value. Paths only work between derivations sitting in one checkout;
+;; a library name resolves wherever letloop's own libraries do, which
+;; is what lets a package set ship inside a release.
+(define (package-reference? reference) (pair? reference))
+
+(define (reference-derivation reference)
+  (if (package-reference? reference)
+      (derivation-parse (eval 'package (environment reference)) reference)
+      (derivation-read reference)))
+
+;; What identifies a derivation for the build cache and the session
+;; key. The printed form rather than a file's bytes, so the two kinds
+;; of reference are treated alike -- and so that editing a comment
+;; does not invalidate a build, which hashing the file did.
+(define (reference-identity reference)
+  (format #f "~s" (if (package-reference? reference)
+                      (eval 'package (environment reference))
+                      (call-with-input-file reference read))))
+
+;; The library a package name resolves to: `letloop store build blake3`
+;; means (letloop package blake3). Deliberately not (letloop store
+;; blake3) -- that namespace already holds the store's own modules, so
+;; a package named hash or fetch would collide with one of them.
+(define (package-library-name name)
+  (list 'letloop 'package (string->symbol name)))
 
 ;; A (derivation "...") reference resolves relative to the directory of
 ;; the derivation file that names it, not the invoker's cwd -- so a
 ;; chain of derivations sitting next to each other can reference
 ;; siblings by bare filename and keep working wherever it is built from.
 (define (derivation-reference-path referrer-path reference)
-  (if (char=? (string-ref reference 0) #\/)
+  (if (or (package-reference? reference)
+          (not (string? referrer-path))
+          (char=? (string-ref reference 0) #\/))
       reference
       (let loop ((index (fx- (string-length referrer-path) 1)))
         (cond
@@ -85,10 +116,13 @@
                         (shell-single-quote destination))))
     destination))
 
-(define (store-write-drv! destination derivation-path)
-  (system! (format #f "cp ~a ~a.drv"
-                    (shell-single-quote derivation-path)
-                    (shell-single-quote destination))))
+(define (store-write-drv! destination reference)
+  ;; A package carries its derivation in a library, so there is no file
+  ;; to copy; the sidecar is only for the file form.
+  (unless (package-reference? reference)
+    (system! (format #f "cp ~a ~a.drv"
+                      (shell-single-quote reference)
+                      (shell-single-quote destination)))))
 
 ;; A derivation with no script (and so no build-environment) is
 ;; fetch-only: each declared fetch lands directly in the output
@@ -140,22 +174,33 @@
   (inputs resolved-inputs)
   (named-inputs resolved-named-inputs))
 
+(define (input-reference? input)
+  (or (input-derivation-reference? input)
+      (input-package-reference? input)))
+
+;; What an input names another derivation by: a sibling file for
+;; (derivation "..."), a library name for (package ...).
+(define (input-reference input)
+  (if (input-package-reference? input)
+      (input-package-name input)
+      (input-derivation-path input)))
+
 (define (resolve-dependencies d derivation-path resolve-derivation)
   (if (not (derivation-script d))
       (make-resolved #f '() '())
       (make-resolved
        (resolve-build-environment-rootfs (derivation-build-environment d) resolve-derivation)
        (map (lambda (input)
-              (if (input-derivation-reference? input)
-                  (resolve-derivation (input-derivation-path input))
+              (if (input-reference? input)
+                  (resolve-derivation (input-reference input))
                   input))
             (derivation-inputs d))
        (map (lambda (input)
-              (let* ((reference (input-derivation-path input))
-                     (path (derivation-reference-path derivation-path reference)))
-                (cons (derivation-name (derivation-read path))
+              (let* ((reference (input-reference input))
+                     (resolved (derivation-reference-path derivation-path reference)))
+                (cons (derivation-name (reference-derivation resolved))
                       (resolve-derivation reference))))
-            (filter input-derivation-reference? (derivation-inputs d))))))
+            (filter input-reference? (derivation-inputs d))))))
 
 ;; The build's own cache key doubles as its session key: it already
 ;; hashes the derivation and everything resolved into it, which is
@@ -205,8 +250,7 @@
 
 (define (build-cache-key derivation-path resolved)
   (define hasher (make-blake3))
-  (blake3-update! hasher
-                  (call-with-port (open-file-input-port derivation-path) get-bytevector-all))
+  (blake3-update! hasher (string->utf8 (reference-identity derivation-path)))
   (blake3-update! hasher
                   (string->utf8
                    (format #f "\nrootfs ~a\n"
@@ -251,7 +295,7 @@
   (let ((memoized (assoc derivation-path (unbox built))))
     (if memoized
         (cdr memoized)
-        (let* ((d (derivation-read derivation-path))
+        (let* ((d (reference-derivation derivation-path))
                (resolve-derivation
                 (lambda (reference)
                   (store-build/resolving
@@ -295,5 +339,13 @@
         (display "Choose: build.\nAs of yet, only: letloop store build DERIVATION.scm\n")
         (exit 1))
       (case (string->symbol (car args))
-        ((build) (display (store-build (cadr args))) (newline))
+        ((build)
+         ;; A path if it names a file, otherwise a package: `letloop
+         ;; store build blake3` builds what (letloop package blake3)
+         ;; defines.
+         (let ((argument (cadr args)))
+           (display (store-build (if (file-exists? argument)
+                                     argument
+                                     (package-library-name argument))))
+           (newline)))
         (else (display "A typo? try: letloop store build DERIVATION.scm\n") (exit 1)))))

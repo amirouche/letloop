@@ -2,6 +2,7 @@
 (library (letloop store derivation)
 
   (export derivation-read
+          derivation-parse
           derivation?
 
           derivation-name
@@ -15,10 +16,13 @@
           build-environment?
           build-environment-directory?
           build-environment-derivation?
+          build-environment-package?
           build-environment-directory
 
           input-derivation-reference?
           input-derivation-path
+          input-package-reference?
+          input-package-name
 
           fetch?
           fetch-name

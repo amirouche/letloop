@@ -2,36 +2,36 @@
 # Builds the Alpine-free bootstrap chain end to end and proves the
 # result can compile a static binary:
 #
-#   1. bootstrap-toolchain    fetch-only: musl.cc's static native
+#   1. toolchain      fetch-only: musl.cc's static native
 #                              x86_64-linux-musl gcc/binutils/musl
-#   2. bootstrap-shell        fetch-only: a static BusyBox binary
-#   3. bootstrap-rootfs       assembles 1+2 into a scaffold rootfs
-#   4. bootstrap-make         GNU make, from source, via its own
+#   2. shell          fetch-only: a static BusyBox binary
+#   3. rootfs         assembles 1+2 into a scaffold rootfs
+#   4. make           GNU make, from source, via its own
 #                              build.sh (no make needed to build make)
-#   5. bootstrap-busybox      BusyBox, from source
-#   6. bootstrap-rootfs-final the rootfs downstream work should use:
+#   5. busybox        BusyBox, from source
+#   6. rootfs-final   the rootfs downstream work should use:
 #                              toolchain + 4 + 5, no prebuilt BusyBox
 #   7. a hello.c derivation built against the scaffold rootfs, with no
 #      Alpine and no host toolchain anywhere in its sandbox
-#   8. bootstrap-chezscheme  ChezScheme 10.4.1, from source
-#   9. bootstrap-liburing    liburing, from source, for its -ffi
+#   8. chezscheme     ChezScheme 10.4.1, from source
+#   9. liburing       liburing, from source, for its -ffi
 #                             archive, without which letloop links
 #                             silently without io_uring
-#   9b. bootstrap-blake3     BLAKE3, from source, without which the
+#   9b. blake3         BLAKE3, from source, without which the
 #                             letloop this builds cannot run the store
 #                             that built it -- every output is hashed
-#  10. bootstrap-letloop     letloop itself, from source, against it --
+#  10. letloop        letloop itself, from source, against it --
 #                             a statically linked, relocatable letloop
 #                             no distribution ever touched
-#  11. bootstrap-flow2       that letloop running the io_uring checks
+#  11. flow2          that letloop running the io_uring checks
 #                             for real, not merely linking them
-#  11b. bootstrap-scheme-hello  a Scheme program compiled to a
+#  11b. scheme-hello a Scheme program compiled to a
 #                             standalone static binary -- what the
 #                             store is actually for, and the only gate
 #                             that fails when just that breaks
-#  12. bootstrap-review      letloop review compiled -- the widest
+#  12. review         letloop review compiled -- the widest
 #                             dependency chain in the repo
-#  13. bootstrap-static-lib  that letloop compiling a Scheme program
+#  13. static-lib     that letloop compiling a Scheme program
 #                             against a C archive it also built --
 #                             gcc, ar, nm and ld all from this chain
 #
@@ -46,7 +46,7 @@
 # that link *and* run.
 #
 # Steps 1 and 2 are the only two prebuilt binaries the chain trusts,
-# both pinned by BLAKE3 (see each derivation's own header for the
+# both pinned by BLAKE3 (see each package library's own header for the
 # provenance and the reasoning). Step 5 is what retires the prebuilt
 # BusyBox: after it, that binary is load-bearing only for step 3's
 # assembly and for hosting steps 4 and 5 themselves, and its bytes
@@ -59,6 +59,12 @@
 # -- and this script supplies it as a fixture of symlinks into the
 # host's own /usr, /bin, /lib rather than by downloading a
 # distribution.
+#
+# Each step is named rather than pointed at a file: the definitions are
+# Scheme libraries under src/letloop/package/, so `letloop store build
+# blake3` resolves (letloop package blake3) wherever letloop's own
+# libraries are -- which is what lets the package set ship in a release
+# rather than only existing in a checkout.
 #
 # Opt-in, NOT run by `make check`: fetches ~95 MB, compiles make and
 # BusyBox from source, and needs bwrap.
@@ -84,14 +90,14 @@ done
 # The two fetched artifacts, gated on their own before anything is
 # built from them: a fetch that quietly produced the wrong thing would
 # otherwise surface as a confusing failure several derivations later.
-TOOLCHAIN_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-toolchain.derivation.scm" | tail -1)
+TOOLCHAIN_DESTINATION=$("$LETLOOP" store build toolchain | tail -1)
 echo "toolchain: $TOOLCHAIN_DESTINATION"
 test -s "$TOOLCHAIN_DESTINATION/x86_64-linux-musl-native.tgz" || {
     echo "FAIL: the toolchain tarball is missing or empty"
     exit 1
 }
 
-SHELL_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-shell.derivation.scm" | tail -1)
+SHELL_DESTINATION=$("$LETLOOP" store build shell | tail -1)
 echo "shell: $SHELL_DESTINATION"
 file "$SHELL_DESTINATION/busybox" | grep -qi 'statically linked' || {
     echo "FAIL: the fetched busybox is not statically linked"
@@ -100,9 +106,9 @@ file "$SHELL_DESTINATION/busybox" | grep -qi 'statically linked' || {
 }
 
 # Building the rootfs pulls in both fetch-only derivations through its
-# own (derivation ...) input references -- store-build resolves them
+# own (package ...) input references -- store-build resolves them
 # depth-first, so this one command runs the whole chain.
-ROOTFS_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-rootfs.derivation.scm" | tail -1)
+ROOTFS_DESTINATION=$("$LETLOOP" store build rootfs | tail -1)
 echo "bootstrap rootfs: $ROOTFS_DESTINATION"
 
 test -x "$ROOTFS_DESTINATION/bin/gcc" || {
@@ -116,8 +122,8 @@ test -e "$ROOTFS_DESTINATION/bin/sh" || {
 
 # The from-source rootfs: same shape, but assembled out of components
 # this chain compiled rather than fetched. Pulls in make and BusyBox
-# through its own (derivation ...) inputs.
-FINAL_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-rootfs-final.derivation.scm" | tail -1)
+# through its own (package ...) inputs.
+FINAL_DESTINATION=$("$LETLOOP" store build rootfs-final | tail -1)
 echo "final rootfs: $FINAL_DESTINATION"
 
 for tool in gcc make busybox sh; do
@@ -144,7 +150,7 @@ fi
 # The real milestone: a derivation whose build-environment is the
 # assembled rootfs itself, compiling C with nothing from Alpine or from
 # the host in its sandbox.
-HELLO_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-hello.derivation.scm" | tail -1)
+HELLO_DESTINATION=$("$LETLOOP" store build hello | tail -1)
 echo "hello: $HELLO_DESTINATION"
 
 # "static-pie linked" (what this gcc defaults to) and "statically
@@ -187,21 +193,21 @@ mkdir -p "$WORKDIR/letloop-src"
 # makefile's probe for it is silent when it fails, producing a letloop
 # with no io_uring symbols that looks healthy until something reaches
 # flow, flow2 or review.
-LIBURING_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-liburing.derivation.scm" | tail -1)
+LIBURING_DESTINATION=$("$LETLOOP" store build liburing | tail -1)
 echo "liburing: $LIBURING_DESTINATION"
 test -e "$LIBURING_DESTINATION/lib/liburing-ffi.a" || {
     echo "FAIL: no liburing-ffi.a, so letloop would link without io_uring"
     exit 1
 }
 
-BLAKE3_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-blake3.derivation.scm" | tail -1)
+BLAKE3_DESTINATION=$("$LETLOOP" store build blake3 | tail -1)
 echo "blake3: $BLAKE3_DESTINATION"
 test -e "$BLAKE3_DESTINATION/lib/libblake3.a" || {
     echo "FAIL: no libblake3.a, so letloop could not hash a store output"
     exit 1
 }
 
-LETLOOP_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-letloop.derivation.scm" | tail -1)
+LETLOOP_DESTINATION=$("$LETLOOP" store build letloop | tail -1)
 echo "letloop: $LETLOOP_DESTINATION"
 
 # Captured rather than piped into grep -q: -q exits on the first match,
@@ -292,7 +298,7 @@ esac
 
 # The io_uring machinery actually running, not merely linked: 58
 # checks of ring setup, submit, wait, cancel, socket and file I/O.
-FLOW2_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-flow2.derivation.scm" | tail -1)
+FLOW2_DESTINATION=$("$LETLOOP" store build flow2 | tail -1)
 echo "flow2 checks: $FLOW2_DESTINATION"
 
 FLOW2_PASSED=$(grep -c '\*\* SUCCESS' "$FLOW2_DESTINATION/result")
@@ -305,7 +311,7 @@ FLOW2_PASSED=$(grep -c '\*\* SUCCESS' "$FLOW2_DESTINATION/result")
 # binary out. bootstrap-hello above compiles C and so proves the
 # toolchain; this proves what the store is actually for. No archive, so
 # `letloop compile` takes its ordinary path and invokes no C compiler.
-SCHEME_HELLO_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-scheme-hello.derivation.scm" | tail -1)
+SCHEME_HELLO_DESTINATION=$("$LETLOOP" store build scheme-hello | tail -1)
 echo "scheme hello: $SCHEME_HELLO_DESTINATION"
 
 SCHEME_HELLO_HEADERS=$(readelf -l "$SCHEME_HELLO_DESTINATION/hello")
@@ -336,7 +342,7 @@ REPRO_FIRST=$(sha256sum "$SCHEME_HELLO_DESTINATION/hello" | cut -d' ' -f1)
 REPRO_KEY=$(grep -rl "$(basename "$SCHEME_HELLO_DESTINATION")" "$LETLOOP_STORE/.cache/" 2>/dev/null | head -1)
 rm -f "$REPRO_KEY"
 rm -rf "$SCHEME_HELLO_DESTINATION" "$SCHEME_HELLO_DESTINATION.drv"
-REPRO_AGAIN=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-scheme-hello.derivation.scm" | tail -1)
+REPRO_AGAIN=$("$LETLOOP" store build scheme-hello | tail -1)
 REPRO_SECOND=$(sha256sum "$REPRO_AGAIN/hello" | cut -d' ' -f1)
 [ "$REPRO_FIRST" = "$REPRO_SECOND" ] || {
     echo "FAIL: two builds of the same derivation differ"
@@ -354,7 +360,7 @@ echo "reproducible: rebuilt byte-identical"
 # sq and heap, all amalgamated into one program. Compile-only -- it is
 # an interactive TUI, and its io_uring machinery is covered above by
 # actually running rings rather than drawing a screen.
-REVIEW_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-review.derivation.scm" | tail -1)
+REVIEW_DESTINATION=$("$LETLOOP" store build review | tail -1)
 echo "review: $REVIEW_DESTINATION"
 
 test -s "$REVIEW_DESTINATION/letloop-review" || {
@@ -364,7 +370,7 @@ test -s "$REVIEW_DESTINATION/letloop-review" || {
 
 # --- the loop closes: that letloop compiling against a C static
 #     library, with the toolchain this chain built ---
-STATIC_LIB_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-static-lib.derivation.scm" | tail -1)
+STATIC_LIB_DESTINATION=$("$LETLOOP" store build static-lib | tail -1)
 echo "static-lib demo: $STATIC_LIB_DESTINATION"
 
 # Captured, not piped: grep -q exiting early can kill the producer with

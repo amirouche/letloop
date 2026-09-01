@@ -65,6 +65,15 @@
 (define (build-environment-derivation? environment)
   (eq? (build-environment-kind environment) 'derivation))
 
+;; (root (package (letloop package rootfs))) -- the build environment
+;; is the output of a package, named by the library that defines it
+;; rather than by a path. A path only works for derivations that sit
+;; next to each other in a checkout; a library name is resolvable from
+;; anywhere letloop's own libraries are, which is what lets the package
+;; set ship inside a release.
+(define (build-environment-package? environment)
+  (eq? (build-environment-kind environment) 'package))
+
 (define-record-type* <fetch>
   (make-fetch name url hash-algorithm hash-hex)
   fetch?
@@ -108,13 +117,15 @@
     (and build-environment
          (let* ((root (required-clause (cdr build-environment) 'root build-environment))
                 (directory (find-clause (cdr root) 'directory))
-                (derivation (find-clause (cdr root) 'derivation)))
+                (derivation (find-clause (cdr root) 'derivation))
+                (package (find-clause (cdr root) 'package)))
            (cond
             (directory (make-build-environment 'directory (cadr directory)))
             (derivation (make-build-environment 'derivation (cadr derivation)))
+            (package (make-build-environment 'package (cadr package)))
             (else
              (error 'derivation-read
-                    "root must be (directory ...) or (derivation ...)"
+                    "root must be (directory ...), (derivation ...) or (package ...)"
                     root)))))))
 
 ;; An input is either a literal store path -- a string, bind-mounted at
@@ -133,9 +144,12 @@
    ((and (pair? entry) (eq? (car entry) 'derivation) (pair? (cdr entry))
          (string? (cadr entry)))
     entry)
+   ((and (pair? entry) (eq? (car entry) 'package) (pair? (cdr entry))
+         (list? (cadr entry)))
+    entry)
    (else
     (error 'derivation-read
-           "an input must be a store path string or (derivation \"path.scm\")"
+           "an input must be a store path, (derivation \"path.scm\") or (package (letloop package name))"
            entry))))
 
 (define (parse-inputs clauses)
@@ -144,6 +158,12 @@
 
 (define (input-derivation-reference? input)
   (and (pair? input) (eq? (car input) 'derivation)))
+
+(define (input-package-reference? input)
+  (and (pair? input) (eq? (car input) 'package)))
+
+(define (input-package-name input)
+  (cadr input))
 
 (define (input-derivation-path input)
   (cadr input))
@@ -200,3 +220,8 @@
 
 (define (derivation-read path)
   (parse-derivation (call-with-input-file path read) path))
+
+;; The same reader, for a derivation that arrived as a value rather
+;; than as a file -- which is how a package library carries one.
+(define (derivation-parse sexp context)
+  (parse-derivation sexp context))

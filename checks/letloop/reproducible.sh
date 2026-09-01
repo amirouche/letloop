@@ -25,7 +25,7 @@ set -exo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LETLOOP="${LETLOOP:-$ROOT/local/bin/letloop}"
 WORKDIR=/tmp/letloop-bootstrap
-DERIVATION="$ROOT/checks/letloop/bootstrap-letloop.derivation.scm"
+DERIVATION=letloop
 
 export LETLOOP_STORE="$WORKDIR/store"
 
