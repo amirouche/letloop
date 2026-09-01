@@ -53,16 +53,9 @@ resolved on 2026-08-16 and their resolutions are specified inline (see
 `flow-stop`, `flow-channel-buffer-size!`, Compute threads, and the
 Rationale on scope tagging).
 
-Two gaps found by the 2026-08-17 adverse review are **open**, listed
-here rather than left in a report nobody reads. Each is a place where
-this document currently describes an intent the implementation does not
-fully deliver:
+One gap found by the 2026-08-17 adverse review is **open**, listed here
+rather than left in a report nobody reads:
 
-- **Shutdown does not join workers.** `flow-run` puts the stop message,
-  signals the eventfd and closes it without waiting. A worker still
-  inside a task can then find the eventfd already `#f`, or race the
-  assignment and write into a closed fd number that a later `loop-new`
-  or `socket` may have reused.
 - **Cancellation checkpoints are asymmetric.** `flow-get-try` raises
   `cancelled` on a compute thread but not on the main thread, so a
   main-thread fiber in a cancelled scope can keep draining a channel as

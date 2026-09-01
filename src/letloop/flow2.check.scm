@@ -458,6 +458,38 @@
   (assert (guard (ex (#t #t)) (flow-write 0 payload 999) #f))
   #t)
 
+;; flow-run must not return until its workers are provably gone. It
+;; used to signal the eventfd, close it, and set it to #f with workers
+;; possibly still inside a task -- so a worker reaching %flow-spawn-safe
+;; afterwards either raised "cross-thread resume with no compute pool
+;; running" from inside its own guard, or won the race and wrote eight
+;; bytes into whatever the next loop-new or socket call had since been
+;; given that fd number.
+;;
+;; The task here deliberately outlives flow-stop: it is submitted at the
+;; root scope, so no nursery join waits for it, and the only thing that
+;; can wait for it is the shutdown itself.
+(define (~check-flow2-005/shutdown-joins-the-worker-pool)
+  (define finished #f)
+  (flow-run
+   (lambda (workers)
+     (let ((worker (car workers))
+           (reply (make-flow-channel 'reply 4)))
+       (flow-submit! worker
+                     (lambda ()
+                       (sleep (make-time 'time-duration 40000000 0))
+                       (set! finished #t))
+                     reply)
+       (flow-stop)))
+   1)
+  (assert finished)
+  (assert (fxzero? %flow2-workers-live))
+  ;; closing the eventfd is only safe once they are gone, so a cleared
+  ;; handle is the evidence that the join succeeded rather than timed out
+  (assert (not %flow2-eventfd))
+  (assert (not %flow2-eventfd-buffer))
+  #t)
+
 ;; A scope owns the compute tasks submitted inside it, so its join must
 ;; wait for them. flow-submit! used to only TAG a task with the scope:
 ;; cancellation reached it, ownership did not, and a join could return

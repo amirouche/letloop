@@ -99,6 +99,7 @@
    ~check-flow2-003/waiter-on-dead-scope-is-woken
    ~check-flow2-004/monitor-in-time
    ~check-flow2-004/monitor-deadline
+   ~check-flow2-005/shutdown-joins-the-worker-pool
    ~check-flow2-005/nursery-waits-for-its-compute-task
    ~check-flow2-003/cancelled-parent-drains-grandchildren
    ~check-flow2-005/worker-task-replies
@@ -441,6 +442,25 @@
   (define %flow2-eventfd #f)
   (define %flow2-workers-running? #f)
 
+  ;; One 8-byte buffer holding the value 1, allocated with the eventfd
+  ;; and never written again, so every cross-thread wake-up is a bare
+  ;; write(2) instead of a foreign-alloc / foreign-free pair on the
+  ;; hottest path this pool has. Shared by every worker, which is safe
+  ;; precisely because nobody mutates it after this.
+  (define %flow2-eventfd-buffer #f)
+
+  ;; Worker liveness, so shutdown can join rather than hope. The count
+  ;; is guarded by the mutex rather than CAS'd because the waiter needs
+  ;; a condition variable anyway.
+  (define %flow2-workers-live 0)
+  (define %flow2-workers-mutex (make-mutex))
+  (define %flow2-workers-gone (make-condition))
+
+  (define (%flow-worker-exited!)
+    (with-mutex %flow2-workers-mutex
+      (set! %flow2-workers-live (fx- %flow2-workers-live 1))
+      (condition-broadcast %flow2-workers-gone)))
+
   (define %eventfd-create
     (let ((func (foreign-procedure __atomic __disable_interrupts __errno
                                    "eventfd" (unsigned-int int) int)))
@@ -455,12 +475,8 @@
     (let ((func (foreign-procedure __atomic __disable_interrupts __errno
                                    "write" (int void* size_t) integer-64)))
       (lambda (fd)
-        (let ((ptr (foreign-alloc 8)))
-          (foreign-set! 'unsigned-64 ptr 0 1)
-          (call-with-values (lambda () (func fd ptr 8))
-            (lambda (n errno)
-              (foreign-free ptr)
-              (>= n 0)))))))
+        (call-with-values (lambda () (func fd %flow2-eventfd-buffer 8))
+          (lambda (n errno) (>= n 0))))))
 
   (define %eventfd-close
     (let ((func (foreign-procedure __atomic __disable_interrupts __errno
@@ -468,18 +484,20 @@
       (lambda (fd) (call-with-values (lambda () (func fd)) (lambda (r e) r)))))
 
   ;; Park the collector fiber on FD until a worker signals it.
+  ;; Reads into a buffer owned by the pool rather than one allocated
+  ;; per wait. The collector parks here and, at shutdown, is simply
+  ;; never resumed -- the loop has stopped -- so a per-wait allocation
+  ;; was freed on every path except the one that always happens, and
+  ;; leaked eight bytes plus its header per flow-run.
   (define %eventfd-wait
     (lambda (fd)
-      (let ((buffer (foreign-alloc 8)))
-        (let* ((sqe (loop-get-sqe (loop-ring (loop-current))))
-               (id (loop-alloc-id!)))
-          (io-uring-prep-read sqe fd buffer 8 0)
-          (io-uring-sqe-set-data64 sqe id)
-          (let ((res (loop-abort
-                      (lambda (k)
-                        (hashtable-set! (loop-handlers (loop-current)) id k)))))
-            (foreign-free buffer)
-            res)))))
+      (let* ((sqe (loop-get-sqe (loop-ring (loop-current))))
+             (id (loop-alloc-id!)))
+        (io-uring-prep-read sqe fd %flow2-eventfd-buffer 8 0)
+        (io-uring-sqe-set-data64 sqe id)
+        (loop-abort
+         (lambda (k)
+           (hashtable-set! (loop-handlers (loop-current)) id k))))))
 
   ;; loop-spawn from the loop thread (the hot path, untouched); from
   ;; a compute thread, queue the thunk and wake the loop through the
@@ -1876,27 +1894,79 @@
                   '()
                   (begin
                     (set! %flow2-eventfd (%eventfd-create))
+                    (set! %flow2-eventfd-buffer (foreign-alloc 8))
+                    (foreign-set! 'unsigned-64 %flow2-eventfd-buffer 0 1)
                     (set! %flow2-workers-running? #t)
+                    (set! %flow2-workers-live compute-count)
                     (loop-spawn %collector)
                     (let start ((i 0) (channels '()))
                       (if (fx=? i compute-count)
                           (reverse channels)
                           (let ((channel (make-flow-channel (cons 'worker i))))
-                            (fork-thread (lambda () (%worker-body channel)))
+                            (fork-thread
+                             (lambda ()
+                               (dynamic-wind
+                                 void
+                                 (lambda () (%worker-body channel))
+                                 %flow-worker-exited!)))
                             (start (fx+ i 1) (cons channel channels)))))))))
          (loop-spawn (lambda ()
                        (set! %scope-current %root-scope)
                        (proc channels)))
          (loop-run)
          (unless (null? channels)
-           (set! %flow2-workers-running? #f)
-           (for-each (lambda (channel)
-                       (%channel-put! channel %flow-worker-stop #t))
-                     channels)
-           (%eventfd-signal! %flow2-eventfd)
-           (%eventfd-close %flow2-eventfd)
-           (set! %flow2-eventfd #f))
+           (%flow-shutdown-pool! channels))
          (void)))))
+
+  ;; Stop the pool and, crucially, WAIT before dismantling what the
+  ;; workers are still using.
+  ;;
+  ;; The old order signalled the eventfd, closed it, and set it to #f
+  ;; with workers possibly still inside a task. Two ways that goes
+  ;; wrong, both silent: a worker reaching %flow-spawn-safe afterwards
+  ;; finds the #f and raises "cross-thread resume with no compute pool
+  ;; running" from inside its own guard, or it wins the race, holds the
+  ;; old fd number, and writes eight bytes into whatever the next
+  ;; loop-new or socket call has since been given that number.
+  ;;
+  ;; So the fd is closed only once every worker has provably exited.
+  ;; Where that cannot be established -- a task parked on a channel
+  ;; nobody will ever put to, which flow-stop does not cancel because it
+  ;; is a shutdown and not a cancellation -- the eventfd is deliberately
+  ;; LEAKED and the situation logged. Leaking one descriptor is strictly
+  ;; better than handing a live writer a number the process is about to
+  ;; reuse, and the log names how many workers were still out.
+  (define %flow-shutdown-join-seconds 2.0)
+
+  (define (%flow-shutdown-pool! channels)
+    (set! %flow2-workers-running? #f)
+    (for-each (lambda (channel)
+                (%channel-put! channel %flow-worker-stop #t))
+              channels)
+    (%eventfd-signal! %flow2-eventfd)
+    (let ((deadline (+ (real-time)
+                       (exact (round (* 1000 %flow-shutdown-join-seconds))))))
+      (let ((stragglers
+             (with-mutex %flow2-workers-mutex
+               (let wait ()
+                 (cond
+                  ((fxzero? %flow2-workers-live) 0)
+                  ((>= (real-time) deadline) %flow2-workers-live)
+                  (else
+                   ;; Bounded, so a stuck worker cannot make flow-run
+                   ;; itself hang.
+                   (condition-wait %flow2-workers-gone %flow2-workers-mutex
+                                   (make-time 'time-duration 50000000 0))
+                   (wait)))))))
+        (cond
+         ((fxzero? stragglers)
+          (%eventfd-close %flow2-eventfd)
+          (foreign-free %flow2-eventfd-buffer)
+          (set! %flow2-eventfd #f)
+          (set! %flow2-eventfd-buffer #f))
+         (else
+          (flow-log (list 'flow2 'shutdown-workers-still-running stragglers))))))
+    (void))
 
   (define (flow-stop)
     (when (%worker-current?) (%flow-wrong-thread 'flow-stop))
