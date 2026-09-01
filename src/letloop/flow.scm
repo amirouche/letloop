@@ -338,13 +338,26 @@
                       ;; unsynchronized thunk list. On the loop thread
                       ;; it IS loop-spawn, so the common path is
                       ;; unchanged.
+                      ;; k is spawned FIRST so that it runs LAST:
+                      ;; loop-spawn conses, and loop-run-once walks the
+                      ;; list front to back, so the thunk queued last
+                      ;; runs first. The losers' cancels must land
+                      ;; before the resumed fiber does anything, because
+                      ;; a cancel can free a resource the fiber
+                      ;; immediately reuses — flow-accept's cancel
+                      ;; releases the multishot's single handler slot,
+                      ;; and a fiber that re-accepts before it runs gets
+                      ;; "concurrent accept on fd" instead. Still two
+                      ;; separate thunks, so a raising cancel is
+                      ;; confined by loop-apply's guard and k survives
+                      ;; it either way.
+                      (%flow-spawn-safe (lambda () (k value)))
                       (%flow-spawn-safe
                        (lambda ()
                          (for-each (lambda (pair)
                                      (unless (eq? (car pair) tag)
                                        ((cdr pair))))
                                    (unbox cancels))))
-                      (%flow-spawn-safe (lambda () (k value)))
                       #t))))
            (for-each (lambda (base)
                        ;; one fresh tag per registration — see the
