@@ -26,7 +26,8 @@
  (build-environment (root (derivation "bootstrap-rootfs-final.derivation.scm")))
  (inputs ("/tmp/letloop-bootstrap/letloop-src"
           (derivation "bootstrap-chezscheme.derivation.scm")
-          (derivation "bootstrap-liburing.derivation.scm")))
+          (derivation "bootstrap-liburing.derivation.scm")
+          (derivation "bootstrap-blake3.derivation.scm")))
  (script
   "set -e\n"
   "cp -a /tmp/letloop-bootstrap/letloop-src /build/src\n"
@@ -60,12 +61,15 @@
   ;; a letloop that cannot run flow, flow2 or review -- which is
   ;; exactly what happened the first time this derivation was written.
   ;; gcc reads both of these itself; no makefile change is needed.
-  "export LIBRARY_PATH=/build/inputs/bootstrap-liburing/lib\n"
-  "export C_INCLUDE_PATH=/build/inputs/bootstrap-liburing/include\n"
+  "export LIBRARY_PATH=/build/inputs/bootstrap-liburing/lib:/build/inputs/bootstrap-blake3/lib\n"
+  "export C_INCLUDE_PATH=/build/inputs/bootstrap-liburing/include:/build/inputs/bootstrap-blake3/include\n"
   "make letloop SCHEME=\"$SCHEME\" PREFIX=/build/out\n"
-  ;; the probe is silent either way, so check the symbols really landed
-  ;; rather than discovering it at run time
-  "nm /build/out/bin/letloop | grep -q io_uring_queue_init\n"
+  ;; both probes are silent either way, so check the symbols really
+  ;; landed rather than discovering it at run time -- blake3 in
+  ;; particular fails only once a store build wants a hash
+  "nm /build/out/bin/letloop > /build/symbols\n"
+  "grep -q io_uring_queue_init /build/symbols\n"
+  "grep -q blake3_hasher_init /build/symbols\n"
   ;; prove the letloop just built actually runs, here, rather than
   ;; leaving it to whoever picks the artifact up
   "/build/out/bin/letloop version\n")

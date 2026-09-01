@@ -72,15 +72,21 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 	  BOOT=$$(dirname $$(readlink -f $(SCHEME))); \
 	  STATIC_FLAG=""; \
 	  URING_FLAGS=""; \
+	  BLAKE3_FLAGS=""; \
 	  case "$$(cc -dumpmachine)" in \
 	    *musl*) STATIC_FLAG="-static"; \
 	      if printf 'int main(void){return 0;}\n' | \
 	         cc -x c -o /dev/null - -luring-ffi >/dev/null 2>&1; then \
 	        URING_FLAGS="-DLETLOOP_LIBURING_STATIC -luring-ffi"; \
+	      fi; \
+	      if printf 'int main(void){return 0;}\n' | \
+	         cc -x c -o /dev/null - -lblake3 >/dev/null 2>&1; then \
+	        BLAKE3_FLAGS="-DLETLOOP_BLAKE3_STATIC -lblake3"; \
 	      fi ;; \
 	  esac; \
 	  cc -I"$$BOOT" src/letloop-main.c "$$BOOT/kernel.o" \
-	     -o "$$BOOT/letloop-host" $$STATIC_FLAG $$URING_FLAGS -ldl -lm -lpthread; \
+	     -o "$$BOOT/letloop-host" $$STATIC_FLAG $$URING_FLAGS $$BLAKE3_FLAGS \
+	     -ldl -lm -lpthread; \
 	  install -m 644 a.out.boot "$$BOOT/letloop.boot"; \
 	  { cat "$$BOOT/letloop-host" a.out.boot; \
 	    n=$$(stat -c%s a.out.boot); i=0; \

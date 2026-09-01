@@ -341,6 +341,33 @@ static void letloop_register_liburing_symbols(void) {
 }
 #endif /* LETLOOP_LIBURING_STATIC */
 
+#ifdef LETLOOP_BLAKE3_STATIC
+/* BLAKE3, the one optional shared object letloop cannot treat as
+ * optional in a static build: (letloop store) hashes every output with
+ * it, so a statically linked letloop without it can compile programs
+ * but cannot run `letloop store build` -- it fails with "cannot dlopen
+ * shared object" the moment a build finishes and wants a hash. A
+ * letloop the store built that could not itself drive the store is not
+ * self-hosting.
+ *
+ * Only the three entry points (letloop blake3) resolves; the rest of
+ * the archive is reached through them. Same asm-label aliasing as the
+ * liburing block above and for the same reason -- no header is
+ * included here, so the address is all there is to take.
+ */
+#define LETLOOP_BLAKE3_SYM(name)                            \
+  do {                                                      \
+    extern void name##_letloop_alias(void) __asm__(#name);  \
+    Sforeign_symbol(#name, (void *)name##_letloop_alias);   \
+  } while (0)
+
+static void letloop_register_blake3_symbols(void) {
+  LETLOOP_BLAKE3_SYM(blake3_hasher_init);
+  LETLOOP_BLAKE3_SYM(blake3_hasher_update);
+  LETLOOP_BLAKE3_SYM(blake3_hasher_finalize);
+}
+#endif /* LETLOOP_BLAKE3_STATIC */
+
 /* Hook for symbols that are not letloop's to know about: the static
  * libraries a *user program* brings to `letloop compile`. That path
  * cannot copy the existing host -- the archives have to be linked in
@@ -415,6 +442,10 @@ static void letloop_register_foreign_symbols(void) {
 
 #ifdef LETLOOP_LIBURING_STATIC
   letloop_register_liburing_symbols();
+#endif
+
+#ifdef LETLOOP_BLAKE3_STATIC
+  letloop_register_blake3_symbols();
 #endif
 
   /* No-op unless a program brought static libraries of its own; see

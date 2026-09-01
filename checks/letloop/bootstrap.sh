@@ -17,6 +17,9 @@
 #   9. bootstrap-liburing    liburing, from source, for its -ffi
 #                             archive, without which letloop links
 #                             silently without io_uring
+#   9b. bootstrap-blake3     BLAKE3, from source, without which the
+#                             letloop this builds cannot run the store
+#                             that built it -- every output is hashed
 #  10. bootstrap-letloop     letloop itself, from source, against it --
 #                             a statically linked, relocatable letloop
 #                             no distribution ever touched
@@ -185,6 +188,13 @@ test -e "$LIBURING_DESTINATION/lib/liburing-ffi.a" || {
     exit 1
 }
 
+BLAKE3_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-blake3.derivation.scm" | tail -1)
+echo "blake3: $BLAKE3_DESTINATION"
+test -e "$BLAKE3_DESTINATION/lib/libblake3.a" || {
+    echo "FAIL: no libblake3.a, so letloop could not hash a store output"
+    exit 1
+}
+
 LETLOOP_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-letloop.derivation.scm" | tail -1)
 echo "letloop: $LETLOOP_DESTINATION"
 
@@ -195,6 +205,11 @@ LETLOOP_SYMBOLS=$(nm "$LETLOOP_DESTINATION/bin/letloop")
 case "$LETLOOP_SYMBOLS" in
     *io_uring_queue_init*) ;;
     *) echo "FAIL: the bootstrap letloop carries no io_uring symbols"
+       exit 1 ;;
+esac
+case "$LETLOOP_SYMBOLS" in
+    *blake3_hasher_init*) ;;
+    *) echo "FAIL: the bootstrap letloop carries no blake3 symbols"
        exit 1 ;;
 esac
 
@@ -231,6 +246,32 @@ EXEC_OUTPUT=$("$ELSEWHERE2/bin/letloop" exec "$ELSEWHERE2/work/" "$ELSEWHERE2/wo
     echo "FAIL: bootstrap letloop cannot run a program: $EXEC_OUTPUT"
     exit 1
 }
+
+# Self-hosting, the point of all of it: the letloop the store built,
+# running the store. Exercises blake3 statically -- without it this
+# fails at the first hash with "cannot dlopen shared object", so a
+# letloop that could compile programs but not drive the store.
+#
+# A script-only derivation deliberately: fetching would need libtls,
+# which is not in this chain, so `letloop store build` on a derivation
+# with a `fetch` clause still fails on a static build. Tracked, not
+# fixed here.
+SELFHOST=$(mktemp -d)
+trap "rm -rf $ELSEWHERE $ELSEWHERE2 $SELFHOST" EXIT
+cat > "$SELFHOST/self.derivation.scm" <<SCM
+(derivation
+ (name "self-hosted")
+ (build-environment (root (directory "$FINAL_DESTINATION")))
+ (script "set -e\n" "mkdir -p out\n" "echo self-hosted > out/marker\n")
+ (output "out"))
+SCM
+SELFHOST_OUT=$(LETLOOP_STORE="$SELFHOST/store" \
+    "$ELSEWHERE2/bin/letloop" store build "$SELFHOST/self.derivation.scm" | tail -1)
+[ "$(cat "$SELFHOST_OUT/marker")" = "self-hosted" ] || {
+    echo "FAIL: the bootstrap letloop cannot run its own store"
+    exit 1
+}
+echo "self-hosted build: $SELFHOST_OUT"
 
 # And its own package manager runs -- the subsystem that produced it.
 # Captured rather than piped: `letloop store` with no verb prints its
