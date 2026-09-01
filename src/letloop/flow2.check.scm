@@ -272,6 +272,90 @@
   (assert (eq? 'still-fine (flow-get-try ch 'EMPTY)))
   #t)
 
+;; Channels are bounded by default, because unbounded is not a capacity
+;; choice -- it is the decision to turn a rate mismatch into unbounded
+;; memory growth and meet it as an OOM hours later. #f is still
+;; available, but you have to say so at the call site.
+(define (~check-flow2-002/default-bound-is-finite)
+  (define ch (make-flow-channel))
+  (define named (make-flow-channel 'small 2))
+  (define unbounded (make-flow-channel 'big #f))
+  (assert (eqv? 43 (flow-channel-bound ch)))
+  (assert (eqv? 2 (flow-channel-bound named)))
+  (assert (not (flow-channel-bound unbounded)))
+  ;; a bad bound is a mistake at the call site, not a surprise later
+  (assert (guard (ex (#t #t)) (make-flow-channel 'bad 0) #f))
+  (assert (guard (ex (#t #t)) (make-flow-channel 'bad -1) #f))
+  #t)
+
+;; A put to a full channel parks and is resumed by the get that makes
+;; room -- the whole point of choosing park over raise. The ordering is
+;; asserted, not just the final contents: a put that "succeeded" by
+;; silently exceeding the bound would leave the same contents behind.
+(define (~check-flow2-002/put-parks-when-full)
+  (define ch (make-flow-channel 'tiny 2))
+  (define order '())
+  (flow-run
+   (lambda (workers)
+     (flow-put! ch 1)
+     (flow-put! ch 2)                    ;; at the bound
+     (flow-spawn (lambda ()
+                   (flow-put! ch 3)      ;; must park
+                   (set! order (cons 'put-3-done order))))
+     (flow-sleep 0.01)                   ;; let it park
+     (set! order (cons 'before-drain order))
+     (assert (eqv? 1 (flow-get! ch)))    ;; frees a slot, wakes the putter
+     (flow-sleep 0.01)
+     (set! order (cons 'after-drain order))
+     (flow-stop)))
+  ;; the parked put completed only AFTER the get made room
+  (assert (equal? '(after-drain put-3-done before-drain) order))
+  (assert (eqv? 2 (flow-get-try ch 'EMPTY)))
+  (assert (eqv? 3 (flow-get-try ch 'EMPTY)))
+  (assert (eq? 'EMPTY (flow-get-try ch 'EMPTY)))
+  #t)
+
+;; Parking makes flow-put! a suspension point, so it must also be a
+;; cancellation point: a fiber parked on a full channel inside a
+;; monitor has to be woken by the deadline like any other parked fiber,
+;; and its space waiter has to be unregistered on the way out.
+(define (~check-flow2-002/put-parked-on-full-is-cancellable)
+  (define ch (make-flow-channel 'full-forever 1))
+  (define outcome 'not-set)
+  (flow-run
+   (lambda (workers)
+     (flow-put! ch 'fills-it)
+     (guard (ex ((flow-error-timeout? ex) (set! outcome 'timeout)))
+       (flow-monitor 0.02 (lambda () (flow-put! ch 'never))))
+     (flow-stop)))
+  (assert (eq? outcome 'timeout))
+  ;; the cancelled putter left nothing behind
+  (assert (null? (flow-channel-space ch)))
+  (assert (eq? 'fills-it (flow-get-try ch 'EMPTY)))
+  #t)
+
+;; The saturation warning is edge-triggered: one line per episode, not
+;; one per blocked put. Three putters pile up behind the same full
+;; channel and produce exactly one warning, which names the channel --
+;; the reason channels got names at all.
+(define (~check-flow2-002/channel-full-warns-once)
+  (define ch (make-flow-channel 'saturating 2))
+  (flow-log-drain!)
+  (flow-run
+   (lambda (workers)
+     (flow-put! ch 1)
+     (flow-put! ch 2)
+     (for-each (lambda (i)
+                 (flow-spawn (lambda () (flow-put! ch (fx+ 10 i)))))
+               '(1 2 3))
+     (flow-sleep 0.02)
+     (flow-stop)))
+  (let ((warnings (filter (lambda (e) (and (pair? e) (eq? (car e) 'flow2)))
+                          (map cdr (flow-log-drain!)))))
+    (assert (= 1 (length warnings)))
+    (assert (equal? '(flow2 channel-full saturating 2) (car warnings))))
+  #t)
+
 ;;------------------------------------------------------------
 ;; Nurseries
 ;;------------------------------------------------------------
