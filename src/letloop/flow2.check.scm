@@ -171,6 +171,40 @@
   (assert (eq? 'the-value (flow-get-try ch 'EMPTY)))
   #t)
 
+;; The getter-growth half of finding 4. flow-get registered no cancel
+;; thunk, so a get that LOSES a choice left its entry on the channel's
+;; getters list, and the only reaper -- %channel-pop-getter! -- runs
+;; only from a put. A channel that is polled and never written therefore
+;; grew by one entry per poll forever, each pinning a captured
+;; continuation through its resume: structurally flow's 44GB leak, whose
+;; regression check the fork had dropped.
+;;
+;; Asserted on the list itself rather than on retained bytes, which is
+;; what the checks can see from inside the library and is exact. The
+;; bytes-per-round version, which is what an outside caller can observe,
+;; is checks/repro-flow2-getter-leak.scm: 378 bytes/round before the fix,
+;; flat after.
+(define (~check-flow2-002/losing-get-leaves-no-getter)
+  (define ch (make-flow-channel))
+  (define rounds 50)
+  (flow-run
+   (lambda (workers)
+     (let round ((i 0))
+       (when (fx<? i rounds)
+         ;; nobody ever puts to ch, so the timeout wins every round
+         (flow-perform (flow-choice (flow-get ch)
+                                    (flow-wrap (flow-timeout 0.0005)
+                                               (lambda (_) 'late))))
+         (round (fx+ i 1))))
+     (flow-stop)))
+  ;; Not "small": zero. Every one of those gets lost, and a loser must
+  ;; take its entry with it.
+  (assert (null? (flow-channel-getters ch)))
+  ;; ... and the channel still works afterwards.
+  (flow-put! ch 'still-fine)
+  (assert (eq? 'still-fine (flow-get-try ch 'EMPTY)))
+  #t)
+
 ;;------------------------------------------------------------
 ;; Nurseries
 ;;------------------------------------------------------------

@@ -67,6 +67,7 @@
    ~check-flow2-002/channel-get-try-default
    ~check-flow2-002/channel-get-or-timeout
    ~check-flow2-002/losing-get-does-not-eat-a-value
+   ~check-flow2-002/losing-get-leaves-no-getter
    ~check-flow2-003/nursery-join-waits-children
    ~check-flow2-003/nursery-child-raise-cancels-siblings
    ~check-flow2-003/nursery-scope-cancel
@@ -808,6 +809,16 @@
           (unless ((flow-getter-resume entry) obj)
             (try))))))
 
+  ;; Drop ENTRY from CHANNEL's getters list. A concurrent deliverer may
+  ;; already have popped it, in which case this is a no-op — that
+  ;; deliverer's own resume returns #f and %channel-put! retries, so no
+  ;; value rides on the race.
+  (define (%channel-remove-getter! channel entry)
+    (with-mutex (flow-channel-mutex channel)
+      (flow-channel-getters!
+       channel
+       (remq entry (flow-channel-getters channel)))))
+
   (define (flow-put! channel obj)
     (when (and (%worker-current?)
                (let ((scope (%task-scope)))
@@ -831,6 +842,18 @@
                            (lambda () value)))))
                 (lambda (state resume register-cancel!)
                   (let ((entry (make-flow-getter state resume (box #f))))
+                    ;; Armed BEFORE the entry is reachable, and the
+                    ;; recheck below closes the remaining window. Without
+                    ;; a cancel at all, a get that loses a choice leaves
+                    ;; its entry on the list forever: the only reaper is
+                    ;; %channel-pop-getter!, which runs only from a put,
+                    ;; so a channel that is polled and never written —
+                    ;; (flow-choice (flow-get ch) (flow-timeout 0.1)),
+                    ;; the ordinary idle shape — grows without bound, and
+                    ;; each dead entry pins a whole captured continuation
+                    ;; through its resume.
+                    (register-cancel!
+                     (lambda () (%channel-remove-getter! channel entry)))
                     (let ((immediate
                            (with-mutex (flow-channel-mutex channel)
                              (if (fx>? (flow-channel-length channel) 0)
@@ -842,17 +865,25 @@
                                     (append (flow-channel-getters channel)
                                             (list entry)))
                                    #f)))))
-                      ;; resume reports #f when an earlier base of this
-                      ;; same perform already won — registration is a
-                      ;; for-each with no early exit, so a base that
-                      ;; resumed inline is followed by every later
-                      ;; base's block. The value is already out of the
-                      ;; queue at that point, so put it back rather than
-                      ;; drop it. %channel-put! has made the same test
-                      ;; since day one.
-                      (when immediate
-                        (unless (resume (cdr immediate))
-                          (%channel-unget! channel (cdr immediate)))))))))
+                      (if immediate
+                          ;; resume reports #f when an earlier base of
+                          ;; this same perform already won — registration
+                          ;; is a for-each with no early exit, so a base
+                          ;; that resumed inline is followed by every
+                          ;; later base's block. The value is already out
+                          ;; of the queue at that point, so put it back
+                          ;; rather than drop it. %channel-put! has made
+                          ;; the same test since day one.
+                          (unless (resume (cdr immediate))
+                            (%channel-unget! channel (cdr immediate)))
+                          ;; The entry only became reachable just now, so
+                          ;; a winner that fired the cancels before this
+                          ;; point missed it — off-loop, resume-from
+                          ;; snapshots the cancel list at resume time.
+                          ;; Same recheck-after-publish as
+                          ;; %scope-add-waiter!.
+                          (unless (eq? (unbox state) 'waiting)
+                            (%channel-remove-getter! channel entry))))))))
 
   (define (flow-get! channel)
     (flow-perform (flow-get channel)))
