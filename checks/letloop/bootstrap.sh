@@ -14,12 +14,22 @@
 #   7. a hello.c derivation built against the scaffold rootfs, with no
 #      Alpine and no host toolchain anywhere in its sandbox
 #   8. bootstrap-chezscheme  ChezScheme 10.4.1, from source
-#   9. bootstrap-letloop     letloop itself, from source, against it --
+#   9. bootstrap-liburing    liburing, from source, for its -ffi
+#                             archive, without which letloop links
+#                             silently without io_uring
+#  10. bootstrap-letloop     letloop itself, from source, against it --
 #                             a statically linked, relocatable letloop
 #                             no distribution ever touched
-#  10. bootstrap-static-lib  that letloop compiling a Scheme program
+#  11. bootstrap-flow2       that letloop running the io_uring checks
+#                             for real, not merely linking them
+#  12. bootstrap-static-lib  that letloop compiling a Scheme program
 #                             against a C archive it also built --
 #                             gcc, ar, nm and ld all from this chain
+#
+# Every step is gated, and gated on what it is actually for: fetches on
+# their contents, rootfs assemblies on the tools they must provide,
+# compilers on a program that compiles and runs, liburing on symbols
+# that link *and* run.
 #
 # Steps 1 and 2 are the only two prebuilt binaries the chain trusts,
 # both pinned by BLAKE3 (see each derivation's own header for the
@@ -56,6 +66,24 @@ mkdir -p "$SCAFFOLD"
 for name in usr bin sbin lib lib64 etc; do
     if [ -e "/$name" ]; then ln -s "/$name" "$SCAFFOLD/$name"; fi
 done
+
+# The two fetched artifacts, gated on their own before anything is
+# built from them: a fetch that quietly produced the wrong thing would
+# otherwise surface as a confusing failure several derivations later.
+TOOLCHAIN_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-toolchain.derivation.scm" | tail -1)
+echo "toolchain: $TOOLCHAIN_DESTINATION"
+test -s "$TOOLCHAIN_DESTINATION/x86_64-linux-musl-native.tgz" || {
+    echo "FAIL: the toolchain tarball is missing or empty"
+    exit 1
+}
+
+SHELL_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-shell.derivation.scm" | tail -1)
+echo "shell: $SHELL_DESTINATION"
+file "$SHELL_DESTINATION/busybox" | grep -qi 'statically linked' || {
+    echo "FAIL: the fetched busybox is not statically linked"
+    file "$SHELL_DESTINATION/busybox"
+    exit 1
+}
 
 # Building the rootfs pulls in both fetch-only derivations through its
 # own (derivation ...) input references -- store-build resolves them
@@ -108,11 +136,15 @@ echo "hello: $HELLO_DESTINATION"
 # "static-pie linked" (what this gcc defaults to) and "statically
 # linked" are both fully static; what actually matters is that there is
 # no INTERP segment, i.e. no dynamic loader is needed to start it.
-readelf -l "$HELLO_DESTINATION/hello" | grep -qi 'interpreter' && {
-    echo "FAIL: $HELLO_DESTINATION/hello needs a dynamic loader"
-    file "$HELLO_DESTINATION/hello"
-    exit 1
-}
+# Captured, not piped: grep -q exiting early can kill the producer with
+# SIGPIPE, and under `set -o pipefail` a gate written as
+# `... | grep -q X && fail` then silently passes -- the worst failure
+# mode a check can have.
+HELLO_PROGRAM_HEADERS=$(readelf -l "$HELLO_DESTINATION/hello")
+case "$HELLO_PROGRAM_HEADERS" in
+    *interpreter*) echo "FAIL: $HELLO_DESTINATION/hello needs a dynamic loader"
+                   exit 1 ;;
+esac
 
 # Relocatability, same bar the Alpine-based smoke test holds its own
 # outputs to: run it outside the store and outside any sandbox.
@@ -135,13 +167,39 @@ rm -rf "$WORKDIR/letloop-src"
 mkdir -p "$WORKDIR/letloop-src"
 (cd "$ROOT" && git ls-files -z | tar --null -T - -cf -) | tar -xf - -C "$WORKDIR/letloop-src"
 
+# liburing, gated on the archive letloop actually links against. The
+# makefile's probe for it is silent when it fails, producing a letloop
+# with no io_uring symbols that looks healthy until something reaches
+# flow, flow2 or review.
+LIBURING_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-liburing.derivation.scm" | tail -1)
+echo "liburing: $LIBURING_DESTINATION"
+test -e "$LIBURING_DESTINATION/lib/liburing-ffi.a" || {
+    echo "FAIL: no liburing-ffi.a, so letloop would link without io_uring"
+    exit 1
+}
+
 LETLOOP_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-letloop.derivation.scm" | tail -1)
 echo "letloop: $LETLOOP_DESTINATION"
 
-readelf -l "$LETLOOP_DESTINATION/bin/letloop" | grep -qi 'interpreter' && {
-    echo "FAIL: the bootstrap letloop needs a dynamic loader"
-    exit 1
-}
+# Captured rather than piped into grep -q: -q exits on the first match,
+# nm then dies of SIGPIPE, and `set -o pipefail` reports the whole
+# pipeline as failed even though the symbol was found.
+LETLOOP_SYMBOLS=$(nm "$LETLOOP_DESTINATION/bin/letloop")
+case "$LETLOOP_SYMBOLS" in
+    *io_uring_queue_init*) ;;
+    *) echo "FAIL: the bootstrap letloop carries no io_uring symbols"
+       exit 1 ;;
+esac
+
+# Captured, not piped: grep -q exiting early can kill the producer with
+# SIGPIPE, and under `set -o pipefail` a gate written as
+# `... | grep -q X && fail` then silently passes -- the worst failure
+# mode a check can have.
+LETLOOP_PROGRAM_HEADERS=$(readelf -l "$LETLOOP_DESTINATION/bin/letloop")
+case "$LETLOOP_PROGRAM_HEADERS" in
+    *interpreter*) echo "FAIL: $LETLOOP_DESTINATION/bin/letloop needs a dynamic loader"
+                   exit 1 ;;
+esac
 
 # It has to be a working letloop, not just one that prints a version:
 # run it from a copy outside the store, on this host's own libc.
@@ -178,15 +236,31 @@ case "$STORE_USAGE" in
        exit 1 ;;
 esac
 
+# The io_uring machinery actually running, not merely linked: 58
+# checks of ring setup, submit, wait, cancel, socket and file I/O.
+FLOW2_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-flow2.derivation.scm" | tail -1)
+echo "flow2 checks: $FLOW2_DESTINATION"
+
+FLOW2_PASSED=$(grep -c '\*\* SUCCESS' "$FLOW2_DESTINATION/result")
+[ "$FLOW2_PASSED" -ge 50 ] || {
+    echo "FAIL: only $FLOW2_PASSED flow2 checks ran; expected the full suite"
+    exit 1
+}
+
 # --- the loop closes: that letloop compiling against a C static
 #     library, with the toolchain this chain built ---
 STATIC_LIB_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-static-lib.derivation.scm" | tail -1)
 echo "static-lib demo: $STATIC_LIB_DESTINATION"
 
-readelf -l "$STATIC_LIB_DESTINATION/demo" | grep -qi 'interpreter' && {
-    echo "FAIL: the static-library demo needs a dynamic loader"
-    exit 1
-}
+# Captured, not piped: grep -q exiting early can kill the producer with
+# SIGPIPE, and under `set -o pipefail` a gate written as
+# `... | grep -q X && fail` then silently passes -- the worst failure
+# mode a check can have.
+DEMO_PROGRAM_HEADERS=$(readelf -l "$STATIC_LIB_DESTINATION/demo")
+case "$DEMO_PROGRAM_HEADERS" in
+    *interpreter*) echo "FAIL: $STATIC_LIB_DESTINATION/demo needs a dynamic loader"
+                   exit 1 ;;
+esac
 
 cp "$STATIC_LIB_DESTINATION/demo" "$ELSEWHERE/demo"
 DEMO_OUTPUT=$("$ELSEWHERE/demo" | tail -1)

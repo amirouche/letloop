@@ -25,7 +25,8 @@
  (name "bootstrap-letloop")
  (build-environment (root (derivation "bootstrap-rootfs-final.derivation.scm")))
  (inputs ("/tmp/letloop-bootstrap/letloop-src"
-          (derivation "bootstrap-chezscheme.derivation.scm")))
+          (derivation "bootstrap-chezscheme.derivation.scm")
+          (derivation "bootstrap-liburing.derivation.scm")))
  (script
   "set -e\n"
   "cp -a /tmp/letloop-bootstrap/letloop-src /build/src\n"
@@ -53,7 +54,18 @@
   "cd /build/src\n"
   "export SCHEME=/build/out/bin/scheme\n"
   "\"$SCHEME\" --version\n"
+  ;; So the makefile's own probe for -luring-ffi finds it and defines
+  ;; LETLOOP_LIBURING_STATIC. Without these the probe simply fails and
+  ;; the build proceeds *silently* without any io_uring symbol, leaving
+  ;; a letloop that cannot run flow, flow2 or review -- which is
+  ;; exactly what happened the first time this derivation was written.
+  ;; gcc reads both of these itself; no makefile change is needed.
+  "export LIBRARY_PATH=/build/inputs/bootstrap-liburing/lib\n"
+  "export C_INCLUDE_PATH=/build/inputs/bootstrap-liburing/include\n"
   "make letloop SCHEME=\"$SCHEME\" PREFIX=/build/out\n"
+  ;; the probe is silent either way, so check the symbols really landed
+  ;; rather than discovering it at run time
+  "nm /build/out/bin/letloop | grep -q io_uring_queue_init\n"
   ;; prove the letloop just built actually runs, here, rather than
   ;; leaving it to whoever picks the artifact up
   "/build/out/bin/letloop version\n")
