@@ -22,9 +22,16 @@
 #                             no distribution ever touched
 #  11. bootstrap-flow2       that letloop running the io_uring checks
 #                             for real, not merely linking them
-#  12. bootstrap-static-lib  that letloop compiling a Scheme program
+#  12. bootstrap-review      letloop review compiled -- the widest
+#                             dependency chain in the repo
+#  13. bootstrap-static-lib  that letloop compiling a Scheme program
 #                             against a C archive it also built --
 #                             gcc, ar, nm and ld all from this chain
+#
+# This replaces the Alpine-based store-static-hello.sh, which
+# provisioned a distribution rootfs with `letloop root create` and
+# `apk add` before it could build anything. Every check it made is
+# covered here without one.
 #
 # Every step is gated, and gated on what it is actually for: fetches on
 # their contents, rootfs assemblies on the tools they must provide,
@@ -244,6 +251,18 @@ echo "flow2 checks: $FLOW2_DESTINATION"
 FLOW2_PASSED=$(grep -c '\*\* SUCCESS' "$FLOW2_DESTINATION/result")
 [ "$FLOW2_PASSED" -ge 50 ] || {
     echo "FAIL: only $FLOW2_PASSED flow2 checks ran; expected the full suite"
+    exit 1
+}
+
+# The widest compile in the repo: review pulls in tea/*, liburing/low,
+# sq and heap, all amalgamated into one program. Compile-only -- it is
+# an interactive TUI, and its io_uring machinery is covered above by
+# actually running rings rather than drawing a screen.
+REVIEW_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-review.derivation.scm" | tail -1)
+echo "review: $REVIEW_DESTINATION"
+
+test -s "$REVIEW_DESTINATION/letloop-review" || {
+    echo "FAIL: letloop review did not compile"
     exit 1
 }
 

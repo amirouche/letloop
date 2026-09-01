@@ -256,7 +256,10 @@ toolchain used throughout this investigation:
   the static Alpine sandbox and produces a static `a.out`.
 - The full `letloop store build store-static-hello.derivation.scm`
   pipeline (not just the manual steps above) ran end to end and
-  produced a statically linked `hello` binary in the store.
+  produced a statically linked `hello` binary in the store. (That
+  derivation and its Alpine-provisioned rootfs were later replaced by
+  the bootstrap chain above; the account here is kept as the record of
+  how the static-linking work was originally verified.)
 - **Relocatability, the actual goal**: that binary was copied out of
   the store to this session's Ubuntu/glibc host and run directly —
   `hello, letloop store`, exit 0 — with zero dependency on the Alpine
@@ -361,11 +364,15 @@ anything in this session's static-linking path (`letloop desktop`
 needs Vulkan/DRM, out of scope per this file's own non-goals), but the
 identical latent bug if either is ever built statically.
 
-**Verified**: `letloop check src/ src/letloop/flow2.scm` — 58 checks,
-real io_uring ring setup/submit/wait/cancel plus socket and file I/O —
+**Verified**: `letloop check src/ src/letloop/flow2.scm` — real
+io_uring ring setup/submit/wait/cancel plus socket and file I/O —
 passes cleanly on the static build
-(`checks/letloop/store-flow2-static.derivation.scm`, wired into
-`checks/letloop/store-static-hello.sh`). `letloop review` still
-compiles statically as before
-(`checks/letloop/store-review-static.derivation.scm`) but is not run
-there — it is an interactive TUI needing a real terminal, not a gap.
+(`checks/letloop/bootstrap-flow2.derivation.scm`). `letloop review`
+compiles statically too (`checks/letloop/bootstrap-review.derivation.scm`)
+but is not run there — it is an interactive TUI needing a real
+terminal, not a gap.
+
+Both checks were originally written against an Alpine-provisioned
+rootfs, in `store-flow2-static` / `store-review-static`, driven by
+`store-static-hello.sh`. Those are gone; the bootstrap chain covers
+every check they made without a distribution.
