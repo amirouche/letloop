@@ -458,6 +458,35 @@
   (assert (guard (ex (#t #t)) (flow-write 0 payload 999) #f))
   #t)
 
+;; A scope owns the compute tasks submitted inside it, so its join must
+;; wait for them. flow-submit! used to only TAG a task with the scope:
+;; cancellation reached it, ownership did not, and a join could return
+;; while a scope-tagged task was still running on a worker -- and that
+;; task could still put to a channel afterwards.
+;;
+;; The worker sleeps on its own OS thread, so "did the join wait" is
+;; decided by real elapsed time and not by loop scheduling order.
+(define (~check-flow2-005/nursery-waits-for-its-compute-task)
+  (define finished #f)
+  (define at-join #f)
+  (flow-run
+   (lambda (workers)
+     (let ((worker (car workers))
+           (reply (make-flow-channel 'reply 4)))
+       (flow-nursery
+        (lambda (scope)
+          (flow-submit! worker
+                        (lambda ()
+                          (sleep (make-time 'time-duration 50000000 0))
+                          (set! finished #t))
+                        reply)))
+       ;; sampled the instant the nursery returned
+       (set! at-join finished)
+       (flow-stop)))
+   1)
+  (assert at-join)
+  #t)
+
 ;;------------------------------------------------------------
 ;; Nurseries
 ;;------------------------------------------------------------
