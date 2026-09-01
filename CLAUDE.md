@@ -98,7 +98,6 @@ src/letloop/base.scm         Main entry point: letloop-main, letloop-compile, le
                             discovery, and compilation
 src/letloop/cli/base.scm     Argument parser — cli-read / cli-write, parses flags,
                             positional args, and extra args (after --)
-src/letloop/root/base.scm    Isolated execution environments (container-like sandboxes)
 src/letloop/r999.scm         define-record-type* macro (extended record types)
 src/letloop/sq.scm           Priority queue (sq-new, sq-add!, sq-min, sq-split)
 src/letloop/match.scm        Pattern matching (SRFI 241)
@@ -127,7 +126,7 @@ $PREFIX/lib/letloop/obj/<optimize-level>/**       their .so and .wpo, per level
 
 **`letloop compile` output is self-contained: `a.out` alone is the deliverable.** The boot image is appended to the executable itself (same host+boot+trailer shape as the letloop binary above), so the `a.out.boot` sibling it also writes is NOT needed at run time — deploy just the executable; do not copy the `.boot` file alongside it.
 
-**`(letloop base)` imports nothing from letloop, on purpose.** It resolves `cli-read`, `transparent`, `letloop-root` and `letloop-review` at first use through `lazy` / `letloop-library-path!`, against the sources installed at `$PREFIX/lib/letloop`. Two reasons, and both bite hard if someone adds an import back:
+**`(letloop base)` imports nothing from letloop, on purpose.** It resolves `cli-read`, `transparent`, `letloop-store` and `letloop-review` at first use through `lazy` / `letloop-library-path!`, against the sources installed at `$PREFIX/lib/letloop`. Two reasons, and both bite hard if someone adds an import back:
 
 - A library imported by `(letloop base)` gets folded into the amalgamated letloop program, and a folded library is **invisible** — its name then blocks *user* programs from importing that same library. `(environment '(letloop match))` fails with "attempt to import invisible library" even with the source on the path.
 - Loading letloop's libraries at startup costs **36 ms**. letloop starts in 35.06 ms against a bare Chez floor of 33.04 ms; before this it was 69.6 ms.
@@ -180,9 +179,6 @@ letloop check [--fail-fast] [DIRECTORY ...] LIBRARY.SCM ...
 letloop compile [DIRECTORY ...] LIBRARY.SCM PROCEDURE
 letloop exec [DIRECTORY ...] LIBRARY.SCM PROCEDURE [-- ARGUMENT ...]
 letloop repl
-letloop root available
-letloop root create DISTRIBUTION VERSION MACHINE DIRECTORY
-letloop root exec DIRECTORY TARGET-DIRECTORY -- COMMAND ...
 ```
 
 Key flags: `--dev` (debug/profile), `--optimize-level=0-3`, `--disable-garbage-collector`, `--visible-libraries` (do not amalgamate).

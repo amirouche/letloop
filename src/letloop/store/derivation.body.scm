@@ -2,7 +2,7 @@
 ;;
 ;;   (derivation
 ;;     (name "hello-c")
-;;     (build-environment (root (distribution "alpine") (version "3.20") (machine "amd64")))
+;;     (build-environment (root (derivation "toolchain.derivation.scm")))
 ;;     (inputs ("/store/aaa-some-input"))
 ;;     (fetch (hello-src (url "https://example.org/hello-1.0.0.tar.gz")
 ;;                        (hash (blake3 "..."))))
@@ -10,14 +10,20 @@
 ;;     (output "out")
 ;;     (expected-output-hash (blake3 "...")))
 ;;
-;; build-environment's root is one of: (distribution ...) (version ...)
-;; (machine ...), naming a rootfs `letloop root create` can fetch; a
-;; (directory ...) pointing straight at an already-provisioned rootfs;
-;; or (derivation "path.scm"), another derivation whose own output is
-;; the rootfs, built first. That last form -- also accepted in place of
-;; any literal store path in `inputs` -- is what makes a chain of
-;; derivations possible at all, e.g. a toolchain fetch feeding a rootfs
-;; assembly feeding everything built against it.
+;; build-environment's root is either a (directory ...) pointing at an
+;; already-provisioned rootfs, or (derivation "path.scm"), another
+;; derivation whose own output is the rootfs, built first. That second
+;; form -- also accepted in place of any literal store path in
+;; `inputs` -- is what makes a chain of derivations possible at all,
+;; e.g. a toolchain fetch feeding a rootfs assembly feeding everything
+;; built against it.
+;;
+;; There used to be a third form, (distribution ...) (version ...)
+;; (machine ...), which downloaded a distribution image through
+;; `letloop root create`. Both it and `letloop root` are gone: the
+;; store builds its own environments now, and a chain that starts from
+;; a hash-pinned toolchain is the point of the exercise -- see
+;; checks/letloop/bootstrap*.derivation.scm.
 ;;
 ;; build-environment and script are both optional, but only together: a
 ;; derivation with neither is fetch-only -- its declared fetches are
@@ -42,26 +48,20 @@
   (output derivation-output)
   (expected-output-hash derivation-expected-output-hash))
 
+;; Both kinds carry a path in the same slot -- either kind ends up
+;; being "a host directory to bind as the rootfs", they differ only in
+;; whether store-build has to produce it first.
 (define-record-type* <build-environment>
-  (make-build-environment kind distribution version machine directory)
+  (make-build-environment kind directory)
   build-environment?
   (kind build-environment-kind)
-  (distribution build-environment-distribution)
-  (version build-environment-version)
-  (machine build-environment-machine)
   (directory build-environment-directory))
-
-(define (build-environment-rootfs? environment)
-  (eq? (build-environment-kind environment) 'rootfs))
 
 (define (build-environment-directory? environment)
   (eq? (build-environment-kind environment) 'directory))
 
 ;; (root (derivation "path.scm")) -- the build environment is another
-;; derivation's own output, built first. The referenced path is carried
-;; in the same slot as a plain directory: both end up being "a host
-;; directory to bind as the rootfs", they just differ in whether
-;; store-build has to produce it first.
+;; derivation's own output, built first.
 (define (build-environment-derivation? environment)
   (eq? (build-environment-kind environment) 'derivation))
 
@@ -108,20 +108,13 @@
     (and build-environment
          (let* ((root (required-clause (cdr build-environment) 'root build-environment))
                 (directory (find-clause (cdr root) 'directory))
-                (distribution (find-clause (cdr root) 'distribution))
                 (derivation (find-clause (cdr root) 'derivation)))
            (cond
-            (directory
-             (make-build-environment 'directory #f #f #f (cadr directory)))
-            (derivation
-             (make-build-environment 'derivation #f #f #f (cadr derivation)))
-            (distribution
-             (let ((version (required-clause (cdr root) 'version root))
-                   (machine (required-clause (cdr root) 'machine root)))
-               (make-build-environment 'rootfs (cadr distribution) (cadr version) (cadr machine) #f)))
+            (directory (make-build-environment 'directory (cadr directory)))
+            (derivation (make-build-environment 'derivation (cadr derivation)))
             (else
              (error 'derivation-read
-                    "root must be (distribution ...), (directory ...) or (derivation ...)"
+                    "root must be (directory ...) or (derivation ...)"
                     root)))))))
 
 ;; An input is either a literal store path -- a string, bind-mounted at

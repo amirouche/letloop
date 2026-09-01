@@ -726,7 +726,6 @@
 
   (define cli-read (lazy '(letloop cli base) 'cli-read))
   (define transparent (lazy '(letloop http server) 'transparent))
-  (define letloop-root (lazy '(letloop root) 'letloop-root))
   (define letloop-store (lazy '(letloop store) 'letloop-store))
   (define letloop-review (lazy '(letloop review) 'letloop-review))
 
@@ -1763,7 +1762,6 @@
         ((exec) (letloop-exec (cdr args)))
         ((http) (letloop-http (cdr args)))
         ((repl) (letloop-repl (cdr args)))
-        ((root) (letloop-root (cdr args)))
         ((store) (letloop-store (cdr args)))
         ;; ((desktop) (letloop-desktop (cdr args)))
         ((review) (letloop-review (cdr args)))

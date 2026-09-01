@@ -69,9 +69,6 @@ letloop exec [DIRECTORY ...] LIBRARY.SCM PROCEDURE [-- ARGUMENT ...]
 letloop http serve [--port=PORT] [DIRECTORY ...] LIBRARY.SCM
 letloop repl
 letloop review [DIRECTORY ...]
-letloop root available
-letloop root create DISTRIBUTION VERSION MACHINE DIRECTORY
-letloop root exec DIRECTORY TARGET-DIRECTORY -- COMMAND ...
 ```
 
 - **check** — discovers and runs `~check-*` procedures exported by
@@ -167,7 +164,6 @@ Key flags: `--dev` (debug, profile, instruction counts),
 | Library | Description |
 | --- | --- |
 | `(letloop cffi)` | C FFI helpers: lazy `dlopen` on first call, locking, errno |
-| `(letloop root)` | Isolated execution environments (the `letloop root` subcommand) |
 | `(letloop desktop ...)` | Experimental Vulkan + DRM/KMS seat management — not wired into the v12 CLI |
 
 ## Testing

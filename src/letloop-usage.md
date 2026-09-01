@@ -7,9 +7,6 @@ Usage:
   letloop exec [DIRECTORY ...] LIBRARY.SCM PROCEDURE [-- ARGUMENT ...]
   letloop http serve [--port=PORT] [DIRECTORY ...] LIBRARY.SCM
   letloop repl
-  letloop root available
-  letloop root create DISTRIBUTION VERSION MACHINE DIRECTORY
-  letloop root exec DIRECTORY TARGET-DIRECTORY -- COMMAND ...
   letloop store build DERIVATION.scm
   letloop review [DIRECTORY ...]
 

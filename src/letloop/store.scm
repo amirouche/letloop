@@ -15,7 +15,6 @@
           ~check-store-006/build-cache-sees-changed-inputs)
 
   (import (chezscheme)
-          (letloop root)
           (letloop store derivation)
           (letloop store hash)
           (letloop store sandbox)

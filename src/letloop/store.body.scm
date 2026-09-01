@@ -19,36 +19,19 @@
   (or (getenv "LETLOOP_STORE")
       (string-append (getenv "HOME") "/.letloop/store")))
 
-(define (store-roots-directory)
-  (string-append (store-directory) "/.roots"))
-
 (define (store-tmp-directory)
   (string-append (store-directory) "/.tmp"))
 
 (define (store-path hash name)
   (string-append (store-directory) "/" hash "-" name))
 
-;; -> a host directory holding the build-environment's toolchain
-;; rootfs, downloading and caching it under .roots/ first if the
-;; derivation named a distribution rather than an already-provisioned
-;; directory. A (derivation "path.scm") root is built first, through
-;; RESOLVE-DERIVATION, and its own store output used as the rootfs.
+;; -> a host directory to bind as the build's rootfs: either one that
+;; already exists, or the output of the derivation that builds it,
+;; produced first through RESOLVE-DERIVATION.
 (define (resolve-build-environment-rootfs build-environment resolve-derivation)
-  (cond
-   ((build-environment-directory? build-environment)
-    (build-environment-directory build-environment))
-   ((build-environment-derivation? build-environment)
-    (resolve-derivation (build-environment-directory build-environment)))
-   (else
-    (let* ((distribution (build-environment-distribution build-environment))
-           (version (build-environment-version build-environment))
-           (machine (build-environment-machine build-environment))
-           (cache-directory (string-append (store-roots-directory) "/"
-                                            distribution "-" version "-" machine)))
-      (unless (file-exists? cache-directory)
-        (system! (format #f "mkdir -p ~a" (shell-single-quote cache-directory)))
-        (root-create distribution version machine cache-directory))
-      cache-directory))))
+  (if (build-environment-derivation? build-environment)
+      (resolve-derivation (build-environment-directory build-environment))
+      (build-environment-directory build-environment)))
 
 ;; A (derivation "...") reference resolves relative to the directory of
 ;; the derivation file that names it, not the invoker's cwd -- so a

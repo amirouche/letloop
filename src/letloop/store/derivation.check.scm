@@ -10,7 +10,7 @@
      path
      '(derivation
        (name "hello-c")
-       (build-environment (root (distribution "alpine") (version "3.20") (machine "amd64")))
+       (build-environment (root (derivation "toolchain.derivation.scm")))
        (inputs ("/store/aaa-input"))
        (fetch (hello-src (url "https://example.org/hello.tar.gz")
                           (hash (blake3 "ab12"))))
@@ -22,10 +22,9 @@
            (fetch (car (derivation-fetches d))))
       (and (derivation? d)
            (string=? (derivation-name d) "hello-c")
-           (build-environment-rootfs? build-environment)
-           (string=? (build-environment-distribution build-environment) "alpine")
-           (string=? (build-environment-version build-environment) "3.20")
-           (string=? (build-environment-machine build-environment) "amd64")
+           (build-environment-derivation? build-environment)
+           (string=? (build-environment-directory build-environment)
+                     "toolchain.derivation.scm")
            (equal? (derivation-inputs d) '("/store/aaa-input"))
            (= (length (derivation-fetches d)) 1)
            (string=? (fetch-name fetch) "hello-src")
