@@ -336,7 +336,7 @@
    SYNC-FILE-RANGE-WRITE-AND-WAIT
 
    ;; C stdlib + FFI helpers
-   stdlib bytevector-pointer with-lock strerror pointer->string memcpy
+   bytevector-pointer with-lock strerror pointer->string memcpy
 
    ;; socket constants
    AF-INET SOCK-STREAM F-GETFL F-SETFL O-NONBLOCK POLLIN POLLOUT
@@ -1740,11 +1740,26 @@
   ;; C stdlib + FFI helpers
   ;;------------------------------------------------------------
 
-  (define stdlib (load-shared-object #f))
-
   ;; with-lock, bytevector-pointer, strerror are imported from
   ;; (letloop cffi) and re-exported, so importing both libraries
   ;; unrestricted stays legal (same binding, no collision).
+  ;;
+  ;; This file's own eager `(foreign-procedure "name" ...)` calls
+  ;; below (%strlen, memcpy, fcntl, socket, ...) rely on the process
+  ;; already having dlopen'd itself (or having every symbol they need
+  ;; pre-registered) by the time this library's body runs -- exactly
+  ;; the "one eager call unlocks everything else" side effect
+  ;; cffi.scm's ensure-self-loaded! documents. Importing with-lock /
+  ;; bytevector-pointer / strerror above as values (not just syntax)
+  ;; already forces (letloop cffi)'s own body -- and its
+  ;; ensure-self-loaded! call -- to run first, per R6RS import
+  ;; ordering. An earlier version of this file additionally called
+  ;; (load-shared-object #f) directly here, unconditionally: that
+  ;; bypassed the probe entirely and crashed immediately on library
+  ;; instantiation under static musl, where dlopen(NULL) is unsafe --
+  ;; the exact bug ensure-self-loaded! exists to avoid. The resulting
+  ;; binding (`stdlib`) was never even used elsewhere in this file;
+  ;; removed rather than reharnessed.
 
   (define %strlen (foreign-procedure "strlen" (void*) size_t))
 

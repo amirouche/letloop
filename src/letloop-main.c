@@ -32,13 +32,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
-#ifdef LETLOOP_LIBURING_STATIC
-#include <liburing.h>
-#endif
 
 #include "scheme.h"
 
@@ -86,28 +84,53 @@ static int letloop_self_dlopen_safe(void) {
 #ifdef LETLOOP_LIBURING_STATIC
 /* liburing's own "-ffi" build variant exists because liburing.h leans
  * heavily on `static inline` functions (io_uring_prep_*, the sqe/cqe
- * accessors) for performance -- those have no linkable symbol at all
- * in the normal case, they get compiled directly into each C caller.
- * "-ffi" is upstream liburing's own answer for non-C consumers:
- * real, non-inline, exported versions of the same functions, meant to
- * be dlopen'd (liburing-ffi.so) or linked (liburing-ffi.a) by a
- * runtime that cannot #include a C header. Alpine's liburing-dev
- * package ships both.
+ * accessors, io_uring_cq_advance, ...) -- several of those
+ * (io_uring_cq_advance, io_uring_cqe_seen, the ring-index bookkeeping
+ * in general) internally call the barrier primitives in
+ * liburing/barrier.h (io_uring_smp_load_acquire /
+ * io_uring_smp_store_release), which enforce the ordering the kernel
+ * relies on between userspace and the SQ/CQ ring's shared memory.
+ * liburing ships a dedicated ffi.c to get real, addressable symbols
+ * for these, compiled with IOURINGINLINE defined empty so every
+ * IOURINGINLINE-guarded function in the header becomes an ordinary,
+ * externally-linked definition instead of `static inline`; Alpine's
+ * liburing-ffi.a is exactly that object file, pre-built by upstream.
  *
- * That dlopen path is exactly what does not work here (see the big
- * comment above): confirmed empirically against a real static build,
- * dlopen("liburing-ffi.so.2", RTLD_NOW) fails with musl's own
- * "Dynamic loading not supported" -- a stronger limitation than the
- * dlopen(NULL, ...) case, this is *any* dlopen, named or not, on this
- * static libc. So this links the plain, non-ffi liburing.a instead
- * (LETLOOP_LIBURING_STATIC pairs with -luring in the makefile) and
- * takes each function's address directly in C. This works uniformly
- * whether the symbol is one of liburing.a's real, non-inline ones
- * (queue_init, submit, register, setup, enter, ...) or one that is
- * `static inline` in the header: taking its address here just forces
- * the compiler to materialize a local copy in this translation unit,
- * with the exact same behavior as liburing-ffi's exported one, and no
- * link-time conflict (the materialized copy keeps static linkage).
+ * An earlier version of this file took each `static inline`
+ * function's address directly (default liburing.h, no IOURINGINLINE
+ * override), reasoning that address-taking forces the compiler to
+ * materialize an equivalent out-of-line copy in this translation
+ * unit. That is a *different* compiled instantiation of the barrier
+ * code than the one upstream ships and tests -- not provably wrong,
+ * but a real, unresolved gap during (letloop liburing low)'s
+ * still-uninvestigated runtime crash. A later attempt to close that
+ * gap by defining IOURINGINLINE here directly (so this file compiles
+ * the exact same real definitions liburing-ffi.c does) failed at
+ * link time instead: liburing.a's own queue.ol already carries real,
+ * non-inline definitions of a handful of these names (io_uring_get_sqe,
+ * io_uring_get_events -- kept for ABI back-compat from before they
+ * became header-only), and duplicating them here collides with
+ * -luring ("multiple definition of io_uring_get_sqe").
+ *
+ * The fix that actually avoids both problems: reference the
+ * pre-built liburing-ffi.a symbols directly, under a distinct local C
+ * name aliased to the real linker symbol via GCC's asm-label
+ * extension, so this translation unit never defines or re-inlines
+ * any of these functions itself -- it only takes the address the
+ * archive already provides, identical to what a dynamic FFI consumer
+ * would dlopen. No liburing.h inclusion is needed for this: only a
+ * matching symbol name, resolved by the linker.
+ *
+ * The dlopen path (liburing-ffi.so) is what does not work here
+ * (see the big comment above): confirmed empirically against a real
+ * static build, dlopen("liburing-ffi.so.2", RTLD_NOW) fails with
+ * musl's own "Dynamic loading not supported" -- a stronger limitation
+ * than the dlopen(NULL, ...) case, this is *any* dlopen, named or
+ * not, on this static libc. So liburing-ffi.a is linked statically
+ * instead (LETLOOP_LIBURING_STATIC pairs with -luring-ffi in the
+ * makefile, replacing plain -luring: liburing-ffi.a is a strict
+ * superset -- setup.ol, queue.ol, register.ol, syscall.ol, version.ol,
+ * plus ffi.ol -- so nothing else needs to change).
  *
  * The list is every io_uring_* symbol src/letloop/liburing/low.scm
  * resolves via lazy-foreign-procedure, mechanically extracted, minus
@@ -116,7 +139,11 @@ static int letloop_self_dlopen_safe(void) {
  * on any build using this liburing version, static or dynamic; this
  * does not change that.
  */
-#define LETLOOP_URING_SYM(name) Sforeign_symbol(#name, (void *)name)
+#define LETLOOP_URING_SYM(name) \
+  do { \
+    extern void name##_letloop_ffi_stub(void) __asm__(#name); \
+    Sforeign_symbol(#name, (void *)name##_letloop_ffi_stub); \
+  } while (0)
 
 static void letloop_register_liburing_symbols(void) {
   LETLOOP_URING_SYM(io_uring_buf_ring_add);
@@ -310,8 +337,17 @@ static void letloop_register_foreign_symbols(void) {
   Sforeign_symbol("socket", (void *)socket);
   Sforeign_symbol("connect", (void *)connect);
   Sforeign_symbol("setsockopt", (void *)setsockopt);
+  Sforeign_symbol("getsockopt", (void *)getsockopt);
+  Sforeign_symbol("bind", (void *)bind);
+  Sforeign_symbol("listen", (void *)listen);
+  Sforeign_symbol("getpeername", (void *)getpeername);
   Sforeign_symbol("close", (void *)close);
   Sforeign_symbol("execve", (void *)execve);
+  Sforeign_symbol("strlen", (void *)strlen);
+  Sforeign_symbol("memcpy", (void *)memcpy);
+  Sforeign_symbol("fcntl", (void *)fcntl);
+  Sforeign_symbol("eventfd", (void *)eventfd);
+  Sforeign_symbol("write", (void *)write);
   /* Deliberately NOT registering "environ": doing so broke
    * environment-variables (letloop/environment.scm) even on an
    * ordinary dynamic build, reproducibly, with an otherwise
