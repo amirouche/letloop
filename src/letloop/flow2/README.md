@@ -1,0 +1,672 @@
+# Fibers, channels, and nurseries over io_uring
+
+Library name: `(letloop flow2)`
+
+## Author
+
+Amirouche A. BOUBEKKI
+
+## Status
+
+This document is a **draft** design specification; the library does
+not exist yet. `(letloop flow2)` is a fork of `(letloop flow)`, which
+stays untouched and keeps serving its current consumers while flow2
+is built. Decisions herein were resolved on 2026-08-14; the
+motivating failures are documented in `TODO.md` (sections "monitored
+trees with automatic timeout-and-cancel" and
+"flow-block-and-wait-off-loop registers ring events from the worker
+thread").
+
+## Abstract
+
+flow2 is a concurrency library for the letloop runtime built on three
+primitives: **fibers** (cooperative lightweight threads multiplexed on
+one OS thread that owns an io_uring), **channels** (buffered,
+many-producer many-consumer queues, the only mechanism that crosses OS
+threads), and **nurseries** (structured-concurrency scopes that own
+every fiber and I/O operation spawned in their dynamic extent, and
+cancel all of it on error, timeout, or request).
+
+The main thread is the only thread that touches the io_uring.
+Compute threads run user thunks submitted over channels and have no
+I/O verbs of their own: a compute task that needs I/O sends messages
+in a user-defined protocol over a response channel, and the fiber
+that submitted the task performs the I/O on its behalf.
+
+Errors are plain records of one type, `<flow-error>`, dispatched by
+symbol — not R6RS conditions.
+
+## Issues
+
+None open. The four issues raised by the first draft — whether the
+framework's error reply respects the response channel's buffer bound,
+a `stopped` error symbol for `flow-stop`, shrinking a bound below the
+current queue length, and wholesale `flow-scope-attach!` of a worker
+channel — were resolved on 2026-08-16 and their resolutions are
+specified inline (see `flow-stop`, `flow-channel-buffer-size!`,
+Compute threads, and the Rationale on scope tagging).
+
+## Rationale
+
+flow2 exists because two architectural decisions in `(letloop flow)`
+produced whole classes of bugs that discipline could not contain:
+
+**A ring shared across threads.** flow lets worker threads register
+events themselves; anything that preps an SQE (`flow-timeout`,
+`flow-read`, ...) from a worker mutates loop-thread-only state.
+Nothing fails at the call site — the ring corrupts and the process
+dies later, somewhere unrelated. A production server died with
+`nonrecoverable invalid memory reference` under ~20 concurrent
+requests and hung for 25 minutes on another occasion; worker mode has
+been forced off there since. The correct usage rule ("wrap the INNER
+client in `flow-worker-io`, not the outer function") existed, was
+documented, and was still violated in practice — a rule that must be
+remembered at every call site is not a design.
+
+flow2's answer is structural: **only the main thread owns the ring**,
+and the only thing another thread can do is put a value on a channel.
+There is no API through which a compute thread can reach the loop's
+state, so the bug class cannot be written.
+
+**Unstructured spawn.** flow's `flow-spawn` creates a fiber nobody
+owns. A fan-out that spawns one fiber per sub-query and then counts N
+reply messages hangs forever if any fiber dies without replying —
+which is exactly what happened: an unguarded raise in a fetch fiber
+under connection flood leaked ~10 GB in minutes. The workaround
+(guard every fiber so a raise still sends SOMETHING) is the Erlang
+lesson relearned: a death notification must be the runtime's
+unconditional guarantee, not a convention each call site
+reimplements.
+
+flow2's answer is the **nursery**: every fiber is spawned inside a
+scope, the scope does not join until every child has returned or
+raised, a child's raise cancels its siblings (and their in-flight
+I/O) and re-raises at the join. The counting loop and the guards
+disappear; a dead fiber is accounted for by the scope, always.
+
+Three further choices deserve justification:
+
+**Channels never park on put.** A channel is unbounded by default;
+bounding it makes an over-capacity put *raise* rather than wait.
+This is deliberately fail-fast: during development a flooded channel
+surfaces immediately as an error with a short feedback loop, instead
+of as silent memory growth (the Erlang mailbox failure mode) or as a
+producer mysteriously stalled (hidden backpressure). A consequence
+worth its own sentence: since put never waits, **put is not an
+event** — only get composes with `flow-choice`. This deletes flow's
+same-channel-choice hazard (put and get of one channel racing in a
+single choice) by making it inexpressible.
+
+**Workers have no verbs.** flow2 does not define a "read a file for
+me" message. A task is `(thunk . response-channel)`; whatever the
+task needs from the main thread it expresses in the *user's*
+protocol over the response channel, and the submitting fiber is
+responsible for reading and acting on those messages. The framework
+that would otherwise live here — request routing, correlation,
+batching, proxy fibers — is exactly the part that varies per
+application, and freezing it into the library would either be too
+rigid (one outstanding request at a time was measured **2× slower**
+than the single-threaded server on cold I/O-bound queries) or grow
+into a second io_uring implemented in Scheme. flow2 owns only what it
+can guarantee: delivery, error routing, and cancellation.
+
+**One error type, dispatched by symbol.** flow2 raises and sends
+plain `<flow-error>` records, not R6RS conditions. Two reasons.
+First, the same error must travel two transports — raised at a
+fiber's suspension point, or *sent over a channel* as a worker task's
+reply — and a self-contained record with a symbol is the same value
+in both, inspected the same way. Second, dispatch is `case` on
+`flow-error-symbol` or a direct predicate in a `guard` clause; there
+is no condition-type hierarchy to import, subtype, or get wrong.
+Cancellation and timeout are ordinary members of this taxonomy, not
+special control flow.
+
+**Per-request scope tagging, not channel attachment.** Killing "the
+compute attached to a nursery" is expressed per *request*: a
+submission made inside a nursery's dynamic extent is tagged with that
+scope automatically. Attaching a whole worker *channel* to a nursery
+was considered and rejected for the first version: a worker is a
+shared resource serving requests from many scopes, and killing every
+task on it because one scope timed out is precisely the kind of
+blast-radius surprise this design is trying to remove. The need it
+would serve is covered without new API by the *dedicated worker*
+pattern: give a nursery its own worker channel and submit only from
+inside its extent — every task on that worker is then scope-tagged
+to the nursery, and cancelling the nursery kills exactly them.
+
+## Prior art
+
+- **Concurrent ML** (Reppy). The event algebra — `flow-wrap`,
+  `flow-guard`, `flow-choice`, synchronization as a first-class value
+  — is CML's, inherited from `(letloop flow)` unchanged. flow2 keeps
+  it because composable synchronization is what lets scope
+  cancellation be *just another event* raced against whatever a fiber
+  is doing.
+- **guile-fibers** (Wingo) and **Loko Scheme fibers**. The same CML
+  lineage in Scheme. fibers funnels all I/O through suspendable ports
+  so no call site carries a wrapping discipline — flow2 reaches the
+  same "no discipline to forget" property by giving non-loop threads
+  no I/O surface at all.
+- **Erlang/OTP.** The property flow2 copies is the monitor guarantee:
+  a `DOWN` message is delivered unconditionally, so waiting on a dead
+  process cannot hang. flow2's nursery join and the worker guard's
+  always-a-reply rule are that guarantee in two places. The
+  properties flow2 deliberately does not copy: unbounded mailboxes
+  (bounded channels raise instead), unstructured `spawn`/link/trap
+  (nurseries instead), untrappable `exit(kill)` that skips cleanup
+  (cancellation is a raise, so explicit close-on-both-paths cleanup
+  runs), and restart-based supervision (in a shared heap a restart
+  cleans almost nothing, so a worker that catches a task's raise
+  simply reports it and lives).
+- **Trio** (Smith, "Notes on structured concurrency"). The nursery:
+  no fiber outlives its scope, first error cancels siblings and
+  re-raises at the join, timeouts are scopes. flow2's `flow-nursery`
+  and `flow-monitor` are this design.
+- **seastar / glommio / thread-per-core io_uring runtimes.** The
+  share-nothing rule — a ring is owned by exactly one thread, other
+  threads communicate with messages, the loop is woken by eventfd —
+  is the standard answer to exactly the corruption flow hit. flow2 is
+  the single-shard special case; scaling across cores remains
+  SO_REUSEPORT's job, as flow already concluded when it dropped its
+  multi-shard experiment.
+- **Go.** Channels as the communication backbone, but Go's
+  unstructured `go` statement and absent cancellation (retrofitted as
+  `context.Context` threading) are the negative example structured
+  concurrency answers.
+
+## Specification
+
+### Errors
+
+All flow2 failures are instances of one record type, `<flow-error>`,
+created with `make-flow-error` and inspected with accessors and
+predicates. A `<flow-error>` reaches the program in one of two ways:
+**raised** (at a suspension point, at a checkpoint, or by an API
+misuse) or **received** on a response channel (a worker task's
+failure reply). It is the same object either way.
+
+The taxonomy, by symbol:
+
+| symbol         | meaning                                                       |
+|----------------|---------------------------------------------------------------|
+| `cancelled`    | the scope owning this fiber or task was cancelled             |
+| `timeout`      | a `flow-monitor` deadline expired                             |
+| `overflow`     | a put exceeded a channel's configured buffer bound            |
+| `compute`      | a worker task raised; the original object is in the cause     |
+| `wrong-thread` | a main-thread-only operation was attempted on a compute thread|
+
+#### `(make-flow-error symbol message irritants cause)`
+
+Returns a fresh `<flow-error>`. `SYMBOL` is one of the taxonomy
+symbols above, `MESSAGE` a string, `IRRITANTS` a list, `CAUSE` the
+originating raised object when there is one (only `compute` errors
+carry one today) and `#f` otherwise. User code normally never calls
+this; it is exported so user protocols can reuse the type for their
+own replies if they wish.
+
+#### `(flow-error? obj)`
+
+Returns `#t` if `OBJ` is a `<flow-error>`, otherwise `#f`.
+
+#### `(flow-error-symbol flow-error)`
+
+Returns the error's symbol, for `case` dispatch:
+
+```scheme
+(guard (ex ((flow-error? ex)
+            (case (flow-error-symbol ex)
+              ((timeout) (values 'partial (drain! results)))
+              ((cancelled) (values 'gone #f))
+              (else (raise ex)))))
+  (flow-monitor 0.5 query))
+```
+
+#### `(flow-error-message flow-error)`
+#### `(flow-error-irritants flow-error)`
+#### `(flow-error-cause flow-error)`
+
+Accessors for the remaining fields. `flow-error-cause` returns the
+object originally raised by a worker task for a `compute` error, and
+`#f` for every other symbol.
+
+#### `(flow-error-cancelled? obj)`
+#### `(flow-error-timeout? obj)`
+#### `(flow-error-overflow? obj)`
+#### `(flow-error-compute? obj)`
+#### `(flow-error-wrong-thread? obj)`
+
+One predicate per symbol; `(flow-error-timeout? obj)` is `(and
+(flow-error? obj) (eq? (flow-error-symbol obj) 'timeout))`, and so on
+for each. These are the natural `guard` clause tests when only one or
+two symbols matter at a call site.
+
+### Starting and stopping
+
+#### `(flow-run proc)`
+#### `(flow-run proc compute-count)`
+
+Starts the io_uring loop on the calling thread — the **main thread**
+— and spawns `PROC` as the initial fiber, *fiber zero*. With
+`COMPUTE-COUNT` (default `0`) greater than zero, starts that many
+**compute threads** before fiber zero runs; each compute thread
+owns one request channel, and `PROC` receives the list of these
+channels as its single argument (the empty list when
+`COMPUTE-COUNT` is zero). Distribution of the channels beyond fiber
+zero is the program's business: whoever holds a worker's channel may
+submit to it.
+
+The number of compute threads is fixed for the run. `flow-run`
+returns when the loop stops.
+
+#### `(flow-stop)`
+
+Stops the loop; `flow-run` then returns. Main thread only.
+
+Fibers still parked when the loop stops are simply never resumed —
+`flow-stop` is a shutdown, not a cancellation, and there is no
+`stopped` error symbol. A program that wants cleanup to run at
+shutdown cancels its own top-level nursery first, then stops.
+
+### Fibers
+
+#### `(flow-spawn thunk)`
+
+Spawns `THUNK` as a new fiber on the main thread. The fiber inherits
+the current scope (see Nurseries): a fiber spawned inside a nursery
+is a child of that nursery, transitively. Main thread only — called
+from a compute thread it raises `wrong-thread`; a compute task that
+needs a fiber spawned asks for one over its response channel (see
+Patterns).
+
+### Events
+
+The Concurrent ML core, unchanged from `(letloop flow)`:
+
+#### `(make-flow wrap try block)`
+
+Returns a base event from its three behaviors: `WRAP` transforms the
+synchronized value, `TRY` polls without blocking, `BLOCK` registers
+for later completion. Library authors only.
+
+#### `(flow? obj)`
+
+Returns `#t` if `OBJ` is an event, otherwise `#f`.
+
+#### `(flow-wrap event proc)`
+
+Returns an event that synchronizes as `EVENT` does and applies `PROC`
+to the result.
+
+#### `(flow-guard thunk)`
+
+Returns an event that calls `THUNK` to produce a fresh event at each
+synchronization attempt.
+
+#### `(flow-choice event ...)`
+
+Returns an event that synchronizes on exactly one of `EVENT ...` —
+whichever is ready first. Associative; nested choices flatten.
+
+#### `(flow-perform event)`
+
+Synchronizes on `EVENT`: returns immediately if some base is ready,
+otherwise parks — the current *fiber* on the main thread, the
+current *OS thread* (on a condition variable) on a compute thread.
+While parked on the main thread inside a cancelled scope,
+`flow-perform` raises `cancelled` and the losing bases' in-flight
+operations (reads, timeouts, accepts) are cancelled on the ring.
+
+### Channels
+
+A flow2 channel is a buffered many-producer many-consumer queue, and
+the only primitive that crosses OS threads. One channel type serves
+every role: fiber-to-fiber on the main thread, worker request
+channels, response channels. Unbounded by default. When the main
+thread is parked in the ring waiting for completions, a put from a
+compute thread wakes it through an eventfd registered on the ring;
+this is internal.
+
+#### `(make-flow-channel)`
+
+Returns a fresh unbounded channel.
+
+#### `(flow-channel? obj)`
+
+Returns `#t` if `OBJ` is a channel, otherwise `#f`.
+
+#### `(flow-channel-buffer-size! channel n)`
+
+Bounds `CHANNEL` at `N` queued values; a put that would exceed the
+bound raises `overflow`. If `CHANNEL` already holds more than `N`
+values, the call itself raises `overflow` — the bound is never
+observably violated, and the mismatch surfaces at the call site that
+created it. Intended as a development and hardening tool: start
+unbounded, bound the channels the design says should stay small, and
+let violations surface as errors during testing.
+
+#### `(flow-put! channel obj)`
+
+Enqueues `OBJ` on `CHANNEL` and returns immediately. Never parks and
+never blocks a thread; raises `overflow` if the channel is bounded
+and full. Callable from any thread. Put is a procedure, not an
+event — see Rationale.
+
+#### `(flow-get channel)`
+
+Returns an *event* that synchronizes when a value can be dequeued
+from `CHANNEL`, with the value as the result. Composable:
+
+```scheme
+(flow-perform (flow-choice (flow-get replies)
+                           (flow-timeout 1.0)))
+```
+
+#### `(flow-get! channel)`
+
+`(flow-perform (flow-get channel))` — dequeue, parking until a value
+arrives. On a compute thread, parks the OS thread on its condition
+variable.
+
+#### `(flow-get-try channel default)`
+
+Dequeues and returns a value if one is immediately available,
+otherwise returns `DEFAULT`. Never parks. Callable from any thread.
+
+### Timers
+
+#### `(flow-timeout seconds)`
+
+Returns an event ready after `SECONDS` (a real number). Backed by a
+ring timeout SQE; as a losing choice member it is cancelled on the
+ring. Main thread only (`wrong-thread` from a compute thread).
+
+#### `(flow-sleep seconds)`
+
+`(flow-perform (flow-timeout seconds))`.
+
+### Network and file I/O
+
+All main thread only; from a compute thread each raises
+`wrong-thread` — a compute task obtains I/O through its response
+channel protocol (see Patterns). Semantics carried over from
+`(letloop flow)`:
+
+#### `(flow-accept fd)`
+
+Event: a client connection accepted on listening `FD`; result is the
+client fd, or `#f` on failure.
+
+#### `(flow-read fd)`
+
+Event: bytes readable on `FD`; result is a bytevector, `#f` on
+EOF/failure.
+
+#### `(flow-write fd bytevector)`
+
+Event: `BYTEVECTOR` written to `FD`; result is the count written, or
+`#f`.
+
+#### `(flow-open filepath flags)`
+#### `(flow-read-at fd offset size)`
+#### `(flow-write-at fd offset bytevector)`
+#### `(flow-close fd)`
+
+File events, same shape: result on success, `#f` on failure. No
+`dynamic-wind`: callers close fds explicitly on both the normal and
+the error path, and cancellation arriving as a raised `cancelled`
+error (rather than a silent kill) is what makes that explicit cleanup
+reachable.
+
+### Nurseries
+
+A **scope** owns fibers and, transitively, everything they do: their
+in-flight ring operations, their child fibers, and the compute tasks
+they submit. Scopes form a tree by inheritance — `flow-spawn` and
+`flow-submit!` performed inside a scope's dynamic extent belong to
+that scope. Fibers outside any nursery belong to the *root scope*,
+which is never cancelled and costs nothing on the hot path.
+
+#### `(flow-nursery proc)`
+
+Creates a fresh scope as a child of the current one and calls `PROC`
+with it. Does not return until every fiber spawned inside the scope
+has returned or raised — the **join**. Returns `PROC`'s value.
+
+If a child fiber raises, the scope is cancelled — every sibling
+parked on an event is resumed with a raised `cancelled`, every
+in-flight ring operation belonging to the subtree is cancelled, every
+scope-tagged compute task is flagged — and the child's original
+raised object re-raises at the join. First error wins;
+later siblings' errors are dropped.
+
+If the scope was cancelled by `flow-scope-cancel!`, the join raises
+`cancelled`. Under `flow-monitor`, deadline cancellation raises
+`timeout` instead.
+
+#### `(flow-scope? obj)`
+
+Returns `#t` if `OBJ` is a scope, otherwise `#f`.
+
+#### `(flow-scope-cancel! scope)`
+
+Cancels `SCOPE` and its subtree, as described above. Idempotent.
+
+#### `(flow-monitor seconds thunk)`
+
+`flow-nursery` with a deadline: runs `THUNK` in a fresh scope racing
+a `SECONDS` timeout. If the subtree joins first, returns `THUNK`'s
+value and the timeout is cancelled on the ring. If the deadline
+fires first, the scope is cancelled and `flow-monitor` raises a
+`timeout` `<flow-error>`. This is the primitive the fan-out patterns
+below build on: "give this whole query N milliseconds, and whatever
+has not answered, cancel its I/O and stop waiting."
+
+#### `(flow-cancelled?)`
+
+Returns `#t` if the current scope (on the main thread) or the
+current task's scope (on a compute thread) has been cancelled. The
+explicit checkpoint for long stretches of pure compute; channel
+operations check it implicitly.
+
+### Compute threads
+
+A compute thread runs a framework loop over its request channel:
+dequeue a task, run it under a guard, repeat. It never touches the
+ring and never spawns fibers. What the framework guarantees per
+task:
+
+- **Always a reply on failure.** If the thunk raises, the guard
+  wraps the raised object as a `compute` `<flow-error>` (the original
+  in `flow-error-cause`) and puts it on the task's response channel.
+  The worker survives and takes the next task. A submitter waiting
+  on the response channel therefore cannot hang on a dead task —
+  the Erlang `DOWN` guarantee, at the thread boundary. The error
+  reply is exempt from the response channel's buffer bound: it
+  enqueues even on a full bounded channel (one value of slack, on
+  the failure path only), so the guarantee is unconditional.
+- **Cancellation.** Each task carries the scope current at
+  submission. A task whose scope is cancelled *before* it is
+  dequeued is skipped entirely. A *running* task observes
+  cancellation cooperatively: every channel operation it performs
+  raises `cancelled` once the scope is dead, and `(flow-cancelled?)`
+  is the explicit checkpoint for compute loops that touch no
+  channel; its puts after cancellation are dropped. Compute between
+  checkpoints runs to its next checkpoint — a Scheme thread cannot
+  be preempted, so an uncooperative infinite loop is out of scope
+  (literally).
+
+#### `(flow-submit! worker-channel thunk response-channel)`
+
+Enqueues the task `(THUNK . RESPONSE-CHANNEL)` on `WORKER-CHANNEL`,
+tagged with the current scope, and returns immediately. The
+submitting side then reads `RESPONSE-CHANNEL` and interprets whatever
+protocol it and the thunk agreed on. `THUNK` runs on the compute
+thread with no arguments; by convention it closes over
+`RESPONSE-CHANNEL` (and any downlink channel) itself — the copy in
+the task record is for the framework's error reply and nothing else.
+
+## Patterns
+
+flow2 ships mechanisms, not protocols. These are the intended shapes.
+
+### Spawn a fiber, plainly
+
+```scheme
+(flow-run
+ (lambda (workers)
+   (flow-spawn (lambda () (serve-http 8080)))
+   (flow-spawn (lambda () (metrics-tick)))))
+```
+
+Fibers spawned outside a nursery live in the root scope: never
+cancelled, no bookkeeping cost. This is the HTTP server's hot path
+and it compiles to exactly what flow does today.
+
+### Fan out, gather, and never hang
+
+The pattern that motivated the nursery. No guard in the fetch fiber,
+no counting N replies:
+
+```scheme
+(define (query-ngrams ngrams)
+  (define replies (make-flow-channel))
+  (flow-nursery
+   (lambda (scope)
+     (for-each (lambda (ngram)
+                 (flow-spawn
+                  (lambda ()
+                    (flow-put! replies (fetch-ngram ngram)))))
+               ngrams)))
+  ;; the join guarantees: every fiber returned, or one raised and
+  ;; the nursery re-raised it after cancelling the others' I/O.
+  (let loop ((out '()))
+    (let ((r (flow-get-try replies #f)))
+      (if r (loop (cons r out)) out))))
+```
+
+If `fetch-ngram` raises in any fiber, the nursery cancels every
+sibling's in-flight read, and the raise surfaces here — instead of a
+wait loop hanging on a message a dead fiber will never send.
+
+### Bound a whole query
+
+```scheme
+(guard (ex ((flow-error-timeout? ex) 'not-fast-enough))
+  (flow-monitor 0.250
+    (lambda () (query-ngrams ngrams))))
+```
+
+Everything transitively spawned under the monitor — fibers, their
+reads, their compute submissions — is cancelled when the budget
+expires. Partial results gathered on a channel *outside* the monitor
+remain readable in the `timeout` branch, if partial answers are
+acceptable.
+
+### Do I/O from a compute thread
+
+The whole point of the verb-less design: the protocol below belongs
+to the *application*, not to flow2. A task sends requests up its
+response channel; the submitting fiber interprets them and performs
+the ring I/O; results come back on a downlink channel the task
+created for itself.
+
+```scheme
+;; --- main thread: submit, then serve the task's protocol ---
+(define (run-indexing worker filepath)
+  (define up (make-flow-channel))     ; task -> main
+  (define down (make-flow-channel))   ; main -> task
+  (flow-submit! worker
+                (lambda () (index-file down up filepath))
+                up)
+  (let loop ()
+    (let ((msg (flow-get! up)))
+      (cond
+       ((flow-error? msg) (raise msg))          ; framework error reply
+       (else
+        (case (car msg)
+          ((read-at)                            ; (read-at fd offset size)
+           (flow-spawn                          ; concurrent, not serial:
+            (lambda ()                          ; N read-ats overlap on the ring
+              (flow-put! down (apply do-read-at (cdr msg)))))
+           (loop))
+          ((done) (cadr msg))))))))
+
+;; --- compute thread: pure compute, I/O by message ---
+(define (index-file down up filepath)
+  (let loop ((offset 0) (index empty-index))
+    (flow-put! up `(read-at ,filepath ,offset 65536))
+    (let ((chunk (flow-get! down)))             ; parks the OS thread
+      (if chunk
+          (loop (+ offset 65536) (index-chunk index chunk))
+          (flow-put! up `(done ,index))))))
+```
+
+Two things to notice. The main-side handler *spawns a fiber per
+request*, so a task that sends several requests before collecting
+gets genuinely overlapping I/O — the serial version of this exact
+pattern measured 2× slower on cold queries, which is why the
+protocol is left in user hands where it can be pipelined. And
+`flow-get!` on the compute thread is the task's cancellation point:
+if the submitting scope dies, the get raises `cancelled` and the
+framework converts the unwound task into a (dropped) reply.
+
+### Dispatch on errors
+
+```scheme
+(let ((msg (flow-get! up)))
+  (if (flow-error? msg)
+      (case (flow-error-symbol msg)
+        ((compute)                          ; task raised; look inside
+         (log-failure (flow-error-cause msg))
+         'retry)
+        ((cancelled) 'gone)
+        (else (raise msg)))
+      (handle msg)))
+```
+
+The same `case` works in a `guard` clause for the raised transport;
+`<flow-error>` is one representation across both.
+
+### Keep long compute cancellable
+
+```scheme
+(define (crunch down up rows)
+  (let loop ((rows rows) (acc '()) (n 0))
+    (when (and (fx= 0 (fxmod n 4096)) (flow-cancelled?))
+      (raise (make-flow-error 'cancelled "crunch: scope died" '() #f)))
+    (if (null? rows)
+        (flow-put! up `(done ,acc))
+        (loop (cdr rows) (cons (transform (car rows)) acc) (fx+ n 1)))))
+```
+
+A task that performs channel operations gets cancellation checks for
+free; a pure loop must volunteer them. Choose the stride by how much
+latency a cancelled monitor may tolerate — compute between two
+checkpoints always runs to the next one.
+
+## References
+
+- John Reppy, *Concurrent Programming in ML*, Cambridge University
+  Press, 1999 — the event algebra (`wrap`, `guard`, `choose`,
+  `sync`).
+- Andy Wingo, *Lightweight concurrency in Guile with fibers*, and the
+  guile-fibers manual — CML operations over an epoll scheduler in
+  Scheme.
+- Nathaniel J. Smith, *Notes on structured concurrency, or: Go
+  statement considered harmful*, 2018 — nurseries, first-error
+  cancellation, timeouts as scopes.
+- Joe Armstrong, *Making reliable distributed systems in the presence
+  of software errors*, PhD thesis, 2003 — links, monitors, and the
+  always-delivered `DOWN` guarantee.
+- The Seastar documentation and Glommio design notes —
+  thread-per-core, share-nothing ownership of the ring, message
+  passing between shards.
+- `TODO.md` in this repository — the observed failures motivating
+  this design: ring corruption from off-loop SQE preparation, and
+  the unguarded fan-out leak.
+- `plans/v12/20260720-flow/README.md` — the original `(letloop
+  flow)` design and milestone plan flow2 forks from.
+
+## Copyright
+
+© 2026 Amirouche A. BOUBEKKI.
