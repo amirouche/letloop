@@ -61,6 +61,10 @@
   "done\n"
   ;; the sandbox's PATH names /sbin too
   "ln -s bin out/sbin\n"
+  ;; `cc` is the POSIX name for the C compiler and what most build
+  ;; systems reach for -- this repo's own makefile included. The
+  ;; tarball ships gcc and x86_64-linux-musl-cc but no plain cc.
+  "ln -s gcc out/bin/cc\n"
   ;; prove the assembled toolchain works, here, rather than finding out
   ;; in whatever derivation first tries to use it
   "printf 'int main(void){return 0;}\\n' > /build/probe.c\n"

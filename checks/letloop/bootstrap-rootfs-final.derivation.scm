@@ -40,6 +40,10 @@
   "  if [ ! -e \"out/bin/$applet\" ]; then ln -s busybox \"out/bin/$applet\"; fi\n"
   "done\n"
   "ln -s bin out/sbin\n"
+  ;; `cc`, the POSIX name most build systems reach for (this repo's own
+  ;; makefile included); the tarball ships only gcc and the
+  ;; target-prefixed x86_64-linux-musl-cc
+  "ln -s gcc out/bin/cc\n"
   ;; prove the assembled environment can drive a real make-based build
   ;; before anything downstream depends on it
   "mkdir -p /build/probe\n"

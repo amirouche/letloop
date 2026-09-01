@@ -13,6 +13,10 @@
 #                              toolchain + 4 + 5, no prebuilt BusyBox
 #   7. a hello.c derivation built against the scaffold rootfs, with no
 #      Alpine and no host toolchain anywhere in its sandbox
+#   8. bootstrap-chezscheme  ChezScheme 10.4.1, from source
+#   9. bootstrap-letloop     letloop itself, from source, against it --
+#                             a statically linked, relocatable letloop
+#                             no distribution ever touched
 #
 # Steps 1 and 2 are the only two prebuilt binaries the chain trusts,
 # both pinned by BLAKE3 (see each derivation's own header for the
@@ -117,5 +121,58 @@ OUTPUT=$("$ELSEWHERE/hello")
     echo "FAIL: unexpected output: $OUTPUT"
     exit 1
 }
+
+# --- ChezScheme and letloop itself, with Alpine nowhere in sight ---
+#
+# The source tree is staged fresh each run rather than bind-mounted
+# from the working directory: the build needs a writable copy, and a
+# stale snapshot silently builds the wrong thing. Only tracked files,
+# so local/ and other build output stay out of it.
+rm -rf "$WORKDIR/letloop-src"
+mkdir -p "$WORKDIR/letloop-src"
+(cd "$ROOT" && git ls-files -z | tar --null -T - -cf -) | tar -xf - -C "$WORKDIR/letloop-src"
+
+LETLOOP_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-letloop.derivation.scm" | tail -1)
+echo "letloop: $LETLOOP_DESTINATION"
+
+readelf -l "$LETLOOP_DESTINATION/bin/letloop" | grep -qi 'interpreter' && {
+    echo "FAIL: the bootstrap letloop needs a dynamic loader"
+    exit 1
+}
+
+# It has to be a working letloop, not just one that prints a version:
+# run it from a copy outside the store, on this host's own libc.
+ELSEWHERE2=$(mktemp -d)
+trap "rm -rf $ELSEWHERE $ELSEWHERE2" EXIT
+cp -a "$LETLOOP_DESTINATION/." "$ELSEWHERE2/"
+
+"$ELSEWHERE2/bin/letloop" version | grep -q "Chez Scheme Version" || {
+    echo "FAIL: bootstrap letloop cannot report its version"
+    exit 1
+}
+
+mkdir -p "$ELSEWHERE2/work"
+cat > "$ELSEWHERE2/work/hi.scm" <<'SCM'
+(library (hi)
+  (export main)
+  (import (chezscheme))
+  (define (main . args) (display "bootstrap letloop works\n")))
+SCM
+EXEC_OUTPUT=$("$ELSEWHERE2/bin/letloop" exec "$ELSEWHERE2/work/" "$ELSEWHERE2/work/hi.scm" main)
+[ "$EXEC_OUTPUT" = "bootstrap letloop works" ] || {
+    echo "FAIL: bootstrap letloop cannot run a program: $EXEC_OUTPUT"
+    exit 1
+}
+
+# And its own package manager runs -- the subsystem that produced it.
+# Captured rather than piped: `letloop store` with no verb prints its
+# usage and exits 1, which under `set -o pipefail` would fail the
+# pipeline even though the output is exactly what is being asserted.
+STORE_USAGE=$("$ELSEWHERE2/bin/letloop" store 2>&1 || true)
+case "$STORE_USAGE" in
+    *"letloop store build"*) ;;
+    *) echo "FAIL: bootstrap letloop's store subcommand does not run: $STORE_USAGE"
+       exit 1 ;;
+esac
 
 echo "=== All tests passed ==="
