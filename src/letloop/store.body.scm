@@ -8,6 +8,12 @@
 ;; declared output with BLAKE3, and places it in the store at
 ;; <hash>-<name>, deduping against an existing path with the same
 ;; content hash.
+;;
+;; A derivation with no script takes a second, shorter path: its
+;; fetches land straight in the output directory, hash-verified, with
+;; no rootfs and no sandbox involved at all. Everything after that --
+;; hashing, expected-hash verification, placement, the .drv sidecar --
+;; is identical either way.
 
 (define (store-directory)
   (or (getenv "LETLOOP_STORE")
@@ -76,17 +82,36 @@
                     (shell-single-quote derivation-path)
                     (shell-single-quote destination))))
 
+;; A derivation with no script (and so no build-environment) is
+;; fetch-only: each declared fetch lands directly in the output
+;; directory under its own name, hash-verified by fetch-verify! exactly
+;; as it would be for a sandboxed build's inputs. Nothing is unpacked
+;; and no sandbox runs -- see derivation.body.scm's header for why the
+;; bootstrap chain needs a shape that requires no rootfs at all.
+(define (run-fetch-only-build! fetches output-directory)
+  (system! (format #f "mkdir -p ~a" (shell-single-quote output-directory)))
+  (for-each
+   (lambda (f)
+     (fetch-verify! (fetch-name f) (fetch-url f) (fetch-hash-hex f)
+                     (string-append output-directory "/" (fetch-name f))))
+   fetches))
+
+(define (run-sandboxed-build! d scratch-directory)
+  (let ((rootfs-directory (resolve-build-environment-rootfs (derivation-build-environment d))))
+    (run-fetches! (derivation-fetches d) scratch-directory)
+    (write-build-script! scratch-directory (derivation-script d))
+    (sandbox-build! rootfs-directory scratch-directory (derivation-inputs d))))
+
 ;; -> the resulting store path.
 (define (store-build derivation-path)
   (define mkdtemp (foreign-procedure "mkdtemp" (string) string))
   (let* ((d (derivation-read derivation-path))
-         (rootfs-directory (resolve-build-environment-rootfs (derivation-build-environment d)))
          (ignore-0 (system! (format #f "mkdir -p ~a" (shell-single-quote (store-tmp-directory)))))
          (scratch-directory (mkdtemp (string-append (store-tmp-directory) "/build-XXXXXX")))
-         (ignore-1 (run-fetches! (derivation-fetches d) scratch-directory))
-         (ignore-2 (write-build-script! scratch-directory (derivation-script d)))
-         (ignore-3 (sandbox-build! rootfs-directory scratch-directory (derivation-inputs d)))
          (output-directory (string-append scratch-directory "/" (derivation-output d))))
+    (if (derivation-script d)
+        (run-sandboxed-build! d scratch-directory)
+        (run-fetch-only-build! (derivation-fetches d) output-directory))
     (unless (file-exists? output-directory)
       (error 'store-build "declared output not produced by the build" (derivation-output d)))
     (let ((hash (store-hash-directory output-directory)))

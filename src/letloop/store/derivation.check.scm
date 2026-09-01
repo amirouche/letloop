@@ -80,3 +80,58 @@
     (guard (ex (#t #t))
       (derivation-read path)
       #f)))
+
+(define ~check-derivation-004/fetch-only
+  (lambda ()
+    (define path "/tmp/letloop/derivation-check-004.scm")
+    (derivation-check-write
+     path
+     '(derivation
+       (name "toolchain-tarball")
+       (fetch (toolchain (url "https://example.org/toolchain.tgz")
+                          (hash (blake3 "ab12"))))
+       (output "out")))
+    (let ((d (derivation-read path)))
+      (and (derivation? d)
+           (not (derivation-build-environment d))
+           (not (derivation-script d))
+           (= (length (derivation-fetches d)) 1)
+           (string=? (derivation-output d) "out")))))
+
+(define ~check-derivation-005/script-without-build-environment
+  (lambda ()
+    (define path "/tmp/letloop/derivation-check-005.scm")
+    (derivation-check-write
+     path
+     '(derivation
+       (name "orphan-script")
+       (script "true\n")
+       (output "out")))
+    (guard (ex (#t #t))
+      (derivation-read path)
+      #f)))
+
+(define ~check-derivation-006/build-environment-without-script
+  (lambda ()
+    (define path "/tmp/letloop/derivation-check-006.scm")
+    (derivation-check-write
+     path
+     '(derivation
+       (name "orphan-build-environment")
+       (build-environment (root (directory "/tmp")))
+       (output "out")))
+    (guard (ex (#t #t))
+      (derivation-read path)
+      #f)))
+
+(define ~check-derivation-007/fetch-only-needs-a-fetch
+  (lambda ()
+    (define path "/tmp/letloop/derivation-check-007.scm")
+    (derivation-check-write
+     path
+     '(derivation
+       (name "empty")
+       (output "out")))
+    (guard (ex (#t #t))
+      (derivation-read path)
+      #f)))

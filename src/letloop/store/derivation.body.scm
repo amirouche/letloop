@@ -13,6 +13,18 @@
 ;; build-environment's root is either (distribution ...) (version ...)
 ;; (machine ...), naming a rootfs `letloop root create` can fetch, or a
 ;; (directory ...) pointing straight at an already-provisioned rootfs.
+;;
+;; build-environment and script are both optional, but only together: a
+;; derivation with neither is fetch-only -- its declared fetches are
+;; placed directly into the output directory, verified by hash, with no
+;; sandbox and no unpacking. This exists so the very first links in a
+;; bootstrap chain (a prebuilt toolchain tarball, a static busybox
+;; binary) never need a rootfs with a shell to fetch themselves into the
+;; store -- unpacking becomes the job of whatever later, ordinary
+;; sandboxed derivation consumes them as an input and has a real `tar`
+;; to do it with. A derivation with only one of the two is rejected: a
+;; script with nothing to run it in, or a rootfs with nothing to run,
+;; are both mistakes worth catching at read time.
 
 (define-record-type* <derivation>
   (make-derivation name build-environment inputs fetches script output expected-output-hash)
@@ -79,19 +91,20 @@
     name))
 
 (define (parse-build-environment clauses)
-  (let* ((build-environment (required-clause clauses 'build-environment "derivation"))
-         (root (required-clause (cdr build-environment) 'root build-environment))
-         (directory (find-clause (cdr root) 'directory))
-         (distribution (find-clause (cdr root) 'distribution)))
-    (cond
-     (directory
-      (make-build-environment 'directory #f #f #f (cadr directory)))
-     (distribution
-      (let ((version (required-clause (cdr root) 'version root))
-            (machine (required-clause (cdr root) 'machine root)))
-        (make-build-environment 'rootfs (cadr distribution) (cadr version) (cadr machine) #f)))
-     (else
-      (error 'derivation-read "root must be (distribution ...) or (directory ...)" root)))))
+  (let ((build-environment (find-clause clauses 'build-environment)))
+    (and build-environment
+         (let* ((root (required-clause (cdr build-environment) 'root build-environment))
+                (directory (find-clause (cdr root) 'directory))
+                (distribution (find-clause (cdr root) 'distribution)))
+           (cond
+            (directory
+             (make-build-environment 'directory #f #f #f (cadr directory)))
+            (distribution
+             (let ((version (required-clause (cdr root) 'version root))
+                   (machine (required-clause (cdr root) 'machine root)))
+               (make-build-environment 'rootfs (cadr distribution) (cadr version) (cadr machine) #f)))
+            (else
+             (error 'derivation-read "root must be (distribution ...) or (directory ...)" root)))))))
 
 (define (parse-inputs clauses)
   (let ((inputs (find-clause clauses 'inputs)))
@@ -111,7 +124,8 @@
     (if fetch (map parse-fetch-entry (cdr fetch)) '())))
 
 (define (parse-script clauses)
-  (apply string-append (cdr (required-clause clauses 'script "derivation"))))
+  (let ((script (find-clause clauses 'script)))
+    (and script (apply string-append (cdr script)))))
 
 (define (parse-output clauses)
   (cadr (required-clause clauses 'output "derivation")))
@@ -125,12 +139,24 @@
 (define (parse-derivation sexp path)
   (unless (and (pair? sexp) (eq? (car sexp) 'derivation))
     (error 'derivation-read "expected a top-level (derivation ...) form" path))
-  (let ((clauses (cdr sexp)))
+  (let* ((clauses (cdr sexp))
+         (build-environment (parse-build-environment clauses))
+         (script (parse-script clauses))
+         (fetches (parse-fetches clauses)))
+    (cond
+     ((and (not build-environment) script)
+      (error 'derivation-read "a script needs a build-environment to run in" path))
+     ((and build-environment (not script))
+      (error 'derivation-read "a build-environment needs a script to run" path))
+     ((and (not build-environment) (null? fetches))
+      (error 'derivation-read
+             "a derivation with no build-environment must declare at least one fetch"
+             path)))
     (make-derivation (parse-name clauses)
-                      (parse-build-environment clauses)
+                      build-environment
                       (parse-inputs clauses)
-                      (parse-fetches clauses)
-                      (parse-script clauses)
+                      fetches
+                      script
                       (parse-output clauses)
                       (parse-expected-output-hash clauses))))
 

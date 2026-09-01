@@ -31,7 +31,11 @@
           ~check-derivation-000
           ~check-derivation-001
           ~check-derivation-002
-          ~check-derivation-003)
+          ~check-derivation-003
+          ~check-derivation-004/fetch-only
+          ~check-derivation-005/script-without-build-environment
+          ~check-derivation-006/build-environment-without-script
+          ~check-derivation-007/fetch-only-needs-a-fetch)
 
   (import (chezscheme)
           (letloop r999))

@@ -6,14 +6,20 @@
           store-directory
           store-path
 
-          ~check-store-000)
+          ~check-store-000
+          ~check-store-001/fetch-only)
 
   (import (chezscheme)
           (letloop root)
           (letloop store derivation)
           (letloop store hash)
           (letloop store sandbox)
-          (letloop store fetch))
+          (letloop store fetch)
+          ;; only for ~check-store-001/fetch-only, which builds its own
+          ;; expected hash from a live probe request rather than pinning
+          ;; a hash that would rot
+          (only (letloop www) www-request)
+          (only (letloop blake3) blake3))
 
   (begin
     (include "letloop/store.body.scm")
