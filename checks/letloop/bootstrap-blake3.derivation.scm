@@ -1,13 +1,18 @@
 ;; BLAKE3, built from source against the bootstrap toolchain, as a
-;; static archive.
+;; static archive -- for speed, not for correctness.
 ;;
-;; Without this the bootstrap letloop cannot run `letloop store build`
-;; at all: the store hashes every output with BLAKE3, (letloop blake3)
-;; reaches it through define-shared-object, and a statically linked
-;; musl binary has no dynamic loader to service the dlopen. It fails
-;; with "cannot dlopen shared object, tried libblake3.so,
-;; libblake3.so.1" the moment a build finishes and wants a hash -- so a
-;; letloop built by the store could not itself drive the store.
+;; (letloop blake3) falls back to (letloop blake3 pure), which needs no
+;; shared object at all, so the store hashes with or without this. What
+;; this buys is about 128x: roughly 2.5 GB/s against 20 MB/s, which on
+;; a 300 MB rootfs is the difference between an instant and a quarter
+;; of a minute, paid on every build.
+;;
+;; It was briefly load-bearing: before the fallback existed, a
+;; statically linked letloop had no loader to service the dlopen and
+;; failed with "cannot dlopen shared object" the moment a build wanted
+;; a hash -- a letloop the store built that could not drive the store.
+;; Hashing is the store's own primitive, so making it depend on a
+;; package the store must first build was the wrong shape.
 ;;
 ;; No build system to speak of: BLAKE3's C implementation is a fixed
 ;; list of sources plus per-architecture assembly, compiled directly.

@@ -176,7 +176,9 @@ OUTPUT=$("$ELSEWHERE/hello")
 # The source tree is staged fresh each run rather than bind-mounted
 # from the working directory: the build needs a writable copy, and a
 # stale snapshot silently builds the wrong thing. Only tracked files,
-# so local/ and other build output stay out of it.
+# so local/ and other build output stay out of it -- which does mean a
+# new file has to be `git add`ed before it is visible here, and shows
+# up as "library not found" from inside the sandbox if it is not.
 rm -rf "$WORKDIR/letloop-src"
 mkdir -p "$WORKDIR/letloop-src"
 (cd "$ROOT" && git ls-files -z | tar --null -T - -cf -) | tar -xf - -C "$WORKDIR/letloop-src"

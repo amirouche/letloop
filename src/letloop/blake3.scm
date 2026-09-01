@@ -2,9 +2,11 @@
 (library (letloop blake3)
   (export blake3 make-blake3 blake3-update! blake3-finalize blake3-close!
           ~check-blake3-000
-          ~check-blake3-001)
+          ~check-blake3-001
+          ~check-blake3-002/c-agrees-with-pure)
 
-  (import (chezscheme) (letloop cffi))
+  (import (chezscheme) (letloop cffi)
+          (prefix (letloop blake3 pure) pure:))
 
   (define-shared-object libblake3 "libblake3.so" "libblake3.so.1")
 
@@ -18,7 +20,7 @@
   (define-syntax-rule (foreign-procedure* return ptr args ...)
     (lazy-foreign-procedure libblake3 ptr (args ...) return))
 
-  (define blake3-hasher-init
+  (define c-hasher-init
     (let ((func (foreign-procedure* void "blake3_hasher_init" void*)))
       (lambda (hasher)
         (func hasher))))
@@ -30,15 +32,15 @@
   ;; The hasher lives outside the Scheme heap: the moving GC neither
   ;; relocates nor reclaims it, so its address stays valid between
   ;; calls. Call blake3-close! when done with a make-blake3 hasher.
-  (define (make-blake3)
+  (define (c-make-blake3)
     (define hasher (foreign-alloc blake3-hasher-size))
-    (blake3-hasher-init hasher)
+    (c-hasher-init hasher)
     hasher)
 
-  (define (blake3-close! hasher)
+  (define (c-close! hasher)
     (foreign-free hasher))
 
-  (define blake3-update!
+  (define c-update!
     (let ((func (foreign-procedure* void "blake3_hasher_update" void* void* size_t)))
       (lambda (hasher bytevector)
         (with-lock (list bytevector)
@@ -46,13 +48,54 @@
                 (bytevector-pointer bytevector)
                 (bytevector-length bytevector))))))
 
-  (define blake3-finalize
+  (define c-finalize
     (let ((func (foreign-procedure* void "blake3_hasher_finalize" void* void* size_t)))
       (lambda (hasher length)
         (define bytevector (make-bytevector length))
         (with-lock (list bytevector)
           (func hasher (bytevector-pointer bytevector) length))
         bytevector)))
+
+  ;; Which implementation to use, decided once and then fixed for the
+  ;; process. It has to be fixed: a hasher from one path is an opaque
+  ;; foreign pointer and from the other an ordinary Scheme object, so
+  ;; whatever made it must also update and finalize it.
+  ;;
+  ;; Decided by trying, not by asking whether the shared object can be
+  ;; dlopen'd: on a statically linked letloop the symbols are
+  ;; registered by letloop-main.c and work while no dlopen ever could.
+  ;; The pure implementation is the floor, so a missing or broken
+  ;; libblake3 costs speed and nothing else -- which is what keeps
+  ;; hashing, and so the whole store, from depending on a package the
+  ;; store would have to have built.
+  (define c-usable?
+    (let ((state 'unknown))
+      (lambda ()
+        (when (eq? state 'unknown)
+          (set! state
+                (guard (ex (#t #f))
+                  (let ((hasher (c-make-blake3)))
+                    (c-update! hasher (string->utf8 "probe"))
+                    (c-finalize hasher 8)
+                    (c-close! hasher)
+                    #t))))
+        state)))
+
+  (define (make-blake3)
+    (if (c-usable?) (c-make-blake3) (pure:make-blake3)))
+
+  (define (blake3-close! hasher)
+    (if (c-usable?) (c-close! hasher) (pure:blake3-close! hasher)))
+
+  (define (blake3-update! hasher bytevector)
+    (if (c-usable?)
+        (c-update! hasher bytevector)
+        (pure:blake3-update! hasher bytevector)))
+
+  (define (blake3-finalize hasher length)
+    (if (c-usable?)
+        (c-finalize hasher length)
+        (pure:blake3-finalize hasher length)))
 
   (define blake3
     (lambda (bytevector)
@@ -62,15 +105,16 @@
         (blake3-close! hasher)
         digest)))
 
+  ;; No skip guard any more: hashing works with or without libblake3,
+  ;; because the pure implementation is the floor. If this fails, both
+  ;; paths are wrong.
   (define ~check-blake3-000
     (lambda ()
-      (check-skip-unless libblake3
       (assert (bytevector=? (blake3 (string->utf8 "azul dunith"))
-                            (bytevector 147 96 202 209 250 91 234 79 148 175 155 40 42 42 163 180 23 60 5 78 248 205 93 236 132 217 22 253 234 98 73 27))))))
+                            (bytevector 147 96 202 209 250 91 234 79 148 175 155 40 42 42 163 180 23 60 5 78 248 205 93 236 132 217 22 253 234 98 73 27)))))
 
   (define ~check-blake3-001
     (lambda ()
-      (check-skip-unless libblake3
       (let ((blake3 (make-blake3)))
         ;; the hasher must survive garbage collections between calls
         (collect (collect-maximum-generation))
@@ -79,7 +123,25 @@
         (assert (bytevector=? (blake3-finalize blake3 16)
                               (bytevector 147 96 202 209 250 91 234 79 148 175 155 40 42 42 163 180)))
         (blake3-close! blake3)
-        #t))))
+        #t)))
+
+  ;; The two implementations must agree, on data neither was written
+  ;; against. Only meaningful where the shared object is present --
+  ;; without it both sides of the comparison are the same code.
+  (define ~check-blake3-002/c-agrees-with-pure
+    (lambda ()
+      (if (not (c-usable?))
+          (begin (display "** SKIP: libblake3 unavailable, nothing to cross-check\n") #t)
+          (let loop ((n 0))
+            (if (fx=? n 16)
+                #t
+                (let ((input (bytevector-random (* n 997))))
+                  (let ((from-c (let ((h (c-make-blake3)))
+                                  (c-update! h input)
+                                  (let ((d (c-finalize h 32))) (c-close! h) d)))
+                        (from-pure (pure:blake3 input)))
+                    (assert (bytevector=? from-c from-pure))
+                    (loop (fx+ n 1)))))))))
 
   (define bytevector-random
     (lambda (n)
