@@ -28,6 +28,18 @@
   ;; load. SHARED-OBJECT is a thunk defined with define-shared-object.
   ;; Optional calling conventions (__collect_safe ...) go between the
   ;; shared object and the symbol name.
+  ;;
+  ;; Tries a bare foreign-procedure lookup before ever calling
+  ;; shared-object: on a statically-linked letloop, dlopen cannot work
+  ;; at all (see src/letloop/store/README.md's Issues section) -- not
+  ;; even a NAMED dlopen of a real .so file, confirmed empirically
+  ;; against musl ("Dynamic loading not supported"). letloop-main.c
+  ;; pre-registers the symbols a static build needs via Sforeign_symbol
+  ;; (independent of dlopen), so the plain lookup already succeeds
+  ;; there and shared-object is never reached. On a dynamic build,
+  ;; where nothing is pre-registered for an optional library's own
+  ;; symbols, the plain lookup fails cleanly and falls back to
+  ;; dlopen'ing shared-object exactly as before.
   (define-syntax lazy-foreign-procedure
     (lambda (stx)
       (syntax-case stx ()
@@ -37,8 +49,9 @@
            #'(let ((func #f))
                (lambda (arg ...)
                  (unless func
-                   (shared-object)
-                   (set! func (foreign-procedure conv ... name (type ...) result)))
+                   (set! func (guard (ex (#t (shared-object)
+                                             (foreign-procedure conv ... name (type ...) result)))
+                                (foreign-procedure conv ... name (type ...) result))))
                  (func arg ...))))))))
 
   (define (shared-object-available? shared-object)

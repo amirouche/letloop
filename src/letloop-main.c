@@ -36,6 +36,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifdef LETLOOP_LIBURING_STATIC
+#include <liburing.h>
+#endif
+
 #include "scheme.h"
 
 extern char **environ;
@@ -79,6 +83,216 @@ static int letloop_self_dlopen_safe(void) {
   return letloop_self_dlopen_safe_result;
 }
 
+#ifdef LETLOOP_LIBURING_STATIC
+/* liburing's own "-ffi" build variant exists because liburing.h leans
+ * heavily on `static inline` functions (io_uring_prep_*, the sqe/cqe
+ * accessors) for performance -- those have no linkable symbol at all
+ * in the normal case, they get compiled directly into each C caller.
+ * "-ffi" is upstream liburing's own answer for non-C consumers:
+ * real, non-inline, exported versions of the same functions, meant to
+ * be dlopen'd (liburing-ffi.so) or linked (liburing-ffi.a) by a
+ * runtime that cannot #include a C header. Alpine's liburing-dev
+ * package ships both.
+ *
+ * That dlopen path is exactly what does not work here (see the big
+ * comment above): confirmed empirically against a real static build,
+ * dlopen("liburing-ffi.so.2", RTLD_NOW) fails with musl's own
+ * "Dynamic loading not supported" -- a stronger limitation than the
+ * dlopen(NULL, ...) case, this is *any* dlopen, named or not, on this
+ * static libc. So this links the plain, non-ffi liburing.a instead
+ * (LETLOOP_LIBURING_STATIC pairs with -luring in the makefile) and
+ * takes each function's address directly in C. This works uniformly
+ * whether the symbol is one of liburing.a's real, non-inline ones
+ * (queue_init, submit, register, setup, enter, ...) or one that is
+ * `static inline` in the header: taking its address here just forces
+ * the compiler to materialize a local copy in this translation unit,
+ * with the exact same behavior as liburing-ffi's exported one, and no
+ * link-time conflict (the materialized copy keeps static linkage).
+ *
+ * The list is every io_uring_* symbol src/letloop/liburing/low.scm
+ * resolves via lazy-foreign-procedure, mechanically extracted, minus
+ * io_uring_prep_ftruncate, which this liburing version (2.9) does not
+ * have -- low.scm's own corresponding wrapper was already unreachable
+ * on any build using this liburing version, static or dynamic; this
+ * does not change that.
+ */
+#define LETLOOP_URING_SYM(name) Sforeign_symbol(#name, (void *)name)
+
+static void letloop_register_liburing_symbols(void) {
+  LETLOOP_URING_SYM(io_uring_buf_ring_add);
+  LETLOOP_URING_SYM(io_uring_buf_ring_advance);
+  LETLOOP_URING_SYM(io_uring_buf_ring_available);
+  LETLOOP_URING_SYM(io_uring_buf_ring_cq_advance);
+  LETLOOP_URING_SYM(io_uring_buf_ring_init);
+  LETLOOP_URING_SYM(io_uring_buf_ring_mask);
+  LETLOOP_URING_SYM(io_uring_check_version);
+  LETLOOP_URING_SYM(io_uring_close_ring_fd);
+  LETLOOP_URING_SYM(io_uring_cq_advance);
+  LETLOOP_URING_SYM(io_uring_cq_has_overflow);
+  LETLOOP_URING_SYM(io_uring_cq_ready);
+  LETLOOP_URING_SYM(io_uring_cqe_get_data);
+  LETLOOP_URING_SYM(io_uring_cqe_get_data64);
+  LETLOOP_URING_SYM(io_uring_cqe_seen);
+  LETLOOP_URING_SYM(io_uring_enable_rings);
+  LETLOOP_URING_SYM(io_uring_enter);
+  LETLOOP_URING_SYM(io_uring_enter2);
+  LETLOOP_URING_SYM(io_uring_free_buf_ring);
+  LETLOOP_URING_SYM(io_uring_free_probe);
+  LETLOOP_URING_SYM(io_uring_get_events);
+  LETLOOP_URING_SYM(io_uring_get_probe);
+  LETLOOP_URING_SYM(io_uring_get_probe_ring);
+  LETLOOP_URING_SYM(io_uring_get_sqe);
+  LETLOOP_URING_SYM(io_uring_major_version);
+  LETLOOP_URING_SYM(io_uring_minor_version);
+  LETLOOP_URING_SYM(io_uring_opcode_supported);
+  LETLOOP_URING_SYM(io_uring_peek_batch_cqe);
+  LETLOOP_URING_SYM(io_uring_peek_cqe);
+  LETLOOP_URING_SYM(io_uring_prep_accept);
+  LETLOOP_URING_SYM(io_uring_prep_accept_direct);
+  LETLOOP_URING_SYM(io_uring_prep_bind);
+  LETLOOP_URING_SYM(io_uring_prep_cancel);
+  LETLOOP_URING_SYM(io_uring_prep_cancel64);
+  LETLOOP_URING_SYM(io_uring_prep_cancel_fd);
+  LETLOOP_URING_SYM(io_uring_prep_close);
+  LETLOOP_URING_SYM(io_uring_prep_close_direct);
+  LETLOOP_URING_SYM(io_uring_prep_cmd_sock);
+  LETLOOP_URING_SYM(io_uring_prep_connect);
+  LETLOOP_URING_SYM(io_uring_prep_epoll_ctl);
+  LETLOOP_URING_SYM(io_uring_prep_fadvise);
+  LETLOOP_URING_SYM(io_uring_prep_fallocate);
+  LETLOOP_URING_SYM(io_uring_prep_fgetxattr);
+  LETLOOP_URING_SYM(io_uring_prep_files_update);
+  LETLOOP_URING_SYM(io_uring_prep_fixed_fd_install);
+  LETLOOP_URING_SYM(io_uring_prep_fsetxattr);
+  LETLOOP_URING_SYM(io_uring_prep_fsync);
+  LETLOOP_URING_SYM(io_uring_prep_futex_wait);
+  LETLOOP_URING_SYM(io_uring_prep_futex_waitv);
+  LETLOOP_URING_SYM(io_uring_prep_futex_wake);
+  LETLOOP_URING_SYM(io_uring_prep_getxattr);
+  LETLOOP_URING_SYM(io_uring_prep_link);
+  LETLOOP_URING_SYM(io_uring_prep_link_timeout);
+  LETLOOP_URING_SYM(io_uring_prep_linkat);
+  LETLOOP_URING_SYM(io_uring_prep_listen);
+  LETLOOP_URING_SYM(io_uring_prep_madvise);
+  LETLOOP_URING_SYM(io_uring_prep_mkdir);
+  LETLOOP_URING_SYM(io_uring_prep_mkdirat);
+  LETLOOP_URING_SYM(io_uring_prep_msg_ring);
+  LETLOOP_URING_SYM(io_uring_prep_msg_ring_cqe_flags);
+  LETLOOP_URING_SYM(io_uring_prep_msg_ring_fd);
+  LETLOOP_URING_SYM(io_uring_prep_msg_ring_fd_alloc);
+  LETLOOP_URING_SYM(io_uring_prep_multishot_accept);
+  LETLOOP_URING_SYM(io_uring_prep_multishot_accept_direct);
+  LETLOOP_URING_SYM(io_uring_prep_nop);
+  LETLOOP_URING_SYM(io_uring_prep_open);
+  LETLOOP_URING_SYM(io_uring_prep_open_direct);
+  LETLOOP_URING_SYM(io_uring_prep_openat);
+  LETLOOP_URING_SYM(io_uring_prep_openat_direct);
+  LETLOOP_URING_SYM(io_uring_prep_poll_add);
+  LETLOOP_URING_SYM(io_uring_prep_poll_multishot);
+  LETLOOP_URING_SYM(io_uring_prep_poll_remove);
+  LETLOOP_URING_SYM(io_uring_prep_poll_update);
+  LETLOOP_URING_SYM(io_uring_prep_provide_buffers);
+  LETLOOP_URING_SYM(io_uring_prep_read);
+  LETLOOP_URING_SYM(io_uring_prep_read_fixed);
+  LETLOOP_URING_SYM(io_uring_prep_read_multishot);
+  LETLOOP_URING_SYM(io_uring_prep_readv);
+  LETLOOP_URING_SYM(io_uring_prep_readv2);
+  LETLOOP_URING_SYM(io_uring_prep_recv);
+  LETLOOP_URING_SYM(io_uring_prep_recv_multishot);
+  LETLOOP_URING_SYM(io_uring_prep_recvmsg);
+  LETLOOP_URING_SYM(io_uring_prep_recvmsg_multishot);
+  LETLOOP_URING_SYM(io_uring_prep_remove_buffers);
+  LETLOOP_URING_SYM(io_uring_prep_rename);
+  LETLOOP_URING_SYM(io_uring_prep_renameat);
+  LETLOOP_URING_SYM(io_uring_prep_rw);
+  LETLOOP_URING_SYM(io_uring_prep_send);
+  LETLOOP_URING_SYM(io_uring_prep_send_bundle);
+  LETLOOP_URING_SYM(io_uring_prep_send_set_addr);
+  LETLOOP_URING_SYM(io_uring_prep_send_zc);
+  LETLOOP_URING_SYM(io_uring_prep_send_zc_fixed);
+  LETLOOP_URING_SYM(io_uring_prep_sendmsg);
+  LETLOOP_URING_SYM(io_uring_prep_sendmsg_zc);
+  LETLOOP_URING_SYM(io_uring_prep_sendto);
+  LETLOOP_URING_SYM(io_uring_prep_setxattr);
+  LETLOOP_URING_SYM(io_uring_prep_shutdown);
+  LETLOOP_URING_SYM(io_uring_prep_socket);
+  LETLOOP_URING_SYM(io_uring_prep_socket_direct);
+  LETLOOP_URING_SYM(io_uring_prep_socket_direct_alloc);
+  LETLOOP_URING_SYM(io_uring_prep_splice);
+  LETLOOP_URING_SYM(io_uring_prep_statx);
+  LETLOOP_URING_SYM(io_uring_prep_symlink);
+  LETLOOP_URING_SYM(io_uring_prep_symlinkat);
+  LETLOOP_URING_SYM(io_uring_prep_sync_file_range);
+  LETLOOP_URING_SYM(io_uring_prep_tee);
+  LETLOOP_URING_SYM(io_uring_prep_timeout);
+  LETLOOP_URING_SYM(io_uring_prep_timeout_remove);
+  LETLOOP_URING_SYM(io_uring_prep_timeout_update);
+  LETLOOP_URING_SYM(io_uring_prep_unlink);
+  LETLOOP_URING_SYM(io_uring_prep_unlinkat);
+  LETLOOP_URING_SYM(io_uring_prep_waitid);
+  LETLOOP_URING_SYM(io_uring_prep_write);
+  LETLOOP_URING_SYM(io_uring_prep_write_fixed);
+  LETLOOP_URING_SYM(io_uring_prep_writev);
+  LETLOOP_URING_SYM(io_uring_prep_writev2);
+  LETLOOP_URING_SYM(io_uring_queue_exit);
+  LETLOOP_URING_SYM(io_uring_queue_init);
+  LETLOOP_URING_SYM(io_uring_queue_init_params);
+  LETLOOP_URING_SYM(io_uring_queue_mmap);
+  LETLOOP_URING_SYM(io_uring_recvmsg_cmsg_firsthdr);
+  LETLOOP_URING_SYM(io_uring_recvmsg_cmsg_nexthdr);
+  LETLOOP_URING_SYM(io_uring_recvmsg_name);
+  LETLOOP_URING_SYM(io_uring_recvmsg_payload);
+  LETLOOP_URING_SYM(io_uring_recvmsg_payload_length);
+  LETLOOP_URING_SYM(io_uring_recvmsg_validate);
+  LETLOOP_URING_SYM(io_uring_register);
+  LETLOOP_URING_SYM(io_uring_register_buf_ring);
+  LETLOOP_URING_SYM(io_uring_register_buffers);
+  LETLOOP_URING_SYM(io_uring_register_buffers_sparse);
+  LETLOOP_URING_SYM(io_uring_register_buffers_tags);
+  LETLOOP_URING_SYM(io_uring_register_buffers_update_tag);
+  LETLOOP_URING_SYM(io_uring_register_eventfd);
+  LETLOOP_URING_SYM(io_uring_register_eventfd_async);
+  LETLOOP_URING_SYM(io_uring_register_file_alloc_range);
+  LETLOOP_URING_SYM(io_uring_register_files);
+  LETLOOP_URING_SYM(io_uring_register_files_sparse);
+  LETLOOP_URING_SYM(io_uring_register_files_tags);
+  LETLOOP_URING_SYM(io_uring_register_files_update);
+  LETLOOP_URING_SYM(io_uring_register_files_update_tag);
+  LETLOOP_URING_SYM(io_uring_register_iowq_max_workers);
+  LETLOOP_URING_SYM(io_uring_register_napi);
+  LETLOOP_URING_SYM(io_uring_register_personality);
+  LETLOOP_URING_SYM(io_uring_register_probe);
+  LETLOOP_URING_SYM(io_uring_register_restrictions);
+  LETLOOP_URING_SYM(io_uring_register_ring_fd);
+  LETLOOP_URING_SYM(io_uring_register_sync_cancel);
+  LETLOOP_URING_SYM(io_uring_ring_dontfork);
+  LETLOOP_URING_SYM(io_uring_setup);
+  LETLOOP_URING_SYM(io_uring_setup_buf_ring);
+  LETLOOP_URING_SYM(io_uring_sq_ready);
+  LETLOOP_URING_SYM(io_uring_sq_space_left);
+  LETLOOP_URING_SYM(io_uring_sqe_set_buf_group);
+  LETLOOP_URING_SYM(io_uring_sqe_set_data);
+  LETLOOP_URING_SYM(io_uring_sqe_set_data64);
+  LETLOOP_URING_SYM(io_uring_sqe_set_flags);
+  LETLOOP_URING_SYM(io_uring_sqring_wait);
+  LETLOOP_URING_SYM(io_uring_submit);
+  LETLOOP_URING_SYM(io_uring_submit_and_get_events);
+  LETLOOP_URING_SYM(io_uring_submit_and_wait);
+  LETLOOP_URING_SYM(io_uring_submit_and_wait_timeout);
+  LETLOOP_URING_SYM(io_uring_unregister_buf_ring);
+  LETLOOP_URING_SYM(io_uring_unregister_buffers);
+  LETLOOP_URING_SYM(io_uring_unregister_eventfd);
+  LETLOOP_URING_SYM(io_uring_unregister_files);
+  LETLOOP_URING_SYM(io_uring_unregister_napi);
+  LETLOOP_URING_SYM(io_uring_unregister_personality);
+  LETLOOP_URING_SYM(io_uring_unregister_ring_fd);
+  LETLOOP_URING_SYM(io_uring_wait_cqe);
+  LETLOOP_URING_SYM(io_uring_wait_cqe_nr);
+  LETLOOP_URING_SYM(io_uring_wait_cqe_timeout);
+  LETLOOP_URING_SYM(io_uring_wait_cqes);
+}
+#endif /* LETLOOP_LIBURING_STATIC */
+
 static void letloop_register_foreign_symbols(void) {
   void *probe = dlopen(NULL, RTLD_LAZY);
   if (probe != NULL) {
@@ -112,6 +326,10 @@ static void letloop_register_foreign_symbols(void) {
    * static `letloop root exec` remains unsupported until this is
    * understood properly.
    */
+
+#ifdef LETLOOP_LIBURING_STATIC
+  letloop_register_liburing_symbols();
+#endif
 }
 
 #define LETLOOP_MAGIC "LETLOOP\1"

@@ -54,9 +54,16 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 	@# own host and appending a different boot. No C compiler runs there.
 	BOOT=$$(dirname $$(readlink -f $(SCHEME))); \
 	  STATIC_FLAG=""; \
-	  case "$$(cc -dumpmachine)" in *musl*) STATIC_FLAG="-static" ;; esac; \
+	  URING_FLAGS=""; \
+	  case "$$(cc -dumpmachine)" in \
+	    *musl*) STATIC_FLAG="-static"; \
+	      if printf '#include <liburing.h>\nint main(void){return 0;}\n' | \
+	         cc -x c -o /dev/null - -luring >/dev/null 2>&1; then \
+	        URING_FLAGS="-DLETLOOP_LIBURING_STATIC -luring"; \
+	      fi ;; \
+	  esac; \
 	  cc -I"$$BOOT" src/letloop-main.c "$$BOOT/kernel.o" \
-	     -o "$$BOOT/letloop-host" $$STATIC_FLAG -ldl -lm -lpthread; \
+	     -o "$$BOOT/letloop-host" $$STATIC_FLAG $$URING_FLAGS -ldl -lm -lpthread; \
 	  install -m 644 a.out.boot "$$BOOT/letloop.boot"; \
 	  { cat "$$BOOT/letloop-host" a.out.boot; \
 	    n=$$(stat -c%s a.out.boot); i=0; \
