@@ -53,15 +53,12 @@ resolved on 2026-08-16 and their resolutions are specified inline (see
 `flow-stop`, `flow-channel-buffer-size!`, Compute threads, and the
 Rationale on scope tagging).
 
-One gap found by the 2026-08-17 adverse review is **open**, listed here
-rather than left in a report nobody reads:
-
-- **Cancellation checkpoints are asymmetric.** `flow-get-try` raises
-  `cancelled` on a compute thread but not on the main thread, so a
-  main-thread fiber in a cancelled scope can keep draining a channel as
-  long as it never performs a suspending event. (`flow-put!` no longer
-  belongs on this list: it parks when full and is therefore a
-  cancellation point on both.)
+Every gap the 2026-08-17 adverse review found is closed. Its findings
+are recorded in the commits that fixed them, and the two design costs
+that came out of the fixes are stated where they apply rather than
+here: a full put parks, so deadlock is expressible (see `flow-put!`),
+and a cancelled scope drains before it propagates, so an uncancellable
+child holds its parent (see Nurseries).
 
 ## Rationale
 
@@ -405,7 +402,9 @@ this is for adjusting a channel you did not create.
 
 #### `(flow-put! channel obj)`
 
-Enqueues `OBJ` on `CHANNEL`. Returns immediately unless the channel is
+Raises `cancelled` immediately if the calling scope is already dead --
+on the main thread and on a compute thread alike. Otherwise enqueues
+`OBJ` on `CHANNEL`, returning immediately unless the channel is
 full, in which case it **parks until there is room** — so `flow-put!`
 is a suspension point and a cancellation point: a putter parked on a
 full channel inside a cancelled scope is woken and raises `cancelled`.
@@ -448,6 +447,12 @@ variable.
 
 Dequeues and returns a value if one is immediately available,
 otherwise returns `DEFAULT`. Never parks. Callable from any thread.
+
+Raises `cancelled` if the calling scope is already dead. Not parking is
+not the same as not being a cancellation point: a channel operation
+reports a dead scope whether or not it would have suspended, so a fiber
+cannot go on draining a channel after the scope that owns it has been
+cancelled.
 
 ### Timers
 
