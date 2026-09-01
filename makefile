@@ -54,7 +54,7 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 	@# own host and appending a different boot. No C compiler runs there.
 	BOOT=$$(dirname $$(readlink -f $(SCHEME))); \
 	  cc -I"$$BOOT" src/letloop-main.c "$$BOOT/kernel.o" \
-	     -o "$$BOOT/letloop-host" -ldl -lm -luuid -lpthread; \
+	     -o "$$BOOT/letloop-host" -ldl -lm -lpthread; \
 	  install -m 644 a.out.boot "$$BOOT/letloop.boot"; \
 	  { cat "$$BOOT/letloop-host" a.out.boot; \
 	    n=$$(stat -c%s a.out.boot); i=0; \
