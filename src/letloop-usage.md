@@ -10,6 +10,7 @@ Usage:
   letloop root available
   letloop root create DISTRIBUTION VERSION MACHINE DIRECTORY
   letloop root exec DIRECTORY TARGET-DIRECTORY -- COMMAND ...
+  letloop store build DERIVATION.scm
   letloop review [DIRECTORY ...]
 
 The following flags are available:

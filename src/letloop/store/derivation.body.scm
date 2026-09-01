@@ -1,0 +1,138 @@
+;; A derivation is read straight from a plain S-expression file, e.g.:
+;;
+;;   (derivation
+;;     (name "hello-c")
+;;     (build-environment (root (distribution "alpine") (version "3.20") (machine "amd64")))
+;;     (inputs ("/store/aaa-some-input"))
+;;     (fetch (hello-src (url "https://example.org/hello-1.0.0.tar.gz")
+;;                        (hash (blake3 "..."))))
+;;     (script "set -e\n" "mkdir -p out\n" "musl-gcc -static -o out/hello hello.c\n")
+;;     (output "out")
+;;     (expected-output-hash (blake3 "...")))
+;;
+;; build-environment's root is either (distribution ...) (version ...)
+;; (machine ...), naming a rootfs `letloop root create` can fetch, or a
+;; (directory ...) pointing straight at an already-provisioned rootfs.
+
+(define-record-type* <derivation>
+  (make-derivation name build-environment inputs fetches script output expected-output-hash)
+  derivation?
+  (name derivation-name)
+  (build-environment derivation-build-environment)
+  (inputs derivation-inputs)
+  (fetches derivation-fetches)
+  (script derivation-script)
+  (output derivation-output)
+  (expected-output-hash derivation-expected-output-hash))
+
+(define-record-type* <build-environment>
+  (make-build-environment kind distribution version machine directory)
+  build-environment?
+  (kind build-environment-kind)
+  (distribution build-environment-distribution)
+  (version build-environment-version)
+  (machine build-environment-machine)
+  (directory build-environment-directory))
+
+(define (build-environment-rootfs? environment)
+  (eq? (build-environment-kind environment) 'rootfs))
+
+(define (build-environment-directory? environment)
+  (eq? (build-environment-kind environment) 'directory))
+
+(define-record-type* <fetch>
+  (make-fetch name url hash-algorithm hash-hex)
+  fetch?
+  (name fetch-name)
+  (url fetch-url)
+  (hash-algorithm fetch-hash-algorithm)
+  (hash-hex fetch-hash-hex))
+
+(define store-name-valid?
+  (lambda (name)
+    (and (string? name)
+         (fx> (string-length name) 0)
+         (for-all (lambda (char)
+                    (or (char-alphabetic? char)
+                        (char-numeric? char)
+                        (memv char '(#\_ #\. #\-))))
+                  (string->list name)))))
+
+(define (find-clause clauses tag)
+  (find (lambda (c) (and (pair? c) (eq? (car c) tag))) clauses))
+
+(define (required-clause clauses tag context)
+  (or (find-clause clauses tag)
+      (error 'derivation-read (format #f "missing required ~a clause" tag) context)))
+
+(define (parse-hash-clause hash-clause context)
+  ;; (hash (blake3 "hex")) -> (values 'blake3 "hex")
+  (let ((algorithm+hex (cadr hash-clause)))
+    (unless (and (pair? algorithm+hex) (eq? (car algorithm+hex) 'blake3))
+      (error 'derivation-read "only the blake3 hash algorithm is supported" context))
+    (values (car algorithm+hex) (cadr algorithm+hex))))
+
+(define (parse-name clauses)
+  (let ((name (cadr (required-clause clauses 'name "derivation"))))
+    (unless (store-name-valid? name)
+      (error 'derivation-read "invalid derivation name, expected [a-zA-Z0-9_.-]+" name))
+    name))
+
+(define (parse-build-environment clauses)
+  (let* ((build-environment (required-clause clauses 'build-environment "derivation"))
+         (root (required-clause (cdr build-environment) 'root build-environment))
+         (directory (find-clause (cdr root) 'directory))
+         (distribution (find-clause (cdr root) 'distribution)))
+    (cond
+     (directory
+      (make-build-environment 'directory #f #f #f (cadr directory)))
+     (distribution
+      (let ((version (required-clause (cdr root) 'version root))
+            (machine (required-clause (cdr root) 'machine root)))
+        (make-build-environment 'rootfs (cadr distribution) (cadr version) (cadr machine) #f)))
+     (else
+      (error 'derivation-read "root must be (distribution ...) or (directory ...)" root)))))
+
+(define (parse-inputs clauses)
+  (let ((inputs (find-clause clauses 'inputs)))
+    (if inputs (cadr inputs) '())))
+
+(define (parse-fetch-entry entry)
+  (unless (and (pair? entry) (symbol? (car entry)))
+    (error 'derivation-read "invalid fetch entry" entry))
+  (let ((url (required-clause (cdr entry) 'url entry))
+        (hash (required-clause (cdr entry) 'hash entry)))
+    (call-with-values (lambda () (parse-hash-clause hash entry))
+      (lambda (algorithm hex)
+        (make-fetch (symbol->string (car entry)) (cadr url) algorithm hex)))))
+
+(define (parse-fetches clauses)
+  (let ((fetch (find-clause clauses 'fetch)))
+    (if fetch (map parse-fetch-entry (cdr fetch)) '())))
+
+(define (parse-script clauses)
+  (apply string-append (cdr (required-clause clauses 'script "derivation"))))
+
+(define (parse-output clauses)
+  (cadr (required-clause clauses 'output "derivation")))
+
+(define (parse-expected-output-hash clauses)
+  (let ((expected-output-hash (find-clause clauses 'expected-output-hash)))
+    (and expected-output-hash
+         (call-with-values (lambda () (parse-hash-clause expected-output-hash expected-output-hash))
+           cons))))
+
+(define (parse-derivation sexp path)
+  (unless (and (pair? sexp) (eq? (car sexp) 'derivation))
+    (error 'derivation-read "expected a top-level (derivation ...) form" path))
+  (let ((clauses (cdr sexp)))
+    (make-derivation (parse-name clauses)
+                      (parse-build-environment clauses)
+                      (parse-inputs clauses)
+                      (parse-fetches clauses)
+                      (parse-script clauses)
+                      (parse-output clauses)
+                      (parse-expected-output-hash clauses))))
+
+(define (derivation-read path)
+  (parse-derivation (call-with-input-file path read) path))
