@@ -10,7 +10,9 @@
           ~check-store-001/fetch-only
           ~check-store-002/derivation-input
           ~check-store-003/derivation-root
-          ~check-store-004/cyclic-reference)
+          ~check-store-004/cyclic-reference
+          ~check-store-005/build-cache-skips-the-build
+          ~check-store-006/build-cache-sees-changed-inputs)
 
   (import (chezscheme)
           (letloop root)
@@ -18,11 +20,14 @@
           (letloop store hash)
           (letloop store sandbox)
           (letloop store fetch)
-          ;; only for ~check-store-001/fetch-only, which builds its own
-          ;; expected hash from a live probe request rather than pinning
-          ;; a hash that would rot
+          ;; www-request and blake3 are only for
+          ;; ~check-store-001/fetch-only, which builds its own expected
+          ;; hash from a live probe request rather than pinning one that
+          ;; would rot; the incremental blake3 procedures key the build
+          ;; cache
           (only (letloop www) www-request)
-          (only (letloop blake3) blake3))
+          (letloop blake3)
+          (letloop r999))
 
   (begin
     (include "letloop/store.body.scm")

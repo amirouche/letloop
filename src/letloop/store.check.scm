@@ -162,6 +162,82 @@
             (let ((destination (store-build user-path)))
               (file-exists? (string-append destination "/marker"))))))))
 
+;; The build cache skips the build itself on a second call, not just
+;; the final move that content addressing already dedups. The script
+;; sleeps, so the two calls are told apart by how long they take: a
+;; second call that returns in a fraction of the sleep cannot have run
+;; it. Sabotaging the build between the calls would not work as a test
+;; -- everything it depends on is part of the cache key, so breaking
+;; any of it invalidates the entry rather than proving it was used.
+(define ~check-store-005/build-cache-skips-the-build
+  (lambda ()
+    (if (not (bwrap-available?))
+        (begin (display "** SKIP: /usr/bin/bwrap not found\n") #t)
+        (guard (ex (#t (display "** SKIP: bwrap sandbox unavailable in this environment\n") #t))
+          (define mkdtemp (foreign-procedure "mkdtemp" (string) string))
+          (system! "mkdir -p /tmp/letloop/")
+          (let* ((rootfs (mkdtemp "/tmp/letloop/store-check-005-rootfs-XXXXXX"))
+                 (directory (mkdtemp "/tmp/letloop/store-check-005-XXXXXX"))
+                 (derivation-path (string-append directory "/cached.scm")))
+            (store-check-fixture-rootfs! rootfs)
+            (system! "rm -rf /tmp/letloop/store-check-005-store")
+            (putenv "LETLOOP_STORE" "/tmp/letloop/store-check-005-store")
+            (store-check-write-derivation!
+             derivation-path
+             `(derivation
+                (name "cached")
+                (build-environment (root (directory ,rootfs)))
+                (script "set -e\n" "sleep 3\n" "mkdir -p out\n" "echo done > out/marker\n")
+                (output "out")))
+            (let* ((started (real-time))
+                   (first (store-build derivation-path))
+                   (first-elapsed (- (real-time) started))
+                   (resumed (real-time))
+                   (second (store-build derivation-path))
+                   (second-elapsed (- (real-time) resumed)))
+              (and (string=? first second)
+                   (file-exists? (string-append second "/marker"))
+                   (>= first-elapsed 3000)
+                   (< second-elapsed 1500))))))))
+
+;; ... but it must not skip a build whose literal input changed. A
+;; literal input is named by a path, not by content, so keying on the
+;; path alone would hand back an output built from the old contents --
+;; the one kind of wrong answer a cache must never give.
+(define ~check-store-006/build-cache-sees-changed-inputs
+  (lambda ()
+    (if (not (bwrap-available?))
+        (begin (display "** SKIP: /usr/bin/bwrap not found\n") #t)
+        (guard (ex (#t (display "** SKIP: bwrap sandbox unavailable in this environment\n") #t))
+          (define mkdtemp (foreign-procedure "mkdtemp" (string) string))
+          (system! "mkdir -p /tmp/letloop/")
+          (let* ((rootfs (mkdtemp "/tmp/letloop/store-check-006-rootfs-XXXXXX"))
+                 (directory (mkdtemp "/tmp/letloop/store-check-006-XXXXXX"))
+                 (source (string-append directory "/source"))
+                 (derivation-path (string-append directory "/uses-source.scm")))
+            (store-check-fixture-rootfs! rootfs)
+            (system! "rm -rf /tmp/letloop/store-check-006-store")
+            (putenv "LETLOOP_STORE" "/tmp/letloop/store-check-006-store")
+            (system! (format #f "mkdir -p ~a" (shell-single-quote source)))
+            (system! (format #f "echo before > ~a/content" (shell-single-quote source)))
+            (store-check-write-derivation!
+             derivation-path
+             `(derivation
+                (name "uses-source")
+                (build-environment (root (directory ,rootfs)))
+                (inputs (,source))
+                (script "set -e\n"
+                        "mkdir -p out\n"
+                        "cp " ,source "/content out/content\n")
+                (output "out")))
+            (let ((first (store-build derivation-path)))
+              (system! (format #f "echo after > ~a/content" (shell-single-quote source)))
+              (let ((second (store-build derivation-path)))
+                (and (not (string=? first second))
+                     (string=? "after"
+                               (call-with-input-file (string-append second "/content")
+                                 get-line))))))))))
+
 ;; A reference cycle raises a clear error instead of recursing forever.
 ;; Needs no sandbox: resolution fails before any build starts.
 (define ~check-store-004/cyclic-reference

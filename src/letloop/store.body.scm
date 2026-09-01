@@ -139,39 +139,116 @@
                            (shell-single-quote (string-append inputs-directory "/" (car named))))))
        named-inputs))))
 
-(define (run-sandboxed-build! d derivation-path scratch-directory resolve-derivation)
-  (let* ((rootfs-directory (resolve-build-environment-rootfs (derivation-build-environment d)
-                                                              resolve-derivation))
-         (named-inputs
-          (map (lambda (input)
-                 (let* ((reference (input-derivation-path input))
-                        (path (derivation-reference-path derivation-path reference)))
-                   (cons (derivation-name (derivation-read path))
-                         (resolve-derivation reference))))
-               (filter input-derivation-reference? (derivation-inputs d))))
-         (inputs (map (lambda (input)
-                        (if (input-derivation-reference? input)
-                            (resolve-derivation (input-derivation-path input))
-                            input))
-                      (derivation-inputs d))))
-    (run-fetches! (derivation-fetches d) scratch-directory)
-    (link-derivation-inputs! scratch-directory named-inputs)
-    (write-build-script! scratch-directory (derivation-script d))
-    (sandbox-build! rootfs-directory scratch-directory inputs)))
+;; Everything a sandboxed build depends on from outside its own
+;; derivation file: the rootfs it runs in, its inputs as absolute
+;; paths, and those of them that carry a name to be reachable under
+;; /build/inputs. Resolved up front, before the build, so it can also
+;; be folded into the build's cache key.
+(define-record-type* <resolved>
+  (make-resolved rootfs inputs named-inputs)
+  resolved?
+  (rootfs resolved-rootfs)
+  (inputs resolved-inputs)
+  (named-inputs resolved-named-inputs))
+
+(define (resolve-dependencies d derivation-path resolve-derivation)
+  (if (not (derivation-script d))
+      (make-resolved #f '() '())
+      (make-resolved
+       (resolve-build-environment-rootfs (derivation-build-environment d) resolve-derivation)
+       (map (lambda (input)
+              (if (input-derivation-reference? input)
+                  (resolve-derivation (input-derivation-path input))
+                  input))
+            (derivation-inputs d))
+       (map (lambda (input)
+              (let* ((reference (input-derivation-path input))
+                     (path (derivation-reference-path derivation-path reference)))
+                (cons (derivation-name (derivation-read path))
+                      (resolve-derivation reference))))
+            (filter input-derivation-reference? (derivation-inputs d))))))
+
+(define (run-sandboxed-build! d scratch-directory resolved)
+  (run-fetches! (derivation-fetches d) scratch-directory)
+  (link-derivation-inputs! scratch-directory (resolved-named-inputs resolved))
+  (write-build-script! scratch-directory (derivation-script d))
+  (sandbox-build! (resolved-rootfs resolved) scratch-directory (resolved-inputs resolved)))
+
+;; The store is addressed by what a build produced, which is only
+;; knowable after running it -- so on its own it can dedup an output
+;; but never skip the work that made it. For a chain a few derivations
+;; deep that is the difference between rebuilding ChezScheme every time
+;; something downstream changes and not.
+;;
+;; This keys a build on everything that determines it: the derivation
+;; file's own bytes, the rootfs it runs in, and its resolved inputs.
+;; Those are exactly the things that, changed, could change the output,
+;; and all of them are known before the build starts. Same key, same
+;; output -- under the determinism the store already assumes when it
+;; treats two identical outputs as interchangeable.
+;;
+;; It is a cache, not a source of truth: every entry points at a store
+;; path that was hashed from real content, and an entry whose target
+;; has since been removed is ignored rather than trusted.
+(define (store-cache-directory)
+  (string-append (store-directory) "/.cache"))
+
+;; What a path contributes to a cache key. A store path already has its
+;; content hash in its own name, so the name is enough and there is no
+;; reason to re-hash a 300 MB toolchain on every build. Anything else
+;; -- a fixture rootfs, a working tree bind-mounted as a literal input
+;; -- is named by a path whose contents can change underneath us, so it
+;; has to be hashed. Keying those by path alone would hand back a stale
+;; output the moment the tree behind it changed, which is exactly the
+;; sort of wrong answer a cache must not give.
+(define (path-cache-identity path)
+  (let ((store (string-append (store-directory) "/")))
+    (if (and (fx>= (string-length path) (string-length store))
+             (string=? (substring path 0 (string-length store)) store))
+        path
+        (string-append path ":" (store-hash-directory path)))))
+
+(define (build-cache-key derivation-path resolved)
+  (define hasher (make-blake3))
+  (blake3-update! hasher
+                  (call-with-port (open-file-input-port derivation-path) get-bytevector-all))
+  (blake3-update! hasher
+                  (string->utf8
+                   (format #f "\nrootfs ~a\n"
+                           (let ((rootfs (resolved-rootfs resolved)))
+                             (if rootfs (path-cache-identity rootfs) "none")))))
+  (for-each (lambda (input)
+              (blake3-update! hasher
+                              (string->utf8 (format #f "input ~a\n" (path-cache-identity input)))))
+            (resolved-inputs resolved))
+  (let ((digest (blake3-finalize hasher 32)))
+    (blake3-close! hasher)
+    (bytevector->hex-string digest)))
+
+(define (build-cache-ref key)
+  (let ((entry (string-append (store-cache-directory) "/" key)))
+    (and (file-exists? entry)
+         (let ((destination (call-with-input-file entry get-line)))
+           (and (string? destination)
+                (file-exists? destination)
+                destination)))))
+
+(define (build-cache-set! key destination)
+  (system! (format #f "mkdir -p ~a" (shell-single-quote (store-cache-directory))))
+  (call-with-output-file (string-append (store-cache-directory) "/" key)
+    (lambda (port) (display destination port) (newline port))))
 
 ;; Builds DERIVATION-PATH, first building anything it references
 ;; through (derivation "...") -- as its build-environment root, as an
 ;; input, or transitively through either.
 ;;
 ;; BUILDING is the list of paths on the current resolution stack, so a
-;; reference cycle raises rather than looping forever. BUILT is a
-;; shared mutable cell (one per top-level store-build) memoizing
-;; path -> store path, so a diamond -- two inputs naming the same
-;; nested derivation -- builds it once instead of redoing the whole
-;; fetch-and-build before store-place!'s content-addressed dedup
-;; finally no-ops the move. Both last only for one store-build call:
-;; this is deliberately not a persistent build cache and not a
-;; scheduler, just depth-first resolution, one derivation at a time.
+;; reference cycle raises rather than looping forever. BUILT memoizes
+;; path -> store path for this call, so a diamond -- two inputs naming
+;; the same nested derivation -- resolves it once; the on-disk cache
+;; above then carries the same saving across calls. Resolution itself
+;; stays plain depth-first, one derivation at a time: still not a
+;; scheduler.
 (define (store-build/resolving derivation-path building built)
   (define mkdtemp (foreign-procedure "mkdtemp" (string) string))
   (when (member derivation-path building)
@@ -186,20 +263,32 @@
                    (derivation-reference-path derivation-path reference)
                    (cons derivation-path building)
                    built)))
-               (ignore-0 (system! (format #f "mkdir -p ~a" (shell-single-quote (store-tmp-directory)))))
-               (scratch-directory (mkdtemp (string-append (store-tmp-directory) "/build-XXXXXX")))
-               (output-directory (string-append scratch-directory "/" (derivation-output d))))
-          (if (derivation-script d)
-              (run-sandboxed-build! d derivation-path scratch-directory resolve-derivation)
-              (run-fetch-only-build! (derivation-fetches d) output-directory))
-          (unless (file-exists? output-directory)
-            (error 'store-build "declared output not produced by the build" (derivation-output d)))
-          (let ((hash (store-hash-directory output-directory)))
-            (verify-expected-output-hash! (derivation-expected-output-hash d) hash derivation-path)
-            (let ((destination (store-place! output-directory hash (derivation-name d))))
-              (store-write-drv! destination derivation-path)
-              (set-box! built (cons (cons derivation-path destination) (unbox built)))
-              destination))))))
+               (resolved (resolve-dependencies d derivation-path resolve-derivation))
+               (key (build-cache-key derivation-path resolved))
+               (cached (build-cache-ref key)))
+          (define (remember destination)
+            (set-box! built (cons (cons derivation-path destination) (unbox built)))
+            destination)
+          (if cached
+              (remember cached)
+              (let* ((ignore-0 (system! (format #f "mkdir -p ~a"
+                                                 (shell-single-quote (store-tmp-directory)))))
+                     (scratch-directory (mkdtemp (string-append (store-tmp-directory)
+                                                                 "/build-XXXXXX")))
+                     (output-directory (string-append scratch-directory "/" (derivation-output d))))
+                (if (derivation-script d)
+                    (run-sandboxed-build! d scratch-directory resolved)
+                    (run-fetch-only-build! (derivation-fetches d) output-directory))
+                (unless (file-exists? output-directory)
+                  (error 'store-build "declared output not produced by the build"
+                         (derivation-output d)))
+                (let ((hash (store-hash-directory output-directory)))
+                  (verify-expected-output-hash! (derivation-expected-output-hash d)
+                                                 hash derivation-path)
+                  (let ((destination (store-place! output-directory hash (derivation-name d))))
+                    (store-write-drv! destination derivation-path)
+                    (build-cache-set! key destination)
+                    (remember destination)))))))))
 
 ;; -> the resulting store path.
 (define (store-build derivation-path)
