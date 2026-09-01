@@ -1,6 +1,6 @@
 #!/bin/bash
 # End-to-end smoke test for `letloop store build`: statically compile
-# three targets inside a network-off, musl/Alpine sandbox, and prove
+# four targets inside a network-off, musl/Alpine sandbox, and prove
 # the resulting binaries are relocatable, statically linked executables
 # -- not just something that happens to run inside its own build
 # sandbox. In increasing order of ambition:
@@ -8,7 +8,10 @@
 #   2. letloop review, the largest real subsystem in this repo
 #      (compile-only -- see store-review-static.derivation.scm's own
 #      header comment for why it is not run).
-#   3. letloop itself, producing a self-hosting distribution named
+#   3. (letloop liburing low)'s own checks, actually run (not just
+#      compiled) statically -- real io_uring ring setup, submit,
+#      wait, cancel, socket and file ops.
+#   4. letloop itself, producing a self-hosting distribution named
 #      letloop-musl-static.
 #
 # This is opt-in, NOT run by `make check`: provisioning builds
@@ -110,7 +113,13 @@ file "$REVIEW_DESTINATION/letloop-review" | grep -qi 'statically linked' || {
     exit 1
 }
 
-# --- 3. letloop itself: build, static-link check, relocatability check ---
+# --- 3. (letloop liburing low): actually run its io_uring checks
+#        statically (not just compile) -- see
+#        store-flow2-static.derivation.scm's header comment ---
+FLOW2_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/store-flow2-static.derivation.scm" | tail -1)
+echo "store path: $FLOW2_DESTINATION"
+
+# --- 4. letloop itself: build, static-link check, relocatability check ---
 LETLOOP_MUSL_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/store-letloop-musl-static.derivation.scm" | tail -1)
 echo "store path: $LETLOOP_MUSL_DESTINATION"
 
