@@ -137,6 +137,40 @@
      (flow-stop)))
   (and (eq? first 'late) (eq? second 'fast)))
 
+;; Finding 7 of the 2026-08-17 review. flow-get's block proc, when it
+;; finds the channel non-empty at registration time, claims its entry
+;; and dequeues -- and then used to ignore resume's return value.
+;; resume reports #f when an earlier base of the same perform already
+;; won, and registration is a for-each with no early exit, so that is
+;; reachable: the value is out of the channel, the fiber is committed
+;; elsewhere, and nothing receives it. Silent, and the peer that was
+;; waiting for it looks like the culprit.
+;;
+;; FILLER makes the interleaving deterministic instead of waiting for a
+;; compute thread to produce it: never ready at poll, and its block does
+;; both halves itself -- fills the channel, then wins -- so the flow-get
+;; registering after it necessarily takes the immediate path with the
+;; state box already synched. Standalone sweep in
+;; checks/repro-flow2-get-immediate-drop.scm.
+(define (~check-flow2-002/losing-get-does-not-eat-a-value)
+  (define ch (make-flow-channel))
+  (define result #f)
+  (define filler (make-flow (lambda (x) x)
+                            (lambda () #f)
+                            (lambda (state resume register-cancel!)
+                              (flow-put! ch 'the-value)
+                              (resume 'winner))))
+  (flow-run
+   (lambda (workers)
+     ;; filler first: flow-flatten preserves choice order, and the
+     ;; registration for-each walks it in order.
+     (set! result (flow-perform (flow-choice filler (flow-get ch))))
+     (flow-stop)))
+  (assert (eq? result 'winner))
+  ;; The value the losing get dequeued must still be in the channel.
+  (assert (eq? 'the-value (flow-get-try ch 'EMPTY)))
+  #t)
+
 ;;------------------------------------------------------------
 ;; Nurseries
 ;;------------------------------------------------------------
