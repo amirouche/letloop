@@ -1,9 +1,15 @@
 #!/bin/bash
-# End-to-end smoke test for `letloop store build`: statically compile a
-# tiny Scheme program inside a network-off, musl/Alpine sandbox, and
-# prove the resulting binary is a relocatable, statically linked
-# executable -- not just something that happens to run inside its own
-# build sandbox.
+# End-to-end smoke test for `letloop store build`: statically compile
+# three targets inside a network-off, musl/Alpine sandbox, and prove
+# the resulting binaries are relocatable, statically linked executables
+# -- not just something that happens to run inside its own build
+# sandbox. In increasing order of ambition:
+#   1. hello.scm, a trivial inline example.
+#   2. letloop review, the largest real subsystem in this repo
+#      (compile-only -- see store-review-static.derivation.scm's own
+#      header comment for why it is not run).
+#   3. letloop itself, producing a self-hosting distribution named
+#      letloop-musl-static.
 #
 # This is opt-in, NOT run by `make check`: provisioning builds
 # ChezScheme + letloop from source inside an Alpine container, a
@@ -36,8 +42,14 @@ if [ ! -x "$ROOTFS/usr/local/bin/letloop" ]; then
     # uses `ln -srf` -- under busybox that call silently no-ops (prints
     # usage to stderr, exits nonzero, but the recipe's `;`-joined shell
     # keeps going), leaving local/bin/letloop never created.
+    # liburing-dev + linux-headers let `make letloop` statically link
+    # (letloop liburing low)'s ~170 io_uring_* symbols (see
+    # src/letloop/store/README.md's liburing section) -- optional in
+    # the sense that the makefile probes for them and skips silently
+    # if absent, but needed here since store-review-static.derivation
+    # and store-letloop-musl-static.derivation both exercise that path.
     "$LETLOOP" root exec "$ROOTFS" / -- \
-        sh -c 'apk add --no-cache build-base bash git util-linux-dev coreutils'
+        sh -c 'apk add --no-cache build-base bash git util-linux-dev coreutils liburing-dev linux-headers'
     # `letloop root exec` always bind-mounts the invoker's own cwd at
     # /mnt/host -- building directly there would run `make chezscheme`
     # / `make letloop` (which `rm -rf`s and repopulates ./local) against
@@ -60,7 +72,7 @@ if [ ! -x "$ROOTFS/usr/local/bin/letloop" ]; then
         sh -c 'rm -f /usr/local/bin/letloop && mkdir -p /usr/local/bin /usr/local/lib && cp -a /root/letloop-src/local/bin/. /usr/local/bin/ && cp -a /root/letloop-src/local/lib/. /usr/local/lib/'
 fi
 
-# --- Build the derivation ---
+# --- 1. hello.scm: build, static-link check, relocatability check ---
 export LETLOOP_STORE="$WORKDIR/store"
 # letloop compile's own progress lines ("compiling ...", "Produced:
 # ./a.out") go to stdout too, ahead of store-build's final printed
@@ -68,14 +80,12 @@ export LETLOOP_STORE="$WORKDIR/store"
 DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/store-static-hello.derivation.scm" | tail -1)
 echo "store path: $DESTINATION"
 
-# --- Statically linked: no dynamic interpreter/loader ---
 file "$DESTINATION/hello" | grep -qi 'statically linked' || {
     echo "FAIL: $DESTINATION/hello is not statically linked"
     file "$DESTINATION/hello"
     exit 1
 }
 
-# --- Relocatable: copy it OUT of the store and run it standalone ---
 # A static binary that only happens to run inside its build sandbox
 # doesn't satisfy the relocatability requirement; it must run
 # unmodified, copied anywhere, with zero dependency on the store
@@ -86,6 +96,36 @@ cp "$DESTINATION/hello" "$ELSEWHERE/hello"
 OUTPUT=$("$ELSEWHERE/hello")
 [ "$OUTPUT" = "hello, letloop store" ] || {
     echo "FAIL: unexpected output: $OUTPUT"
+    exit 1
+}
+
+# --- 2. letloop review: build, static-link check only (not run -- see
+#        store-review-static.derivation.scm's header comment) ---
+REVIEW_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/store-review-static.derivation.scm" | tail -1)
+echo "store path: $REVIEW_DESTINATION"
+
+file "$REVIEW_DESTINATION/letloop-review" | grep -qi 'statically linked' || {
+    echo "FAIL: $REVIEW_DESTINATION/letloop-review is not statically linked"
+    file "$REVIEW_DESTINATION/letloop-review"
+    exit 1
+}
+
+# --- 3. letloop itself: build, static-link check, relocatability check ---
+LETLOOP_MUSL_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/store-letloop-musl-static.derivation.scm" | tail -1)
+echo "store path: $LETLOOP_MUSL_DESTINATION"
+
+file "$LETLOOP_MUSL_DESTINATION/bin/letloop-musl-static" | grep -qi 'statically linked' || {
+    echo "FAIL: $LETLOOP_MUSL_DESTINATION/bin/letloop-musl-static is not statically linked"
+    file "$LETLOOP_MUSL_DESTINATION/bin/letloop-musl-static"
+    exit 1
+}
+
+ELSEWHERE2=$(mktemp -d)
+trap "rm -rf $ELSEWHERE $ELSEWHERE2" EXIT
+cp "$LETLOOP_MUSL_DESTINATION/bin/letloop-musl-static" "$ELSEWHERE2/letloop-musl-static"
+VERSION_OUTPUT=$("$ELSEWHERE2/letloop-musl-static" version)
+echo "$VERSION_OUTPUT" | grep -q "Chez Scheme Version" || {
+    echo "FAIL: unexpected version output: $VERSION_OUTPUT"
     exit 1
 }
 
