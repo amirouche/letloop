@@ -2,22 +2,35 @@
 # Builds the Alpine-free bootstrap chain end to end and proves the
 # result can compile a static binary:
 #
-#   1. bootstrap-toolchain  fetch-only: musl.cc's static native
-#                            x86_64-linux-musl gcc/binutils/musl tarball
-#   2. bootstrap-shell      fetch-only: a static BusyBox binary
-#   3. bootstrap-rootfs     assembles 1+2 into a usable rootfs
-#   4. a hello.c derivation built *against* that rootfs, with no Alpine
-#      and no host toolchain anywhere in its sandbox
+#   1. bootstrap-toolchain    fetch-only: musl.cc's static native
+#                              x86_64-linux-musl gcc/binutils/musl
+#   2. bootstrap-shell        fetch-only: a static BusyBox binary
+#   3. bootstrap-rootfs       assembles 1+2 into a scaffold rootfs
+#   4. bootstrap-make         GNU make, from source, via its own
+#                              build.sh (no make needed to build make)
+#   5. bootstrap-busybox      BusyBox, from source
+#   6. bootstrap-rootfs-final the rootfs downstream work should use:
+#                              toolchain + 4 + 5, no prebuilt BusyBox
+#   7. a hello.c derivation built against the scaffold rootfs, with no
+#      Alpine and no host toolchain anywhere in its sandbox
 #
 # Steps 1 and 2 are the only two prebuilt binaries the chain trusts,
 # both pinned by BLAKE3 (see each derivation's own header for the
-# provenance and the reasoning). Step 3 is the one step that still
-# needs a pre-existing rootfs to run its assembly script in -- see its
-# header for why that is structural -- and this script supplies it as
-# a fixture of symlinks into the host's own /usr, /bin, /lib rather
-# than by downloading a distribution.
+# provenance and the reasoning). Step 5 is what retires the prebuilt
+# BusyBox: after it, that binary is load-bearing only for step 3's
+# assembly and for hosting steps 4 and 5 themselves, and its bytes
+# appear in nothing the chain produces. The compiler cannot be retired
+# the same way without a full source bootstrap, which this chain
+# deliberately does not attempt.
 #
-# Opt-in, NOT run by `make check`: fetches ~90 MB and needs bwrap.
+# Step 3 is the one step that still needs a pre-existing rootfs to run
+# its assembly script in -- see its header for why that is structural
+# -- and this script supplies it as a fixture of symlinks into the
+# host's own /usr, /bin, /lib rather than by downloading a
+# distribution.
+#
+# Opt-in, NOT run by `make check`: fetches ~95 MB, compiles make and
+# BusyBox from source, and needs bwrap.
 set -exo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -49,6 +62,33 @@ test -x "$ROOTFS_DESTINATION/bin/gcc" || {
 }
 test -e "$ROOTFS_DESTINATION/bin/sh" || {
     echo "FAIL: no sh in the assembled rootfs"
+    exit 1
+}
+
+# The from-source rootfs: same shape, but assembled out of components
+# this chain compiled rather than fetched. Pulls in make and BusyBox
+# through its own (derivation ...) inputs.
+FINAL_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-rootfs-final.derivation.scm" | tail -1)
+echo "final rootfs: $FINAL_DESTINATION"
+
+for tool in gcc make busybox sh; do
+    test -e "$FINAL_DESTINATION/bin/$tool" || {
+        echo "FAIL: no $tool in the final rootfs"
+        exit 1
+    }
+done
+
+# The prebuilt BusyBox must not have survived into it.
+PREBUILT=$(echo "$LETLOOP_STORE"/*-bootstrap-shell/busybox)
+if cmp -s "$FINAL_DESTINATION/bin/busybox" "$PREBUILT"; then
+    echo "FAIL: final rootfs still carries the prebuilt busybox"
+    exit 1
+fi
+
+# make is linked static like everything else here, so it runs from a
+# store path directly rather than only from inside the rootfs.
+"$FINAL_DESTINATION/bin/make" --version | grep -q "GNU Make" || {
+    echo "FAIL: the from-source make does not run standalone"
     exit 1
 }
 

@@ -7,8 +7,15 @@
 ;; reason to sandbox it, and it sidesteps needing any network tooling
 ;; inside a minimal, network-off build rootfs.
 
+;; Some upstreams -- ftp.gnu.org among them -- answer 403 to a request
+;; carrying no User-Agent at all, which is what www-request sends when
+;; given no headers. Identifying ourselves is both what those servers
+;; want and the polite thing to do when fetching from a volunteer
+;; mirror.
+(define fetch-user-agent '((user-agent . "letloop-store/1")))
+
 (define (fetch-verify! name url expected-hash-hex destination-path)
-  (call-with-values (lambda () (www-request 'GET url '() (bytevector)))
+  (call-with-values (lambda () (www-request 'GET url fetch-user-agent (bytevector)))
     (lambda (code headers body)
       (unless (= code 200)
         (error 'fetch-verify! "fetch failed" name url code))
