@@ -90,6 +90,7 @@
    ;; and ~check-flow-009 series -- the 11 fd- and ring-touching checks
    ;; the fork had dropped
    ~check-flow2-006/echo-pair
+   ~check-flow2-006/accept-cancel-leaves-listener-usable
    ~check-flow2-006/read-or-timeout-leaves-fd-usable
    ~check-flow2-006/request-loop-idle-timeout
    ~check-flow2-009/file-write-read-roundtrip
@@ -917,6 +918,19 @@
                                                (else (submit! (subbytevector remaining res)))))))))
                       (submit! bv))))))
 
+  ;; The cancel is not optional here, unlike the other events where it
+  ;; only saves a wasted ring operation. loop-accept-block keys its
+  ;; single continuation slot by the multishot's id and REFUSES a
+  ;; second waiter on it; a cancelled accept that left its handler
+  ;; behind therefore poisons the listening fd, and every later
+  ;; flow-accept on it raises "concurrent accept on fd" for as long as
+  ;; no client happens to arrive to clear the slot — i.e. exactly when
+  ;; the server is idle. Any flow-accept under a flow-monitor or a
+  ;; cancellable scope hit this on the first cancellation.
+  ;;
+  ;; Deleting the handler is the whole fix: a client the multishot
+  ;; accepts afterwards lands on %accept-backlog and the next
+  ;; flow-accept picks it up, so nothing is leaked and nothing is lost.
   (define flow-accept
     (lambda (fd)
       (make-flow% 'base #f
@@ -925,7 +939,12 @@
                     (let ((client (loop-accept-try fd)))
                       (and client (lambda () client))))
                   (lambda (state resume register-cancel!)
-                    (loop-accept-block fd (lambda (client) (resume client)))))))
+                    (let ((id (loop-accept-block
+                               fd (lambda (client) (resume client)))))
+                      (register-cancel!
+                       (lambda ()
+                         (hashtable-delete! (loop-handlers (loop-current))
+                                            id))))))))
 
   (define O-RDONLY 0)
   (define O-WRONLY 1)
