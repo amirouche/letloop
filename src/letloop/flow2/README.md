@@ -8,10 +8,17 @@ Amirouche A. BOUBEKKI
 
 ## Status
 
-This document is a **draft** design specification; the library does
-not exist yet. `(letloop flow2)` is a fork of `(letloop flow)`, which
-stays untouched and keeps serving its current consumers while flow2
-is built. Decisions herein were resolved on 2026-08-14; the
+`(letloop flow2)` is **implemented**, in `src/letloop/flow2.scm`, with
+49 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
+`(letloop flow)` stays untouched and keeps serving its current ones.
+
+This document began as a draft specification and is now the library's
+reference, so where the two ever disagree the source wins. It was last
+reconciled against the implementation on 2026-08-17, after an adverse
+review whose findings changed several documented behaviours — channels
+are now bounded by default and a full put parks, which is the one
+change that would break code written against the original draft.
+Decisions herein were resolved on 2026-08-14; the
 motivating failures are documented in `TODO.md` (sections "monitored
 trees with automatic timeout-and-cancel" and
 "flow-block-and-wait-off-loop registers ring events from the worker
@@ -38,13 +45,48 @@ symbol — not R6RS conditions.
 
 ## Issues
 
-None open. The four issues raised by the first draft — whether the
-framework's error reply respects the response channel's buffer bound,
-a `stopped` error symbol for `flow-stop`, shrinking a bound below the
-current queue length, and wholesale `flow-scope-attach!` of a worker
-channel — were resolved on 2026-08-16 and their resolutions are
-specified inline (see `flow-stop`, `flow-channel-buffer-size!`,
-Compute threads, and the Rationale on scope tagging).
+The four issues raised by the first draft — whether the framework's
+error reply respects the response channel's buffer bound, a `stopped`
+error symbol for `flow-stop`, shrinking a bound below the current queue
+length, and wholesale `flow-scope-attach!` of a worker channel — were
+resolved on 2026-08-16 and their resolutions are specified inline (see
+`flow-stop`, `flow-channel-buffer-size!`, Compute threads, and the
+Rationale on scope tagging).
+
+Five gaps found by the 2026-08-17 adverse review are **open**, listed
+here rather than left in a report nobody reads. Each is a place where
+this document currently describes an intent the implementation does not
+fully deliver:
+
+- **Writes are not cancellable.** `flow-write`, `flow-write-at` and
+  `flow-close` register no cancel thunk. `flow-write` is the sharp one:
+  it resubmits the remainder of a partial write internally, so after a
+  scope is cancelled and the fiber has unwound, that chain keeps
+  issuing ring operations against an fd the cleanup path has very
+  likely already closed. "Every in-flight ring operation belonging to
+  the subtree is cancelled", below, overstates this.
+- **A nursery does not wait for the compute tasks it owns.**
+  `flow-submit!` tags a task with the current scope but never
+  increments the scope's child count, so a join can return while a
+  scope-tagged task is still running on a worker and can still put
+  afterwards. Cancellation flags such tasks; ownership is not
+  implemented.
+- **A cancelled parent abandons its grandchildren.** `%scope-finish`
+  performs the join under the parent scope on purpose, so an enclosing
+  cancellation reaches it — but when it does, the join raises with the
+  child scope's own children still running and uncounted, and the
+  subscope is never unlinked from the parent.
+- **Shutdown does not join workers.** `flow-run` puts the stop message,
+  signals the eventfd and closes it without waiting. A worker still
+  inside a task can then find the eventfd already `#f`, or race the
+  assignment and write into a closed fd number that a later `loop-new`
+  or `socket` may have reused.
+- **Cancellation checkpoints are asymmetric.** `flow-get-try` raises
+  `cancelled` on a compute thread but not on the main thread, so a
+  main-thread fiber in a cancelled scope can keep draining a channel as
+  long as it never performs a suspending event. (`flow-put!` no longer
+  belongs on this list: it parks when full and is therefore a
+  cancellation point on both.)
 
 ## Rationale
 
@@ -458,15 +500,31 @@ client fd, or `#f` on failure.
 
 #### `(flow-read fd)`
 
-Event: bytes readable on `FD`; result is a bytevector, `#f` on
-EOF/failure.
+Event: bytes readable on `FD`. Three results, and EOF is **not** `#f`:
+
+| result | meaning |
+|---|---|
+| bytevector | that many bytes were read |
+| `#t` | clean EOF, the peer closed |
+| `#f` | the read failed |
+
+Distinguishing the last two matters — a loop that treats `#f` as EOF
+silently turns an error into a normal end of stream.
 
 #### `(flow-write fd bytevector)`
 
-Event: `BYTEVECTOR` written to `FD`; result is the count written, or
-`#f`.
+Event: `BYTEVECTOR` written to `FD`; result is `#t` once **all** of it
+has been written, or `#f` on failure. Not a count: a partial write is
+resubmitted internally until the bytevector is exhausted, so the event
+completes only when there is nothing left to write.
 
-#### `(flow-open filepath flags)`
+#### `(flow-open path flags mode)`
+
+Three arguments. `FLAGS` is a bitwise-or of the exported open flags —
+`O-RDONLY`, `O-WRONLY`, `O-RDWR`, `O-CREAT`, `O-TRUNC`, `O-APPEND` —
+and `MODE` is the permission bits used when `O-CREAT` creates the
+file, and ignored otherwise. Result is the fd, or `#f` on failure.
+
 #### `(flow-read-at fd offset size)`
 #### `(flow-write-at fd offset bytevector)`
 #### `(flow-close fd)`
@@ -558,12 +616,51 @@ task:
 #### `(flow-submit! worker-channel thunk response-channel)`
 
 Enqueues the task `(THUNK . RESPONSE-CHANNEL)` on `WORKER-CHANNEL`,
-tagged with the current scope, and returns immediately. The
+tagged with the current scope. Returns immediately unless the worker
+channel is full, in which case it parks like any other put — that is
+the pool exerting backpressure on its submitters, and it means
+`flow-submit!` is a suspension point and a cancellation point. The
 submitting side then reads `RESPONSE-CHANNEL` and interprets whatever
 protocol it and the thunk agreed on. `THUNK` runs on the compute
 thread with no arguments; by convention it closes over
 `RESPONSE-CHANNEL` (and any downlink channel) itself — the copy in
 the task record is for the framework's error reply and nothing else.
+
+### Diagnostics
+
+#### `(flow-log sexp)`
+
+Records `SEXP`, timestamped with the loop's cached per-tick jiffy, and
+returns. Callable from **any** thread, and the one facility here that
+is: a call conses onto a box the calling thread owns and does nothing
+else — no mutex, no port, no syscall. That is the whole design
+requirement. Logging has to be safe on the loop thread, where a
+syscall costs every fiber, and on a compute thread, where blocking
+wastes the core the pool exists to use. Before there is a loop the
+timestamp is `0` rather than an error, so a library can warn during
+startup without taking the program down.
+
+#### `(flow-log-drain!)`
+
+Every pending entry as a list of `(timestamp . sexp)`, oldest first
+within each thread's own accumulator, threads concatenated in
+registration order rather than globally sorted — sort on the
+timestamps if you need strict cross-thread order. Draining empties.
+
+#### `(flow-log-start! period-seconds)` / `(flow-log-stop!)`
+
+Start a single dedicated OS thread that drains and writes to
+`(current-error-port)` every `PERIOD-SECONDS`, and stop it. Calling
+`flow-log-start!` twice does not fork a second flush thread. The port
+is read at flush time, not captured at start, so reparameterizing it
+is honored on the next cycle. `flow-log-stop!` blocks until the thread
+has done a final drain, so nothing logged before the request is lost.
+
+What the library itself logs:
+
+| entry | when |
+|---|---|
+| `(flow2 channel-full NAME BOUND)` | a put parked on a full channel, once per saturation episode |
 
 ## Patterns
 
