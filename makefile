@@ -10,10 +10,19 @@ LETLOOP=$(shell which letloop)
 SHELL=/bin/sh
 PREFIX=$(PWD)/local
 
-# Which ChezScheme to build. There is no v10.5.0 tag upstream: main carries
-# scheme-version #x0a050001, i.e. 10.5.0-pre-release.1, while the latest
-# release tag is v10.4.1. Pin this to a tag when one lands.
-CHEZ_REF=main
+# Which ChezScheme to build. A tag, not main: main is not a fixed point,
+# so two people building "the same" letloop could not be building the
+# same thing, and the bootstrap chain cannot track it either -- a
+# network-off sandbox cannot fetch the submodules a git checkout needs,
+# where the release tarball bundles them. Pinning both here means the
+# letloop you develop with and the one `letloop store build letloop`
+# produces are the same version.
+#
+# Nothing in the tree needs anything newer: __errno and
+# scheme-pre-release, the two things this depends on that are at all
+# recent, both work in 10.4.1 -- the bootstrap letloop is built with it
+# and compiles the whole tree, flow2 checks included.
+CHEZ_REF=v10.4.1
 
 help: ## Help!...
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST) | sort

@@ -141,11 +141,14 @@ Known gaps, all of them deliberate:
 - **The compiler is trusted, not built.** musl.cc's gcc and one
   BusyBox binary are taken on their hashes. Retiring the compiler means
   a full source bootstrap, which this chain does not attempt.
-- **ChezScheme diverges.** The chain pins the 10.4.1 release, because
-  release tarballs bundle the submodules a network-off sandbox cannot
-  fetch and because the makefile's `CHEZ_REF=main` is not a fixed
-  point. The host build still tracks `main` (10.5.0-pre-release.1), so
-  the two disagree.
+- ~~**ChezScheme diverges.**~~ Closed: the host now pins `v10.4.1`
+  too, so the letloop you develop with and the one
+  `letloop store build letloop` produces are the same version. The
+  chain had to pin a release regardless — a network-off sandbox cannot
+  fetch the submodules a git checkout needs, where the release tarball
+  bundles them — and `main` was never a fixed point to build against.
+  Nothing in the tree needs anything newer: `__errno` and
+  `scheme-pre-release` both work in 10.4.1.
 - **x86_64-linux-musl only.** No cross-compilation, no other
   architecture.
 
