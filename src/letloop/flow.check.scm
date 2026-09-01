@@ -960,6 +960,53 @@
   (flow-worker-tick-until (lambda () done) 400)
   (eq? outcome 'raised))
 
+;; flow-get-block resumes the PUTTER first -- its #f is handled, inside
+;; the `and` -- and then called its own resume in tail position and
+;; discarded the result. That result is #f whenever an earlier base of
+;; the same perform won during registration, and by then the putter is
+;; committed: its flow-put! has returned, so the handoff happened while
+;; the value reached nobody. One side of a rendezvous succeeded and the
+;; other never did.
+;;
+;; Not reachable from well-behaved code as flow stands: channels are
+;; single-loop-thread by contract (see <flow-channel>), workers never
+;; touch them, and nothing yields between flow-perform's poll pass and
+;; its block pass, so a putter cannot appear in the gap. This drives the
+;; block proc directly, with a state box already 'synched, because that
+;; is the only way to reach the path -- the same reasoning flow already
+;; applies to the claim!/rescan discipline it keeps "regardless", so
+;; that re-introducing concurrency cannot silently re-open the hole.
+(define (~check-flow-011/lost-get-does-not-eat-a-value)
+  (define ch (make-flow-channel))
+  (define put-returned #f)
+  (define got 'not-set)
+  (loop-new)
+  (loop-spawn (lambda ()
+                (flow-put! ch 'the-value)
+                (set! put-returned #t)))
+  ;; let the putter register and park
+  (flow-worker-tick-until (lambda () #f) 3)
+  (assert (fx=? 1 (flow-channel-puts-length ch)))
+  (assert (not put-returned))
+  ;; A perform that has already synched on another base, reaching
+  ;; flow-get's block: its resume reports #f, as the real one would.
+  ((flow-block-proc (flow-get ch))
+   (box 'synched)
+   (lambda (value) #f)
+   (lambda (thunk) (void)))
+  (flow-worker-tick-until (lambda () put-returned) 20)
+  ;; The putter is committed either way -- that is not the bug, and
+  ;; un-committing it is not on the table.
+  (assert put-returned)
+  ;; The bug is what happened to the value. It must still be there.
+  (loop-spawn (lambda () (set! got (flow-get! ch))))
+  (flow-worker-tick-until (lambda () (not (eq? got 'not-set))) 20)
+  (assert (eq? got 'the-value))
+  ;; ... and exactly once: the redeposited entry is single-use, so a
+  ;; second getter must find nothing rather than the same value again.
+  (assert (not ((flow-try-proc (flow-get ch)))))
+  #t)
+
 ;; ---- flow-worker (CPU offload to OS threads) ----
 ;;
 ;; Ticking rather than loop-run: these checks must drive the loop
