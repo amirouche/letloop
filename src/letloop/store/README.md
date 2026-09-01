@@ -9,9 +9,79 @@ deduping against an existing path with the same hash. See
 `src/letloop/store/derivation.body.scm` for the exact format and
 `src/letloop/store/sandbox.body.scm` for the sandbox invocation.
 
-This is a v1 walking skeleton: one derivation per build, no dependency
-graph, no substituter, no GC over the store. Non-goals and the full
-design are in the session's implementation plan, not duplicated here.
+A derivation can name another with `(derivation "other.scm")`, as an
+input or as its build-environment root; `store-build` resolves those
+depth-first, guarding against reference cycles and memoising within
+the call. A derivation with neither a `build-environment` nor a
+`script` is fetch-only: its fetches land in the store directly, with
+no rootfs and no sandbox involved.
+
+Builds are cached on what determines them -- the derivation's own
+bytes, its rootfs, and its resolved inputs -- so an unchanged
+derivation is not rebuilt. Paths outside the store contribute their
+content rather than their name, since a bind-mounted working tree can
+change underneath a path that does not.
+
+Still not here: a scheduler, parallelism, a substituter, or GC over
+the store.
+
+## The bootstrap chain
+
+`checks/letloop/bootstrap*.derivation.scm`, driven by
+`checks/letloop/bootstrap.sh`, builds a statically linked, relocatable
+letloop without Alpine or any other distribution:
+
+| derivation | what it is |
+| --- | --- |
+| `bootstrap-toolchain` | fetch-only: musl.cc's static native `x86_64-linux-musl` gcc + binutils + musl |
+| `bootstrap-shell` | fetch-only: a static BusyBox binary |
+| `bootstrap-rootfs` | assembles those two into a rootfs a build can run in |
+| `bootstrap-make` | GNU make, from source, via its own `build.sh` |
+| `bootstrap-busybox` | BusyBox, from source |
+| `bootstrap-rootfs-final` | the rootfs downstream work uses: toolchain + the two above |
+| `bootstrap-chezscheme` | ChezScheme 10.4.1, from source |
+| `bootstrap-letloop` | letloop itself, from source, against all of it |
+
+**Exactly two prebuilt binaries are trusted**, both pinned by BLAKE3
+with their provenance recorded in the derivation headers. Trusting a
+prebuilt compiler is Nix's bargain, taken deliberately: building a C
+compiler needs a C compiler, and the alternative is Guix's hex0/mes
+chain -- years of work that still bottoms out in trusting a seed
+binary. The prebuilt BusyBox *is* retired: `bootstrap-busybox`
+rebuilds it from source, and `bootstrap.sh` asserts the fetched
+binary's bytes are not in the final rootfs.
+
+One bounded exception remains, and it is structural rather than an
+oversight: `sandbox-build!` runs `sh` inside whatever rootfs it is
+given, so the build that produces the first rootfs-with-a-shell
+cannot itself run in one. `bootstrap.sh` breaks that loop from outside
+with a fixture of symlinks into the host's own `/usr` and `/bin` --
+scaffolding for that one assembly step, which only unpacks and links
+bytes from the two pinned inputs. Nothing is compiled there, so no
+host header, library or compiler reaches the output.
+
+Things worth knowing before touching it:
+
+- The rootfs layout is not arbitrary. The toolchain's own prefix
+  contents sit at the rootfs root because that is where gcc looks for
+  its libexec and headers relative to `/bin/gcc`; `/usr` is a real
+  directory of one-level-down symlinks rather than the tarball's
+  top-level `usr -> .`, since a top-level symlink is an untested edge
+  case for bwrap's per-entry `--ro-bind`; BusyBox applets are
+  installed only where the toolchain has not already claimed the name,
+  so the real `ar`, `nm`, `strip` and `ranlib` win.
+- `cc` is a symlink to `gcc` that the derivations add. The tarball
+  ships `gcc` and `x86_64-linux-musl-cc` but no plain `cc`, which is
+  the name most build systems reach for.
+- `tar --no-same-owner` everywhere: the sandbox maps only uid 0, so
+  restoring the tarball's recorded ownership fails outright. Nothing
+  is lost, since `store-hash-directory` hashes content and the
+  owner-execute bit, never uid or gid.
+- The chain is **not** bit-reproducible. BusyBox stamps its build time
+  into the binary, so rebuilding it yields a different hash, and that
+  cascades to everything downstream. The build cache hides this in
+  practice, but a cleared cache produces a different set of store
+  paths for the same inputs.
 
 ## Issues
 
