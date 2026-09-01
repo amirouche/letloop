@@ -76,7 +76,28 @@
    ~check-flow2-005/worker-raise-becomes-compute-error
    ~check-flow2-005/worker-ring-event-raises-wrong-thread
    ~check-flow2-005/worker-cancelled-along-monitor
-   ~check-flow2-005/worker-io-protocol-roundtrip)
+   ~check-flow2-005/worker-io-protocol-roundtrip
+
+   ;; block-and-wait machinery, ported from (letloop flow)'s
+   ;; ~check-flow-011 series
+   ~check-flow2-011/sync-resume-runs-later-cancels
+   ~check-flow2-011/raising-cancel-does-not-lose-fiber
+   ~check-flow2-011/winner-own-cancel-not-fired
+
+   ;; network and file I/O, ported from (letloop flow)'s ~check-flow-006
+   ;; and ~check-flow-009 series -- the 11 fd- and ring-touching checks
+   ;; the fork had dropped
+   ~check-flow2-006/echo-pair
+   ~check-flow2-006/read-or-timeout-leaves-fd-usable
+   ~check-flow2-006/request-loop-idle-timeout
+   ~check-flow2-009/file-write-read-roundtrip
+   ~check-flow2-009/chunked-read-until-eof
+   ~check-flow2-009/nonzero-offset
+   ~check-flow2-009/read-or-timeout-leaves-fd-usable
+   ~check-flow2-009/open-nonexistent-fails
+   ~check-flow2-009/open-loses-choice-no-fd-leak
+   ~check-flow2-009/close-under-choice-fd-actually-closed
+   ~check-flow2-009/close-while-read-in-flight)
 
   (import (chezscheme)
           (letloop r999)
