@@ -254,6 +254,38 @@
   (assert nursery-saw)
   #t)
 
+;; A waiter registered on a scope that is ALREADY dead must be woken
+;; by the registration itself. %scope-fail! CASes the state and then
+;; drains the waiters list, so anything consed on after that drain is
+;; attached to a corpse -- and on a compute thread, which registers its
+;; own waiter from its own thread, losing that race parks the worker
+;; forever and shrinks the pool by one with no other symptom.
+;;
+;; Asserted deterministically against the internals rather than by
+;; racing: the real interleaving needs the loop thread's CAS to land
+;; inside a ~1us window on the worker, which took a 6000-round deadline
+;; sweep to hit even once (checks/repro-flow2-scope-waiter-race.scm
+;; does exactly that, and is kept for the end-to-end proof). What
+;; belongs in `make check` is the invariant the fix establishes, and
+;; that is checkable in microseconds.
+(define (~check-flow2-003/waiter-on-dead-scope-is-woken)
+  (define scope (%make-scope %root-scope))
+  (define woken 'not-woken)
+  ;; kill it first: the waiters list has already been drained
+  (%scope-fail! scope 'cancelled)
+  (%scope-add-waiter! scope (box 'waiting)
+                      (lambda (value) (set! woken value) #t))
+  (assert (eq? woken %flow-cancel-sentinel))
+  ;; and the ordinary order still works: register, then cancel
+  (let ((live (%make-scope %root-scope))
+        (seen 'not-woken))
+    (%scope-add-waiter! live (box 'waiting)
+                        (lambda (value) (set! seen value) #t))
+    (assert (eq? seen 'not-woken))
+    (%scope-fail! live 'cancelled)
+    (assert (eq? seen %flow-cancel-sentinel)))
+  #t)
+
 ;;------------------------------------------------------------
 ;; Monitor
 ;;------------------------------------------------------------

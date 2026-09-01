@@ -71,6 +71,7 @@
    ~check-flow2-003/nursery-scope-cancel
    ~check-flow2-003/nursery-perform-after-cancel-raises
    ~check-flow2-003/block-raise-reaches-the-scope
+   ~check-flow2-003/waiter-on-dead-scope-is-woken
    ~check-flow2-004/monitor-in-time
    ~check-flow2-004/monitor-deadline
    ~check-flow2-005/worker-task-replies
@@ -80,7 +81,7 @@
    ~check-flow2-005/worker-io-protocol-roundtrip
 
    ;; block-and-wait machinery, ported from (letloop flow)'s
-   ;; ~check-flow-011 series
+   ;; ~check-flow-011 series, plus the branch finding 1's fix added
    ~check-flow2-011/sync-resume-runs-later-cancels
    ~check-flow2-011/raising-cancel-does-not-lose-fiber
    ~check-flow2-011/winner-own-cancel-not-fired
@@ -262,7 +263,6 @@
      ((eq? result %flow-cancel-sentinel) (raise (%flow-cancelled-error)))
      (else result)))
 
-
   (define flow-poll
     (lambda (bases)
       (let ((n (length bases)))
@@ -421,6 +421,19 @@
 
   (define (%scope-add-waiter! scope state resume)
     (flow-box-cons! (flow-scope-waiters scope) (cons state resume))
+    ;; Recheck AFTER publishing, and wake ourselves if the scope died
+    ;; in between. %scope-fail! CASes the state and then drains this
+    ;; list, so a registration that lands after that drain is attached
+    ;; to a corpse and nothing will ever resume it. On the loop thread
+    ;; the window does not exist — nothing yields between the caller's
+    ;; liveness check and this cons — but a compute thread registers
+    ;; its own waiter from its own thread (see the record comment
+    ;; above), and losing that race parks the worker on its condition
+    ;; variable forever: the pool shrinks by one, silently, while the
+    ;; main program keeps working. Resuming twice is harmless because
+    ;; resume CASes the shared state box, so the loser is a no-op.
+    (when (%scope-dead? scope)
+      (resume %flow-cancel-sentinel))
     (let ((n (let ((b (flow-scope-waiter-count scope)))
                (let bump ()
                  (let ((n (unbox b)))
