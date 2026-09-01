@@ -53,17 +53,11 @@ resolved on 2026-08-16 and their resolutions are specified inline (see
 `flow-stop`, `flow-channel-buffer-size!`, Compute threads, and the
 Rationale on scope tagging).
 
-Five gaps found by the 2026-08-17 adverse review are **open**, listed
+Two gaps found by the 2026-08-17 adverse review are **open**, listed
 here rather than left in a report nobody reads. Each is a place where
 this document currently describes an intent the implementation does not
 fully deliver:
 
-- **`flow-write-at` and `flow-close` are not cancellable.** Neither
-  registers a cancel thunk, so a cancelled scope leaves their ring
-  operations in flight. `flow-write` was the sharp case and is fixed:
-  it no longer loops internally and registers the same cancel
-  `flow-read` does. "Every in-flight ring operation belonging to the
-  subtree is cancelled", below, still overstates the remaining two.
 - **Shutdown does not join workers.** `flow-run` puts the stop message,
   signals the eventfd and closes it without waiting. A worker still
   inside a task can then find the eventfd already `#f`, or race the
@@ -536,6 +530,15 @@ file, and ignored otherwise. Result is the fd, or `#f` on failure.
 #### `(flow-read-at fd offset size)`
 #### `(flow-write-at fd offset bytevector)`
 #### `(flow-close fd)`
+
+The one ring event that is deliberately **not** cancellable, for the
+opposite reason to all the others: cancelling a close would leak the
+fd, which is exactly what the cancelling scope is trying to clean up.
+The close is left to complete — the fiber unwinds on the scope's
+cancellation and the completion is discarded, but the kernel releases
+the descriptor either way. A close also always completes on its own, so
+unlike an accept or a read it can never hold a cancelled parent in the
+drain described under Nurseries.
 
 File events, same shape: result on success, `#f` on failure. No
 `dynamic-wind`: callers close fds explicitly on both the normal and

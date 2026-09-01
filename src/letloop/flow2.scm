@@ -1588,9 +1588,33 @@
                       (io-uring-sqe-set-data64 sqe id)
                       (hashtable-set! (loop-handlers (loop-current)) id
                                       (lambda (res)
+                                        ;; runs on cancellation too, with
+                                        ;; res = -ECANCELED, so the pin is
+                                        ;; always released
                                         (unlock-object bv)
-                                        (resume (and (fx>=? res 0) res)))))))))
+                                        (resume (and (fx>=? res 0) res))))
+                      ;; A cancelled scope must not leave a write in the
+                      ;; ring: io_uring resolves the fd when it processes
+                      ;; the SQE, so a write still queued after the
+                      ;; cleanup path closed that fd can land on whatever
+                      ;; reopened the number.
+                      (register-cancel!
+                       (lambda ()
+                         (let ((csqe (loop-get-sqe ring)))
+                           (io-uring-prep-cancel64 csqe id 0)
+                           (io-uring-sqe-set-data64 csqe (loop-alloc-id!))))))))))
 
+  ;; The one ring event here that deliberately registers NO cancel, and
+  ;; the reason is the opposite of the others': cancelling a close would
+  ;; leak the fd, which is precisely what the cancelling scope is trying
+  ;; to clean up. So the close is left to complete.
+  ;;
+  ;; Nothing waits for it. The scope's cancellation wins this perform,
+  ;; the fiber unwinds, and the completion handler's resume then reports
+  ;; #f and is discarded — the kernel has released the descriptor either
+  ;; way. A close also always completes on its own, so unlike an accept
+  ;; or a read it can never hold a cancelled parent in %scope-finish's
+  ;; drain.
   (define flow-close
     (lambda (fd)
       (make-flow% 'base #f
