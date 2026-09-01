@@ -18,6 +18,12 @@
 ;; Device nodes, FIFOs and sockets are still rejected -- nothing a
 ;; build ought to be producing as its output, and each would need its
 ;; own encoding to hash meaningfully.
+;;
+;; The tree is walked in Scheme. It used to shell out to
+;; `find -printf`, which is a GNU extension BusyBox does not have --
+;; so the store could not run inside the minimal rootfs it builds,
+;; which is a poor property for a package manager that builds its own
+;; environment. Nothing here spawns a process now.
 
 (define (shell-single-quote unquoted)
   (string-append
@@ -34,74 +40,64 @@
   (unless (zero? (system command))
     (error 'system! "command failed" command)))
 
-(define (read-all-lines port)
-  (let loop ((out '()))
-    (let ((line (get-line port)))
-      (if (eof-object? line)
-          (reverse out)
-          (loop (cons line out))))))
+(define readlink*
+  ;; No readlink in Chez, and the manifest needs one: a symlink hashes
+  ;; as its target string. PATH_MAX is 4096 on Linux; a truncated
+  ;; result would silently change the digest, so a full buffer is
+  ;; treated as an error rather than accepted.
+  (let ((func (foreign-procedure "readlink" (string u8* uptr) iptr)))
+    (lambda (path)
+      (let* ((size 4096)
+             (buffer (make-bytevector size))
+             (n (func path buffer size)))
+        (when (fx<? n 0)
+          (error 'directory-manifest "cannot read symlink" path))
+        (when (fx=? n size)
+          (error 'directory-manifest "symlink target longer than PATH_MAX" path))
+        (let ((out (make-bytevector n)))
+          (bytevector-copy! buffer 0 out 0 n)
+          (utf8->string out))))))
 
-(define (string-index-from string char start)
-  (let loop ((i start))
-    (cond
-     ((fx>= i (string-length string)) #f)
-     ((char=? (string-ref string i) char) i)
-     (else (loop (fx+ i 1))))))
+;; -> (type mode relative-path target), where type is 'file,
+;; 'directory or 'symlink, mode is the integer st_mode, and target is
+;; the link's target for a symlink and #f otherwise.
+;;
+;; Walked in Scheme rather than shelled out to `find -printf`, which is
+;; a GNU extension: BusyBox find does not have it, so the store could
+;; not run inside the minimal rootfs it builds. Doing it here also
+;; drops two subprocesses per hash and the text parsing that went with
+;; them -- the old manifest had to run find twice, since neither a path
+;; nor a symlink target can be delimited unambiguously by spaces.
+;;
+;; Every predicate is asked not to follow symlinks: a link to a
+;; directory is a link, not a directory, and must never be descended
+;; into. A dangling link is fine and stays a link.
+(define (directory-entries directory)
+  (let walk ((prefix "") (path directory) (out '()))
+    (fold-left
+     (lambda (out name)
+       (let* ((relative (if (string=? prefix "") name (string-append prefix "/" name)))
+              (full (string-append path "/" name))
+              (mode (get-mode full #f)))
+         (cond
+          ((file-symbolic-link? full)
+           (cons (list 'symlink mode relative (readlink* full)) out))
+          ((file-directory? full #f)
+           (walk relative full (cons (list 'directory mode relative #f) out)))
+          ((file-regular? full #f)
+           (cons (list 'file mode relative #f) out))
+          (else
+           (error 'directory-manifest
+                  "unsupported filesystem entry (only regular files, directories and symlinks are supported)"
+                  full)))))
+     out
+     (directory-list path))))
 
-;; "f 644 some/path" -> (#\f "644" "some/path"); split at the first
-;; two spaces only, so a space embedded in the path itself is kept.
-(define (parse-manifest-line line)
-  (let* ((space1 (or (string-index-from line #\space 0)
-                      (error 'directory-manifest "malformed find output line" line)))
-         (space2 (or (string-index-from line #\space (fx+ space1 1))
-                      (error 'directory-manifest "malformed find output line" line))))
-    (list (string-ref line 0)
-          (substring line (fx+ space1 1) space2)
-          (substring line (fx+ space2 1) (string-length line)))))
-
-(define (check-manifest-entry-type! entry)
-  (unless (memv (car entry) '(#\f #\d #\l))
-    (error 'directory-manifest
-           "unsupported filesystem entry (only regular files, directories and symlinks are supported)"
-           entry))
-  entry)
-
-;; Symlink targets come from a second `find`, emitting path and target
-;; on alternating lines, rather than as an extra field on the main
-;; manifest line: both a path and a target may contain spaces, so
-;; there is no space-delimited field order that stays unambiguous.
-;; This does assume neither contains a newline -- an assumption the
-;; line-based manifest already makes about paths.
-(define (directory-symlink-targets directory scratch)
-  (let ((listing-path (string-append scratch "/symlinks")))
-    (system! (format #f "cd ~a && find . -mindepth 1 -type l -printf '%P\\n%l\\n' > ~a"
-                      (shell-single-quote directory)
-                      (shell-single-quote listing-path)))
-    (let loop ((lines (call-with-input-file listing-path read-all-lines))
-               (out '()))
-      (cond
-       ((null? lines) out)
-       ((null? (cdr lines))
-        (error 'directory-manifest "unpaired symlink target line" (car lines)))
-       (else
-        (loop (cddr lines) (cons (cons (car lines) (cadr lines)) out)))))))
-
-;; -> sorted list of (type mode relative-path), type is #\f, #\d or #\l.
+;; -> the entries sorted by relative path, so the digest does not
+;; depend on the order the filesystem happened to hand them back.
 (define (directory-manifest directory)
-  (define mkdtemp (foreign-procedure "mkdtemp" (string) string))
-  (system! "mkdir -p /tmp/letloop/")
-  (let* ((scratch (mkdtemp "/tmp/letloop/hash-XXXXXX"))
-         (listing-path (string-append scratch "/listing")))
-    (system! (format #f "cd ~a && find . -mindepth 1 -printf '%y %m %P\\n' > ~a"
-                      (shell-single-quote directory)
-                      (shell-single-quote listing-path)))
-    (let ((lines (call-with-input-file listing-path read-all-lines))
-          (targets (directory-symlink-targets directory scratch)))
-      (system! (format #f "rm -rf ~a" (shell-single-quote scratch)))
-      (values
-       (sort (lambda (a b) (string<? (caddr a) (caddr b)))
-             (map check-manifest-entry-type! (map parse-manifest-line lines)))
-       targets))))
+  (sort (lambda (a b) (string<? (caddr a) (caddr b)))
+        (directory-entries directory)))
 
 (define hex-digits "0123456789abcdef")
 
@@ -116,9 +112,12 @@
         (loop (fx+ i 1))))
     out))
 
-;; owner-execute bit only, e.g. "755" -> #t, "644" -> #f
-(define (mode-executable? mode-string)
-  (not (fxzero? (fxand (string->number mode-string 8) #o100))))
+;; owner-execute bit only, from the integer st_mode: not the whole
+;; mode, and never mtime/uid/gid, so the digest is stable across a
+;; touch or a re-checkout while still moving when a file gains or
+;; loses the bit that changes how it behaves.
+(define (mode-executable? mode)
+  (not (fxzero? (fxand mode #o100))))
 
 (define (update-directory-entry! hasher relative-path)
   (blake3-update! hasher (string->utf8 (string-append "d " relative-path "\n"))))
@@ -145,20 +144,17 @@
 ;; -> 64-char lowercase hex BLAKE3 digest of DIRECTORY's content.
 (define (store-hash-directory directory)
   (define hasher (make-blake3))
-  (call-with-values (lambda () (directory-manifest directory))
-    (lambda (entries targets)
-      (for-each
-       (lambda (entry)
-         (let ((type (car entry)) (mode (cadr entry)) (relative-path (caddr entry)))
-           (case type
-             ((#\d) (update-directory-entry! hasher relative-path))
-             ((#\f) (update-file-entry! hasher directory relative-path mode))
-             ((#\l)
-              (let ((target (assoc relative-path targets)))
-                (unless target
-                  (error 'store-hash-directory "symlink with no recorded target" relative-path))
-                (update-symlink-entry! hasher relative-path (cdr target)))))))
-       entries)))
+  (for-each
+   (lambda (entry)
+     (let ((type (car entry))
+           (mode (cadr entry))
+           (relative-path (caddr entry))
+           (target (cadddr entry)))
+       (case type
+         ((directory) (update-directory-entry! hasher relative-path))
+         ((file) (update-file-entry! hasher directory relative-path mode))
+         ((symlink) (update-symlink-entry! hasher relative-path target)))))
+   (directory-manifest directory))
   (let ((digest (blake3-finalize hasher 32)))
     (blake3-close! hasher)
     (bytevector->hex-string digest)))
