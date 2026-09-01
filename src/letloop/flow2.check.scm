@@ -33,6 +33,58 @@
   (assert (not (flow-error-wrong-thread? 42)))
   #t)
 
+;; flow-log must be safe to call from the loop thread and from a
+;; compute thread, so it does exactly one thing: cons onto a box the
+;; calling thread owns. Nothing here starts the flush thread -- draining
+;; by hand is what a check wants, and it also pins the ordering
+;; contract: oldest-first within a thread's own box.
+(define (~check-flow2-000/log-is-nonblocking-and-drains)
+  ;; drain whatever earlier checks left behind, so this one sees only
+  ;; its own entries
+  (flow-log-drain!)
+  (flow-log '(alpha))
+  (flow-log '(beta 2))
+  (let ((entries (flow-log-drain!)))
+    (assert (= 2 (length entries)))
+    ;; every entry is (timestamp . sexp), oldest first
+    (assert (equal? '(alpha) (cdr (car entries))))
+    (assert (equal? '(beta 2) (cdr (cadr entries))))
+    ;; a log call before any loop exists must not raise -- a library
+    ;; that warns during startup would otherwise take the program down
+    (assert (fixnum? (car (car entries)))))
+  ;; drained means drained
+  (assert (null? (flow-log-drain!)))
+  ;; and it works from a compute thread too, which is the half that
+  ;; must never block
+  (let ((done (box #f)))
+    (fork-thread (lambda () (flow-log '(from-a-thread)) (set-box! done #t)))
+    (let wait ((n 0))
+      (when (and (not (unbox done)) (fx<? n 1000))
+        (sleep (make-time 'time-duration 1000000 0))
+        (wait (fx+ n 1))))
+    (assert (unbox done)))
+  (let ((entries (flow-log-drain!)))
+    (assert (= 1 (length entries)))
+    (assert (equal? '(from-a-thread) (cdr (car entries)))))
+  #t)
+
+;; The flush thread's lifecycle, exercised with nothing pending so the
+;; check writes nothing to stderr. What matters here is that
+;; flow-log-stop! returns rather than hanging -- it blocks the caller
+;; until the thread has done its final drain and exited -- and that a
+;; second flow-log-start! does not fork a competing flush thread. Two
+;; threads interleaving writes to the same port produce shuffled output
+;; at exactly the moment someone is reading it to diagnose something.
+(define (~check-flow2-000/log-flush-thread-lifecycle)
+  (flow-log-drain!)
+  (flow-log-start! 0.02)
+  (flow-log-start! 0.02)          ;; must be a no-op, not a second thread
+  (flow-log-stop!)
+  ;; stopped, so a fresh cycle must still be startable
+  (flow-log-start! 0.02)
+  (flow-log-stop!)
+  #t)
+
 ;;------------------------------------------------------------
 ;; Event core
 ;;------------------------------------------------------------

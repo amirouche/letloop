@@ -56,6 +56,9 @@
    ;; lifecycle and compute threads
    flow-run flow-stop flow-submit!
 
+   ;; diagnostics
+   flow-log flow-log-drain! flow-log-start! flow-log-stop!
+
    ;; checks
    ~check-flow2-000/error-symbol-dispatch
    ~check-flow2-000/error-predicates
@@ -67,6 +70,8 @@
    ~check-flow2-002/channel-bound-below-length
    ~check-flow2-002/channel-get-try-default
    ~check-flow2-002/channel-get-or-timeout
+   ~check-flow2-000/log-is-nonblocking-and-drains
+   ~check-flow2-000/log-flush-thread-lifecycle
    ~check-flow2-002/channel-name
    ~check-flow2-002/losing-get-does-not-eat-a-value
    ~check-flow2-002/losing-get-leaves-no-getter
@@ -171,6 +176,120 @@
         (if (box-cas! box n (fx+ n 1))
             (fx+ n 1)
             (flow-box-increment! box)))))
+
+  ;;------------------------------------------------------------
+  ;; flow-log: diagnostics that block neither the loop nor a worker
+  ;;------------------------------------------------------------
+  ;;
+  ;; The design is (letloop flow)'s, reimplemented here rather than
+  ;; imported: flow2 must never depend on flow. What it buys is the one
+  ;; property a library-internal diagnostic has to have — logging must
+  ;; be safe on the loop thread, where any syscall costs every fiber,
+  ;; and on a compute thread, where blocking wastes the core the pool
+  ;; exists to use.
+  ;;
+  ;; So a flow-log call does exactly one thing: cons onto a box this
+  ;; thread owns. No mutex, no port, no syscall, no allocation beyond
+  ;; the entry. Per-thread boxes, not one shared box, because two
+  ;; threads CASing the same box would spin against each other on
+  ;; precisely the hot path this exists to stay off. Formatting and
+  ;; writing happen on a separate flush thread that nothing waits for.
+  (define %flow-log-registry (box '()))
+
+  ;; A thread-parameter, not a global: two OS threads logging
+  ;; concurrently would otherwise clobber each other's accumulator.
+  (define %flow-log-box (make-thread-parameter #f))
+
+  ;; Created and registered on first use, so logging needs no setup
+  ;; step on any thread. Only this thread writes its own parameter, so
+  ;; the check-then-set needs no CAS; flow-box-cons! is what makes the
+  ;; registry push safe against concurrent registration.
+  (define (%flow-log-ensure-box!)
+    (or (%flow-log-box)
+        (let ((b (box '())))
+          (%flow-log-box b)
+          (flow-box-cons! %flow-log-registry b)
+          b)))
+
+  ;; The loop's cached per-tick jiffy, or 0 before there is a loop. A
+  ;; plain read of an already-computed field — no syscall on the
+  ;; logging path — and the only loop state a compute thread ever
+  ;; touches. It is never written from here, and a worker reading a
+  ;; value up to one tick stale is exactly the resolution a log line
+  ;; wants. Logging before flow-run must not raise: a library that
+  ;; warns during startup would otherwise take the program down.
+  (define (%flow-log-now)
+    (if (loop-current) (loop-jiffy) 0))
+
+  (define (flow-log sexp)
+    (flow-box-cons! (%flow-log-ensure-box!) (cons (%flow-log-now) sexp)))
+
+  ;; Every pending entry: oldest-first within each thread's own box,
+  ;; boxes in registry order rather than globally sorted — a caller
+  ;; wanting strict cross-thread order can sort on the timestamps.
+  ;; Draining the registry empties it, so every box is pushed straight
+  ;; back: registration is once per thread for that thread's life, not
+  ;; a one-shot queue.
+  (define (flow-log-drain!)
+    (let ((boxes (flow-box-drain! %flow-log-registry)))
+      (for-each (lambda (b) (flow-box-cons! %flow-log-registry b)) boxes)
+      (apply append (map (lambda (b) (reverse (flow-box-drain! b))) boxes))))
+
+  (define (%flow-log-write! entries)
+    (unless (null? entries)
+      (let ((port (current-error-port)))
+        (for-each (lambda (entry) (write entry port) (newline port))
+                  entries)
+        (flush-output-port port))))
+
+  ;; (current-error-port) is read at flush time rather than captured at
+  ;; start, so a caller that reparameterizes it — a check capturing
+  ;; output, a supervisor redirecting it — is honored on the next cycle.
+  ;; Plain synchronous port I/O: this thread is not on the loop's
+  ;; critical path and does not run a ring at all, so routing it
+  ;; through io_uring would buy nothing and cost it a loop of its own.
+  (define %flow-log-poll-interval 0.01)
+  (define %flow-log-stop-requested? (box #f))
+  (define %flow-log-stopped? (box #t))
+
+  ;; Guarded against a second concurrent flush thread, which flow left
+  ;; merely documented as unsupported. Draining stays correct either
+  ;; way — flow-box-drain! never double-delivers — but two threads
+  ;; interleaving writes to the same port produce shuffled output at
+  ;; exactly the moment someone is reading it to diagnose something.
+  (define (flow-log-start! period-seconds)
+    (when (box-cas! %flow-log-stopped? #t #f)
+      (set-box! %flow-log-stop-requested? #f)
+      (let ((ticks (fxmax 1 (exact (round (/ period-seconds
+                                             %flow-log-poll-interval))))))
+        (fork-thread
+         (lambda ()
+           (let lp ()
+             ;; Re-check the stop flag at the poll interval rather than
+             ;; only at a period boundary, so flow-log-stop! is prompt
+             ;; even when the period is long.
+             (let wait ((n 0))
+               (unless (or (unbox %flow-log-stop-requested?) (fx>=? n ticks))
+                 (sleep (make-time 'time-duration
+                                   (exact (round (* %flow-log-poll-interval
+                                                    1000000000)))
+                                   0))
+                 (wait (fx+ n 1))))
+             (%flow-log-write! (flow-log-drain!))
+             (if (unbox %flow-log-stop-requested?)
+                 (set-box! %flow-log-stopped? #t)
+                 (lp)))))))
+    (void))
+
+  ;; Blocks the caller until the flush thread has done one final
+  ;; drain-and-write and exited, so nothing logged before the stop
+  ;; request is lost on shutdown.
+  (define (flow-log-stop!)
+    (set-box! %flow-log-stop-requested? #t)
+    (let wait ()
+      (unless (unbox %flow-log-stopped?)
+        (sleep (make-time 'time-duration 10000000 0))
+        (wait))))
 
   ;;------------------------------------------------------------
   ;; Events: the Concurrent ML core, unchanged from flow
