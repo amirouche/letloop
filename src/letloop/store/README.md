@@ -113,10 +113,27 @@ gate, it is not a claim.
 
 Known gaps, all of them deliberate:
 
-- **No cold start.** Every `fetch` derivation needs `libtls`, which is
-  not in the chain, so a statically linked letloop can drive a *warm*
-  store but cannot bootstrap one from nothing. Adding LibreSSL would
-  close this; nothing else does.
+- **No cold start, and deliberately so.** Every `fetch` derivation
+  needs `libtls`, which is not in the chain, so a statically linked
+  letloop drives a *warm* store but cannot bootstrap one from nothing.
+
+  Fetching over plain HTTP instead looks like the cheap way out, since
+  every fetch is hash-pinned and TLS therefore adds nothing to
+  integrity — it only hides *which* file is being asked for. It does
+  not work: measured 2026-08-23, five of the seven pinned URLs
+  301-redirect HTTP to HTTPS, GitHub and busybox.net among them, and
+  GitHub will not stop.
+
+  So closing this costs either a static LibreSSL in the chain — the
+  largest thing it would build, bigger than ChezScheme — or mirroring
+  those artifacts somewhere plain HTTP reaches. The mirror can be any
+  untrusted host, which content addressing is what makes possible, but
+  it has to be a host someone keeps alive.
+
+  Left open on purpose: what it unblocks is bootstrapping from nothing
+  on a bare machine. A warm store works, `letloop update` fetches
+  through an ordinary dynamic letloop, and a published binary is
+  verifiable by rebuilding it. None of those need this.
 - **Not a fixpoint byte-for-byte.** letloop rebuilds letloop, and the
   third generation is as complete as the second and produces identical
   output hashes — but the two binaries differ, because the build is not
