@@ -272,6 +272,55 @@
   (assert (eq? 'still-fine (flow-get-try ch 'EMPTY)))
   #t)
 
+;; The diagnostics exist to show the gap between a structure's LOGICAL
+;; state and its RAW one -- exactly the gap flow's 44GB leak lived in,
+;; where the raw puts list held 62 entries at 70 cumulative puts while
+;; logical pending stayed at 0. So this check drives a channel into
+;; each of those states and reads both numbers.
+(define (~check-flow2-002/diagnostics-see-what-leaks)
+  (define ch (make-flow-channel 'diag 2))
+  (define parked-getter #f)
+  (assert (eqv? 2 (flow-channel-bound ch)))
+  (assert (eqv? 0 (flow-channel-queue-length ch)))
+  (assert (eqv? 0 (flow-channel-getters-length ch)))
+  (assert (eqv? 0 (flow-channel-space-length ch)))
+  (flow-run
+   (lambda (workers)
+     ;; queued values are visible
+     (flow-put! ch 'a)
+     (assert (eqv? 1 (flow-channel-queue-length ch)))
+     ;; a putter parked on a full channel is visible as such, and is
+     ;; NOT counted as a queued value
+     (flow-put! ch 'b)
+     (flow-spawn (lambda () (flow-put! ch 'c)))
+     (flow-sleep 0.01)
+     (assert (eqv? 2 (flow-channel-queue-length ch)))
+     (assert (eqv? 1 (flow-channel-space-length ch)))
+     ;; draining wakes the parked putter, so the space list empties
+     (assert (eq? 'a (flow-get! ch)))
+     (flow-sleep 0.01)
+     (assert (eqv? 0 (flow-channel-space-length ch)))
+     ;; a parked getter shows up on the getters list
+     (let ((empty (make-flow-channel 'empty 4)))
+       (flow-spawn (lambda () (set! parked-getter (flow-get! empty))))
+       (flow-sleep 0.01)
+       (assert (eqv? 1 (flow-channel-getters-length empty)))
+       (assert (eqv? 0 (flow-channel-queue-length empty)))
+       ;; ... and leaves it when it is served
+       (flow-put! empty 'served)
+       (flow-sleep 0.01)
+       (assert (eq? 'served parked-getter))
+       (assert (eqv? 0 (flow-channel-getters-length empty))))
+     ;; scope bookkeeping: a nursery with a child in flight
+     (flow-nursery
+      (lambda (scope)
+        (assert (eqv? 0 (flow-scope-children-count scope)))
+        (flow-spawn (lambda () (flow-sleep 0.02)))
+        (assert (eqv? 1 (flow-scope-children-count scope)))
+        (assert (eqv? 0 (flow-scope-join-waiters-length scope)))))
+     (flow-stop)))
+  #t)
+
 ;; Channels are bounded by default, because unbounded is not a capacity
 ;; choice -- it is the decision to turn a rate mismatch into unbounded
 ;; memory growth and meet it as an OOM hours later. #f is still
