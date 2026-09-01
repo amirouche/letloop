@@ -216,6 +216,44 @@
      (flow-stop)))
   raised-inside?)
 
+;; A raise from a base event's BLOCK procedure must reach the fiber,
+;; and through it the scope -- exactly as a raise from the fiber's body
+;; does. Before the fix, block procs ran inside loop-abort's thunk, on
+;; the scheduler's stack with the prompt already unwound, so the raise
+;; escaped to loop-apply's catch-all: the fiber died without
+;; %scope-child-done!, the scope's child count never reached zero, and
+;; the nursery's join parked forever. Case B below HUNG.
+;;
+;; Not synthetic. loop-get-sqe raises "submission queue full" past 256
+;; queued ops in one tick, reachable from flow-timeout / flow-read /
+;; flow-write / flow-open / flow-read-at / flow-write-at; and
+;; loop-accept-block raises "concurrent accept on fd". Standalone
+;; reproducer: checks/repro-flow2-block-raise.scm.
+(define (~check-flow2-003/block-raise-reaches-the-scope)
+  ;; never ready, so flow-perform must call block -- and block raises
+  (define (bad-event)
+    (make-flow (lambda (x) x)
+               (lambda () #f)
+               (lambda (state resume register-cancel!)
+                 (error 'bad-event "raised from block"))))
+  (define root-saw #f)
+  (define nursery-saw #f)
+  (flow-run
+   (lambda (workers)
+     ;; A: root scope -- flow-perform raises on the performing fiber
+     (guard (ex (#t (set! root-saw #t)))
+       (flow-perform (bad-event)))
+     ;; B: inside a nursery -- the child's raise fails the scope and
+     ;; re-raises at the join, instead of hanging it
+     (guard (ex (#t (set! nursery-saw #t)))
+       (flow-nursery
+        (lambda (scope)
+          (flow-spawn (lambda () (flow-perform (bad-event)))))))
+     (flow-stop)))
+  (assert root-saw)
+  (assert nursery-saw)
+  #t)
+
 ;;------------------------------------------------------------
 ;; Monitor
 ;;------------------------------------------------------------
@@ -469,6 +507,37 @@
   (and (eq? result 'won)
        loser-cancelled
        (not winner-cancelled)))
+
+;; The two dropped checks above, composed -- and the branch finding 1's
+;; fix introduced. An earlier base wins synchronously during
+;; registration, and a LATER base's block proc then raises. The fiber is
+;; already committed to the winner's value, so the raise has nowhere to
+;; go: the fix reports it on stderr rather than swallowing it, and must
+;; not disturb the winner. Asserted here: the fiber still gets 'sync,
+;; the later base's own cancel still fires, and nothing hangs.
+(define (~check-flow2-011/raise-after-sync-win-keeps-winner)
+  (define cancelled #f)
+  (define result 'not-set)
+  (define sync (make-flow (lambda (x) x)
+                          (lambda () #f)
+                          (lambda (state resume register-cancel!)
+                            (resume 'sync))))
+  (define raising (make-flow (lambda (x) x)
+                             (lambda () #f)
+                             (lambda (state resume register-cancel!)
+                               (register-cancel!
+                                (lambda () (set! cancelled #t)))
+                               (error 'raising-block "boom"))))
+  (loop-new)
+  (set! %scope-current %root-scope)
+  (loop-spawn
+   (lambda ()
+     (set! result (flow-perform (flow-choice sync raising)))))
+  (let tick ((n 0))
+    (when (fx<? n 6)
+      (loop-run-once)
+      (tick (fx+ n 1))))
+  (and (eq? result 'sync) cancelled))
 
 ;;------------------------------------------------------------
 ;; Network and file I/O

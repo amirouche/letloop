@@ -70,6 +70,7 @@
    ~check-flow2-003/nursery-child-raise-cancels-siblings
    ~check-flow2-003/nursery-scope-cancel
    ~check-flow2-003/nursery-perform-after-cancel-raises
+   ~check-flow2-003/block-raise-reaches-the-scope
    ~check-flow2-004/monitor-in-time
    ~check-flow2-004/monitor-deadline
    ~check-flow2-005/worker-task-replies
@@ -83,6 +84,7 @@
    ~check-flow2-011/sync-resume-runs-later-cancels
    ~check-flow2-011/raising-cancel-does-not-lose-fiber
    ~check-flow2-011/winner-own-cancel-not-fired
+   ~check-flow2-011/raise-after-sync-win-keeps-winner
 
    ;; network and file I/O, ported from (letloop flow)'s ~check-flow-006
    ;; and ~check-flow-009 series -- the 11 fd- and ring-touching checks
@@ -225,6 +227,40 @@
   ;; <flow-error> on the parked fiber's own stack — a raise from the
   ;; canceller's stack would unwind the wrong context entirely.
   (define %flow-cancel-sentinel (list 'cancelled))
+
+  ;; A raise from a base's block procedure, on its way back to the
+  ;; fiber. Same device as %flow-cancel-sentinel, for the same reason.
+  ;;
+  ;; block procs run inside loop-abort's thunk — on the SCHEDULER's
+  ;; stack, after the prompt was already unwound — so the guard
+  ;; %scope-spawn! installs around the fiber body is no longer in the
+  ;; dynamic extent. A raise there used to reach loop-apply's catch-all
+  ;; instead: the fiber died, %scope-fail! never ran,
+  ;; %scope-child-done! never decremented the scope's child count, and
+  ;; %scope-finish parked on the join forever. Not a synthetic worry —
+  ;; loop-get-sqe raises "submission queue full" once more than 256 ops
+  ;; are queued in a tick (flow-timeout, flow-read, flow-write,
+  ;; flow-open, flow-read-at, flow-write-at all reach it) and
+  ;; loop-accept-block raises "concurrent accept on fd".
+  ;;
+  ;; (letloop flow)'s flow-block-and-wait-on-loop has the same shape and
+  ;; the same hole: its comment names loop-get-sqe as a raise source and
+  ;; hardens the CANCEL thunk against it, leaving the registration loop
+  ;; below exposed. The fix belongs there too.
+  (define-record-type* <flow2-raise>
+    (%make-flow-raise object)
+    %flow-raise?
+    (object %flow-raise-object))
+
+  ;; What a parked fiber sees when it wakes: a block-proc raise and a
+  ;; scope cancellation both come back as values and are converted into
+  ;; raises HERE, on the fiber's own stack, where its guards are.
+  (define (%flow-settle result)
+    (cond
+     ((%flow-raise? result) (raise (%flow-raise-object result)))
+     ((eq? result %flow-cancel-sentinel) (raise (%flow-cancelled-error)))
+     (else result)))
+
 
   (define flow-poll
     (lambda (bases)
@@ -489,16 +525,41 @@
                                        ((cdr pair))))
                                    (unbox cancels))))
                       #t))))
-           (for-each (lambda (base)
-                       (let ((tag (cons #f #f)))
-                         ((flow-block-proc base) state
-                          (lambda (raw)
-                            (resume-from tag ((flow-wrap-proc base) raw)))
-                          (lambda (thunk)
-                            (set-box! cancels
-                                      (cons (cons tag thunk)
-                                            (unbox cancels)))))))
-                     bases))))))
+           ;; Registration runs on the scheduler's stack, so a raise
+           ;; here cannot reach the fiber by unwinding — see
+           ;; <flow2-raise>. Catch it and elect it this perform's
+           ;; winner: ERROR-TAG matches no base, so every already
+           ;; registered base's cancel fires, and the fiber resumes into
+           ;; %flow-settle, which re-raises on its own stack. The bases
+           ;; after the failing one never register, which is what we
+           ;; want — this perform is over.
+           (let ((error-tag (cons #f #f)))
+             (guard (ex (#t
+                         ;; A base may already have won synchronously
+                         ;; during registration, in which case the
+                         ;; fiber is committed to that value and the
+                         ;; CAS fails. Report rather than swallow: a
+                         ;; silently dropped raise here is exactly the
+                         ;; undebuggable-hang shape loop-apply's own
+                         ;; guard comment warns about.
+                         (unless (resume-from error-tag (%make-flow-raise ex))
+                           (display "flow2: block registration raised after another base won: "
+                                    (current-error-port))
+                           (if (condition? ex)
+                               (display-condition ex (current-error-port))
+                               (display ex (current-error-port)))
+                           (newline (current-error-port))
+                           (flush-output-port (current-error-port)))))
+               (for-each (lambda (base)
+                           (let ((tag (cons #f #f)))
+                             ((flow-block-proc base) state
+                              (lambda (raw)
+                                (resume-from tag ((flow-wrap-proc base) raw)))
+                              (lambda (thunk)
+                                (set-box! cancels
+                                          (cons (cons tag thunk)
+                                                (unbox cancels)))))))
+                         bases))))))))
 
   ;; A compute thread is not a fiber: it parks on a condition
   ;; variable, and its resume fills a slot and broadcasts. Only
@@ -531,16 +592,31 @@
                      (set! done? #t)
                      (condition-broadcast ready))
                    #t))))
-        (for-each (lambda (base)
-                    (let ((tag (cons #f #f)))
-                      ((flow-block-proc base) state
-                       (lambda (raw)
-                         (resume-from tag ((flow-wrap-proc base) raw)))
-                       (lambda (thunk)
-                         (set-box! cancels
-                                   (cons (cons tag thunk)
-                                         (unbox cancels)))))))
-                  bases)
+        ;; Registration runs on this thread's own stack, so unlike the
+        ;; on-loop case a raise here does propagate to the task's guard
+        ;; by itself. What it would leave behind is the bases that DID
+        ;; register — a channel getter entry, say — still live and
+        ;; pointing at a perform nobody will ever complete. Mark this
+        ;; perform synched so the next deliverer drops that entry, fire
+        ;; whatever cancels were registered, then let the raise go.
+        (guard (ex (#t
+                    (box-cas! state 'waiting 'synched)
+                    (let ((pending (unbox cancels)))
+                      (when (pair? pending)
+                        (%flow-spawn-safe
+                         (lambda ()
+                           (for-each (lambda (pair) ((cdr pair))) pending)))))
+                    (raise ex)))
+          (for-each (lambda (base)
+                      (let ((tag (cons #f #f)))
+                        ((flow-block-proc base) state
+                         (lambda (raw)
+                           (resume-from tag ((flow-wrap-proc base) raw)))
+                         (lambda (thunk)
+                           (set-box! cancels
+                                     (cons (cons tag thunk)
+                                           (unbox cancels)))))))
+                    bases))
         (with-mutex mutex
           (let wait ()
             (unless done?
@@ -571,12 +647,9 @@
                          (append bases (list (%scope-cancel-base scope)))
                          bases)))
           (let ((result (flow-poll bases)))
-            (let ((result (if (eq? result %flow-not-ready)
+            (%flow-settle (if (eq? result %flow-not-ready)
                               (flow-block-and-wait-off-loop bases)
-                              result)))
-              (if (eq? result %flow-cancel-sentinel)
-                  (raise (%flow-cancelled-error))
-                  result)))))))
+                              result)))))))
 
   (define flow-perform
     (lambda (event)
@@ -589,7 +662,12 @@
                 (let ((bases (flow-flatten event)))
                   (let ((result (flow-poll bases)))
                     (if (eq? result %flow-not-ready)
-                        (flow-block-and-wait-on-loop bases scope)
+                        ;; %flow-settle, not a bare return: the cancel
+                        ;; sentinel cannot reach here (no scope base
+                        ;; under the root scope) but a block-proc raise
+                        ;; can, and a root-scope fiber must see it too.
+                        (%flow-settle
+                         (flow-block-and-wait-on-loop bases scope))
                         result)))
                 (begin
                   (when (%scope-dead? scope)
@@ -597,12 +675,9 @@
                   (let ((bases (append (flow-flatten event)
                                        (list (%scope-cancel-base scope)))))
                     (let ((result (flow-poll bases)))
-                      (let ((result (if (eq? result %flow-not-ready)
+                      (%flow-settle (if (eq? result %flow-not-ready)
                                         (flow-block-and-wait-on-loop bases scope)
-                                        result)))
-                        (if (eq? result %flow-cancel-sentinel)
-                            (raise (%flow-cancelled-error))
-                            result))))))))))
+                                        result))))))))))
 
   ;;------------------------------------------------------------
   ;; Channels: buffered, mutex-protected, cross-thread
