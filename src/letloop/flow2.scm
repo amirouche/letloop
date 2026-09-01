@@ -37,7 +37,8 @@
    make-flow flow? flow-wrap flow-guard flow-choice flow-perform
 
    ;; channels
-   make-flow-channel flow-channel? flow-channel-buffer-size!
+   make-flow-channel flow-channel? flow-channel-name
+   flow-channel-buffer-size!
    flow-put! flow-get flow-get! flow-get-try
 
    ;; timers
@@ -66,6 +67,7 @@
    ~check-flow2-002/channel-bound-below-length
    ~check-flow2-002/channel-get-try-default
    ~check-flow2-002/channel-get-or-timeout
+   ~check-flow2-002/channel-name
    ~check-flow2-002/losing-get-does-not-eat-a-value
    ~check-flow2-002/losing-get-leaves-no-getter
    ~check-flow2-003/nursery-join-waits-children
@@ -162,6 +164,13 @@
         (if (box-cas! box lst '())
             lst
             (flow-box-drain! box)))))
+
+  (define flow-box-increment!
+    (lambda (box)
+      (let ((n (unbox box)))
+        (if (box-cas! box n (fx+ n 1))
+            (fx+ n 1)
+            (flow-box-increment! box)))))
 
   ;;------------------------------------------------------------
   ;; Events: the Concurrent ML core, unchanged from flow
@@ -705,8 +714,9 @@
   ;; the value queue (two-stack FIFO), the parked getters and the
   ;; bound; it is held only for list surgery, never across a resume.
   (define-record-type* <flow2-channel>
-    (make-flow-channel% mutex in out length bound getters)
+    (make-flow-channel% name mutex in out length bound getters)
     flow-channel?
+    (name    flow-channel-name)
     (mutex   flow-channel-mutex)
     (in      flow-channel-in      flow-channel-in!)
     (out     flow-channel-out     flow-channel-out!)
@@ -714,8 +724,25 @@
     (bound   flow-channel-bound   flow-channel-bound!)
     (getters flow-channel-getters flow-channel-getters!))
 
-  (define (make-flow-channel)
-    (make-flow-channel% (make-mutex) '() '() 0 #f '()))
+  ;; Every channel carries a name, and one created without a name still
+  ;; gets a process-unique integer rather than nothing. A diagnostic
+  ;; that cannot say WHICH channel is in trouble is barely better than
+  ;; no diagnostic: (letloop flow) learned that from a hang it could not
+  ;; attribute, and bolted sequential ids onto channels through a weak
+  ;; hashtable purely so its trace could name them. This is that, made
+  ;; deliberate and always on.
+  ;;
+  ;; The auto name is the integer itself rather than a symbol built from
+  ;; it. Chez interns symbols for the life of the process, so minting
+  ;; one per channel would leak steadily in a program that creates
+  ;; channels in a loop — which is exactly the kind of program whose
+  ;; channel diagnostics you end up reading.
+  (define %flow-channel-counter (box 0))
+
+  (define make-flow-channel
+    (case-lambda
+      (() (make-flow-channel (flow-box-increment! %flow-channel-counter)))
+      ((name) (make-flow-channel% name (make-mutex) '() '() 0 #f '()))))
 
   ;; A parked getter: the perform's shared state box and this base's
   ;; own wrap-applying resume, plus the claimed box that gives one
@@ -1313,7 +1340,7 @@
                     (let start ((i 0) (channels '()))
                       (if (fx=? i compute-count)
                           (reverse channels)
-                          (let ((channel (make-flow-channel)))
+                          (let ((channel (make-flow-channel (cons 'worker i))))
                             (fork-thread (lambda () (%worker-body channel)))
                             (start (fx+ i 1) (cons channel channels)))))))))
          (loop-spawn (lambda ()
