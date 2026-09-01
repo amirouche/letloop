@@ -405,6 +405,59 @@
     (assert (equal? '(flow2 channel-full saturating 2) (car warnings))))
   #t)
 
+;; flow-write reports the count it actually wrote and does NOT loop
+;; internally. The old shape resubmitted the remainder from inside the
+;; completion handler, which made the write surface uncancellable, made
+;; a flow-choice timeout unable to stop it, and copied the whole
+;; remainder per partial write. This pins the contract that replaced it:
+;; a positive count, a START offset that needs no copying, and #f on
+;; failure -- the shape flow-write-at has always had.
+(define (~check-flow2-006/write-reports-its-count)
+  (define PORT 18248)
+  (define first-count #f)
+  (define rest-count #f)
+  (define echoed #f)
+  (define payload (string->utf8 "0123456789"))
+  (flow-run
+   (lambda (workers)
+     (let ((listen-fd (loop-socket-new AF-INET SOCK-STREAM 0)))
+       (loop-bind listen-fd "127.0.0.1" PORT)
+       (loop-listen listen-fd 128)
+       (flow-spawn
+        (lambda ()
+          (let* ((client (flow-perform (flow-accept listen-fd)))
+                 (data   (flow-perform (flow-read client))))
+            (set! echoed (and (bytevector? data) (utf8->string data)))
+            (loop-close client))))
+       (flow-spawn
+        (lambda ()
+          (call-with-values (lambda () (make-sockaddr-in 127 0 0 1 PORT))
+            (lambda (addr addrlen)
+              (let ((fd (loop-connect addr addrlen)))
+                (foreign-free addr)
+                ;; a count, not #t
+                (set! first-count (flow-perform (flow-write fd payload)))
+                ;; START resumes a partial write with no copying; when
+                ;; the first send took everything there is nothing left,
+                ;; which the caller expresses as start = length
+                (set! rest-count
+                      (if (fx=? first-count (bytevector-length payload))
+                          0
+                          (flow-perform
+                           (flow-write fd payload first-count))))
+                (loop-close fd))))
+          (loop-close listen-fd)
+          (flow-stop))))))
+  (assert (fixnum? first-count))
+  (assert (fx>? first-count 0))
+  (assert (fx=? (bytevector-length payload)
+                (fx+ first-count rest-count)))
+  (assert (equal? "0123456789" echoed))
+  ;; an out-of-range start is a mistake at the call site, not a
+  ;; surprise at completion time
+  (assert (guard (ex (#t #t)) (flow-write 0 payload 999) #f))
+  #t)
+
 ;;------------------------------------------------------------
 ;; Nurseries
 ;;------------------------------------------------------------
@@ -922,7 +975,7 @@
         (lambda ()
           (let* ((client (flow-perform (flow-accept listen-fd)))
                  (data   (flow-perform (flow-read client))))
-            (flow-perform (flow-write client data))
+            (flow-write-all! client data)
             (loop-close client))))
        (flow-spawn
         (lambda ()
@@ -930,7 +983,7 @@
             (lambda (addr addrlen)
               (let ((fd (loop-connect addr addrlen)))
                 (foreign-free addr)
-                (flow-perform (flow-write fd (string->utf8 "hello")))
+                (flow-write-all! fd (string->utf8 "hello"))
                 (set! result (flow-perform (flow-read fd)))
                 (loop-close fd))))
           (loop-close listen-fd)
@@ -977,7 +1030,7 @@
                 ;; stay silent well past the server's 50ms
                 ;; read-or-timeout before finally sending
                 (flow-sleep 0.2)
-                (flow-perform (flow-write fd (string->utf8 "late")))
+                (flow-write-all! fd (string->utf8 "late"))
                 (loop-close fd)))))))))
   (and timed-out
        (equal? result (string->utf8 "late"))))
@@ -1030,7 +1083,7 @@
             (lambda (addr addrlen)
               (let ((fd (loop-connect addr addrlen)))
                 (foreign-free addr)
-                (flow-perform (flow-write fd (string->utf8 "after-cancel")))
+                (flow-write-all! fd (string->utf8 "after-cancel"))
                 (flow-sleep 0.05)
                 (loop-close fd)))))))))
   (and timed-out
@@ -1065,7 +1118,7 @@
                   (loop-close client))
                  (else
                   (set! echoed (cons result echoed))
-                  (flow-perform (flow-write client result))
+                  (flow-write-all! client result)
                   (request-loop)))))
             (loop-close listen-fd)
             (flow-stop))))
@@ -1075,9 +1128,9 @@
             (lambda (addr addrlen)
               (let ((fd (loop-connect addr addrlen)))
                 (foreign-free addr)
-                (flow-perform (flow-write fd (string->utf8 "one")))
+                (flow-write-all! fd (string->utf8 "one"))
                 (flow-perform (flow-read fd))
-                (flow-perform (flow-write fd (string->utf8 "two")))
+                (flow-write-all! fd (string->utf8 "two"))
                 (flow-perform (flow-read fd))
                 ;; go silent well past the server's 100ms per-read idle
                 ;; timeout before closing

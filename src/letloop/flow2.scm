@@ -47,7 +47,7 @@
    flow-timeout flow-sleep
 
    ;; network and file I/O
-   flow-accept flow-read flow-write
+   flow-accept flow-read flow-write flow-write-all!
    flow-open flow-read-at flow-write-at flow-close
    O-RDONLY O-WRONLY O-RDWR O-CREAT O-TRUNC O-APPEND
 
@@ -115,6 +115,7 @@
    ;; network and file I/O, ported from (letloop flow)'s ~check-flow-006
    ;; and ~check-flow-009 series -- the 11 fd- and ring-touching checks
    ;; the fork had dropped
+   ~check-flow2-006/write-reports-its-count
    ~check-flow2-006/echo-pair
    ~check-flow2-006/accept-cancel-leaves-listener-usable
    ~check-flow2-006/read-or-timeout-leaves-fd-usable
@@ -1352,30 +1353,83 @@
                            (io-uring-prep-cancel64 csqe id 0)
                            (io-uring-sqe-set-data64 csqe (loop-alloc-id!))))))))))
 
+  ;; One send, reporting what the kernel actually took: a positive
+  ;; fixnum, or #f on failure. START defaults to 0 and lets a caller
+  ;; resume a partial write without copying anything.
+  ;;
+  ;; It deliberately does NOT loop internally. Resubmitting the
+  ;; remainder from inside the completion handler runs on the
+  ;; scheduler's stack with the fiber parked across every round trip,
+  ;; and that one decision caused three separate problems:
+  ;;
+  ;; - Uncancellable. The chain belonged to no fiber, so a cancelled
+  ;;   scope could not stop it: it kept issuing ring operations against
+  ;;   an fd the cleanup path had very likely already closed, which on a
+  ;;   recycled descriptor is a write into someone else's file.
+  ;; - Unraceable. (flow-choice (flow-write ...) (flow-timeout ...))
+  ;;   would elect the timeout and the write would carry on regardless.
+  ;; - Quadratic. subbytevector copied the whole remainder on every
+  ;;   partial write, which is worst exactly when partial writes happen
+  ;;   -- a large buffer dribbling out through a slow socket.
+  ;;
+  ;; Looping in the CALLER makes each chunk its own perform and
+  ;; therefore its own cancellation point, and costs no atomicity: each
+  ;; resubmit was a separate SQE either way, so a competing send on the
+  ;; same fd could always interleave. flow-write-all! below is the
+  ;; loop, and flow-write-at has reported its count all along -- this
+  ;; makes flow-write agree with it.
   (define flow-write
-    (lambda (fd bv)
-      (make-flow% 'base #f
-                  (lambda (x) x)
-                  (lambda () #f)
-                  (lambda (state resume register-cancel!)
-                    (let ((ring (loop-ring (loop-current))))
-                      (define submit!
-                        (lambda (remaining)
-                          (lock-object remaining)
-                          (let ((id  (loop-alloc-id!))
-                                (sqe (loop-get-sqe ring)))
-                            (io-uring-prep-send sqe fd (bytevector-pointer remaining)
-                                                (bytevector-length remaining) 0)
-                            (io-uring-sqe-set-data64 sqe id)
-                            (hashtable-set! (loop-handlers (loop-current)) id
-                                            (lambda (res)
-                                              (unlock-object remaining)
-                                              (cond
-                                               ((fx<=? res 0) (resume #f))
-                                               ((fx=? res (bytevector-length remaining))
-                                                (resume #t))
-                                               (else (submit! (subbytevector remaining res)))))))))
-                      (submit! bv))))))
+    (case-lambda
+      ((fd bv) (flow-write fd bv 0))
+      ((fd bv start)
+       (unless (and (fixnum? start)
+                    (fx>=? start 0)
+                    (fx<=? start (bytevector-length bv)))
+         (error 'flow-write "start must be an index into bv"
+                (list start (bytevector-length bv))))
+       (make-flow% 'base #f
+                   (lambda (x) x)
+                   (lambda () #f)
+                   (lambda (state resume register-cancel!)
+                     (let* ((ring (loop-ring (loop-current)))
+                            (id   (loop-alloc-id!))
+                            (sqe  (loop-get-sqe ring)))
+                       (lock-object bv)
+                       (io-uring-prep-send sqe fd
+                                           (+ (bytevector-pointer bv) start)
+                                           (fx- (bytevector-length bv) start)
+                                           0)
+                       (io-uring-sqe-set-data64 sqe id)
+                       (hashtable-set! (loop-handlers (loop-current)) id
+                                       (lambda (res)
+                                         ;; Runs on cancellation too, with
+                                         ;; res = -ECANCELED, so the pin is
+                                         ;; always released.
+                                         (unlock-object bv)
+                                         (resume (and (fx>? res 0) res))))
+                       ;; The same cancel flow-read registers. A write
+                       ;; that loses a choice must not still be in the
+                       ;; ring afterwards.
+                       (register-cancel!
+                        (lambda ()
+                          (let ((csqe (loop-get-sqe ring)))
+                            (io-uring-prep-cancel64 csqe id 0)
+                            (io-uring-sqe-set-data64 csqe (loop-alloc-id!)))))))))))
+
+  ;; Write all of BV, resuming after each partial write. A procedure
+  ;; rather than an event, exactly as flow-put! is: every iteration
+  ;; performs flow-write and is therefore a suspension point and a
+  ;; cancellation point, which is the property the old internal loop
+  ;; threw away. Returns #t once everything is written, #f if a write
+  ;; failed -- ask flow-write directly if you need to know how far it
+  ;; got. An empty bytevector costs no syscall.
+  (define (flow-write-all! fd bv)
+    (let ((size (bytevector-length bv)))
+      (let loop ((start 0))
+        (if (fx=? start size)
+            #t
+            (let ((n (flow-perform (flow-write fd bv start))))
+              (and n (loop (fx+ start n))))))))
 
   ;; The cancel is not optional here, unlike the other events where it
   ;; only saves a wasted ring operation. loop-accept-block keys its
