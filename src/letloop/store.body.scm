@@ -22,8 +22,14 @@
 (define (store-tmp-directory)
   (string-append (store-directory) "/.tmp"))
 
+;; <name>-<hash>, not Nix's <hash>-<name>. Nix puts the hash first
+;; because it scans built outputs for store paths and rewrites them in
+;; place, which a fixed-width leading field makes tractable. letloop
+;; does none of that, so the reason does not carry over -- and putting
+;; the name first is what makes `ls` sort usefully, keeps every version
+;; of a package adjacent, and lets a name be tab-completed at all.
 (define (store-path hash name)
-  (string-append (store-directory) "/" hash "-" name))
+  (string-append (store-directory) "/" name "-" hash))
 
 ;; -> a host directory to bind as the build's rootfs: either one that
 ;; already exists, or the output of the derivation that builds it,
@@ -151,11 +157,17 @@
                       (resolve-derivation reference))))
             (filter input-derivation-reference? (derivation-inputs d))))))
 
-(define (run-sandboxed-build! d scratch-directory resolved)
+;; The build's own cache key doubles as its session key: it already
+;; hashes the derivation and everything resolved into it, which is
+;; exactly "the identity of the source and any source dependencies"
+;; that a stable gensym key has to be derived from. Two builds of the
+;; same thing then produce the same bytes, and two builds of different
+;; things cannot collide.
+(define (run-sandboxed-build! d scratch-directory resolved key)
   (run-fetches! (derivation-fetches d) scratch-directory)
   (link-derivation-inputs! scratch-directory (resolved-named-inputs resolved))
   (write-build-script! scratch-directory (derivation-script d))
-  (sandbox-build! (resolved-rootfs resolved) scratch-directory (resolved-inputs resolved)))
+  (sandbox-build! (resolved-rootfs resolved) scratch-directory (resolved-inputs resolved) key))
 
 ;; The store is addressed by what a build produced, which is only
 ;; knowable after running it -- so on its own it can dedup an output
@@ -260,7 +272,7 @@
                                                                  "/build-XXXXXX")))
                      (output-directory (string-append scratch-directory "/" (derivation-output d))))
                 (if (derivation-script d)
-                    (run-sandboxed-build! d scratch-directory resolved)
+                    (run-sandboxed-build! d scratch-directory resolved key)
                     (run-fetch-only-build! (derivation-fetches d) output-directory))
                 (unless (file-exists? output-directory)
                   (error 'store-build "declared output not produced by the build"

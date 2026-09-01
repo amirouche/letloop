@@ -26,7 +26,7 @@
             (system! (format #f "mkdir -p ~a" (shell-single-quote (string-append scratch "/out"))))
             (call-with-output-file (string-append scratch "/build.sh")
               (lambda (port) (display "echo ok > /build/out/ok\n" port)))
-            (sandbox-build! rootfs scratch '())
+            (sandbox-build! rootfs scratch '() #f)
             (let ((content (call-with-port (open-file-input-port (string-append scratch "/out/ok"))
                               get-bytevector-all)))
               (string=? (utf8->string content) "ok\n")))))))

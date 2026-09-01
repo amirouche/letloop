@@ -211,12 +211,24 @@
                                            "-"
                                            (substring describe 0 (fx- (string-length describe) 1))))))
 
+  ;; The build date, baked in at expand time -- and the one thing that
+  ;; makes letloop's own build irreproducible no matter what else is
+  ;; pinned. Chez compiles are otherwise reproducible modulo gensym
+  ;; names, which $session-key handles; a literal timestamp is the case
+  ;; that defeats it outright, and it is ours, not Chez's.
+  ;;
+  ;; SOURCE_DATE_EPOCH is the reproducible-builds convention for
+  ;; exactly this: when set, it replaces the wall clock, so two builds
+  ;; of the same commit agree. Unset, nothing changes.
   (define-syntax include-date
     (lambda (x)
       (syntax-case x ()
         [(k)
          (let ([fn (datum filename)])
-           (with-syntax ([exp (run/output "date +\"%Y-%m-%dT%H:%M:%S%z\"")])
+           (with-syntax ([exp (run/output
+                               (if (getenv "SOURCE_DATE_EPOCH")
+                                   "date -u -d \"@$SOURCE_DATE_EPOCH\" +\"%Y-%m-%dT%H:%M:%S%z\""
+                                   "date +\"%Y-%m-%dT%H:%M:%S%z\""))])
              #'exp))])))
 
   (define scheme-binarypath*
@@ -981,6 +993,22 @@
                              (system* (format #f "mkdir -p ~a" out))
                              out))))))
 
+          ;; Chez names every gensym it generates with a session key,
+          ;; drawn at random per process, and that name is written into
+          ;; the fasl -- so two compiles of the same source differ byte
+          ;; for byte while remaining $fasl-file-equal?. Pinning the key
+          ;; makes them byte-identical, which is what lets a build be
+          ;; addressed by its inputs and verified by anyone.
+          ;;
+          ;; $LETLOOP_SESSION_KEY carries it, rather than a flag: the
+          ;; caller that knows what identifies this build is the store,
+          ;; which already computes exactly that as its cache key.
+          ;; Unset, nothing changes and Chez keeps its random key.
+          ;;
+          ;; Reproducibility needs one more thing this cannot give: no
+          ;; macro may bake in a timestamp. See include-date.
+          (define session-key (getenv "LETLOOP_SESSION_KEY"))
+
           (define forms
             `(,@(if (null? directories)
                     ;; Leave Chez's defaults, which include the current
@@ -1051,6 +1079,14 @@
           (call-with-output-file build.scm
             (lambda (port)
               (display "#!chezscheme\n" port)
+              ;; Written as text, not pretty-printed: the reader needs
+              ;; #%$set-top-level-value! to name the system primitive,
+              ;; and pretty-print escapes the # into \x23; which reads
+              ;; back as an ordinary, unbound identifier.
+              (when session-key
+                (display "(#%$set-top-level-value! '$session-key \"" port)
+                (display session-key port)
+                (display "-\")\n" port))
               (pretty-print
                `(guard (ex (else (display "* Ooops :|\n" (current-error-port))
                                  (display "** " (current-error-port))

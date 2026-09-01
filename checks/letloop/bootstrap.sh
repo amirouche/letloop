@@ -128,7 +128,7 @@ for tool in gcc make busybox sh; do
 done
 
 # The prebuilt BusyBox must not have survived into it.
-PREBUILT=$(echo "$LETLOOP_STORE"/*-bootstrap-shell/busybox)
+PREBUILT=$(echo "$LETLOOP_STORE"/bootstrap-shell-*/busybox)
 if cmp -s "$FINAL_DESTINATION/bin/busybox" "$PREBUILT"; then
     echo "FAIL: final rootfs still carries the prebuilt busybox"
     exit 1
@@ -318,6 +318,35 @@ SCHEME_HELLO_OUTPUT=$("$ELSEWHERE/scheme-hello")
     echo "FAIL: the compiled Scheme program does not run relocated: $SCHEME_HELLO_OUTPUT"
     exit 1
 }
+
+# Reproducibility: the same derivation, built twice, byte for byte.
+# Chez names gensyms from a per-process random session key and writes
+# those names into every fasl, so without pinning it two builds of
+# identical sources differ -- they stay $fasl-file-equal?, but the
+# bytes move, and a store cannot be addressed by something that moves.
+# store-build pins it from the build's own cache key, which is exactly
+# "the identity of the source and its dependencies".
+#
+# Forced by dropping the cache entry and the output: otherwise the
+# second call is a cache hit and proves nothing, which it silently did
+# the first time this was written.
+REPRO_FIRST=$(sha256sum "$SCHEME_HELLO_DESTINATION/hello" | cut -d' ' -f1)
+REPRO_KEY=$(grep -rl "$(basename "$SCHEME_HELLO_DESTINATION")" "$LETLOOP_STORE/.cache/" 2>/dev/null | head -1)
+rm -f "$REPRO_KEY"
+rm -rf "$SCHEME_HELLO_DESTINATION" "$SCHEME_HELLO_DESTINATION.drv"
+REPRO_AGAIN=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-scheme-hello.derivation.scm" | tail -1)
+REPRO_SECOND=$(sha256sum "$REPRO_AGAIN/hello" | cut -d' ' -f1)
+[ "$REPRO_FIRST" = "$REPRO_SECOND" ] || {
+    echo "FAIL: two builds of the same derivation differ"
+    echo "  $REPRO_FIRST"
+    echo "  $REPRO_SECOND"
+    exit 1
+}
+[ "$REPRO_AGAIN" = "$SCHEME_HELLO_DESTINATION" ] || {
+    echo "FAIL: reproducible output landed at a different store path"
+    exit 1
+}
+echo "reproducible: rebuilt byte-identical"
 
 # The widest compile in the repo: review pulls in tea/*, liburing/low,
 # sq and heap, all amalgamated into one program. Compile-only -- it is

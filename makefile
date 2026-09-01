@@ -32,7 +32,15 @@ chezscheme: ## Compile chezscheme $(CHEZ_REF) into $(PREFIX)
 letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## Produce the letloop binary from letloop/base.scm's letloop-main, and install it
 	echo $(SCHEME)
 	$(SCHEME) --version
-	echo '(source-directories (list "./src/")) (generate-wpo-files #t)(import (letloop base)) (letloop-compile (list "./src/" "src/letloop/base.scm" "letloop-main"))' | $(SCHEME) --quiet --libdirs ./src/ --compile-imported-libraries
+	@# The session key has to be set in *this* process too, not only in
+	@# the child letloop-compile spawns: --compile-imported-libraries
+	@# writes a .so and .wpo for every library base.scm imports, right
+	@# here, and those carry gensym names into the boot image. Without
+	@# it the build is irreproducible however well the child behaves.
+	{ [ -n "$$LETLOOP_SESSION_KEY" ] && \
+	    echo "(#%\$$set-top-level-value! '\$$session-key \"$$LETLOOP_SESSION_KEY-outer-\")"; \
+	  echo '(source-directories (list "./src/")) (generate-wpo-files #t)(import (letloop base)) (letloop-compile (list "./src/" "src/letloop/base.scm" "letloop-main"))'; \
+	} | $(SCHEME) --quiet --libdirs ./src/ --compile-imported-libraries
 	@# The ./a.out written here is built on upstream scheme, whose main
 	@# knows nothing of the appended payload -- only its boot file is any
 	@# use to us, and the binary is assembled below.

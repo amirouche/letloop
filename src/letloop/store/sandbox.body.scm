@@ -38,10 +38,26 @@
 ;; list of existing store paths, read-only bind-mounted at the same
 ;; absolute path inside the sandbox as outside. SCRATCH-DIRECTORY must
 ;; already contain build.sh, written by the caller.
-(define (sandbox-build! rootfs-directory scratch-directory inputs)
+;; SESSION-KEY, when given, reaches the build as $LETLOOP_SESSION_KEY
+;; and $SOURCE_DATE_EPOCH -- the two things a build needs to be
+;; reproducible. The first pins Chez's gensym naming, without which two
+;; compiles of the same source differ byte for byte; the second is the
+;; reproducible-builds convention for anything that would otherwise
+;; reach for the wall clock. Both are derived from what identifies the
+;; build, so the same inputs give the same bytes.
+;;
+;; SOURCE_DATE_EPOCH is 0 rather than the key: it has to be a Unix
+;; timestamp, and any fixed one will do, since what matters is only
+;; that it does not vary between builds of the same thing.
+(define (sandbox-build! rootfs-directory scratch-directory inputs session-key)
   (unless (bwrap-available?)
     (error 'sandbox-build! "/usr/bin/bwrap not found"))
-  (let* ((input-binds
+  (let* ((reproducible-env
+          (if session-key
+              (string-append " --setenv LETLOOP_SESSION_KEY " (shell-single-quote session-key)
+                             " --setenv SOURCE_DATE_EPOCH 0")
+              ""))
+         (input-binds
           (apply string-append
                  (map (lambda (input)
                         (string-append " --ro-bind "
@@ -54,6 +70,7 @@
            " --die-with-parent --as-pid-1 --clearenv"
            " --setenv PATH /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
            " --setenv HOME /build --setenv USER build"
+           reproducible-env
            " --unshare-uts --unshare-ipc --unshare-pid --unshare-cgroup --unshare-net"
            " --cap-add ALL --uid 0 --gid 0"
            (rootfs-entry-binds rootfs-directory)
