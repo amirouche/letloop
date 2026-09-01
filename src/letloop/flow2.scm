@@ -99,6 +99,7 @@
    ~check-flow2-003/waiter-on-dead-scope-is-woken
    ~check-flow2-004/monitor-in-time
    ~check-flow2-004/monitor-deadline
+   ~check-flow2-005/nursery-waits-for-its-compute-task
    ~check-flow2-005/worker-task-replies
    ~check-flow2-005/worker-raise-becomes-compute-error
    ~check-flow2-005/worker-ring-event-raises-wrong-thread
@@ -514,8 +515,11 @@
   ;;
   ;; waiters is a CAS list — a compute-thread task parked on a
   ;; channel registers its scope waiter from its own thread — of
-  ;; (state . resume) pairs; children, join-waiters and subscopes are
-  ;; loop-thread-only.
+  ;; (state . resume) pairs. children is a CAS box for the same reason:
+  ;; a scope owns the compute tasks submitted inside it, and a worker
+  ;; finishing one has to decrement from its own thread. join-waiters
+  ;; and subscopes stay loop-thread-only, which is why waking the
+  ;; joiners is marshalled back onto the loop.
   (define-record-type* <flow2-scope>
     (make-flow-scope% parent state waiters waiter-count
                       children join-waiters subscopes)
@@ -529,7 +533,7 @@
     (subscopes    flow-scope-subscopes    flow-scope-subscopes!))
 
   (define (%make-scope parent)
-    (make-flow-scope% parent (box 'open) (box '()) (box 0) 0 '() '()))
+    (make-flow-scope% parent (box 'open) (box '()) (box 0) (box 0) '() '()))
 
   ;; The root scope: never cancelled, and the flag flow-perform tests
   ;; to keep the hot path — every fiber outside any nursery — free of
@@ -608,10 +612,37 @@
     (when (%worker-current?) (%flow-wrong-thread 'flow-scope-cancel!))
     (%scope-fail! scope 'cancelled))
 
-  ;; One child returned or raised; at zero, resume the join.
+  (define (%scope-children scope)
+    (unbox (flow-scope-children scope)))
+
+  ;; Both directions CAS, because flow-submit! may be called from a
+  ;; worker and %worker-body always decrements from one.
+  (define (%scope-child-add! scope)
+    (let bump ()
+      (let ((n (unbox (flow-scope-children scope))))
+        (unless (box-cas! (flow-scope-children scope) n (fx+ n 1))
+          (bump)))))
+
+  ;; One child returned or raised; at zero, resume the join. The
+  ;; decrement is safe from any thread; waking the joiners is not --
+  ;; join-waiters is a plain loop-thread-only list -- so a worker
+  ;; marshals that half back onto the loop.
   (define (%scope-child-done! scope)
-    (flow-scope-children! scope (fx- (flow-scope-children scope) 1))
-    (when (fxzero? (flow-scope-children scope))
+    (let ((n (let drop ()
+               (let ((n (unbox (flow-scope-children scope))))
+                 (if (box-cas! (flow-scope-children scope) n (fx- n 1))
+                     (fx- n 1)
+                     (drop))))))
+      (when (fxzero? n)
+        (if (%worker-current?)
+            (%flow-spawn-safe (lambda () (%scope-wake-joiners! scope)))
+            (%scope-wake-joiners! scope)))))
+
+  ;; Loop thread only. Rechecks the count rather than trusting the
+  ;; caller's: a marshalled wake-up runs a tick later, by which time
+  ;; another task may have been submitted into the same scope.
+  (define (%scope-wake-joiners! scope)
+    (when (fxzero? (%scope-children scope))
       (let ((waiters (flow-scope-join-waiters scope)))
         (flow-scope-join-waiters! scope '())
         (for-each (lambda (resume) (resume #t)) waiters))))
@@ -635,7 +666,7 @@
     (make-flow% 'base (cons 'flow2-scope scope)
                 (lambda (x) x)
                 (lambda ()
-                  (and (fxzero? (flow-scope-children scope))
+                  (and (fxzero? (%scope-children scope))
                        (lambda () #t)))
                 (lambda (state resume register-cancel!)
                   (flow-scope-join-waiters!
@@ -1269,7 +1300,7 @@
   ;; A scope's own bookkeeping: children still running, fibers parked
   ;; on its cancellation, and fibers parked on its join.
   (define (flow-scope-children-count scope)
-    (flow-scope-children scope))
+    (%scope-children scope))
 
   (define (flow-scope-waiters-length scope)
     (length (unbox (flow-scope-waiters scope))))
@@ -1583,7 +1614,7 @@
                       (set! %scope-current %root-scope)
                       (thunk)))
         (begin
-          (flow-scope-children! scope (fx+ (flow-scope-children scope) 1))
+          (%scope-child-add! scope)
           (loop-spawn
            (lambda ()
              (set! %scope-current scope)
@@ -1610,7 +1641,7 @@
   ;; cancellation and the monitor's deadline raise their symbol; an
   ;; open scope yields OUTCOME.
   (define (%scope-finish scope parent outcome)
-    (when (not (fxzero? (flow-scope-children scope)))
+    (when (not (fxzero? (%scope-children scope)))
       (flow-perform (%scope-join-event scope)))
     (when (flow-scope? parent)
       (flow-scope-subscopes!
@@ -1689,13 +1720,34 @@
 
   (define %flow-worker-stop (list 'stop))
 
+  ;; The task is counted as a child of the submitting scope, so the
+  ;; nursery's join waits for it. Tagging alone -- which is all this did
+  ;; -- meant cancellation reached a task but ownership did not: a join
+  ;; could return while a scope-tagged task was still running on a
+  ;; worker, and that task could still put to a channel afterwards. The
+  ;; README promised a scope owns "the compute tasks they submit"; only
+  ;; the flagging half was implemented.
+  ;;
+  ;; The increment happens BEFORE the put and is undone if the put does
+  ;; not complete. Since channels became bounded, a put to a full worker
+  ;; channel parks and can therefore be cancelled, and a count bumped
+  ;; for a task that was never submitted is a join that never finishes.
+  ;; Doing it after the put instead would be worse: the worker can pick
+  ;; the task up and decrement before the increment lands.
   (define (flow-submit! worker-channel thunk response-channel)
     (let ((scope (if (%worker-current?)
                      (or (%task-scope) %root-scope)
                      %scope-current)))
-      (%channel-put! worker-channel
-                     (make-flow-task thunk response-channel scope)
-                     #f)))
+      (if (eq? scope %root-scope)
+          (%channel-put! worker-channel
+                         (make-flow-task thunk response-channel scope)
+                         #f)
+          (begin
+            (%scope-child-add! scope)
+            (guard (ex (#t (%scope-child-done! scope) (raise ex)))
+              (%channel-put! worker-channel
+                             (make-flow-task thunk response-channel scope)
+                             #f))))))
 
   ;; The per-worker framework loop: dequeue, skip tasks whose scope
   ;; died in the queue, run under the guard that makes always-a-reply
@@ -1708,19 +1760,31 @@
     (let loop ()
       (let ((task (flow-get! channel)))
         (unless (eq? task %flow-worker-stop)
-          (unless (%scope-dead? (flow-task-scope task))
-            (%task-scope (flow-task-scope task))
-            (guard (ex ((and (flow-error-cancelled? ex)
-                             (%scope-dead? (flow-task-scope task)))
-                        (void))
-                       (#t
-                        (%channel-put! (flow-task-response task)
-                                       (make-flow-error
-                                        'compute "flow2: worker task raised"
-                                        '() ex)
-                                       #t)))
-              ((flow-task-thunk task)))
-            (%task-scope #f))
+          (let ((scope (flow-task-scope task)))
+            ;; The decrement pairs with flow-submit!'s increment and has
+            ;; to happen on EVERY path out, including the one where the
+            ;; task is skipped because its scope died in the queue --
+            ;; otherwise a cancelled scope's join waits for a task that
+            ;; will never run.
+            (dynamic-wind
+              void
+              (lambda ()
+                (unless (%scope-dead? scope)
+                  (%task-scope scope)
+                  (guard (ex ((and (flow-error-cancelled? ex)
+                                   (%scope-dead? scope))
+                              (void))
+                             (#t
+                              (%channel-put! (flow-task-response task)
+                                             (make-flow-error
+                                              'compute "flow2: worker task raised"
+                                              '() ex)
+                                             #t)))
+                    ((flow-task-thunk task)))
+                  (%task-scope #f)))
+              (lambda ()
+                (unless (eq? scope %root-scope)
+                  (%scope-child-done! scope)))))
           (loop)))))
 
   ;; Start the loop on the calling thread — the main thread — and
