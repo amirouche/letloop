@@ -58,13 +58,12 @@ here rather than left in a report nobody reads. Each is a place where
 this document currently describes an intent the implementation does not
 fully deliver:
 
-- **Writes are not cancellable.** `flow-write`, `flow-write-at` and
-  `flow-close` register no cancel thunk. `flow-write` is the sharp one:
-  it resubmits the remainder of a partial write internally, so after a
-  scope is cancelled and the fiber has unwound, that chain keeps
-  issuing ring operations against an fd the cleanup path has very
-  likely already closed. "Every in-flight ring operation belonging to
-  the subtree is cancelled", below, overstates this.
+- **`flow-write-at` and `flow-close` are not cancellable.** Neither
+  registers a cancel thunk, so a cancelled scope leaves their ring
+  operations in flight. `flow-write` was the sharp case and is fixed:
+  it no longer loops internally and registers the same cancel
+  `flow-read` does. "Every in-flight ring operation belonging to the
+  subtree is cancelled", below, still overstates the remaining two.
 - **A nursery does not wait for the compute tasks it owns.**
   `flow-submit!` tags a task with the current scope but never
   increments the scope's child count, so a join can return while a
@@ -511,12 +510,32 @@ Event: bytes readable on `FD`. Three results, and EOF is **not** `#f`:
 Distinguishing the last two matters — a loop that treats `#f` as EOF
 silently turns an error into a normal end of stream.
 
-#### `(flow-write fd bytevector)`
+#### `(flow-write fd bytevector [start])`
 
-Event: `BYTEVECTOR` written to `FD`; result is `#t` once **all** of it
-has been written, or `#f` on failure. Not a count: a partial write is
-resubmitted internally until the bytevector is exhausted, so the event
-completes only when there is nothing left to write.
+Event: one `send` of `BYTEVECTOR` from `START` (default `0`). Result is
+the count actually written — a positive fixnum — or `#f` on failure.
+`START` lets a caller resume a partial write without copying anything.
+
+It does **not** loop internally, and that is deliberate. Resubmitting
+the remainder from inside the completion handler runs on the
+scheduler's stack with the fiber parked across every round trip, which
+made the write uncancellable (a cancelled scope's chain kept issuing
+ring operations against an fd the cleanup path had already closed),
+unraceable (a `flow-choice` timeout that won could not stop it), and
+quadratic (the whole remainder was copied per partial write, worst
+exactly when partial writes happen). Looping in the caller makes each
+chunk its own perform and therefore its own cancellation point, and
+costs no atomicity — each resubmit was a separate ring operation
+either way, so a competing send on the same fd could always interleave.
+
+#### `(flow-write-all! fd bytevector)`
+
+Writes all of `BYTEVECTOR`, resuming after each partial write. Returns
+`#t` when everything is written, `#f` if a write failed; ask
+`flow-write` directly if you need to know how far it got. A procedure
+rather than an event, exactly as `flow-put!` is — every iteration
+performs `flow-write`, so it is a suspension point and a cancellation
+point throughout. An empty bytevector costs no syscall.
 
 #### `(flow-open path flags mode)`
 
