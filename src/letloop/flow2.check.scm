@@ -487,6 +487,46 @@
   (assert at-join)
   #t)
 
+;; A cancelled parent must not abandon its grandchildren. %scope-finish
+;; performs the join under the PARENT scope on purpose, so an enclosing
+;; cancellation reaches it -- but it used to raise on the spot with this
+;; scope's own children still running. They were cancelled transitively,
+;; yet nobody waited for them to finish, so fibers outlived the scope
+;; that owned them, which is the one thing a nursery exists to prevent.
+;;
+;; The inner scope owns a compute task that outlasts the monitor's
+;; deadline, so the two failures are separable: without the ownership
+;; fix the task is not counted and the join does not happen at all;
+;; without the drain fix it is counted but the join is abandoned
+;; mid-flight. Either way the task is still running when the timeout
+;; escapes, and at-raise is #f.
+(define (~check-flow2-003/cancelled-parent-drains-grandchildren)
+  (define finished #f)
+  (define at-raise 'not-set)
+  (define outcome 'not-set)
+  (flow-run
+   (lambda (workers)
+     (let ((worker (car workers))
+           (reply (make-flow-channel 'reply 4)))
+       (guard (ex ((flow-error-timeout? ex)
+                   (set! outcome 'timeout)
+                   (set! at-raise finished)))
+         (flow-monitor
+          0.02
+          (lambda ()
+            (flow-nursery
+             (lambda (inner)
+               (flow-submit! worker
+                             (lambda ()
+                               (sleep (make-time 'time-duration 60000000 0))
+                               (set! finished #t))
+                             reply))))))
+       (flow-stop)))
+   1)
+  (assert (eq? outcome 'timeout))
+  (assert at-raise)
+  #t)
+
 ;;------------------------------------------------------------
 ;; Nurseries
 ;;------------------------------------------------------------

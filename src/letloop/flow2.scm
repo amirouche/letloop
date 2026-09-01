@@ -100,6 +100,7 @@
    ~check-flow2-004/monitor-in-time
    ~check-flow2-004/monitor-deadline
    ~check-flow2-005/nursery-waits-for-its-compute-task
+   ~check-flow2-003/cancelled-parent-drains-grandchildren
    ~check-flow2-005/worker-task-replies
    ~check-flow2-005/worker-raise-becomes-compute-error
    ~check-flow2-005/worker-ring-event-raises-wrong-thread
@@ -1641,20 +1642,65 @@
   ;; cancellation and the monitor's deadline raise their symbol; an
   ;; open scope yields OUTCOME.
   (define (%scope-finish scope parent outcome)
-    (when (not (fxzero? (%scope-children scope)))
-      (flow-perform (%scope-join-event scope)))
-    (when (flow-scope? parent)
-      (flow-scope-subscopes!
-       parent (remq scope (flow-scope-subscopes parent))))
-    (let ((reason (unbox (flow-scope-state scope))))
-      (cond
-       ((pair? reason) (raise (cdr reason)))
-       ((eq? reason 'timeout)
-        (raise (make-flow-error 'timeout "flow2: deadline expired" '() #f)))
-       ((eq? reason 'cancelled)
-        (raise (%flow-cancelled-error)))
-       ((eq? (car outcome) 'raised) (raise (cdr outcome)))
-       (else (cdr outcome)))))
+    ;; The join runs under the PARENT scope on purpose, so an enclosing
+    ;; cancellation reaches it rather than being blocked by a child that
+    ;; will not finish. But when it did reach it, this raised on the
+    ;; spot with this scope's own children still running — they were
+    ;; cancelled transitively by %scope-fail!, yet nobody waited for
+    ;; them to finish unwinding, so fibers outlived the scope that owned
+    ;; them and the parent's own join could complete while they were
+    ;; still on their way out. That is the single thing a nursery exists
+    ;; to prevent.
+    ;;
+    ;; So: catch the interruption, make sure this scope really is dead
+    ;; so its children are told to stop, and drain them to zero with the
+    ;; cancellation OFF before propagating. The second wait runs at the
+    ;; root scope, where flow-perform adds no cancel base and therefore
+    ;; nothing can abandon it a second time.
+    ;;
+    ;; The cost is honest and worth stating: a child parked in an
+    ;; operation that cannot be cancelled will hold its parent here.
+    ;; Cancellation is prompt for everything that registers a cancel
+    ;; thunk; flow-write-at and flow-close still do not (see Issues).
+    (let ((interrupted
+           (and (not (fxzero? (%scope-children scope)))
+                (guard (ex (#t ex))
+                  (flow-perform (%scope-join-event scope))
+                  #f))))
+      (when interrupted
+        ;; Idempotent: if the scope already died for a better reason —
+        ;; a child's failure, a monitor's deadline — that reason wins
+        ;; and this changes nothing.
+        (%scope-fail! scope 'cancelled)
+        (let ((saved %scope-current))
+          (set! %scope-current %root-scope)
+          (let drain ()
+            (unless (fxzero? (%scope-children scope))
+              (flow-perform (%scope-join-event scope))
+              (drain)))
+          (set! %scope-current saved)))
+      ;; Unconditionally, on every path. The old code unlinked only
+      ;; after a join that returned normally, so a parent whose
+      ;; cancellation interrupted the join kept the dead subscope on its
+      ;; list for the rest of its life — and %scope-fail! walks that
+      ;; list on every later cancellation.
+      (when (flow-scope? parent)
+        (flow-scope-subscopes!
+         parent (remq scope (flow-scope-subscopes parent))))
+      (let ((reason (unbox (flow-scope-state scope))))
+        (cond
+         ((pair? reason) (raise (cdr reason)))
+         ((eq? reason 'timeout)
+          (raise (make-flow-error 'timeout "flow2: deadline expired" '() #f)))
+         ;; Before the bare 'cancelled: when the join was cut short we
+         ;; re-raise what actually cut it, which is normally the
+         ;; parent's cancellation but must not mask a block-proc raise
+         ;; behind a generic cancelled error.
+         (interrupted (raise interrupted))
+         ((eq? reason 'cancelled)
+          (raise (%flow-cancelled-error)))
+         ((eq? (car outcome) 'raised) (raise (cdr outcome)))
+         (else (cdr outcome))))))
 
   ;; PROC runs on the calling fiber with the fresh scope current;
   ;; fibers it spawns are the scope's children. The join — waiting
