@@ -12,6 +12,10 @@ if [ ! "$LETLOOP_VENV" ]; then
         export LETLOOP_PREFIX=$(pwd)/local
     fi
     mkdir -p "$LETLOOP_PREFIX/bin"
+    # Keep this checkout's store out of the user's own: `letloop store
+    # build` inside a venv fills $LETLOOP_PREFIX/letloop/store, not the
+    # ~/.local/letloop/store someone has been accumulating packages in.
+    export LETLOOP_PROJECT_PATH="$LETLOOP_PREFIX/letloop"
     export LD_LIBRARY_PATH="$LETLOOP_PREFIX/lib/"
     export PATH="$LETLOOP_PREFIX/bin:$HOME/.local/bin:$PATH"
     export SCHEME=$(which scheme)

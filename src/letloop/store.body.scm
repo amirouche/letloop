@@ -15,9 +15,28 @@
 ;; hashing, expected-hash verification, placement, the .drv sidecar --
 ;; is identical either way.
 
+;; Where the store lives, most specific first:
+;;
+;;   $LETLOOP_STORE            the store directory outright
+;;   $LETLOOP_PROJECT_PATH     a project's letloop directory; the store
+;;                             is `store` inside it
+;;   ~/.local/letloop/store    otherwise
+;;
+;; The middle one is what keeps a checkout's builds out of the user's
+;; own store: ./venv points it at $LETLOOP_PREFIX/letloop, so working
+;; on letloop fills local/letloop/store rather than the store a user
+;; has been accumulating packages in. Same reason a language runtime
+;; grows a per-project directory -- one machine, several worlds, and
+;; nothing shared between them by accident.
+;;
+;; $LETLOOP_STORE stays because a caller sometimes wants to name a
+;; store directly, and because every check here does.
 (define (store-directory)
-  (or (getenv "LETLOOP_STORE")
-      (string-append (getenv "HOME") "/.letloop/store")))
+  (cond
+   ((getenv "LETLOOP_STORE"))
+   ((getenv "LETLOOP_PROJECT_PATH")
+    => (lambda (project) (string-append project "/store")))
+   (else (string-append (getenv "HOME") "/.local/letloop/store"))))
 
 (define (store-tmp-directory)
   (string-append (store-directory) "/.tmp"))

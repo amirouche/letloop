@@ -4,12 +4,21 @@
 S-expression: a build-environment rootfs, optional fixed-output
 fetches, a build script, a declared output), runs the script inside a
 network-off `bwrap` sandbox, hashes the result with BLAKE3, and places
-it in a content-addressed store at `$LETLOOP_STORE/<hash>-<name>`,
+it in a content-addressed store at `<store>/<name>-<hash>`,
 deduping against an existing path with the same hash. See
 `src/letloop/store/derivation.body.scm` for the exact format and
 `src/letloop/store/sandbox.body.scm` for the sandbox invocation.
 
-A derivation can name another with `(derivation "other.scm")`, as an
+The store is `$LETLOOP_STORE` if set, else `$LETLOOP_PROJECT_PATH/store`,
+else `~/.local/letloop/store`. `./venv` sets the middle one, so working
+on letloop fills the checkout's own store rather than the one a user has
+been accumulating packages in.
+
+A package is an ordinary Scheme library exporting `package`, under
+`src/letloop/package/`, so `letloop store build blake3` resolves
+`(letloop package blake3)` wherever letloop's own libraries resolve —
+which is what lets a package set ship inside a release. A derivation can
+also name another with `(derivation "other.scm")`, as an
 input or as its build-environment root; `store-build` resolves those
 depth-first, guarding against reference cycles and memoising within
 the call. A derivation with neither a `build-environment` nor a
@@ -27,23 +36,25 @@ the store.
 
 ## The bootstrap chain
 
-`checks/letloop/bootstrap*.derivation.scm`, driven by
-`checks/letloop/bootstrap.sh`, builds a statically linked, relocatable
-letloop without Alpine or any other distribution:
+The packages under `src/letloop/package/`, driven by
+`checks/letloop/bootstrap.sh`, build a statically linked, relocatable
+letloop without Alpine or any other distribution. Each is
+`letloop store build <name>`:
 
-| derivation | what it is |
+| package | what it is |
 | --- | --- |
-| `bootstrap-toolchain` | fetch-only: musl.cc's static native `x86_64-linux-musl` gcc + binutils + musl |
-| `bootstrap-shell` | fetch-only: a static BusyBox binary |
-| `bootstrap-rootfs` | assembles those two into a rootfs a build can run in |
-| `bootstrap-make` | GNU make, from source, via its own `build.sh` |
-| `bootstrap-busybox` | BusyBox, from source |
-| `bootstrap-rootfs-final` | the rootfs downstream work uses: toolchain + the two above |
-| `bootstrap-chezscheme` | ChezScheme 10.4.1, from source |
-| `bootstrap-letloop` | letloop itself, from source, against all of it |
+| `toolchain` | fetch-only: musl.cc's static native `x86_64-linux-musl` gcc + binutils + musl |
+| `shell` | fetch-only: a static BusyBox binary |
+| `rootfs` | assembles those two into a rootfs a build can run in |
+| `make` | GNU make, from source, via its own `build.sh` |
+| `busybox` | BusyBox, from source |
+| `rootfs-final` | the rootfs downstream work uses: toolchain + the two above |
+| `liburing`, `blake3` | from source, for the archives letloop links |
+| `chezscheme` | ChezScheme 10.4.1, from source |
+| `letloop` | letloop itself, from source, against all of it |
 
 **Exactly two prebuilt binaries are trusted**, both pinned by BLAKE3
-with their provenance recorded in the derivation headers. Trusting a
+with their provenance recorded in each package library's header. Trusting a
 prebuilt compiler is Nix's bargain, taken deliberately: building a C
 compiler needs a C compiler, and the alternative is Guix's hex0/mes
 chain -- years of work that still bottoms out in trusting a seed
@@ -77,11 +88,11 @@ Things worth knowing before touching it:
   restoring the tarball's recorded ownership fails outright. Nothing
   is lost, since `store-hash-directory` hashes content and the
   owner-execute bit, never uid or gid.
-- The chain is **not** bit-reproducible. BusyBox stamps its build time
-  into the binary, so rebuilding it yields a different hash, and that
-  cascades to everything downstream. The build cache hides this in
-  practice, but a cleared cache produces a different set of store
-  paths for the same inputs.
+- The chain **is** bit-reproducible now, given a pinned session key --
+  see `make check-reproducible`, which builds letloop twice and
+  requires every file to match. It was not, and the cause was two
+  layers: Chez names gensyms from a per-process random key, and
+  letloop baked a build timestamp in at expand time.
 
 ## What "done" means, and what is not done
 
@@ -101,14 +112,14 @@ gate, it is not a claim.
 | Fetch a pinned artifact with no rootfs at all | `~check-store-001/fetch-only` |
 | Build a derivation from another's output, and refuse a cycle | `~check-store-00{2,3,4}` |
 | Skip an unchanged build, and *not* skip a changed one | `~check-store-00{5,6}` |
-| Assemble a rootfs that compiles C, from two pinned binaries | `bootstrap-rootfs`, `bootstrap-hello` |
-| **Compile a Scheme program to a standalone static binary** | `bootstrap-scheme-hello` — the thing the store is actually for, and the one gate that fails when only *that* is broken |
-| Rebuild its own shell and build driver from source | `bootstrap-{busybox,make}`, and `bootstrap.sh` comparing bytes against the fetched BusyBox |
-| Build ChezScheme and letloop with no distribution involved | `bootstrap-{chezscheme,letloop}` |
+| Assemble a rootfs that compiles C, from two pinned binaries | `rootfs`, `hello` |
+| **Compile a Scheme program to a standalone static binary** | `scheme-hello` — the thing the store is actually for, and the one gate that fails when only *that* is broken |
+| Rebuild its own shell and build driver from source | `busybox`/`make`, and `bootstrap.sh` comparing bytes against the fetched BusyBox |
+| Build ChezScheme and letloop with no distribution involved | `chezscheme`/`letloop` |
 | Produce a letloop that needs no dynamic loader, anywhere | absent `INTERP` segment, checked per artifact |
-| Actually drive io_uring, not merely link it | `bootstrap-flow2` — the full flow2 suite |
+| Actually drive io_uring, not merely link it | `flow2` — the full flow2 suite |
 | Actually run the store that built it | `bootstrap.sh`'s self-hosted build, which needs BLAKE3 |
-| Compile a Scheme program against a C archive | `bootstrap-static-lib`, and `letloop-check.sh` on the host |
+| Compile a Scheme program against a C archive | `static-lib`, and `letloop-check.sh` on the host |
 | Run all of the above relocated, on a foreign libc | copied to a fresh directory and run there |
 
 Known gaps, all of them deliberate:
