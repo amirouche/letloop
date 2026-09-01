@@ -118,6 +118,12 @@ letloop-libraries: ## Install letloop's sources and their per-level .wpo cache i
 	rm -rf $(PREFIX)/lib/letloop
 	mkdir -p $(PREFIX)/lib/letloop/src
 	cp -a src/letloop $(PREFIX)/lib/letloop/src/
+	@# The host's own source ships too: `letloop compile` recompiles it
+	@# when a program brings static libraries of its own to link in,
+	@# which is the one case where copying the existing host is not
+	@# enough. It sits beside src/letloop rather than inside it so a
+	@# library scan never mistakes it for Scheme.
+	cp -a src/letloop-main.c $(PREFIX)/lib/letloop/src/
 	@# One pass per level, and one pass only: .wpo files from separate
 	@# compilations disagree ("does not define expected compilation
 	@# instance of library").

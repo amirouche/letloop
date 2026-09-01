@@ -341,6 +341,20 @@ static void letloop_register_liburing_symbols(void) {
 }
 #endif /* LETLOOP_LIBURING_STATIC */
 
+/* Hook for symbols that are not letloop's to know about: the static
+ * libraries a *user program* brings to `letloop compile`. That path
+ * cannot copy the existing host -- the archives have to be linked in
+ * -- so it recompiles this file together with a generated companion
+ * that lists their symbols, and that companion defines this function.
+ *
+ * Weak, so this default stands whenever no companion is linked, which
+ * is every ordinary build including letloop's own. Keeping the
+ * generated code on the other side of a hook is what lets it be
+ * generated at all: nothing here has to know a library's symbol names,
+ * and adding one never means editing this file.
+ */
+__attribute__((weak)) void letloop_register_extra_symbols(void) {}
+
 static void letloop_register_foreign_symbols(void) {
   void *probe = dlopen(NULL, RTLD_LAZY);
   if (probe != NULL) {
@@ -402,6 +416,11 @@ static void letloop_register_foreign_symbols(void) {
 #ifdef LETLOOP_LIBURING_STATIC
   letloop_register_liburing_symbols();
 #endif
+
+  /* No-op unless a program brought static libraries of its own; see
+   * the weak definition above. Last, so a program can shadow anything
+   * registered here with its own build of the same symbol. */
+  letloop_register_extra_symbols();
 }
 
 #define LETLOOP_MAGIC "LETLOOP\1"

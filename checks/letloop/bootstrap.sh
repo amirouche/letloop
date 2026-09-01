@@ -17,6 +17,9 @@
 #   9. bootstrap-letloop     letloop itself, from source, against it --
 #                             a statically linked, relocatable letloop
 #                             no distribution ever touched
+#  10. bootstrap-static-lib  that letloop compiling a Scheme program
+#                             against a C archive it also built --
+#                             gcc, ar, nm and ld all from this chain
 #
 # Steps 1 and 2 are the only two prebuilt binaries the chain trusts,
 # both pinned by BLAKE3 (see each derivation's own header for the
@@ -174,5 +177,22 @@ case "$STORE_USAGE" in
     *) echo "FAIL: bootstrap letloop's store subcommand does not run: $STORE_USAGE"
        exit 1 ;;
 esac
+
+# --- the loop closes: that letloop compiling against a C static
+#     library, with the toolchain this chain built ---
+STATIC_LIB_DESTINATION=$("$LETLOOP" store build "$ROOT/checks/letloop/bootstrap-static-lib.derivation.scm" | tail -1)
+echo "static-lib demo: $STATIC_LIB_DESTINATION"
+
+readelf -l "$STATIC_LIB_DESTINATION/demo" | grep -qi 'interpreter' && {
+    echo "FAIL: the static-library demo needs a dynamic loader"
+    exit 1
+}
+
+cp "$STATIC_LIB_DESTINATION/demo" "$ELSEWHERE/demo"
+DEMO_OUTPUT=$("$ELSEWHERE/demo" | tail -1)
+[ "$DEMO_OUTPUT" = "42" ] || {
+    echo "FAIL: the static-library demo does not run relocated: $DEMO_OUTPUT"
+    exit 1
+}
 
 echo "=== All tests passed ==="

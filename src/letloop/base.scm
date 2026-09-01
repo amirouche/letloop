@@ -486,6 +486,11 @@
   (define (guess string)
     (cond
      ((file-directory? string) (values 'directory (make-filepath string)))
+     ;; Before the file case, deliberately: a static library is a file,
+     ;; and the file case claims the argument as the library to
+     ;; compile. Sniffing the suffix first is also what lets archives
+     ;; be given in any position, like every other standalone argument.
+     ((string-suffix? ".a" string) (values 'archive (make-filepath string)))
      ((file-exists? string)
       (values 'file (make-filepath string)))
      ;; the first char is a dot, the associated path is neither a file
@@ -771,6 +776,7 @@
 
       (define extensions '())
       (define directories '())
+      (define archives '())
       (define main #f)
       (define library.scm #f)
       (define dev? #f)
@@ -796,6 +802,7 @@
                 (case type
                   (directory (set! directories (cons string* directories)))
                   (extension (set! extensions (cons string* extensions)))
+                  (archive (set! archives (cons string* archives)))
                   (file (set! library.scm string*))
                   (unknown (set! main string*)))))
             (massage-standalone! (cdr standalone)))))
@@ -1067,21 +1074,191 @@
            (pk (format #f "~a -b ~apetite.boot -b ~ascheme.boot --quiet --script ~a"
                        (scheme-executable) boot-directory* boot-directory* build.scm)))))
 
+      ;; The lines a command wrote to stdout. Read with get-line rather
+      ;; than read-string, which this library only has at expand time.
+      (define run/lines
+        (lambda (command)
+          (call-with-values (lambda ()
+                              (open-process-ports command 'line (current-transcoder)))
+            (lambda (stdin stdout stderr pid)
+              (let loop ((out '()))
+                (let ((line (get-line stdout)))
+                  (if (eof-object? line)
+                      (reverse out)
+                      (loop (cons line out)))))))))
+
+      (define split-on
+        (lambda (string char)
+          (let loop ((chars (string->list string)) (current '()) (out '()))
+            (cond
+             ((null? chars) (reverse (cons (list->string (reverse current)) out)))
+             ((char=? (car chars) char)
+              (loop (cdr chars) '() (cons (list->string (reverse current)) out)))
+             (else (loop (cdr chars) (cons (car chars) current) out))))))
+
+      (define string-contains?
+        (lambda (needle haystack)
+          (let ((n (string-length needle)) (h (string-length haystack)))
+            (let loop ((index 0))
+              (cond
+               ((fx> (fx+ index n) h) #f)
+               ((string=? (substring haystack index (fx+ index n)) needle) #t)
+               (else (loop (fx+ index 1))))))))
+
+      ;; The Chez boot directory and letloop's installed sources, both
+      ;; needed to relink the host against a program's archives. Named
+      ;; here rather than reused from build-boot-file/whole-program,
+      ;; whose copies are local to it.
+      (define boot-directory-path
+        (lambda ()
+          (or (boot-directory) (string-append (scheme-binarypath*) "/"))))
+
+      (define letloop-source-directory
+        (lambda ()
+          (and=> (letloop-library-directory)
+                 (lambda (x) (string-append x "/src")))))
+
+      (define c-compiler
+        ;; Only ever consulted when a program brought archives of its
+        ;; own; the ordinary path copies the running host and needs no
+        ;; compiler at all.
+        (lambda ()
+          (define usable
+            (lambda (path)
+              (and path
+                   (positive? (string-length path))
+                   ;; plain system, not system*: a missing compiler is
+                   ;; the question being asked here, not an error
+                   (fxzero? (system (format #f "command -v ~a >/dev/null 2>&1" path)))
+                   path)))
+          (or (usable (getenv "CC"))
+              (usable "cc")
+              (usable "gcc")
+              (begin
+                (format (current-error-port)
+                        "* Ooops :|\n** Linking a static library needs a C compiler, and none was found.\n")
+                (format (current-error-port)
+                        "** Tried $CC, cc, and gcc on $PATH.\n")
+                (exit 1)))))
+
+      (define archive-symbols
+        ;; Every defined, global symbol an archive exports -- what
+        ;; dlsym would find, had dlopen been an option. nm prints
+        ;; blank lines and "member.o:" headers between members; a
+        ;; symbol line is "ADDRESS TYPE NAME", so three fields.
+        (lambda (archive)
+          (let loop ((lines (run/lines
+                             (format #f "nm --defined-only -g ~a 2>/dev/null" archive)))
+                     (out '()))
+            (if (null? lines)
+                (reverse out)
+                (let ((fields (remove "" (split-on (car lines) #\space))))
+                  (loop (cdr lines)
+                        (if (= (length fields) 3)
+                            (cons (caddr fields) out)
+                            out)))))))
+
+      (define write-extra-symbols!
+        ;; The companion for letloop-main.c's weak
+        ;; letloop_register_extra_symbols. Each symbol is referenced
+        ;; under a local name aliased to the real one via GCC's
+        ;; asm-label extension, so this file never declares a
+        ;; prototype it cannot know -- an archive's symbols have types
+        ;; only its headers describe, and the address is all
+        ;; Sforeign_symbol wants.
+        (lambda (path symbols)
+          (call-with-output-file path
+            (lambda (port)
+              (display "/* Generated by `letloop compile`. Do not edit. */\n" port)
+              (display "#include \"scheme.h\"\n\n" port)
+              (display "void letloop_register_extra_symbols(void);\n\n" port)
+              (display "void letloop_register_extra_symbols(void) {\n" port)
+              (for-each
+               (lambda (symbol)
+                 (format port "  { extern void ~a_letloop_alias(void) __asm__(\"~a\");\n" symbol symbol)
+                 (format port "    Sforeign_symbol(\"~a\", (void *)~a_letloop_alias); }\n" symbol symbol))
+               symbols)
+              (display "}\n" port)))))
+
+      (define link-host-with-archives!
+        ;; The one path that needs a C compiler: archives have to be
+        ;; linked, and linking is not something bytes can be copied
+        ;; into. Recompiles letloop-main.c -- shipped beside the
+        ;; libraries for exactly this -- against kernel.o and the
+        ;; archives, plus the generated symbol table.
+        (lambda (destination)
+          (define compiler (c-compiler))
+          (define boot* (boot-directory-path))
+          (define source
+            (let* ((src (letloop-source-directory))
+                   (path (and src (string-append src "/letloop-main.c"))))
+              (if (and path (file-exists? path))
+                  path
+                  (begin
+                    (format (current-error-port)
+                            "* Ooops :|\n** Linking a static library needs letloop's own letloop-main.c.\n")
+                    (format (current-error-port)
+                            "** Looked for it at ~a.\n"
+                            (or path "<letloop's sources are not installed>"))
+                    (exit 1)))))
+          (define kernel.o (string-append boot* "kernel.o"))
+          (unless (file-exists? kernel.o)
+            (format (current-error-port)
+                    "* Ooops :|\n** Linking a static library needs ~a, from the Chez installation.\n"
+                    kernel.o)
+            (exit 1))
+          (for-each
+           (lambda (archive)
+             (unless (file-exists? archive)
+               (format (current-error-port)
+                       "* Ooops :|\n** No such static library: ~a\n" archive)
+               (exit 1)))
+           archives)
+          (let ((extra.c (string-append temporary-directory "/letloop-extra-symbols.c"))
+                (symbols (apply append (map archive-symbols archives))))
+            (write-extra-symbols! extra.c symbols)
+            ;; -static on musl, matching how letloop builds itself
+            ;; there: musl makes it routine, and a program linking
+            ;; archives rather than dlopening them is usually after
+            ;; exactly that.
+            (let* ((triple (let ((lines (run/lines (format #f "~a -dumpmachine" compiler))))
+                             (if (null? lines) "" (car lines))))
+                   (static-flag (if (string-contains? "musl" triple) "-static" ""))
+                   (command
+                    (format #f "~a -I~a -I~a ~a ~a ~a~a -o ~a ~a -ldl -lm -lpthread"
+                            compiler boot* temporary-directory
+                            source extra.c kernel.o
+                            (fold-left (lambda (out archive) (string-append out " " archive))
+                                       "" archives)
+                            destination static-flag)))
+              (when LETLOOP_DEBUG (pk 'link command))
+              (unless (fxzero? (system command))
+                (format (current-error-port)
+                        "* Ooops :|\n** Linking the static libraries failed:\n** ~a\n" command)
+                (exit 1))))))
+
       (define emit-program!
-        ;; One self-contained file, and no C compiler: the host binary,
-        ;; then the standalone boot image, then a trailer giving its
-        ;; length. src/letloop-main.c finds that trailer by reading
+        ;; One self-contained file: the host binary, then the
+        ;; standalone boot image, then a trailer giving its length.
+        ;; src/letloop-main.c finds that trailer by reading
         ;; /proc/self/exe and registers the boot from memory. Bytes past
         ;; the end of an ELF image are ignored by the loader, so the
         ;; result is still an executable.
+        ;;
+        ;; No C compiler is involved unless the program named archives
+        ;; to link: the host is otherwise this very binary, copied.
         (lambda ()
 
           (define host
-            (or (executable-path)
-                (begin
-                  (format (current-error-port)
-                          "* Ooops :|\n** Cannot read /proc/self/exe, needed to copy the host binary.\n")
-                  (exit 1))))
+            (if (null? archives)
+                (or (executable-path)
+                    (begin
+                      (format (current-error-port)
+                              "* Ooops :|\n** Cannot read /proc/self/exe, needed to copy the host binary.\n")
+                      (exit 1)))
+                (let ((linked (string-append temporary-directory "/letloop-host")))
+                  (link-host-with-archives! linked)
+                  linked)))
 
           (define read-file
             (lambda (path)

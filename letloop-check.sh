@@ -92,4 +92,47 @@ else
   exit 1
 fi
 
+# a program linking a C static library: the archive is a positional
+# argument recognised by its .a suffix, and its symbols resolve through
+# plain foreign-procedure with no shared object anywhere
+cc -c checks/staticlib/arith.c -o /tmp/letloop-check-arith.o
+if [ $? -ne 0 ]; then
+  echo "cannot compile the static library fixture"
+  exit 1
+fi
+ar rcs /tmp/letloop-check-libarith.a /tmp/letloop-check-arith.o
+if [ $? -ne 0 ]; then
+  echo "cannot archive the static library fixture"
+  exit 1
+fi
+
+# deliberately before the procedure name: position must not matter
+$LETLOOP compile checks/ checks/staticlib/base.scm /tmp/letloop-check-libarith.a staticlib-usage
+if [ $? -eq 0 ]; then
+  echo staticlib compile success
+else
+  exit 1
+fi
+
+./a.out | grep -q "static library add: 42"
+if [ $? -eq 0 ]; then
+  echo staticlib compiled exec success
+else
+  echo "the static library program did not produce the expected output"
+  exit 1
+fi
+
+# and it is relocatable: nothing beside it, run from somewhere else
+STATICLIB_ELSEWHERE=$(mktemp -d)
+cp a.out "$STATICLIB_ELSEWHERE/a.out"
+"$STATICLIB_ELSEWHERE/a.out" | grep -q "static library add: 42"
+if [ $? -eq 0 ]; then
+  echo staticlib relocated exec success
+  rm -rf "$STATICLIB_ELSEWHERE"
+  rm -f a.out a.out.boot /tmp/letloop-check-arith.o /tmp/letloop-check-libarith.a
+else
+  echo "the static library program does not run relocated"
+  exit 1
+fi
+
 echo win
