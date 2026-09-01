@@ -60,6 +60,15 @@
 
    ;; diagnostics
    flow-log flow-log-drain! flow-log-start! flow-log-stop!
+   ;; Raw internal lengths, the way (letloop flow) gained
+   ;; flow-channel-puts-length / flow-channel-pops-length after its
+   ;; 44GB incident: a structure holding entries nobody will resume
+   ;; looks idle from outside, and every leak in this family is the gap
+   ;; between the raw number and the logical one.
+   flow-channel-queue-length flow-channel-getters-length
+   flow-channel-space-length flow-channel-bound
+   flow-scope-children-count flow-scope-waiters-length
+   flow-scope-join-waiters-length
 
    ;; checks
    ~check-flow2-000/error-symbol-dispatch
@@ -75,6 +84,7 @@
    ~check-flow2-000/log-is-nonblocking-and-drains
    ~check-flow2-000/log-flush-thread-lifecycle
    ~check-flow2-002/channel-name
+   ~check-flow2-002/diagnostics-see-what-leaks
    ~check-flow2-002/default-bound-is-finite
    ~check-flow2-002/put-parks-when-full
    ~check-flow2-002/put-parked-on-full-is-cancellable
@@ -1208,6 +1218,65 @@
         (%channel-wake-space! channel)
         (car value))
        (else default))))
+
+  ;;------------------------------------------------------------
+  ;; Diagnostics: raw internal lengths
+  ;;------------------------------------------------------------
+  ;;
+  ;; (letloop flow) gained flow-channel-puts-length /
+  ;; flow-channel-pops-length after its 44GB incident, commented as
+  ;; existing "to tell apart logically empty (put-count = get-count)
+  ;; from channel has released its internal state". Per TODO.md that
+  ;; instrumentation is what finally confirmed the leak after the
+  ;; business logic had been exonerated by eight repeated-allocation
+  ;; passes: the raw puts list held 62 entries at 70 cumulative puts
+  ;; while logical pending stayed exactly 0.
+  ;;
+  ;; The whole point is that these are RAW list lengths, not logical
+  ;; ones. A structure holding entries nobody will ever resume looks
+  ;; identical from the outside to one that is genuinely idle, and
+  ;; every leak in this family — flow's §1.1, flow2's finding 4 — is
+  ;; the gap between the two. Without a way to read both numbers you
+  ;; are reduced to guessing from RSS.
+  ;;
+  ;; flow2 has three such structures, so all three are readable:
+  ;; a channel's parked getters, its parked putters, and a scope's
+  ;; waiter lists — flow-scope-join-waiters in particular has neither
+  ;; compaction nor removal, only the implicit filter of a resume
+  ;; returning #f.
+
+  ;; Values currently queued. The logical number: what a getter would
+  ;; find.
+  (define (flow-channel-queue-length channel)
+    (with-mutex (flow-channel-mutex channel)
+      (flow-channel-length channel)))
+
+  ;; Entries on the getters list, dead ones included. Compare against
+  ;; the number of fibers you believe are actually parked on this
+  ;; channel; a gap that grows is finding 4's shape.
+  (define (flow-channel-getters-length channel)
+    (with-mutex (flow-channel-mutex channel)
+      (length (flow-channel-getters channel))))
+
+  ;; Putters parked waiting for room. Persistently non-zero means
+  ;; sustained backpressure — pair it with the (flow2 channel-full ...)
+  ;; warning, which fires once per saturation episode.
+  (define (flow-channel-space-length channel)
+    (with-mutex (flow-channel-mutex channel)
+      (length (flow-channel-space channel))))
+
+  ;; A scope's own bookkeeping: children still running, fibers parked
+  ;; on its cancellation, and fibers parked on its join.
+  (define (flow-scope-children-count scope)
+    (flow-scope-children scope))
+
+  (define (flow-scope-waiters-length scope)
+    (length (unbox (flow-scope-waiters scope))))
+
+  ;; A plain list field, unlike flow-scope-waiters, which is a CAS box:
+  ;; the join list is only ever touched from the loop thread.
+  (define (flow-scope-join-waiters-length scope)
+    (length (flow-scope-join-waiters scope)))
 
   ;; Raises overflow right here when the channel already holds more
   ;; than N values: the bound is never observably violated, and the

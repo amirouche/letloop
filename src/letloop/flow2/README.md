@@ -346,6 +346,34 @@ at the call site.
 
 The channel's name.
 
+#### `(flow-channel-bound channel)`
+
+The channel's bound, or `#f` if it is unbounded.
+
+#### Diagnostics
+
+`(flow-channel-queue-length channel)`,
+`(flow-channel-getters-length channel)`,
+`(flow-channel-space-length channel)`,
+`(flow-scope-children-count scope)`,
+`(flow-scope-waiters-length scope)`,
+`(flow-scope-join-waiters-length scope)`.
+
+Raw internal lengths, for telling apart *logically idle* from *still
+holding state nobody will ever resume*. Every leak in this family lives
+in the gap between the two numbers, and a structure full of entries no
+one will resume looks identical from the outside to one that is
+genuinely empty — in `(letloop flow)`'s 44GB incident the raw puts list
+held 62 entries at 70 cumulative puts while logical pending stayed at
+exactly 0, and reading both numbers is what finally identified it after
+the application code had been exonerated by eight repeated-allocation
+passes.
+
+Watch `flow-channel-getters-length` against the number of fibers you
+believe are parked on the channel, and `flow-scope-join-waiters-length`
+in particular: that list has neither compaction nor removal, only the
+implicit filter of a resume returning `#f`.
+
 #### `(flow-channel? obj)`
 
 Returns `#t` if `OBJ` is a channel, otherwise `#f`.
