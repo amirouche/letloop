@@ -95,7 +95,8 @@
           ~check-flow-011/raising-cancel-does-not-lose-fiber
           ~check-flow-011/winner-own-cancel-not-fired
           ~check-flow-011/block-raise-reaches-the-caller
-          ~check-flow-011/block-raise-does-not-strand-a-worker)
+          ~check-flow-011/block-raise-does-not-strand-a-worker
+          ~check-flow-011/lost-get-does-not-eat-a-value)
 
   (import (chezscheme)
           (letloop r999)
@@ -755,6 +756,49 @@
               (lambda () obj)))
            (else (scan (cdr puts))))))))
 
+  ;; A rendezvous whose putter has already been resumed cannot be
+  ;; called off: its flow-put! has returned, the handoff DID happen. So
+  ;; when the getter's own resume then reports #f — this perform synched
+  ;; on another base first — the value must land somewhere rather than
+  ;; evaporate. Hand it to another waiting getter if there is one;
+  ;; otherwise leave it on the puts list as an entry with no
+  ;; continuation behind it, only a state box its resume CASes exactly
+  ;; like a real party's does.
+  ;;
+  ;; That CAS is what makes the entry single-use: the first taker wins
+  ;; and the entry stops being `waiting?`, so a second one skips it and
+  ;; compaction drops it. Without it the entry would stay waiting
+  ;; forever and hand the same value out repeatedly — a synthetic
+  ;; putter that never dies is worse than the lost value it replaces.
+  ;;
+  ;; The entry satisfies flow-get-try's waiting?/claim!/resume test
+  ;; unchanged, so no reader needs to know it is special.
+  (define %flow-channel-redeposit!
+    (lambda (channel obj)
+      (let scan ((pops (unbox (flow-channel-pops channel))))
+        (cond
+         ((null? pops)
+          (let* ((state (box 'waiting))
+                 (entry (make-flow-channel-entry*
+                         state
+                         (lambda (ignored) (box-cas! state 'waiting 'synched))
+                         obj)))
+            (%flow-trace! "redeposit e" (%flow-trace-entry-id entry)
+                          " ch" (%flow-trace-channel-id channel))
+            (flow-box-cons! (flow-channel-puts channel) entry)))
+         ((and (flow-channel-entry-waiting? (car pops))
+               (flow-channel-entry-claim! (car pops)))
+          (if ((flow-channel-entry-resume (car pops)) obj)
+              (flow-channel-remove! (flow-channel-pops channel) (car pops))
+              ;; Cannot happen under the claim! invariant, but a claim
+              ;; left set on an entry we then walk away from would
+              ;; strand that getter for good — release it rather than
+              ;; rely on the invariant holding forever.
+              (begin
+                (set-box! (flow-channel-entry-claimed (car pops)) #f)
+                (scan (cdr pops)))))
+         (else (scan (cdr pops)))))))
+
   ;; Mirror of flow-put-block's lost-wakeup fix; see its comment.
   (define flow-get-block
     (lambda (channel)
@@ -775,8 +819,13 @@
                 (%flow-trace! "get-block rendezvous e"
                               (%flow-trace-entry-id entry)
                               " with e" (%flow-trace-entry-id (car puts)))
-                ((flow-channel-entry-resume entry)
-                 (flow-channel-entry-value (car puts))))
+                ;; The putter above is already committed, so this
+                ;; resume's #f — an earlier base of this same perform
+                ;; won during registration — must not drop the value on
+                ;; the floor. See %flow-channel-redeposit!.
+                (let ((obj (flow-channel-entry-value (car puts))))
+                  (unless ((flow-channel-entry-resume entry) obj)
+                    (%flow-channel-redeposit! channel obj))))
                (else (scan (cdr puts))))))))))
 
   (define flow-get
