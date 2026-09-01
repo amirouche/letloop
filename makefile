@@ -3,7 +3,11 @@
 SCHEME=$(shell which scheme)
 PWD=$(shell pwd)
 LETLOOP=$(shell which letloop)
-SHELL=/bin/bash
+# Plain sh, not bash: every recipe here is POSIX, and requiring bash
+# kept letloop from being built in a minimal environment that has only
+# BusyBox -- which is exactly what the bootstrap rootfs in
+# checks/letloop/bootstrap*.derivation.scm provides.
+SHELL=/bin/sh
 PREFIX=$(PWD)/local
 
 # Which ChezScheme to build. There is no v10.5.0 tag upstream: main carries
@@ -50,9 +54,22 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 	@# nothing beside it. letloop.boot is installed too: it is what
 	@# --visible-libraries folds into a program.
 	@#
+	@# $(PREFIX)/bin/letloop is a *relative* symlink, and has to stay one:
+	@# scheme-binarypath* finds the boot directory through
+	@# dirname($$SCHEME) + readlink. It is computed by hand below rather
+	@# than with `ln -sr`, whose -r is a GNU extension BusyBox lacks --
+	@# BOOT always lives under PREFIX, so stripping that prefix gives the
+	@# path to descend from PREFIX/bin.
+	@#
 	@# The same shape is what `letloop compile` produces, by copying its
 	@# own host and appending a different boot. No C compiler runs there.
-	BOOT=$$(dirname $$(readlink -f $(SCHEME))); \
+	@# set -e, because the steps below are chained with `;`: without it a
+	@# failing cc leaves letloop-host missing, the cat below produces a
+	@# file that is just the boot image with no ELF header, and the only
+	@# symptom is a "syntax error" when the shell later tries to run that
+	@# as a script.
+	set -e; \
+	  BOOT=$$(dirname $$(readlink -f $(SCHEME))); \
 	  STATIC_FLAG=""; \
 	  URING_FLAGS=""; \
 	  case "$$(cc -dumpmachine)" in \
@@ -76,7 +93,17 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 	  mv -f "$$BOOT/letloop.tmp" "$$BOOT/letloop"; \
 	  rm -f a.out.boot; \
 	  mkdir -p $(PREFIX)/bin; \
-	  ln -srf "$$BOOT/letloop" $(PREFIX)/bin/letloop; \
+	  PREFIX_NO_SLASH="$(PREFIX)"; \
+	  PREFIX_NO_SLASH=$${PREFIX_NO_SLASH%/}; \
+	  BOOT_RELATIVE=$${BOOT#$$PREFIX_NO_SLASH/}; \
+	  if [ "$$BOOT_RELATIVE" = "$$BOOT" ]; then \
+	    echo "make letloop: SCHEME resolves to $$BOOT, which is not under PREFIX ($$PREFIX_NO_SLASH)." >&2; \
+	    echo "  bin/letloop has to be a symlink relative to PREFIX -- scheme-binarypath* finds" >&2; \
+	    echo "  the boot directory as dirname(\$$SCHEME) + readlink(\$$SCHEME) -- so the Chez" >&2; \
+	    echo "  installation must live inside PREFIX. Install or copy it there first." >&2; \
+	    exit 1; \
+	  fi; \
+	  ln -sf "../$$BOOT_RELATIVE/letloop" $(PREFIX)/bin/letloop; \
 	  echo "Installed $$BOOT/letloop and $(PREFIX)/bin/letloop"
 	$(MAKE) letloop-libraries
 	@echo What is done is not to be done!
