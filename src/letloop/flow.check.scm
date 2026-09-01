@@ -855,6 +855,61 @@
        loser-cancelled
        (not winner-cancelled)))
 
+;; A raise from a base event's BLOCK procedure must reach the fiber
+;; that performed it. Registration runs inside loop-abort's thunk, on
+;; the scheduler's stack with the prompt unwound, so before the fix the
+;; raise went to loop-apply's catch-all and took k with it: the fiber
+;; was gone, silently, and anything waiting on it waited forever.
+;; loop-get-sqe ("submission queue full") and loop-accept-block
+;; ("concurrent accept on fd") both raise from block procs in real
+;; code. Bounded ticks so the buggy case fails instead of hanging.
+(define (~check-flow-011/block-raise-reaches-the-caller)
+  (define seen 'not-set)
+  (define bad (make-flow (lambda (x) x)
+                         (lambda () #f)          ;; never ready -> must block
+                         (lambda (state resume register-cancel!)
+                           (error 'bad-block "boom"))))
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (guard (ex (#t (set! seen 'raised)))
+       (flow-perform bad)
+       (set! seen 'returned))))
+  (let tick ((n 0))
+    (when (fx<? n 6)
+      (loop-run-once)
+      (tick (fx+ n 1))))
+  (eq? seen 'raised))
+
+;; The same raise, from a compute worker -- the worse half. Off-loop
+;; registration is marshalled ONTO the loop (that is the fix for
+;; preparing SQEs from the wrong thread), so a raising block proc runs
+;; on the loop while the worker sleeps on its condition variable: the
+;; raise is swallowed by loop-apply, nobody ever broadcasts, and that
+;; worker is lost for the life of the process. The pool shrinks by one
+;; with no other symptom.
+(define (~check-flow-011/block-raise-does-not-strand-a-worker)
+  (define outcome 'not-set)
+  (define done #f)
+  (define bad (make-flow (lambda (x) x)
+                         (lambda () #f)
+                         (lambda (state resume register-cancel!)
+                           (error 'bad-block "boom"))))
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-worker-start! 1)
+     (set! outcome
+           (flow-worker-call
+            (lambda ()
+              (guard (ex (#t 'raised))
+                (flow-perform bad)
+                'returned))))
+     (set! done #t)
+     (flow-worker-stop!)))
+  (flow-worker-tick-until (lambda () done) 400)
+  (eq? outcome 'raised))
+
 ;; ---- flow-worker (CPU offload to OS threads) ----
 ;;
 ;; Ticking rather than loop-run: these checks must drive the loop

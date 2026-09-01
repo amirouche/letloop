@@ -92,7 +92,9 @@
 
           ~check-flow-011/sync-resume-runs-later-cancels
           ~check-flow-011/raising-cancel-does-not-lose-fiber
-          ~check-flow-011/winner-own-cancel-not-fired)
+          ~check-flow-011/winner-own-cancel-not-fired
+          ~check-flow-011/block-raise-reaches-the-caller
+          ~check-flow-011/block-raise-does-not-strand-a-worker)
 
   (import (chezscheme)
           (letloop r999)
@@ -230,6 +232,40 @@
   ;; shared with the fiber path below, so a rendezvous between a worker
   ;; and a fiber works in either direction with one implementation of
   ;; the protocol.
+  ;; A raise from a base's block procedure, on its way back to the
+  ;; party that is waiting on this synchronization.
+  ;;
+  ;; Registration never runs in the waiter's own dynamic extent. On the
+  ;; loop it runs inside loop-abort's thunk, on the SCHEDULER's stack
+  ;; with the prompt already unwound; off the loop it is marshalled
+  ;; onto the loop by %flow-spawn-safe and runs there. Either way a
+  ;; raise reaches loop-apply's catch-all instead of the caller: the
+  ;; fiber is killed with its continuation unrun, or — worse, off the
+  ;; loop — the worker thread is never broadcast to and blocks on its
+  ;; condition variable for the life of the process. Both present as a
+  ;; lost wakeup, which is exactly what they are not.
+  ;;
+  ;; Not a hypothetical: loop-get-sqe raises "submission queue full"
+  ;; once more than 256 operations are queued in a tick, and every
+  ;; ring-touching block proc reaches it — flow-timeout, flow-read,
+  ;; flow-write, flow-open, flow-read-at — as does loop-accept-block's
+  ;; "concurrent accept on fd". The cancel path a few lines below has
+  ;; been hardened against precisely this raise since the NULL-SQE fix;
+  ;; the registration pass had not been.
+  ;;
+  ;; So carry the object out as a VALUE, through the same resume the
+  ;; winning base would have used, and re-raise it in %flow-settle on
+  ;; the waiting party's own stack, where its guards are.
+  (define-record-type* <flow-raise>
+    (%make-flow-raise object)
+    %flow-raise?
+    (object %flow-raise-object))
+
+  (define (%flow-settle result)
+    (if (%flow-raise? result)
+        (raise (%flow-raise-object result))
+        result))
+
   (define flow-block-and-wait-off-loop
     (lambda (bases)
       (let ((state (box 'waiting))
@@ -244,6 +280,19 @@
                  (begin
                    ;; Cancels touch the ring, so they must run ON the
                    ;; loop even though we are not on it.
+                   ;;
+                   ;; Known residual, unlike the on-loop path below:
+                   ;; the broadcast wakes this worker on ITS thread
+                   ;; while the cancels are still only queued on the
+                   ;; loop, so a worker that immediately re-performs
+                   ;; can have its new registration marshalled ahead of
+                   ;; the old cancel. Only matters for a cancel that
+                   ;; frees something the next registration needs —
+                   ;; today just flow-accept's handler slot — i.e. a
+                   ;; worker losing an accept race and re-accepting the
+                   ;; same fd at once. Ordering these across the thread
+                   ;; boundary would mean blocking the worker on the
+                   ;; loop, which is worse than the case it fixes.
                    (%flow-spawn-safe
                      (lambda ()
                        (for-each (lambda (pair)
@@ -278,15 +327,32 @@
         ;; only around the slot, and condition-wait releases it.
         (%flow-spawn-safe
           (lambda ()
-            (for-each (lambda (base)
-                        (let ((tag (cons #f #f)))
-                          ((flow-block-proc base) state
-                           (lambda (raw)
-                             (resume-from tag ((flow-wrap-proc base) raw)))
-                           (lambda (thunk)
-                             (set-box! cancels
-                                       (cons (cons tag thunk) (unbox cancels)))))))
-                      bases)))
+            ;; This thunk runs on the LOOP while the worker sleeps on
+            ;; the condition variable below, so a raise in a block proc
+            ;; here would be swallowed by loop-apply and the worker
+            ;; would never be broadcast to again. Hand it back as this
+            ;; synchronization's winning value instead: ERROR-TAG
+            ;; matches no base, so every already registered cancel
+            ;; fires, and the worker wakes into %flow-settle.
+            (let ((error-tag (cons #f #f)))
+              (guard (ex (#t
+                          (unless (resume-from error-tag (%make-flow-raise ex))
+                            (display "flow: block registration raised after another base won: "
+                                     (current-error-port))
+                            (if (condition? ex)
+                                (display-condition ex (current-error-port))
+                                (display ex (current-error-port)))
+                            (newline (current-error-port))
+                            (flush-output-port (current-error-port)))))
+                (for-each (lambda (base)
+                            (let ((tag (cons #f #f)))
+                              ((flow-block-proc base) state
+                               (lambda (raw)
+                                 (resume-from tag ((flow-wrap-proc base) raw)))
+                               (lambda (thunk)
+                                 (set-box! cancels
+                                           (cons (cons tag thunk) (unbox cancels)))))))
+                          bases)))))
         (with-mutex mutex
           (let wait ()
             (unless done?
@@ -359,18 +425,39 @@
                                        ((cdr pair))))
                                    (unbox cancels))))
                       #t))))
-           (for-each (lambda (base)
-                       ;; one fresh tag per registration — see the
-                       ;; comment above on winner-cancel exclusion
-                       (let ((tag (cons #f #f)))
-                         ((flow-block-proc base) state
-                          (lambda (raw)
-                            (resume-from tag ((flow-wrap-proc base) raw)))
-                          (lambda (thunk)
-                            (set-box! cancels
-                                      (cons (cons tag thunk)
-                                            (unbox cancels)))))))
-                     bases))))))
+           ;; Same hazard as the cancel split described above, on the
+           ;; other pass: a block proc can raise, and here that would
+           ;; take k with it and strand the fiber. ERROR-TAG matches no
+           ;; base, so the losers' cancels all fire and the fiber
+           ;; resumes into %flow-settle, which re-raises on its own
+           ;; stack. Bases after the failing one never register — this
+           ;; synchronization is over.
+           (let ((error-tag (cons #f #f)))
+             (guard (ex (#t
+                         ;; A base may already have won synchronously
+                         ;; during registration, in which case the
+                         ;; fiber is committed to that value and the
+                         ;; CAS fails. Report rather than swallow.
+                         (unless (resume-from error-tag (%make-flow-raise ex))
+                           (display "flow: block registration raised after another base won: "
+                                    (current-error-port))
+                           (if (condition? ex)
+                               (display-condition ex (current-error-port))
+                               (display ex (current-error-port)))
+                           (newline (current-error-port))
+                           (flush-output-port (current-error-port)))))
+               (for-each (lambda (base)
+                           ;; one fresh tag per registration — see the
+                           ;; comment above on winner-cancel exclusion
+                           (let ((tag (cons #f #f)))
+                             ((flow-block-proc base) state
+                              (lambda (raw)
+                                (resume-from tag ((flow-wrap-proc base) raw)))
+                              (lambda (thunk)
+                                (set-box! cancels
+                                          (cons (cons tag thunk)
+                                                (unbox cancels)))))))
+                         bases))))))))
 
   (define flow-perform
     (lambda (event)
@@ -378,7 +465,7 @@
         (flow-check-same-channel-choice! bases)
         (let ((result (flow-poll bases)))
           (if (eq? result %flow-not-ready)
-              (flow-block-and-wait bases)
+              (%flow-settle (flow-block-and-wait bases))
               result)))))
 
   ;;------------------------------------------------------------
