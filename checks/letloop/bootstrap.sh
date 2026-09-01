@@ -54,11 +54,11 @@
 # the same way without a full source bootstrap, which this chain
 # deliberately does not attempt.
 #
-# Step 3 is the one step that still needs a pre-existing rootfs to run
-# its assembly script in -- see its header for why that is structural
-# -- and this script supplies it as a fixture of symlinks into the
-# host's own /usr, /bin, /lib rather than by downloading a
-# distribution.
+# Step 3 is the one step that needs a rootfs it cannot have built --
+# see its header for why that is structural. It asks for `(root
+# (host))`, and the store provisions symlinks into the host's own
+# /usr and /bin for it, so building into an empty store bootstraps
+# itself rather than needing anything staged first.
 #
 # Each step is named rather than pointed at a file: the definitions are
 # Scheme libraries under src/letloop/package/, so `letloop store build
@@ -73,19 +73,9 @@ set -exo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 LETLOOP="${LETLOOP:-$ROOT/local/bin/letloop}"
 WORKDIR=/tmp/letloop-bootstrap
-SCAFFOLD="$WORKDIR/host-scaffold"
 
 export LETLOOP_STORE="$WORKDIR/store"
 mkdir -p "$LETLOOP_STORE"
-
-# The scaffold rootfs for step 3 only. Symlinks, not copies: nothing
-# here is read by anything except that one assembly script, which uses
-# the host's sh/tar/cp to unpack bytes it never inspects.
-rm -rf "$SCAFFOLD"
-mkdir -p "$SCAFFOLD"
-for name in usr bin sbin lib lib64 etc; do
-    if [ -e "/$name" ]; then ln -s "/$name" "$SCAFFOLD/$name"; fi
-done
 
 # The two fetched artifacts, gated on their own before anything is
 # built from them: a fetch that quietly produced the wrong thing would

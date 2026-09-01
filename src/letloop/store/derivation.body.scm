@@ -74,6 +74,19 @@
 (define (build-environment-package? environment)
   (eq? (build-environment-kind environment) 'package))
 
+;; (root (host)) -- build against the host's own /usr, /bin and so on,
+;; read-only. Exactly one derivation may want this and it is a
+;; structural need, not a convenience: sandbox-build! runs `sh` inside
+;; the rootfs it is given, so the build that assembles the first
+;; rootfs-with-a-shell cannot run inside one. Something has to break
+;; that loop from outside, and the host is what is there.
+;;
+;; Named in the grammar rather than reached by hardcoding a path,
+;; because it is the one place the chain touches the machine it runs
+;; on, and that should be visible in the derivation that does it.
+(define (build-environment-host? environment)
+  (eq? (build-environment-kind environment) 'host))
+
 (define-record-type* <fetch>
   (make-fetch name url hash-algorithm hash-hex)
   fetch?
@@ -118,14 +131,16 @@
          (let* ((root (required-clause (cdr build-environment) 'root build-environment))
                 (directory (find-clause (cdr root) 'directory))
                 (derivation (find-clause (cdr root) 'derivation))
-                (package (find-clause (cdr root) 'package)))
+                (package (find-clause (cdr root) 'package))
+                (host (find-clause (cdr root) 'host)))
            (cond
             (directory (make-build-environment 'directory (cadr directory)))
             (derivation (make-build-environment 'derivation (cadr derivation)))
             (package (make-build-environment 'package (cadr package)))
+            (host (make-build-environment 'host #f))
             (else
              (error 'derivation-read
-                    "root must be (directory ...), (derivation ...) or (package ...)"
+                    "root must be (directory ...), (derivation ...), (package ...) or (host)"
                     root)))))))
 
 ;; An input is either a literal store path -- a string, bind-mounted at

@@ -53,11 +53,39 @@
 ;; -> a host directory to bind as the build's rootfs: either one that
 ;; already exists, or the output of the derivation that builds it,
 ;; produced first through RESOLVE-DERIVATION.
+(define (store-scaffold-directory)
+  (string-append (store-directory) "/.scaffold"))
+
+;; The rootfs for a (root (host)) build: a directory of symlinks into
+;; the host's own top-level directories, read-only once bound.
+;;
+;; Provisioned here rather than by whoever runs letloop, so that
+;; building into an empty store bootstraps itself instead of failing
+;; on a path someone was supposed to have created. Symlinks rather
+;; than copies because nothing reads them except the one assembly
+;; script, which uses the host's sh and tar to unpack bytes it never
+;; inspects -- nothing of the host reaches the output.
+(define (provision-host-scaffold!)
+  (let ((scaffold (store-scaffold-directory)))
+    (system! (format #f "rm -rf ~a" (shell-single-quote scaffold)))
+    (system! (format #f "mkdir -p ~a" (shell-single-quote scaffold)))
+    (for-each
+     (lambda (name)
+       (let ((source (string-append "/" name)))
+         (when (file-exists? source)
+           (system! (format #f "ln -s ~a ~a"
+                             (shell-single-quote source)
+                             (shell-single-quote (string-append scaffold "/" name)))))))
+     '("usr" "bin" "sbin" "lib" "lib64" "etc"))
+    scaffold))
+
 (define (resolve-build-environment-rootfs build-environment resolve-reference)
-  (if (or (build-environment-derivation? build-environment)
-          (build-environment-package? build-environment))
-      (resolve-reference (build-environment-directory build-environment))
-      (build-environment-directory build-environment)))
+  (cond
+   ((build-environment-host? build-environment) (provision-host-scaffold!))
+   ((or (build-environment-derivation? build-environment)
+        (build-environment-package? build-environment))
+    (resolve-reference (build-environment-directory build-environment)))
+   (else (build-environment-directory build-environment))))
 
 ;; A reference is what one derivation names another by: either a path
 ;; to a file, or the name of a library that carries the derivation as a

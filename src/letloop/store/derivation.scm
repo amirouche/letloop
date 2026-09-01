@@ -17,6 +17,7 @@
           build-environment-directory?
           build-environment-derivation?
           build-environment-package?
+          build-environment-host?
           build-environment-directory
 
           input-derivation-reference?

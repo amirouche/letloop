@@ -40,7 +40,7 @@
   (define package
     '(derivation
      (name "bootstrap-rootfs")
-     (build-environment (root (directory "/tmp/letloop-bootstrap/host-scaffold")))
+     (build-environment (root (host)))
      (inputs ((package (letloop package toolchain))
               (package (letloop package shell))))
      (script
