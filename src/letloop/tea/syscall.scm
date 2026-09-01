@@ -36,7 +36,14 @@
 
   ;; ----- shared object -----------------------------------------------------
 
-  (define libc (load-shared-object "libc.so.6"))
+  ;; Best-effort: on a statically linked build there is no dynamic
+  ;; loader at all, and this raises "Dynamic loading not supported"
+  ;; before any of this library's own bindings can be reached. The
+  ;; symbols it wants are registered by letloop-main.c there instead
+  ;; (see its letloop_register_foreign_symbols), so the plain
+  ;; foreign-procedure calls below resolve without it. On a dynamic
+  ;; build it does what it always did.
+  (define libc (guard (ex (#t #f)) (load-shared-object "libc.so.6")))
 
   ;; ----- constants (linux x86_64) ------------------------------------------
 

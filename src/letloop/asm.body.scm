@@ -19,8 +19,11 @@
 
 ;; --- executable memory ---------------------------------------------
 
+;; Best-effort, like the other libc loads in this tree: a statically
+;; linked build has no dynamic loader, and mmap/mprotect/memcpy are
+;; registered by letloop-main.c there instead.
 (define asm-libc
-  (load-shared-object "libc.so.6"))
+  (guard (ex (#t #f)) (load-shared-object "libc.so.6")))
 
 (define %asm-mmap
   (foreign-procedure "mmap" (void* size_t int int int integer-64) void*))

@@ -113,7 +113,11 @@
                  0
                  (foreign-ref 'void* ptr-to-ptr 0)))))]
       [(i3le a6le ti3le ta6le arm32le ppc32le arm64le tarm64le)
-       (load-shared-object "libc.so.6")
+       ;; best-effort: a statically linked build has no dynamic loader,
+       ;; and letting this raise would take the whole library with it
+       ;; rather than just this one procedure (see letloop-main.c on
+       ;; why `environ` in particular is still unresolved there)
+       (guard (ex (#t #f)) (load-shared-object "libc.so.6"))
        (lambda ()
          (let ([ptr-to-ptr (foreign-entry "environ")])
            (if (= ptr-to-ptr 0)

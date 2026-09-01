@@ -26,8 +26,16 @@
  * appended it runs that instead.
  */
 
+/* pipe2 and signalfd are behind _GNU_SOURCE on glibc; musl exposes
+ * them regardless. */
+#define _GNU_SOURCE
+
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <signal.h>
+#include <sys/ioctl.h>
+#include <sys/signalfd.h>
+#include <termios.h>
 #include <netdb.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,9 +79,22 @@ extern char **environ;
  * fixed-output fetch step's HTTPS client) -- is registered instead,
  * via Sforeign_symbol, a public Chez embedding API independent of
  * dlopen that (foreign-procedure ...) and foreign-entry already
- * search first. This list is not exhaustive by construction: a static
- * build exercising a file outside that chain, with no
- * load-shared-object of its own, needs its own entry added here.
+ * search first.
+ *
+ * The list is not exhaustive by construction -- a static build
+ * exercising a file outside that chain needs its own entry here -- and
+ * a missing one shows up only as "no entry for X" the first time that
+ * code path runs, which is a poor way to find them one at a time. To
+ * get the whole set instead, list every eagerly-resolved symbol in the
+ * tree and subtract what is already registered:
+ *
+ *   grep -rhoE '\(foreign-procedure[^"]*"([a-zA-Z_][a-zA-Z0-9_]*)"' \
+ *        src/letloop --include='*.scm' | grep -v lazy-foreign-procedure
+ *
+ * Symbols reached through lazy-foreign-procedure do not belong here:
+ * those probe first and fall back to their own dlopen, which is how
+ * optional shared objects (blake3, picohttpparser, liburing) stay
+ * optional. Nor do the Windows/macOS spellings in environment.scm.
  */
 static int letloop_self_dlopen_safe_result = 0;
 
@@ -348,6 +369,21 @@ static void letloop_register_foreign_symbols(void) {
   Sforeign_symbol("fcntl", (void *)fcntl);
   Sforeign_symbol("eventfd", (void *)eventfd);
   Sforeign_symbol("write", (void *)write);
+  Sforeign_symbol("read", (void *)read);
+  Sforeign_symbol("open", (void *)open);
+  Sforeign_symbol("pipe2", (void *)pipe2);
+  Sforeign_symbol("ioctl", (void *)ioctl);
+  Sforeign_symbol("isatty", (void *)isatty);
+  Sforeign_symbol("mmap", (void *)mmap);
+  Sforeign_symbol("mprotect", (void *)mprotect);
+  Sforeign_symbol("getsockname", (void *)getsockname);
+  Sforeign_symbol("tcgetattr", (void *)tcgetattr);
+  Sforeign_symbol("tcsetattr", (void *)tcsetattr);
+  Sforeign_symbol("cfmakeraw", (void *)cfmakeraw);
+  Sforeign_symbol("sigemptyset", (void *)sigemptyset);
+  Sforeign_symbol("sigaddset", (void *)sigaddset);
+  Sforeign_symbol("sigprocmask", (void *)sigprocmask);
+  Sforeign_symbol("signalfd", (void *)signalfd);
   /* Deliberately NOT registering "environ": doing so broke
    * environment-variables (letloop/environment.scm) even on an
    * ordinary dynamic build, reproducibly, with an otherwise
