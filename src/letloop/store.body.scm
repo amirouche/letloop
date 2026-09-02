@@ -151,6 +151,50 @@
     (and (fx>? length* 2)
          (string=? (substring name (fx- length* 2) length*) ".a"))))
 
+;; The output a package already has in the store, or #f -- looked up,
+;; never built.
+;;
+;; That distinction is the whole point. `letloop compile` links what
+;; the store has; it does not decide on its own to spend minutes
+;; building libsodium, still less the toolchain under it, because a
+;; program happened to import something. Builds stay where they are
+;; asked for, at `letloop store build`. A package that exists but is
+;; unbuilt is reported to the caller, not silently made to happen.
+;;
+;; Found by name rather than by cache key, because computing a key
+;; means resolving the build-environment and inputs, and resolving
+;; those means building them -- the exact thing this must not do. A
+;; store path is <name>-<64 hex>, so the name identifies the package
+;; and the hash distinguishes builds of it. More than one match means
+;; the derivation changed and both builds are still there; there is no
+;; way to tell which is current without resolving, so this reports
+;; nothing rather than guess and link a stale archive.
+(define (store-package-output reference)
+  (let* ((d (reference-derivation reference))
+         (name (derivation-name d))
+         (prefix (string-append name "-"))
+         (prefix-length (string-length prefix))
+         (store (store-directory)))
+    (and (file-directory? store)
+         (let ((matches
+                (filter (lambda (entry)
+                          (and (fx=? (string-length entry) (fx+ prefix-length 64))
+                               (string=? (substring entry 0 prefix-length) prefix)
+                               (file-directory? (string-append store "/" entry))))
+                        (guard (ex (#t '())) (directory-list store)))))
+           (and (fx=? (length matches) 1)
+                (string-append store "/" (car matches)))))))
+
+;; Whether a package exists but has no output yet -- the one case
+;; worth telling a caller about, since it is the difference between
+;; "there is no C library here" and "there is one, and a single
+;; `letloop store build` away from being linked in".
+(define (store-package-unbuilt? components)
+  (let ((reference (resolve-package-reference components)))
+    (and (guard (ex (#t #f)) (environment reference) #t)
+         (not (guard (ex (#t #f)) (store-package-output reference)))
+         #t)))
+
 (define (store-package-archives components)
   (let ((reference (resolve-package-reference components)))
     ;; Only a package that actually exists: resolve-package-reference
@@ -165,7 +209,7 @@
            (else
             (let* ((reference (car pending))
                    (seen (cons reference seen))
-                   (destination (guard (ex (#t #f)) (store-build reference))))
+                   (destination (guard (ex (#t #f)) (store-package-output reference))))
               (if (not destination)
                   (loop (cdr pending) seen out)
                   (let* ((d (reference-derivation reference))

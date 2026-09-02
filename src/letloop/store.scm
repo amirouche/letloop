@@ -6,6 +6,7 @@
           store-directory
           store-path
           store-package-archives
+          store-package-unbuilt?
 
           ~check-store-000
           ~check-store-001/fetch-only

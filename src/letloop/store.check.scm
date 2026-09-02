@@ -380,8 +380,17 @@
                             "echo root > root\n"
                             "ar rcs out/lib/libroot.a root\n")
                     (output "out")))))
+            ;; Nothing is built yet, so nothing is linkable yet -- and
+            ;; asking must not make it happen. This is the property
+            ;; `letloop compile` leans on: it links what the store has
+            ;; and never starts a build of its own.
+            (unless (and (null? (store-package-archives '(archive-root)))
+                         (store-package-unbuilt? '(archive-root)))
+              (error 'check-store-009 "an unbuilt package should offer no archive"))
+            (store-build '(package archive-root))
             (let ((found (store-package-archives '(archive-root))))
-              (and (= (length found) 2)
+              (and (not (store-package-unbuilt? '(archive-root)))
+                   (= (length found) 2)
                    ;; the package's own archive, and the one only its
                    ;; derivation knew it depended on
                    (find (lambda (x) (store-check-ends-with? x "/libroot.a")) found)

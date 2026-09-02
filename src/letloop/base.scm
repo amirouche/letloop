@@ -800,6 +800,7 @@
   (define transparent (lazy '(letloop http server) 'transparent))
   (define letloop-store (lazy '(letloop store) 'letloop-store))
   (define store-package-archives (lazy '(letloop store) 'store-package-archives))
+  (define store-package-unbuilt? (lazy '(letloop store) 'store-package-unbuilt?))
   (define letloop-review (lazy '(letloop review) 'letloop-review))
 
   (define letloop-compile
@@ -856,7 +857,6 @@
       (define optimize-level* 0)
       (define optimize-level-given? #f)
       (define visible-libraries? #f)
-      (define static? #f)
       (define extra '())
       (define sorted-discovered #f)
 
@@ -891,8 +891,6 @@
                 (set! disable-garbage-collector? #t))
                ((and (eq? (car keyword) '--visible-libraries) (not (string? (cdr keyword))))
                 (set! visible-libraries? #t))
-               ((and (eq? (car keyword) '--static) (not (string? (cdr keyword))))
-                (set! static? #t))
                ((and (eq? (car keyword) '--optimize-level)
                      (string->number (cdr keyword))
                      (<= 0 (string->number (cdr keyword)) 3))
@@ -1416,20 +1414,48 @@
                                       (let ((path (library-name->path name)))
                                         (and path (library-declares-shared-object? path))))
                                     (import-closure library.scm)))
-                     (found '()))
+                     (found '())
+                     (unbuilt-candidates '()))
             (if (pair? names)
-                (loop (cdr names)
-                      (fold-left (lambda (out archive)
-                                   (if (member archive out) out (append out (list archive))))
-                                 found
-                                 (archives-for-library (car names))))
+                (let ((archives-here (archives-for-library (car names))))
+                  (loop (cdr names)
+                        (fold-left (lambda (out archive)
+                                     (if (member archive out) out (append out (list archive))))
+                                   found
+                                   archives-here)
+                        (if (null? archives-here)
+                            (append unbuilt-candidates (list (car names)))
+                            unbuilt-candidates)))
                 (let ((new (filter (lambda (archive) (not (member archive archives))) found)))
-                  (if (null? new)
-                      (display "* Inferred no static archive from the import closure.\n")
-                      (begin
-                        (display "* Inferred static archives from the import closure:\n")
-                        (for-each (lambda (archive) (format #t "** ~a\n" archive)) new)))
-                  (set! archives (append archives new)))))))
+                  (unless (null? new)
+                    (display "* Linking static libraries found in the store:\n")
+                    (for-each (lambda (archive) (format #t "** ~a\n" archive)) new))
+                  (set! archives (append archives new))
+                  ;; Silent when there is nothing to say -- this runs on
+                  ;; every compile now, and most programs have no C
+                  ;; under them at all. The one thing worth interrupting
+                  ;; for is a package that exists and simply has not
+                  ;; been built: that program is about to dlopen a
+                  ;; library it could have linked, and the fix is one
+                  ;; command. Compiling never runs that command itself;
+                  ;; a build is minutes, sometimes the whole chain, and
+                  ;; is not something to start because an import
+                  ;; mentioned it.
+                  (for-each
+                   (lambda (name)
+                     (let loop ((candidates (or (library-package-components name) '())))
+                       (unless (null? candidates)
+                         (if (store-package-unbuilt? (car candidates))
+                             (format #t "* ~a has a package that is not built; it will dlopen at run time.\n** Build it to link it in: letloop store build ~a\n"
+                                     name
+                                     (fold-left (lambda (out component)
+                                                  (if (string=? out "")
+                                                      (symbol->string component)
+                                                      (string-append out " " (symbol->string component))))
+                                                ""
+                                                (car candidates)))
+                             (loop (cdr candidates))))))
+                   unbuilt-candidates))))))
 
       (define emit-program!
         ;; One self-contained file: the host binary, then the
@@ -1540,7 +1566,7 @@
           (build-boot-file/visible-libraries)
           (build-boot-file/whole-program))
 
-      (when static? (infer-archives!))
+      (infer-archives!)
 
       (emit-program!)))
 
