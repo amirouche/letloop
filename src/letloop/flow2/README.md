@@ -60,6 +60,18 @@ here: a full put parks, so deadlock is expressible (see `flow-put!`),
 and a cancelled scope drains before it propagates, so an uncancellable
 child holds its parent (see Nurseries).
 
+A second adverse pass on 2026-08-19 — run against the tree with every
+first-pass fix in — found six more, all closed the next day, and their
+pattern is worth keeping: each invariant had been proven on the loop
+thread and inherited, unverified, by the cross-thread and post-mortem
+paths. The worker-resume path inverted the cancels-before-continuation
+order the on-loop fix had established; a nursery opened inside an
+already-dead scope escaped cancellation entirely; the monitor's race
+skipped the drain the nursery's join performs; the pool's shared
+globals let a straggler worker corrupt the next `flow-run`. Their
+findings, too, live in the commits that fixed them, each with its
+regression check.
+
 ## Rationale
 
 flow2 exists because two architectural decisions in `(letloop flow)`
