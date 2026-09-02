@@ -535,6 +535,34 @@
   (assert finished)
   #t)
 
+;; flow-submit! is a channel operation like flow-put!, so a dead scope
+;; is observable through it too — the raise is how the sender learns of
+;; its own death. It used to enqueue silently, which was doubly
+;; useless: the worker skips a dead scope's task at dequeue anyway, so
+;; the caller paid the put and the child count for work guaranteed
+;; never to run. No worker is needed to prove the boundary: the
+;; request channel is an ordinary channel.
+(define (~check-flow2-005/submit-in-dead-scope-raises)
+  (define outcome 'unset)
+  (define requests (make-flow-channel 'requests))
+  (flow-run
+   (lambda (workers)
+     (guard (ex ((flow-error-cancelled? ex) (void)))
+       (flow-nursery
+        (lambda (scope)
+          (flow-scope-cancel! scope)
+          (set! outcome
+                (guard (ex ((flow-error-cancelled? ex) 'cancelled))
+                  (flow-submit! requests
+                                (lambda () 'never)
+                                (make-flow-channel 'resp))
+                  'submitted)))))
+     (flow-stop)))
+  (assert (eq? outcome 'cancelled))
+  ;; nothing was enqueued for the raise to strand
+  (assert (= 0 (flow-channel-queue-length requests)))
+  #t)
+
 ;; A straggler worker -- one that outlived its run's bounded shutdown
 ;; join -- must not corrupt the NEXT flow-run. The pool state used to
 ;; be global, so the straggler's eventual exit decremented the new

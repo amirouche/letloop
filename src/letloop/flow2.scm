@@ -105,6 +105,7 @@
    ~check-flow2-004/monitor-interrupted-by-parent-drains-children
    ~check-flow2-005/shutdown-joins-the-worker-pool
    ~check-flow2-005/straggler-does-not-corrupt-the-next-run
+   ~check-flow2-005/submit-in-dead-scope-raises
    ~check-flow2-005/nursery-waits-for-its-compute-task
    ~check-flow2-003/cancel-is-visible-to-non-suspending-ops
    ~check-flow2-003/cancelled-parent-drains-grandchildren
@@ -1943,6 +1944,14 @@
   ;; Doing it after the put instead would be worse: the worker can pick
   ;; the task up and decrement before the increment lands.
   (define (flow-submit! worker-channel thunk response-channel)
+    ;; Same boundary as flow-put! and flow-get-try: a submit is a
+    ;; channel operation, and a cancelled scope must be observable
+    ;; through it — the raise is how the sender learns of its own
+    ;; death. Silently enqueueing was doubly useless: the worker skips
+    ;; a dead scope's task at dequeue anyway, so the caller paid the
+    ;; put and the count for work guaranteed never to run.
+    (when (flow-cancelled?)
+      (raise (%flow-cancelled-error)))
     (let ((scope (if (%worker-current?)
                      (or (%task-scope) %root-scope)
                      %scope-current)))
