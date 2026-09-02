@@ -1972,3 +1972,43 @@
   (let ((delivered (if (eq? first-race 'timeout) second-read first-race)))
     (assert (equal? delivered (list 'read payload))))
   #t)
+
+;; Third adverse pass, finding 4. "Callable from any thread" was true
+;; only of flow-log. A thread the USER forked holds no worker pool, so
+;; a channel operation from it fell through to %flow-spawn-safe's
+;; loop-spawn branch: it mutated the loop's pending-thunk list with no
+;; synchronization against loop-run-once's take-and-clear, and sent no
+;; eventfd wake. A lost resume, or one delayed by a whole wait timeout,
+;; from an operation the documentation said was fine.
+(define (~check-flow2-005/a-thread-the-user-forked-is-refused)
+  (define channel (make-flow-channel 'foreign))
+  (define put-outcome (box 'not-set))
+  (define spawn-outcome (box 'not-set))
+  (define done (box #f))
+  ;; before any run there is no loop to corrupt, and priming a channel
+  ;; is legitimate -- the check must not turn that into an error
+  (flow-put! channel 'primed)
+  (flow-run
+   (lambda (workers)
+     (fork-thread
+      (lambda ()
+        (set-box! put-outcome
+                  (guard (ex (#t (and (flow-error? ex) (flow-error-symbol ex))))
+                    (flow-put! channel 'from-a-stray-thread)
+                    'no-raise))
+        (set-box! spawn-outcome
+                  (guard (ex (#t (and (flow-error? ex) (flow-error-symbol ex))))
+                    (flow-spawn (lambda () (void)))
+                    'no-raise))
+        (set-box! done #t)))
+     (let wait ((n 0))
+       (flow-sleep 0.01)
+       (if (or (unbox done) (fx>? n 300))
+           (flow-stop)
+           (wait (fx+ n 1))))))
+  (assert (unbox done))
+  (assert (eq? 'wrong-thread (unbox put-outcome)))
+  (assert (eq? 'wrong-thread (unbox spawn-outcome)))
+  ;; the priming put landed and the stray one did not
+  (assert (eqv? 1 (flow-channel-queue-length channel)))
+  #t)

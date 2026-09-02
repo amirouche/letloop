@@ -116,6 +116,7 @@
    ~check-flow2-005/worker-cancelled-along-monitor
    ~check-flow2-005/worker-io-protocol-roundtrip
    ~check-flow2-005/worker-resume-runs-cancels-first
+   ~check-flow2-005/a-thread-the-user-forked-is-refused
 
    ;; block-and-wait machinery, ported from (letloop flow)'s
    ;; ~check-flow-011 series, plus the branch finding 1's fix added
@@ -524,6 +525,27 @@
          (lambda (k)
            (hashtable-set! (loop-handlers (loop-current)) id k))))))
 
+  ;; The thread flow-run is running the loop on, for the duration of
+  ;; that run and #f outside one. "Any thread" here has only ever meant
+  ;; the loop thread and this library's own compute threads: a thread
+  ;; the USER forked holds no pool, so it takes the loop-spawn branch of
+  ;; %flow-spawn-safe below and mutates loop-thunks with no
+  ;; synchronization against loop-run-once's take-and-clear, and sends
+  ;; no eventfd wake — a resume lost outright, or delayed by a whole
+  ;; wait timeout. The entry points that advertise cross-thread use
+  ;; check this and raise wrong-thread instead.
+  (define %flow-loop-thread (box #f))
+
+  ;; Outside a run there is no loop to corrupt and nothing to check:
+  ;; flow-put! on a channel before flow-run is a legitimate way to
+  ;; prime one, and it either queues or raises overflow on its own.
+  (define (%flow-check-caller-thread! who)
+    (let ((owner (unbox %flow-loop-thread)))
+      (when (and owner
+                 (not (%worker-current?))
+                 (not (eqv? owner (get-thread-id))))
+        (%flow-wrong-thread who))))
+
   ;; loop-spawn from the loop thread (the hot path, untouched); from
   ;; a compute thread, queue the thunk on the worker's OWN run's pool
   ;; and wake that run's loop through its eventfd. Only channel
@@ -531,6 +553,11 @@
   ;; user-facing cross-thread spawn. A worker always holds its pool,
   ;; and a straggler's pool keeps its (leaked) fd, so there is no
   ;; no-pool case left to error on.
+  ;;
+  ;; No thread test here on purpose. This runs on resume paths, where a
+  ;; raise would abandon a channel already mutated — a value dequeued
+  ;; and delivered to nobody. The check belongs at the entry points,
+  ;; before anything has been committed.
   (define %flow-spawn-safe
     (lambda (thunk)
       (let ((pool (%worker-current?)))
@@ -1303,6 +1330,7 @@
   ;; raised at once. The README's "channel operations check it
   ;; implicitly" reads as universal, and now is.
   (define (flow-put! channel obj)
+    (%flow-check-caller-thread! 'flow-put!)
     (when (flow-cancelled?)
       (raise (%flow-cancelled-error)))
     (%channel-put! channel obj #f))
@@ -1379,6 +1407,7 @@
   ;; either thread. Without this a main-thread fiber could drain a
   ;; channel for as long as it liked after its scope died.
   (define (flow-get-try channel default)
+    (%flow-check-caller-thread! 'flow-get-try)
     (when (flow-cancelled?)
       (raise (%flow-cancelled-error)))
     (let ((value
@@ -1861,8 +1890,13 @@
                (thunk))
              (%scope-child-done! scope))))))
 
+  ;; A worker is refused because there is deliberately no cross-thread
+  ;; spawn; a thread the user forked is refused for the blunter reason
+  ;; that %scope-spawn! ends in loop-spawn, which is not synchronized
+  ;; against the loop's own take-and-clear of that list.
   (define (flow-spawn thunk)
     (when (%worker-current?) (%flow-wrong-thread 'flow-spawn))
+    (%flow-check-caller-thread! 'flow-spawn)
     (%scope-spawn! %scope-current thunk))
 
   ;; Run BODY with SCOPE current, restoring PARENT on normal return
@@ -2133,6 +2167,9 @@
       ((proc compute-count)
        (loop-new)
        (set! %scope-current %root-scope)
+       ;; Whoever calls flow-run owns the loop for this run; see
+       ;; %flow-check-caller-thread!.
+       (set-box! %flow-loop-thread (get-thread-id))
        ;; The pool is created per run and handed to the workers and the
        ;; collector as a closure, never through a global — a straggler
        ;; from a previous run therefore cannot touch this run's eventfd,
@@ -2166,6 +2203,10 @@
          (loop-run)
          (when pool
            (%flow-shutdown-pool! pool channels))
+         ;; Cleared after the pool is joined, so a straggler that puts
+         ;; on its way out is still recognised as a worker rather than
+         ;; as a stray thread.
+         (set-box! %flow-loop-thread #f)
          (void)))))
 
   ;; Stop the pool and, crucially, WAIT before dismantling what the

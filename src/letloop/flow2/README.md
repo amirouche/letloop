@@ -432,8 +432,8 @@ The first put to park on a given channel logs one
 once the queue drains to half the bound. One line per saturation
 episode, not per blocked put.
 
-Callable from any thread. Put is a procedure, not an event — see
-Rationale.
+Callable from the loop thread or from a **compute** thread — see
+[Threads](#threads). Put is a procedure, not an event — see Rationale.
 
 **Deadlock is now expressible**, as it is with any backpressure: a
 fiber that fills a channel only it would drain waits forever. Bound
@@ -458,7 +458,8 @@ variable.
 #### `(flow-get-try channel default)`
 
 Dequeues and returns a value if one is immediately available,
-otherwise returns `DEFAULT`. Never parks. Callable from any thread.
+otherwise returns `DEFAULT`. Never parks. Callable from the loop thread
+or from a **compute** thread — see [Threads](#threads).
 
 Raises `cancelled` if the calling scope is already dead. Not parking is
 not the same as not being a cancellation point: a channel operation
@@ -634,6 +635,26 @@ Returns `#t` if the current scope (on the main thread) or the
 current task's scope (on a compute thread) has been cancelled. The
 explicit checkpoint for long stretches of pure compute; channel
 operations check it implicitly.
+
+### Threads
+
+There are exactly two kinds of thread flow2 knows about: the one that
+called `flow-run`, which owns the ring and runs every fiber, and the
+compute threads that same `flow-run` forked. "Cross-thread" throughout
+this document means between those, and nothing else.
+
+A thread the **user** forked is neither. It holds no worker pool, so a
+channel operation from it would fall through to the loop's own spawn
+path — mutating the loop's pending-thunk list with no synchronization
+against the loop's take-and-clear of it, and sending no eventfd wake, so
+the resume is lost outright or delayed by a whole wait timeout.
+`flow-put!`, `flow-get-try` and `flow-spawn` therefore raise
+`wrong-thread` when called from one, rather than corrupting the loop
+quietly. Outside a `flow-run` there is nothing to corrupt and no check:
+priming a channel before the loop starts is legitimate.
+
+`flow-log` is the one exception, and genuinely takes any thread: it
+appends to a box that the calling thread alone writes.
 
 ### Compute threads
 
