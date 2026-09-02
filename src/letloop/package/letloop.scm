@@ -34,7 +34,8 @@
               (package (letloop package chezscheme))
               (package (letloop package liburing))
               (package (letloop package blake3))
-              (package (letloop package tls))))
+              (package (letloop package tls))
+              (package (letloop package ca-certificates))))
      (script
       "set -e\n"
       "cp -a /tmp/letloop-bootstrap/letloop-src /build/src\n"
@@ -75,6 +76,12 @@
       "export LIBRARY_PATH=/build/inputs/bootstrap-liburing/lib:/build/inputs/bootstrap-blake3/lib:/build/inputs/bootstrap-tls/lib\n"
       "export C_INCLUDE_PATH=/build/inputs/bootstrap-liburing/include:/build/inputs/bootstrap-blake3/include:/build/inputs/bootstrap-tls/include\n"
       "make letloop SCHEME=\"$SCHEME\" PREFIX=/build/out\n"
+      ;; letloop-libraries (a `make letloop` prerequisite) does
+      ;; `rm -rf $(PREFIX)/lib/letloop` before repopulating it, so this
+      ;; has to land after `make letloop` finishes, not before -- a
+      ;; copy placed earlier would just be wiped. (letloop tls base)'s
+      ;; bundled-ca-file looks for exactly this path.
+      "cp /build/inputs/bootstrap-ca-certificates/cert.pem /build/out/lib/letloop/cert.pem\n"
       ;; all three probes are silent either way, so check the symbols
       ;; really landed rather than discovering it at run time -- blake3
       ;; and tls in particular fail only once something reaches a hash

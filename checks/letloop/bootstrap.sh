@@ -317,6 +317,27 @@ EXEC_OUTPUT=$("$ELSEWHERE2/bin/letloop" exec "$ELSEWHERE2/work/" "$ELSEWHERE2/wo
     exit 1
 }
 
+# The actual proof static tls linking closes a real gap, not just that
+# it compiles: a genuine HTTPS request, from the relocated copy, with
+# no host libtls.so and no host CA store -- both would have to come
+# from inside $ELSEWHERE2 for this to work at all. Network-dependent,
+# like the other live-host checks in this file.
+cat > "$ELSEWHERE2/work/https-probe.scm" <<'SCM'
+(library (https-probe)
+  (export main)
+  (import (chezscheme) (letloop www))
+  (define (main . args)
+    (call-with-values (lambda () (www-request 'GET "https://ftp.openbsd.org/pub/OpenBSD/LibreSSL/" '() (bytevector)))
+      (lambda (code headers body)
+        (display code) (newline)))))
+SCM
+HTTPS_OUTPUT=$("$ELSEWHERE2/bin/letloop" exec "$ELSEWHERE2/work/" "$ELSEWHERE2/work/https-probe.scm" main 2>&1)
+case "$HTTPS_OUTPUT" in
+    *200*) ;;
+    *) echo "FAIL: relocated bootstrap letloop cannot make an HTTPS request: $HTTPS_OUTPUT"
+       exit 1 ;;
+esac
+
 # Self-hosting, the point of all of it: the letloop the store built,
 # running the store. Exercises blake3 statically -- without it this
 # fails at the first hash with "cannot dlopen shared object", so a
