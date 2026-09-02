@@ -2012,3 +2012,40 @@
   ;; the priming put landed and the stray one did not
   (assert (eqv? 1 (flow-channel-queue-length channel)))
   #t)
+
+;; Third adverse pass, finding 8. The losers' cancels run in one thunk
+;; -- deliberately, so the whole batch lands before the resumed fiber
+;; does -- but they used to share one dynamic extent too, so a raise
+;; from any of them aborted the walk and skipped every cancel after it.
+;; Most of these thunks call loop-get-sqe, which raises "submission
+;; queue full" when the kernel will not take more, so one transient
+;; SQ-full could leave unrelated bases uncancelled: a read still in the
+;; ring, a timeout still armed with its continuation pinned.
+;;
+;; The registration order below is what makes this bite. Cancels are
+;; consed as they register, so the walk runs them newest-first: the
+;; raiser has to register AFTER the base whose cancel it would skip.
+(define (~check-flow2-001/a-raising-cancel-does-not-skip-the-others)
+  (define ran (box '()))
+  (define result 'not-set)
+  (define (never-ready-with-cancel thunk)
+    (make-flow (lambda (x) x)
+               (lambda () #f)
+               (lambda (state resume register-cancel!)
+                 (register-cancel! thunk))))
+  (flow-run
+   (lambda (workers)
+     (set! result
+           (flow-perform
+            (flow-choice
+             (never-ready-with-cancel
+              (lambda () (set-box! ran (cons 'later (unbox ran)))))
+             (never-ready-with-cancel
+              (lambda () (error '~check-flow2-001 "cancel raised")))
+             (flow-wrap (flow-timeout 0.02) (lambda (x) 'timeout)))))
+     ;; the cancels are spawned, so they land a tick after the resume
+     (flow-sleep 0.05)
+     (flow-stop)))
+  (assert (eq? 'timeout result))
+  (assert (memq 'later (unbox ran)))
+  #t)
