@@ -1412,6 +1412,14 @@
                 (file (if library.scm
                           (errors (format #f "Already registred a library to execute, maybe remove: ~a" (car standalone)))
                           (set! library.scm string*)))
+                ;; letloop exec runs the interpreted/dlopen'd path, not
+                ;; a linked binary -- there is no step that would ever
+                ;; make an archive's symbols resolve. Reject it here,
+                ;; rather than silently dropping the argument and
+                ;; letting the first foreign-procedure call into it
+                ;; fail later with an unrelated "no entry for" error:
+                ;; see letloop compile for linking a .a into a program.
+                (archive (errors (format #f "letloop exec cannot link a static library, only letloop compile can: ~a" (car standalone))))
                 (unknown (if main
                              (errors (format #f "Already registred a main procedure, maybe remove: ~a" (car standalone)))
                              (set! main string*))))))
