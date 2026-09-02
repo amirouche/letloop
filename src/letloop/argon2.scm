@@ -2,7 +2,7 @@
 (library (letloop argon2)
   (export argon2id argon2id-encode argon2id-verify
           argon2id-t-cost argon2id-m-cost argon2id-parallelism
-          ~check-argon2-0)
+          ~check-argon2-0 ~check-argon2-1)
   (import (chezscheme)
           (letloop cffi))
 
@@ -138,17 +138,52 @@
   (define ARGON2-ID 2)
 
   (define argon2-encoded-length
-    (let ((func (lazy-foreign-procedure libargon2.so.1 "argon2_encodedlen"
-                                   (unsigned-32 unsigned-32 unsigned-32
-                                                unsigned-32 unsigned-32
-                                                int)
-                                   size_t)))
+    ;; argon2_encodedlen, in Scheme rather than through the shared
+    ;; object, because it is not cryptography and never was -- it
+    ;; sizes the encoded string and nothing else:
+    ;;
+    ;;   strlen("$$v=$m=,t=,p=$$") + strlen(type) + numlen(t_cost) +
+    ;;   numlen(m_cost) + numlen(parallelism) + b64len(saltlen) +
+    ;;   b64len(hashlen) + numlen(ARGON2_VERSION_NUMBER) + 1
+    ;;
+    ;; The strlen there is over a literal format template, so it is a
+    ;; constant the compiler folds, not a call into libc. Binding this
+    ;; meant libargon2 had to be loadable before a hash could even be
+    ;; sized, for arithmetic over constants -- and it is the one of
+    ;; this library's four entry points that libsodium does not export
+    ;; either, so it is also the one that would block ever sourcing
+    ;; these elsewhere.
+    ;;
+    ;; Checked against the C function over 61440 parameter
+    ;; combinations before it was removed; ~check-argon2-1 keeps the
+    ;; result honest against the encoder itself, which is the property
+    ;; that actually matters.
+    (lambda (cost-iterations cost-memory parallelism salt-length hash-length argon2-type)
 
-      (lambda (cost-iterations cost-memory parallelism salt-length hash-length argon2-type)
-        (func cost-iterations cost-memory parallelism
-              salt-length
-              hash-length
-              argon2-type))))
+      (define numlen
+        (lambda (n)
+          (let loop ((n n) (length* 1))
+            (if (fx<? n 10) length* (loop (fxdiv n 10) (fx+ length* 1))))))
+
+      (define b64len
+        ;; Base64 without padding: three bytes become four characters,
+        ;; and a trailing one or two bytes become two or three.
+        (lambda (length*)
+          (let ((whole (fxsll (fxdiv length* 3) 2)))
+            (case (fxmod length* 3)
+              ((2) (fx+ whole 3))
+              ((1) (fx+ whole 2))
+              (else whole)))))
+
+      (fx+ 15                                        ; "$$v=$m=,t=,p=$$"
+           (if (fx=? argon2-type ARGON2-ID) 8 7)     ; argon2id, or argon2d/argon2i
+           (numlen cost-iterations)
+           (numlen cost-memory)
+           (numlen parallelism)
+           (b64len salt-length)
+           (b64len hash-length)
+           2                                         ; ARGON2_VERSION_NUMBER, 0x13
+           1)))
 
   (define argon2id-encode
     (lambda (salt password . args)
@@ -191,6 +226,38 @@
         ;; round-trip through text, as when stored in a database
         (assert (argon2id-verify (string->utf8 (utf8->string encoded)) password))
         (assert (not (argon2id-verify encoded (bytevector-random 32))))
+        #t))))
+
+  ;; argon2-encoded-length is computed here rather than asked of
+  ;; libargon2, so nothing but this check stands between a wrong
+  ;; formula and a silently truncated hash. It is exercised the way it
+  ;; is actually used -- as the size of the buffer the C encoder writes
+  ;; into -- across parameters that move every term of the sum:
+  ;; different digit counts for t, m and p, and salt lengths on either
+  ;; side of a base64 boundary, where the remainder of length mod 3
+  ;; decides whether two or three characters are added.
+  ;;
+  ;; A size that is too small makes the encoder fail outright, and one
+  ;; that is too large leaves NUL padding the trim would have to eat,
+  ;; so a round-trip through verify catches both directions.
+  (define ~check-argon2-1
+    (lambda ()
+      (check-skip-unless libargon2.so.1 "argon2id_hash_raw"
+      (let ((password (bytevector-random 32)))
+        (for-each
+         (lambda (parameters)
+           (let* ((t-cost (car parameters))
+                  (m-cost (cadr parameters))
+                  (parallelism (caddr parameters))
+                  (salt (bytevector-random (cadddr parameters)))
+                  (encoded (argon2id-encode salt password t-cost m-cost parallelism)))
+             (assert (not (fxzero? (bytevector-u8-ref encoded
+                                                      (fx- (bytevector-length encoded) 1)))))
+             (assert (argon2id-verify encoded password))))
+         ;; t, m, p, salt-length -- one and two digit costs, a
+         ;; six-digit memory cost, and salt lengths at each residue of
+         ;; 3 so both base64 tail cases are covered
+         '((1 8 1 16) (2 1024 2 15) (3 102400 8 17) (11 99999 10 32)))
         #t))))
 
   (define bytevector-random
