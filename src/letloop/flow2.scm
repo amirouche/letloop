@@ -102,6 +102,7 @@
    ~check-flow2-003/waiter-on-dead-scope-is-woken
    ~check-flow2-004/monitor-in-time
    ~check-flow2-004/monitor-deadline
+   ~check-flow2-004/monitor-interrupted-by-parent-drains-children
    ~check-flow2-005/shutdown-joins-the-worker-pool
    ~check-flow2-005/nursery-waits-for-its-compute-task
    ~check-flow2-003/cancel-is-visible-to-non-suspending-ops
@@ -1851,14 +1852,29 @@
       (%scope-spawn! scope
                      (lambda ()
                        (set-box! result (cons 'ok (thunk)))))
-      (let ((race (flow-perform
-                   (flow-choice
-                    (flow-wrap (%scope-join-event scope)
-                               (lambda (_) 'joined))
-                    (flow-wrap (flow-timeout seconds)
-                               (lambda (_) 'deadline))))))
-        (when (eq? race 'deadline)
-          (%scope-fail! scope 'timeout))
+      ;; The race runs under the PARENT scope so an enclosing
+      ;; cancellation reaches it — the same reason the nursery's join
+      ;; does. But when it did, the raise used to propagate straight
+      ;; out of flow-monitor: no %scope-fail!, no %scope-finish, no
+      ;; drain. The monitor's children were cancelled transitively
+      ;; through the subscope link, yet nobody waited for them to
+      ;; finish unwinding — they outlived the monitor call, which is
+      ;; the single thing a scope exists to prevent, and the exact
+      ;; invariant %scope-finish's interrupted path enforces for
+      ;; flow-nursery. Catch the interruption, fail the scope with it
+      ;; — idempotently, so a child failure or the deadline that
+      ;; already killed the scope keeps its better reason — and let
+      ;; %scope-finish drain and re-raise it like any first error.
+      (let ((race (guard (ex (#t (cons 'interrupted ex)))
+                    (flow-perform
+                     (flow-choice
+                      (flow-wrap (%scope-join-event scope)
+                                 (lambda (_) 'joined))
+                      (flow-wrap (flow-timeout seconds)
+                                 (lambda (_) 'deadline)))))))
+        (cond
+         ((eq? race 'deadline) (%scope-fail! scope 'timeout))
+         ((pair? race) (%scope-fail! scope (cons 'failed (cdr race)))))
         (%scope-finish scope parent
                        (or (unbox result) (cons 'ok (void)))))))
 
