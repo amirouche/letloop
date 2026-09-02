@@ -127,38 +127,40 @@ gate, it is not a claim.
 
 Known gaps, all of them deliberate:
 
-- **No cold start, still, but for a narrower reason now.** `tls`
-  builds real LibreSSL statically, and `bootstrap-letloop` links it
-  in the same way as `liburing`/`blake3`: a bootstrap letloop, copied
-  anywhere, resolves `tls_init`/`tls_connect`/... with no dlopen and
-  no host `libtls.so`. Verified doing an actual HTTPS request from a
-  copy of `bootstrap-letloop` run outside any sandbox.
+- ~~**No cold start.**~~ The mechanism is closed, gated by
+  `bootstrap.sh`: `tls` builds real LibreSSL statically,
+  `bootstrap-letloop` links it in like `liburing`/`blake3`, and
+  `(letloop tls base)`'s `tls-open` resolves a CA bundle explicitly
+  (`bundled-ca-file`, walked up from the running executable) rather
+  than trusting LibreSSL's own default — which is a compile-time
+  constant baked into `libtls.a` pointing at a sandbox-only path,
+  useless once the binary is copied out. `(letloop package
+  ca-certificates)` ships the bundle itself, hash-pinned like every
+  other fetch here. Verified: a `bootstrap-letloop` copy, run outside
+  the sandbox on this session's glibc host, makes a real HTTPS GET
+  with no host `libtls.so` and no host CA store.
 
-  What's missing now is narrower: LibreSSL's own default CA bundle
-  path is baked in at compile time to somewhere under the sandbox's
-  own `/build/out` — gone once the binary is copied elsewhere — so a
-  relocated bootstrap letloop's own `tls_connect_socket` fails with
-  "failed to open CA file", not a linking or symbol error. Closing
-  this needs either bundling a CA file into what `bootstrap-letloop`
-  produces (which itself needs pinning one by hash, the same open
-  question as any other fetched artifact in this chain) or teaching
-  `(letloop tls low)` to look somewhere the produced tree actually
-  ships one. Deliberately not fixed by turning off certificate
-  verification instead — that trades a build-time gap for a
+  Not fixed by turning off certificate verification instead, which
+  was on the table for a moment — that trades a build-time gap for a
   runtime security hole, in every program this store's `tls` output
   ever gets linked into, not just the bootstrap chain.
+
+  What "closed" does not cover: the gate above proves the *mechanism*
+  — an already-built relocated letloop can fetch over HTTPS — not
+  that the *whole chain*, from `toolchain` through `letloop`, has been
+  run starting from a machine with nothing on it at all. Every fetch
+  in this chain so far has run under an ordinary host letloop, using
+  the host's own dynamic `libtls.so`; nobody has yet driven
+  `bootstrap.sh` itself using only a statically linked letloop as the
+  fetcher. That would be the actual end-to-end cold-start proof, and
+  it is still unattempted.
 
   Fetching over plain HTTP instead looked like the cheap way out at
   one point, since every fetch is hash-pinned and TLS therefore adds
   nothing to integrity — it only hides *which* file is being asked
-  for. It does not work regardless of the CA question above: measured
-  2026-08-23, five of the seven pinned URLs 301-redirect HTTP to
-  HTTPS, GitHub and busybox.net among them, and GitHub will not stop.
-
-  Left open on purpose: what it unblocks is bootstrapping from nothing
-  on a bare machine. A warm store works, `letloop update` fetches
-  through an ordinary dynamic letloop, and a published binary is
-  verifiable by rebuilding it. None of those need this.
+  for. It does not work regardless: measured 2026-08-23, five of the
+  seven pinned URLs 301-redirect HTTP to HTTPS, GitHub and
+  busybox.net among them, and GitHub will not stop.
 - **Not a fixpoint byte-for-byte.** letloop rebuilds letloop, and the
   third generation is as complete as the second and produces identical
   output hashes — but the two binaries differ, because the build is not
