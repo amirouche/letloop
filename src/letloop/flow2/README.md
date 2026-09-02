@@ -74,6 +74,32 @@ globals let a straggler worker corrupt the next `flow-run`. Their
 findings, too, live in the commits that fixed them, each with its
 regression check.
 
+A third pass on 2026-08-24 went after the **cleanup path** and after
+this document's own examples, and both gave way. All nine findings are
+closed, and their pattern is different again: the first two passes
+found invariants that were true somewhere and assumed everywhere, while
+this one found places where the *specification* and the code had drifted
+apart and nobody had re-run the example. `flow-close` inside a cancelled
+scope raised `cancelled` before reaching the ring, so the fd leaked on
+precisely the path described here as the one that releases it. The
+"Fan out, gather, and never hang" pattern below deadlocked past the
+default bound, on the page that states the rule it broke. A `flow-read`
+that lost its choice discarded bytes the kernel had already taken off
+the socket. "Callable from any thread" was true of exactly one
+procedure, and it was the one that said it was the only one.
+
+Two costs are stated where they apply rather than here: a write that
+loses a race cannot be recovered the way a read now can (see
+`flow-write`), and a bounded channel drained only after a join must be
+sized for the whole fan-out (see the pattern).
+
+The lesson for this document specifically: **reconciling docs against
+code is only right when the code is the part that is right.** The
+2026-08-17 pass wrote a drifted `flow-write` implementation down as
+intent; this pass had to undo that. An example that is not executed
+somewhere is a claim, not a specification — the patterns below now have
+checks.
+
 ## Rationale
 
 flow2 exists because two architectural decisions in `(letloop flow)`
