@@ -95,6 +95,7 @@
    ~check-flow2-003/nursery-child-raise-cancels-siblings
    ~check-flow2-003/nursery-scope-cancel
    ~check-flow2-003/nursery-perform-after-cancel-raises
+   ~check-flow2-003/nursery-in-dead-scope-raises
    ~check-flow2-003/block-raise-reaches-the-scope
    ~check-flow2-003/waiter-on-dead-scope-is-woken
    ~check-flow2-004/monitor-in-time
@@ -1774,6 +1775,17 @@
   ;; after the children have drained.
   (define (flow-nursery proc)
     (when (%worker-current?) (%flow-wrong-thread 'flow-nursery))
+    ;; A dead scope must not open a live subscope. The link below lands
+    ;; AFTER %scope-fail!'s subscope walk, and the walk is CAS-guarded
+    ;; so it never reruns: a scope created past that point would be
+    ;; invisible to the cancellation forever — its body runs SHIELDED
+    ;; under a permanently-open scope, parks on whatever it likes, and
+    ;; nothing can ever reach it. On the loop thread nothing yields
+    ;; between this check and the link (and %scope-fail! is loop-only),
+    ;; so checking at entry closes the hole completely; it also matches
+    ;; flow-perform, which raises rather than starting work in a scope
+    ;; that is already dead.
+    (when (flow-cancelled?) (raise (%flow-cancelled-error)))
     (let* ((parent %scope-current)
            (scope (%make-scope parent)))
       (unless (eq? parent %root-scope)
@@ -1794,6 +1806,12 @@
   ;; cancelled, drained, and a timeout <flow-error> raises.
   (define (flow-monitor seconds thunk)
     (when (%worker-current?) (%flow-wrong-thread 'flow-monitor))
+    ;; Same entry check as flow-nursery, and with more at stake: the
+    ;; child fiber is spawned BEFORE the join/deadline race, and the
+    ;; race's perform raises on the dead parent before the deadline is
+    ;; armed — the child would be orphaned under a scope nothing can
+    ;; cancel, with no deadline and no join.
+    (when (flow-cancelled?) (raise (%flow-cancelled-error)))
     (let* ((parent %scope-current)
            (scope (%make-scope parent))
            (result (box #f)))

@@ -675,6 +675,46 @@
      (flow-stop)))
   raised-inside?)
 
+;; Opening a nursery -- or a monitor -- inside a scope that is already
+;; dead must raise, exactly as flow-perform does. The subscope link
+;; lands AFTER %scope-fail!'s subscope walk, and the walk is
+;; CAS-guarded so it never reruns: a scope created past that point was
+;; invisible to the cancellation forever, and its body ran SHIELDED
+;; under a permanently-open scope -- it could park on a channel nobody
+;; writes and nothing could ever reach it. flow-monitor was worse
+;; still: its child fiber spawned first, then the join/deadline race
+;; raised on the dead parent BEFORE the deadline was armed, orphaning
+;; the child with no deadline and no join.
+(define (~check-flow2-003/nursery-in-dead-scope-raises)
+  (define body-ran? #f)
+  (define nursery-outcome 'unset)
+  (define monitor-outcome 'unset)
+  (define outer-raised? #f)
+  (flow-run
+   (lambda (workers)
+     (guard (ex ((flow-error-cancelled? ex) (set! outer-raised? #t)))
+       (flow-nursery
+        (lambda (scope)
+          (flow-scope-cancel! scope)
+          (set! nursery-outcome
+                (guard (ex ((flow-error-cancelled? ex) 'cancelled))
+                  (flow-nursery
+                   (lambda (sub)
+                     (set! body-ran? #t)
+                     (flow-sleep 0.01)))
+                  'returned))
+          (set! monitor-outcome
+                (guard (ex ((flow-error-cancelled? ex) 'cancelled))
+                  (flow-monitor 1.0 (lambda () (set! body-ran? #t)))
+                  'returned)))))
+     (flow-stop)))
+  (assert (eq? nursery-outcome 'cancelled))
+  (assert (eq? monitor-outcome 'cancelled))
+  (assert (not body-ran?))
+  ;; and the outer join still reports the cancellation as usual
+  (assert outer-raised?)
+  #t)
+
 ;; A raise from a base event's BLOCK procedure must reach the fiber,
 ;; and through it the scope -- exactly as a raise from the fiber's body
 ;; does. Before the fix, block procs ran inside loop-abort's thunk, on
