@@ -505,16 +505,20 @@
   #t)
 
 ;; flow-run must not return until its workers are provably gone. It
-;; used to signal the eventfd, close it, and set it to #f with workers
-;; possibly still inside a task -- so a worker reaching %flow-spawn-safe
-;; afterwards either raised "cross-thread resume with no compute pool
-;; running" from inside its own guard, or won the race and wrote eight
-;; bytes into whatever the next loop-new or socket call had since been
-;; given that fd number.
+;; used to signal the eventfd, close it, and null the global handle
+;; with workers possibly still inside a task -- so a worker reaching
+;; %flow-spawn-safe afterwards either found no pool and raised from
+;; inside its own guard, or won the race and wrote eight bytes into
+;; whatever the next loop-new or socket call had since been given that
+;; fd number.
 ;;
 ;; The task here deliberately outlives flow-stop: it is submitted at the
 ;; root scope, so no nursery join waits for it, and the only thing that
-;; can wait for it is the shutdown itself.
+;; can wait for it is the shutdown itself. FINISHED set at all is the
+;; evidence: without the join, flow-run returns while the worker is
+;; still asleep. The pool state itself is per-run now and unreachable
+;; once flow-run returns, which is the point -- there is no global left
+;; for this check to inspect, or for a straggler to corrupt.
 (define (~check-flow2-005/shutdown-joins-the-worker-pool)
   (define finished #f)
   (flow-run
@@ -529,11 +533,61 @@
        (flow-stop)))
    1)
   (assert finished)
-  (assert (fxzero? %flow2-workers-live))
-  ;; closing the eventfd is only safe once they are gone, so a cleared
-  ;; handle is the evidence that the join succeeded rather than timed out
-  (assert (not %flow2-eventfd))
-  (assert (not %flow2-eventfd-buffer))
+  #t)
+
+;; A straggler worker -- one that outlived its run's bounded shutdown
+;; join -- must not corrupt the NEXT flow-run. The pool state used to
+;; be global, so the straggler's eventual exit decremented the new
+;; run's live count: the new shutdown undercounted, concluded all
+;; workers had exited while its own was still inside a task, and
+;; dismantled the pool under it -- flow-run returned early, and the
+;; eventfd closed with a live writer holding the fd number. The pool
+;; is per-run now, handed to workers as a closure, so a straggler can
+;; only ever touch the run that created it.
+;;
+;; The differential: run 2's task takes 1.0s, and the run-1 straggler
+;; exits ~0.55s into run 2. With shared globals run 2's shutdown
+;; returned at the straggler's exit, before its own task finished;
+;; with per-run pools it waits the full 1.0s. Slow by check standards
+;; (~3s), and deliberately so -- the whole scenario IS the timing.
+(define (~check-flow2-005/straggler-does-not-corrupt-the-next-run)
+  (define straggler-done? #f)
+  (define second-task-done? #f)
+  (flow-log-drain!)
+  ;; run 1: the task outlives the 2s join -> logged straggler
+  (flow-run
+   (lambda (workers)
+     (flow-submit! (car workers)
+                   (lambda ()
+                     (sleep (make-time 'time-duration 600000000 2))
+                     (set! straggler-done? #t))
+                   (make-flow-channel 'resp))
+     (flow-sleep 0.05)   ;; the worker has certainly dequeued by now
+     (flow-stop))
+   1)
+  ;; flow-run returned with the worker still inside the task, and said so
+  (assert (not straggler-done?))
+  (let ((logged (filter (lambda (e)
+                          (and (pair? e)
+                               (eq? (cadr e) 'shutdown-workers-still-running)))
+                        (map cdr (flow-log-drain!)))))
+    (assert (= 1 (length logged))))
+  ;; run 2, while the straggler is still alive and exits mid-run
+  (flow-run
+   (lambda (workers)
+     (flow-submit! (car workers)
+                   (lambda ()
+                     (sleep (make-time 'time-duration 0 1))
+                     (set! second-task-done? #t))
+                   (make-flow-channel 'resp))
+     (flow-sleep 0.05)
+     (flow-stop))
+   1)
+  ;; run 2's shutdown joined ITS worker, not whatever count the
+  ;; straggler's exit left behind
+  (assert second-task-done?)
+  ;; and by now the straggler has finished on its own leaked pool
+  (assert straggler-done?)
   #t)
 
 ;; A scope owns the compute tasks submitted inside it, so its join must
