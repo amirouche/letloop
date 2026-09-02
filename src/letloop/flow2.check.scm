@@ -159,6 +159,29 @@
     (flow-channel-buffer-size! ch 2)
     #f))
 
+;; The setter's domain is the constructor's: a positive fixnum or #f.
+;; Zero used to slip through and made a channel that deadlocked
+;; put-first — space waiters are only woken by a dequeue, and nothing
+;; can ever enter a zero-bound queue — while get-first happened to
+;; work, since a put hands its value straight to a parked getter.
+;; Reproducer: repro-flow2-second-pass.scm, bound-zero scenario.
+(define (~check-flow2-002/channel-bound-zero-rejected)
+  (define ch (make-flow-channel 'validated 2))
+  (assert (guard (ex (#t #t)) (make-flow-channel 'zero 0) #f))
+  (assert (guard (ex (#t #t)) (flow-channel-buffer-size! ch 0) #f))
+  ;; the rejected bound left the old one in place
+  (assert (eqv? 2 (flow-channel-bound ch)))
+  ;; #f un-bounds, matching the constructor's domain
+  (flow-channel-buffer-size! ch #f)
+  (assert (not (flow-channel-bound ch)))
+  ;; an unbounded channel accepts puts past the old bound even with no
+  ;; scheduler to park on
+  (flow-put! ch 1)
+  (flow-put! ch 2)
+  (flow-put! ch 3)
+  (assert (= 3 (flow-channel-queue-length ch)))
+  #t)
+
 (define (~check-flow2-002/channel-get-try-default)
   (define ch (make-flow-channel))
   (assert (eq? 'nope (flow-get-try ch 'nope)))

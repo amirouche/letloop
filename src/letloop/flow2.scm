@@ -79,6 +79,7 @@
    ~check-flow2-002/channel-get-parks-until-put
    ~check-flow2-002/channel-bound-overflow
    ~check-flow2-002/channel-bound-below-length
+   ~check-flow2-002/channel-bound-zero-rejected
    ~check-flow2-002/channel-get-try-default
    ~check-flow2-002/channel-get-or-timeout
    ~check-flow2-000/log-is-nonblocking-and-drains
@@ -1354,11 +1355,22 @@
   ;; Raises overflow right here when the channel already holds more
   ;; than N values: the bound is never observably violated, and the
   ;; queue-vs-bound mismatch surfaces at the call site that made it.
+  ;; The domain is make-flow-channel's: a positive fixnum, or #f for
+  ;; unbounded. Zero used to slip through here — the constructor
+  ;; rejects it — and produced a channel that could never make progress
+  ;; put-first: the put parks on space, space waiters are only woken by
+  ;; a dequeue, and nothing can ever enter a zero-bound queue, so
+  ;; put-then-get deadlocked while get-then-put happened to work (a put
+  ;; hands its value straight to a parked getter, skipping the queue) —
+  ;; an order-dependent hang, the worst kind. And #f was refused, so a
+  ;; bounded channel could never be made unbounded even though the
+  ;; constructor allows creating one.
   (define (flow-channel-buffer-size! channel n)
-    (unless (and (fixnum? n) (fx>=? n 0))
-      (error 'flow-channel-buffer-size! "bound must be a non-negative fixnum" n))
+    (unless (or (not n) (and (fixnum? n) (fx>? n 0)))
+      (error 'flow-channel-buffer-size!
+             "bound must be a positive fixnum, or #f for unbounded" n))
     (with-mutex (flow-channel-mutex channel)
-      (when (fx>? (flow-channel-length channel) n)
+      (when (and n (fx>? (flow-channel-length channel) n))
         (raise (make-flow-error 'overflow
                                 "flow2: channel already over the requested bound"
                                 (list n (flow-channel-length channel)) #f)))
