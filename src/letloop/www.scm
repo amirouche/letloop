@@ -77,21 +77,34 @@
     ;; form/query semantics; pass #f for RFC 3986 path segments where
     ;; + is a literal character. Invalid %XX escapes are copied
     ;; through literally instead of raising.
+    ;;
+    ;; %XX yields a BYTE (0-255), not a Unicode codepoint -- a
+    ;; non-ASCII character is UTF-8 encoded before percent-encoding
+    ;; (e.g. "é" as %C3%A9), so the two escapes must be collected as
+    ;; raw bytes and UTF-8-decoded TOGETHER at the end. Turning each
+    ;; escape into a character via (integer->char n) treats every
+    ;; byte as its own Latin-1 codepoint instead, which took %C3%A9
+    ;; and produced "Ã©" (U+00C3 U+00A9) instead of "é" (U+00E9) --
+    ;; found live via a mojibake'd "notre territoire mathématiques"
+    ;; query. Literal (non-percent-escaped) characters in a URL are
+    ;; always ASCII by construction, so folding them into the same
+    ;; byte stream via CHAR->INTEGER is safe.
     (lambda (string . plus)
       (let ((plus? (if (pair? plus) (car plus) #t)))
         (let loop ((chars (string->list* string))
                    (out '()))
           (match chars
-            (() (list->string (reverse out)))
+            (() (utf8->string (u8-list->bytevector (reverse out))))
             ((#\+ ,rest ...)
-             (loop rest (cons (if plus? #\space #\+) out)))
+             (loop rest (cons (char->integer (if plus? #\space #\+)) out)))
             ((#\% ,a ,b ,rest ...)
              (let ((n (string->number (list->string (list a b)) 16)))
                (if (and n (fixnum? n) (fx<=? 0 n 255))
-                   (loop rest (cons (integer->char n) out))
+                   (loop rest (cons n out))
                    ;; invalid escape: keep it as literal text
-                   (loop rest (cons* b a #\% out)))))
-            ((,char . ,rest) (loop rest (cons char out))))))))
+                   (loop rest (cons* (char->integer b) (char->integer a)
+                                     (char->integer #\%) out)))))
+            ((,char . ,rest) (loop rest (cons (char->integer char) out))))))))
 
   (define www-form-urlencoded-read
     ;; content-type: application/x-www-form-urlencoded
