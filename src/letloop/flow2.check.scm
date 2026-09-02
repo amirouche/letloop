@@ -891,6 +891,50 @@
    1)
   (eqv? result 42))
 
+;; resume-from's contract -- the losers' cancels land before the
+;; resumed fiber runs -- must hold when a WORKER completes the
+;; rendezvous, not only when the resume happens on-loop. The
+;; cross-thread path goes through %cross-thread-spawns, which drains
+;; newest-first; spawning that list without reversing it inverted the
+;; order, so a fiber that won a worker's put against a losing
+;; flow-accept re-accepted before the cancel had freed the multishot's
+;; handler slot and raised "concurrent accept on fd". The probe's
+;; cancel sets a flag; the fiber reads it as its first act after the
+;; resume, so this fails on the inversion itself rather than on any
+;; particular resource the cancel happens to free.
+(define (~check-flow2-005/worker-resume-runs-cancels-first)
+  (define registered? #f)
+  (define cancel-ran? #f)
+  (define cancel-ran-at-resume 'unset)
+  (flow-run
+   (lambda (workers)
+     (let ((ch (make-flow-channel 'ctrl))
+           (resp (make-flow-channel 'resp))
+           (probe (make-flow
+                   (lambda (x) x)
+                   (lambda () #f)
+                   (lambda (state resume register-cancel!)
+                     (set! registered? #t)
+                     (register-cancel!
+                      (lambda () (set! cancel-ran? #t)))))))
+       ;; the worker sleeps so the fiber is PARKED on the choice --
+       ;; a put that lands before the park is taken at poll time and
+       ;; never exercises the resume path at all
+       (flow-submit! (car workers)
+                     (lambda ()
+                       (sleep (make-time 'time-duration 50000000 0))
+                       (flow-put! ch 'msg))
+                     resp)
+       (let ((v (flow-perform (flow-choice probe (flow-get ch)))))
+         (assert (eq? v 'msg))
+         ;; first act after the resume: the loser's cancel already ran
+         (set! cancel-ran-at-resume cancel-ran?))
+       (flow-stop)))
+   1)
+  (assert registered?)
+  (assert (eq? cancel-ran-at-resume #t))
+  #t)
+
 ;;------------------------------------------------------------
 ;; Block-and-wait machinery
 ;;------------------------------------------------------------
