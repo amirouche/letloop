@@ -277,6 +277,11 @@ case "$LETLOOP_SYMBOLS" in
     *) echo "FAIL: the bootstrap letloop carries no blake3 symbols"
        exit 1 ;;
 esac
+case "$LETLOOP_SYMBOLS" in
+    *tls_connect*) ;;
+    *) echo "FAIL: the bootstrap letloop carries no tls symbols"
+       exit 1 ;;
+esac
 
 # Captured, not piped: grep -q exiting early can kill the producer with
 # SIGPIPE, and under `set -o pipefail` a gate written as

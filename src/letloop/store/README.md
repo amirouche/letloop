@@ -127,22 +127,33 @@ gate, it is not a claim.
 
 Known gaps, all of them deliberate:
 
-- **No cold start, and deliberately so.** Every `fetch` derivation
-  needs `libtls`, which is not in the chain, so a statically linked
-  letloop drives a *warm* store but cannot bootstrap one from nothing.
+- **No cold start, still, but for a narrower reason now.** `tls`
+  builds real LibreSSL statically, and `bootstrap-letloop` links it
+  in the same way as `liburing`/`blake3`: a bootstrap letloop, copied
+  anywhere, resolves `tls_init`/`tls_connect`/... with no dlopen and
+  no host `libtls.so`. Verified doing an actual HTTPS request from a
+  copy of `bootstrap-letloop` run outside any sandbox.
 
-  Fetching over plain HTTP instead looks like the cheap way out, since
-  every fetch is hash-pinned and TLS therefore adds nothing to
-  integrity — it only hides *which* file is being asked for. It does
-  not work: measured 2026-08-23, five of the seven pinned URLs
-  301-redirect HTTP to HTTPS, GitHub and busybox.net among them, and
-  GitHub will not stop.
+  What's missing now is narrower: LibreSSL's own default CA bundle
+  path is baked in at compile time to somewhere under the sandbox's
+  own `/build/out` — gone once the binary is copied elsewhere — so a
+  relocated bootstrap letloop's own `tls_connect_socket` fails with
+  "failed to open CA file", not a linking or symbol error. Closing
+  this needs either bundling a CA file into what `bootstrap-letloop`
+  produces (which itself needs pinning one by hash, the same open
+  question as any other fetched artifact in this chain) or teaching
+  `(letloop tls low)` to look somewhere the produced tree actually
+  ships one. Deliberately not fixed by turning off certificate
+  verification instead — that trades a build-time gap for a
+  runtime security hole, in every program this store's `tls` output
+  ever gets linked into, not just the bootstrap chain.
 
-  So closing this costs either a static LibreSSL in the chain — the
-  largest thing it would build, bigger than ChezScheme — or mirroring
-  those artifacts somewhere plain HTTP reaches. The mirror can be any
-  untrusted host, which content addressing is what makes possible, but
-  it has to be a host someone keeps alive.
+  Fetching over plain HTTP instead looked like the cheap way out at
+  one point, since every fetch is hash-pinned and TLS therefore adds
+  nothing to integrity — it only hides *which* file is being asked
+  for. It does not work regardless of the CA question above: measured
+  2026-08-23, five of the seven pinned URLs 301-redirect HTTP to
+  HTTPS, GitHub and busybox.net among them, and GitHub will not stop.
 
   Left open on purpose: what it unblocks is bootstrapping from nothing
   on a bare machine. A warm store works, `letloop update` fetches

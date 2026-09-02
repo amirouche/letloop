@@ -342,13 +342,16 @@ static void letloop_register_liburing_symbols(void) {
 #endif /* LETLOOP_LIBURING_STATIC */
 
 #ifdef LETLOOP_BLAKE3_STATIC
-/* BLAKE3, the one optional shared object letloop cannot treat as
- * optional in a static build: (letloop store) hashes every output with
- * it, so a statically linked letloop without it can compile programs
- * but cannot run `letloop store build` -- it fails with "cannot dlopen
- * shared object" the moment a build finishes and wants a hash. A
- * letloop the store built that could not itself drive the store is not
- * self-hosting.
+/* BLAKE3. Was, briefly, the one optional shared object a static
+ * letloop could not treat as optional: before (letloop blake3 scheme)
+ * existed, (letloop store) hashed every output through the dispatching
+ * (letloop blake3), so a statically linked letloop without this
+ * registration could compile programs but not run `letloop store
+ * build` -- it failed with "cannot dlopen shared object" the moment a
+ * build finished and wanted a hash. (letloop store) now imports
+ * (letloop blake3 scheme) directly and never reaches this path at all,
+ * so this registration is back to being what it looks like: a speed-up
+ * for whatever else imports (letloop blake3), not a store dependency.
  *
  * Only the three entry points (letloop blake3) resolves; the rest of
  * the archive is reached through them. Same asm-label aliasing as the
@@ -367,6 +370,120 @@ static void letloop_register_blake3_symbols(void) {
   LETLOOP_BLAKE3_SYM(blake3_hasher_finalize);
 }
 #endif /* LETLOOP_BLAKE3_STATIC */
+
+#ifdef LETLOOP_TLS_STATIC
+/* LibreSSL's libtls, plus the libssl/libcrypto it is built against --
+ * (letloop tls low) dlopen's libtls.so.28 at runtime, and (letloop
+ * www)'s HTTPS path is what `letloop store build`'s own fetch-verify!
+ * step uses, so a statically linked letloop without this can compile
+ * programs and run a *warm* store, but cannot fetch anything new --
+ * the same gap src/letloop/store/README.md's cold-start section
+ * already names, one static registration closer to closed.
+ *
+ * Same asm-label aliasing as the liburing and blake3 blocks above,
+ * for the same reason: no header is included here, so the address
+ * linked into the binary from libtls.a is all there is to take.
+ *
+ * The list is every tls_* symbol src/letloop/tls/low.scm resolves via
+ * lazy-foreign-procedure, mechanically extracted. strlen is already
+ * registered above, generically -- low.scm's own use of it through
+ * the same libtls handle was never actually libtls-specific.
+ */
+#define LETLOOP_TLS_SYM(name)                              \
+  do {                                                      \
+    extern void name##_letloop_alias(void) __asm__(#name);  \
+    Sforeign_symbol(#name, (void *)name##_letloop_alias);   \
+  } while (0)
+
+static void letloop_register_tls_symbols(void) {
+  LETLOOP_TLS_SYM(tls_accept_fds);
+  LETLOOP_TLS_SYM(tls_accept_socket);
+  LETLOOP_TLS_SYM(tls_client);
+  LETLOOP_TLS_SYM(tls_close);
+  LETLOOP_TLS_SYM(tls_config_add_keypair_file);
+  LETLOOP_TLS_SYM(tls_config_add_keypair_mem);
+  LETLOOP_TLS_SYM(tls_config_add_keypair_ocsp_file);
+  LETLOOP_TLS_SYM(tls_config_add_keypair_ocsp_mem);
+  LETLOOP_TLS_SYM(tls_config_add_ticket_key);
+  LETLOOP_TLS_SYM(tls_config_clear_keys);
+  LETLOOP_TLS_SYM(tls_config_error);
+  LETLOOP_TLS_SYM(tls_config_free);
+  LETLOOP_TLS_SYM(tls_config_insecure_noverifycert);
+  LETLOOP_TLS_SYM(tls_config_insecure_noverifyname);
+  LETLOOP_TLS_SYM(tls_config_insecure_noverifytime);
+  LETLOOP_TLS_SYM(tls_config_new);
+  LETLOOP_TLS_SYM(tls_config_ocsp_require_stapling);
+  LETLOOP_TLS_SYM(tls_config_parse_protocols);
+  LETLOOP_TLS_SYM(tls_config_prefer_ciphers_client);
+  LETLOOP_TLS_SYM(tls_config_prefer_ciphers_server);
+  LETLOOP_TLS_SYM(tls_config_set_alpn);
+  LETLOOP_TLS_SYM(tls_config_set_ca_file);
+  LETLOOP_TLS_SYM(tls_config_set_ca_mem);
+  LETLOOP_TLS_SYM(tls_config_set_ca_path);
+  LETLOOP_TLS_SYM(tls_config_set_cert_file);
+  LETLOOP_TLS_SYM(tls_config_set_cert_mem);
+  LETLOOP_TLS_SYM(tls_config_set_ciphers);
+  LETLOOP_TLS_SYM(tls_config_set_crl_file);
+  LETLOOP_TLS_SYM(tls_config_set_dheparams);
+  LETLOOP_TLS_SYM(tls_config_set_ecdhecurve);
+  LETLOOP_TLS_SYM(tls_config_set_ecdhecurves);
+  LETLOOP_TLS_SYM(tls_config_set_key_file);
+  LETLOOP_TLS_SYM(tls_config_set_key_mem);
+  LETLOOP_TLS_SYM(tls_config_set_keypair_file);
+  LETLOOP_TLS_SYM(tls_config_set_keypair_mem);
+  LETLOOP_TLS_SYM(tls_config_set_keypair_ocsp_file);
+  LETLOOP_TLS_SYM(tls_config_set_keypair_ocsp_mem);
+  LETLOOP_TLS_SYM(tls_config_set_ocsp_staple_file);
+  LETLOOP_TLS_SYM(tls_config_set_ocsp_staple_mem);
+  LETLOOP_TLS_SYM(tls_config_set_protocols);
+  LETLOOP_TLS_SYM(tls_config_set_session_fd);
+  LETLOOP_TLS_SYM(tls_config_set_session_id);
+  LETLOOP_TLS_SYM(tls_config_set_session_lifetime);
+  LETLOOP_TLS_SYM(tls_config_set_verify_depth);
+  LETLOOP_TLS_SYM(tls_config_verify);
+  LETLOOP_TLS_SYM(tls_config_verify_client);
+  LETLOOP_TLS_SYM(tls_config_verify_client_optional);
+  LETLOOP_TLS_SYM(tls_configure);
+  LETLOOP_TLS_SYM(tls_conn_alpn_selected);
+  LETLOOP_TLS_SYM(tls_conn_cipher);
+  LETLOOP_TLS_SYM(tls_conn_cipher_strength);
+  LETLOOP_TLS_SYM(tls_conn_servername);
+  LETLOOP_TLS_SYM(tls_conn_session_resumed);
+  LETLOOP_TLS_SYM(tls_conn_version);
+  LETLOOP_TLS_SYM(tls_connect);
+  LETLOOP_TLS_SYM(tls_connect_fds);
+  LETLOOP_TLS_SYM(tls_connect_servername);
+  LETLOOP_TLS_SYM(tls_connect_socket);
+  LETLOOP_TLS_SYM(tls_default_ca_cert_file);
+  LETLOOP_TLS_SYM(tls_error);
+  LETLOOP_TLS_SYM(tls_free);
+  LETLOOP_TLS_SYM(tls_handshake);
+  LETLOOP_TLS_SYM(tls_init);
+  LETLOOP_TLS_SYM(tls_load_file);
+  LETLOOP_TLS_SYM(tls_ocsp_process_response);
+  LETLOOP_TLS_SYM(tls_peer_cert_chain_pem);
+  LETLOOP_TLS_SYM(tls_peer_cert_contains_name);
+  LETLOOP_TLS_SYM(tls_peer_cert_hash);
+  LETLOOP_TLS_SYM(tls_peer_cert_issuer);
+  LETLOOP_TLS_SYM(tls_peer_cert_notafter);
+  LETLOOP_TLS_SYM(tls_peer_cert_notbefore);
+  LETLOOP_TLS_SYM(tls_peer_cert_provided);
+  LETLOOP_TLS_SYM(tls_peer_cert_subject);
+  LETLOOP_TLS_SYM(tls_peer_ocsp_cert_status);
+  LETLOOP_TLS_SYM(tls_peer_ocsp_crl_reason);
+  LETLOOP_TLS_SYM(tls_peer_ocsp_next_update);
+  LETLOOP_TLS_SYM(tls_peer_ocsp_response_status);
+  LETLOOP_TLS_SYM(tls_peer_ocsp_result);
+  LETLOOP_TLS_SYM(tls_peer_ocsp_revocation_time);
+  LETLOOP_TLS_SYM(tls_peer_ocsp_this_update);
+  LETLOOP_TLS_SYM(tls_peer_ocsp_url);
+  LETLOOP_TLS_SYM(tls_read);
+  LETLOOP_TLS_SYM(tls_reset);
+  LETLOOP_TLS_SYM(tls_server);
+  LETLOOP_TLS_SYM(tls_unload_file);
+  LETLOOP_TLS_SYM(tls_write);
+}
+#endif /* LETLOOP_TLS_STATIC */
 
 /* Hook for symbols that are not letloop's to know about: the static
  * libraries a *user program* brings to `letloop compile`. That path
@@ -446,6 +563,10 @@ static void letloop_register_foreign_symbols(void) {
 
 #ifdef LETLOOP_BLAKE3_STATIC
   letloop_register_blake3_symbols();
+#endif
+
+#ifdef LETLOOP_TLS_STATIC
+  letloop_register_tls_symbols();
 #endif
 
   /* No-op unless a program brought static libraries of its own; see

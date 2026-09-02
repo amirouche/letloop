@@ -90,6 +90,7 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 	  STATIC_FLAG=""; \
 	  URING_FLAGS=""; \
 	  BLAKE3_FLAGS=""; \
+	  TLS_FLAGS=""; \
 	  case "$$(cc -dumpmachine)" in \
 	    *musl*) STATIC_FLAG="-static"; \
 	      if printf 'int main(void){return 0;}\n' | \
@@ -99,10 +100,14 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 	      if printf 'int main(void){return 0;}\n' | \
 	         cc -x c -o /dev/null - -lblake3 >/dev/null 2>&1; then \
 	        BLAKE3_FLAGS="-DLETLOOP_BLAKE3_STATIC -lblake3"; \
+	      fi; \
+	      if printf 'int main(void){return 0;}\n' | \
+	         cc -x c -o /dev/null - -ltls -lssl -lcrypto >/dev/null 2>&1; then \
+	        TLS_FLAGS="-DLETLOOP_TLS_STATIC -ltls -lssl -lcrypto"; \
 	      fi ;; \
 	  esac; \
 	  cc -I"$$BOOT" src/letloop-main.c "$$BOOT/kernel.o" \
-	     -o "$$BOOT/letloop-host" $$STATIC_FLAG $$URING_FLAGS $$BLAKE3_FLAGS \
+	     -o "$$BOOT/letloop-host" $$STATIC_FLAG $$URING_FLAGS $$BLAKE3_FLAGS $$TLS_FLAGS \
 	     -ldl -lm -lpthread; \
 	  install -m 644 a.out.boot "$$BOOT/letloop.boot"; \
 	  { cat "$$BOOT/letloop-host" a.out.boot; \
