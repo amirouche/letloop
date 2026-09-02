@@ -503,6 +503,13 @@ Event: bytes readable on `FD`. Three results, and EOF is **not** `#f`:
 Distinguishing the last two matters — a loop that treats `#f` as EOF
 silently turns an error into a normal end of stream.
 
+A read that **loses** a `flow-choice` — the idle-timeout idiom below,
+say — does not lose its bytes. The kernel can complete the recv in the
+same tick the winner completes, and by then the data is already off the
+socket and cannot be asked for again; it is kept on a per-fd backlog
+that the next `flow-read` on that fd takes before issuing another recv.
+The backlog is discarded with the fd, on close.
+
 #### `(flow-write fd bytevector [start])`
 
 Event: one `send` of `BYTEVECTOR` from `START` (default `0`). Result is
@@ -520,6 +527,14 @@ exactly when partial writes happen). Looping in the caller makes each
 chunk its own perform and therefore its own cancellation point, and
 costs no atomicity — each resubmit was a separate ring operation
 either way, so a competing send on the same fd could always interleave.
+
+The write side has no equivalent of the read backlog and cannot: a send
+that completed but lost its `flow-choice` has already put those bytes on
+the wire, and there is nothing to hand to a later caller. The result is
+reported to nobody, so **a caller that retries after losing a race
+duplicates what it already sent**. Race a write against a deadline only
+when you are prepared to abandon the connection, which is usually the
+honest response to a peer that cannot keep up anyway.
 
 #### `(flow-write-all! fd bytevector)`
 

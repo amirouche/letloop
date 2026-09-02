@@ -132,6 +132,7 @@
    ~check-flow2-006/accept-cancel-leaves-listener-usable
    ~check-flow2-006/read-or-timeout-leaves-fd-usable
    ~check-flow2-006/request-loop-idle-timeout
+   ~check-flow2-006/read-losing-a-same-tick-race-keeps-its-bytes
    ~check-flow2-009/file-write-read-roundtrip
    ~check-flow2-009/chunked-read-until-eof
    ~check-flow2-009/nonzero-offset
@@ -1534,11 +1535,28 @@
   ;; Network and file I/O events (identical to flow)
   ;;------------------------------------------------------------
 
+  ;; A read that LOSES its choice still has to account for the bytes.
+  ;; The recv and the base that beat it — typically the deadline in the
+  ;; idle-timeout idiom — complete in the same tick whenever the loop is
+  ;; late draining, i.e. under load, i.e. exactly when idle timeouts
+  ;; fire; the handlers then run in completion-queue order and the
+  ;; loser's resume returns #f. The bytes are already off the socket at
+  ;; that point, so discarding them is silent, unrecoverable data loss
+  ;; for that connection — a request truncated with nothing logged. It
+  ;; goes on the fd's recv backlog instead, and this event's try pops it
+  ;; before preparing another recv, which is the shape flow-accept has
+  ;; always had for a client it could not hand over.
+  ;;
+  ;; Only the data case needs it. A clean EOF and a failure are both
+  ;; level-triggered: the next recv reports them again, so there is
+  ;; nothing to preserve.
   (define flow-read
     (lambda (fd)
       (make-flow% 'base #f
                   (lambda (x) x)
-                  (lambda () #f)
+                  (lambda ()
+                    (let ((bv (loop-recv-backlog-take! fd)))
+                      (and bv (lambda () bv))))
                   (lambda (state resume register-cancel!)
                     (let* ((ring (loop-ring (loop-current)))
                            (id   (loop-alloc-id!))
@@ -1549,11 +1567,17 @@
                       (io-uring-sqe-set-data64 sqe id)
                       (hashtable-set! (loop-handlers (loop-current)) id
                                       (lambda (res)
-                                        (resume
-                                         (cond
-                                          ((fx<? res 0) (loop-buf-data-take! id) #f)
-                                          ((fxzero? res) (loop-buf-data-take! id) #t)
-                                          (else (loop-buf-data-take! id))))))
+                                        (cond
+                                         ((fx<? res 0)
+                                          (loop-buf-data-take! id)
+                                          (resume #f))
+                                         ((fxzero? res)
+                                          (loop-buf-data-take! id)
+                                          (resume #t))
+                                         (else
+                                          (let ((bv (loop-buf-data-take! id)))
+                                            (unless (resume bv)
+                                              (loop-recv-backlog-put! fd bv)))))))
                       (register-cancel!
                        (lambda ()
                          (let ((csqe (loop-get-sqe ring)))
