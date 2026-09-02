@@ -16,7 +16,10 @@
           ~check-hash-006/symlink-is-not-its-target)
 
   (import (chezscheme)
-          (letloop blake3))
+          ;; Directly, not the dispatching (letloop blake3): the
+          ;; store's own hashing should not turn on whether a
+          ;; particular binary's static blake3 registration worked.
+          (letloop blake3 scheme))
 
   (begin
     (include "letloop/store/hash.body.scm")

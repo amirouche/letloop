@@ -6,11 +6,14 @@
   ;; BLAKE3, built from source against the bootstrap toolchain, as a
   ;; static archive -- for speed, not for correctness.
   ;;
-  ;; (letloop blake3) falls back to (letloop blake3 pure), which needs no
-  ;; shared object at all, so the store hashes with or without this. What
-  ;; this buys is about 128x: roughly 2.5 GB/s against 20 MB/s, which on
-  ;; a 300 MB rootfs is the difference between an instant and a quarter
-  ;; of a minute, paid on every build.
+  ;; (letloop blake3) falls back to (letloop blake3 scheme), which needs
+  ;; no shared object at all, so the store hashes with or without this --
+  ;; and (letloop store) itself imports (letloop blake3 scheme) directly,
+  ;; not through that fallback, so this archive is for speeding up other
+  ;; compiled programs, not for the store's own operation. What this
+  ;; buys, where it is used, is about 128x: roughly 2.5 GB/s against
+  ;; 20 MB/s, which on a 300 MB rootfs is the difference between an
+  ;; instant and a quarter of a minute, paid on every build.
   ;;
   ;; It was briefly load-bearing: before the fallback existed, a
   ;; statically linked letloop had no loader to service the dlopen and

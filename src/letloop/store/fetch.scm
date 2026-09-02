@@ -8,7 +8,9 @@
 
   (import (chezscheme)
           (letloop www)
-          (letloop blake3)
+          ;; Directly, not the dispatching (letloop blake3): see
+          ;; (letloop store hash)'s own import for why.
+          (letloop blake3 scheme)
           (letloop store hash))
 
   (begin

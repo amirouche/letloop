@@ -3,10 +3,10 @@
   (export blake3 make-blake3 blake3-update! blake3-finalize blake3-close!
           ~check-blake3-000
           ~check-blake3-001
-          ~check-blake3-002/c-agrees-with-pure)
+          ~check-blake3-002/c-agrees-with-scheme)
 
   (import (chezscheme) (letloop cffi)
-          (prefix (letloop blake3 pure) pure:))
+          (prefix (letloop blake3 scheme) scheme:))
 
   (define-shared-object libblake3 "libblake3.so" "libblake3.so.1")
 
@@ -64,7 +64,7 @@
   ;; Decided by trying, not by asking whether the shared object can be
   ;; dlopen'd: on a statically linked letloop the symbols are
   ;; registered by letloop-main.c and work while no dlopen ever could.
-  ;; The pure implementation is the floor, so a missing or broken
+  ;; The Scheme implementation is the floor, so a missing or broken
   ;; libblake3 costs speed and nothing else -- which is what keeps
   ;; hashing, and so the whole store, from depending on a package the
   ;; store would have to have built.
@@ -82,20 +82,20 @@
         state)))
 
   (define (make-blake3)
-    (if (c-usable?) (c-make-blake3) (pure:make-blake3)))
+    (if (c-usable?) (c-make-blake3) (scheme:make-blake3)))
 
   (define (blake3-close! hasher)
-    (if (c-usable?) (c-close! hasher) (pure:blake3-close! hasher)))
+    (if (c-usable?) (c-close! hasher) (scheme:blake3-close! hasher)))
 
   (define (blake3-update! hasher bytevector)
     (if (c-usable?)
         (c-update! hasher bytevector)
-        (pure:blake3-update! hasher bytevector)))
+        (scheme:blake3-update! hasher bytevector)))
 
   (define (blake3-finalize hasher length)
     (if (c-usable?)
         (c-finalize hasher length)
-        (pure:blake3-finalize hasher length)))
+        (scheme:blake3-finalize hasher length)))
 
   (define blake3
     (lambda (bytevector)
@@ -106,7 +106,7 @@
         digest)))
 
   ;; No skip guard any more: hashing works with or without libblake3,
-  ;; because the pure implementation is the floor. If this fails, both
+  ;; because the Scheme implementation is the floor. If this fails, both
   ;; paths are wrong.
   (define ~check-blake3-000
     (lambda ()
@@ -128,7 +128,7 @@
   ;; The two implementations must agree, on data neither was written
   ;; against. Only meaningful where the shared object is present --
   ;; without it both sides of the comparison are the same code.
-  (define ~check-blake3-002/c-agrees-with-pure
+  (define ~check-blake3-002/c-agrees-with-scheme
     (lambda ()
       (if (not (c-usable?))
           (begin (display "** SKIP: libblake3 unavailable, nothing to cross-check\n") #t)
@@ -139,8 +139,8 @@
                   (let ((from-c (let ((h (c-make-blake3)))
                                   (c-update! h input)
                                   (let ((d (c-finalize h 32))) (c-close! h) d)))
-                        (from-pure (pure:blake3 input)))
-                    (assert (bytevector=? from-c from-pure))
+                        (from-scheme (scheme:blake3 input)))
+                    (assert (bytevector=? from-c from-scheme))
                     (loop (fx+ n 1)))))))))
 
   (define bytevector-random

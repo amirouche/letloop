@@ -5,20 +5,25 @@
 ;; hashes every output, so a letloop that cannot hash cannot run the
 ;; store, and requiring libblake3 to be built and statically linked
 ;; first made the package manager depend on a package. This is the
-;; floor it falls back to.
+;; floor (letloop blake3) falls back to -- and what the store itself
+;; imports directly, rather than through that dispatch: the store's
+;; own correctness should not turn on whether a particular binary's
+;; static blake3 registration happened to work. Named "scheme" rather
+;; than "pure" so the contrast with (letloop blake3) reads as
+;; implementation language, not purity.
 ;;
 ;; It is about 128x slower than the C implementation -- roughly
 ;; 20 MB/s against 2.5 GB/s, measured on 5 MB -- which is why
-;; (letloop blake3) prefers the shared object when there is one. Both
-;; produce identical digests; that is checked, against the same
-;; vectors and against each other.
+;; (letloop blake3) prefers the shared object when there is one, for
+;; everything except the store. Both produce identical digests; that
+;; is checked, against the same vectors and against each other.
 ;;
 ;; Recovered from e3cc037^, which replaced it with the C bindings.
-(library (letloop blake3 pure)
+(library (letloop blake3 scheme)
   (export blake3 make-blake3 blake3-update! blake3-finalize blake3-close!
-          ~check-blake3-pure-000
-          ~check-blake3-pure-001
-          ~check-blake3-pure-002)
+          ~check-blake3-scheme-000
+          ~check-blake3-scheme-001
+          ~check-blake3-scheme-002)
 
   (import (chezscheme))
 
@@ -308,7 +313,7 @@
 
   ;; ===== Tests =====
 
-  (define ~check-blake3-pure-000
+  (define ~check-blake3-scheme-000
     (lambda ()
       (assert (bytevector=? (blake3 (string->utf8 "azul dunith"))
                             (bytevector 147 96 202 209 250 91 234 79
@@ -316,7 +321,7 @@
                                         23 60 5 78 248 205 93 236
                                         132 217 22 253 234 98 73 27)))))
 
-  (define ~check-blake3-pure-001
+  (define ~check-blake3-scheme-001
     (lambda ()
       (let ((hasher (make-blake3)))
         (blake3-update! hasher (string->utf8 "azul dunith"))
@@ -324,7 +329,7 @@
                               (bytevector 147 96 202 209 250 91 234 79
                                           148 175 155 40 42 42 163 180))))))
 
-  (define ~check-blake3-pure-002
+  (define ~check-blake3-scheme-002
     (lambda ()
       (define (hex->bytevector hex)
         (let* ((len (div (string-length hex) 2))

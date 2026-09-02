@@ -25,9 +25,14 @@
           ;; ~check-store-001/fetch-only, which builds its own expected
           ;; hash from a live probe request rather than pinning one that
           ;; would rot; the incremental blake3 procedures key the build
-          ;; cache
+          ;; cache.
+          ;;
+          ;; (letloop blake3 scheme) directly, not the dispatching
+          ;; (letloop blake3): the store's own correctness should not
+          ;; turn on whether a particular binary's static blake3
+          ;; registration happened to work, so it never asks.
           (only (letloop www) www-request)
-          (letloop blake3)
+          (letloop blake3 scheme)
           (letloop r999))
 
   (begin
