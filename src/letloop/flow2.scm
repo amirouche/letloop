@@ -119,6 +119,7 @@
    ~check-flow2-005/worker-io-protocol-roundtrip
    ~check-flow2-005/worker-resume-runs-cancels-first
    ~check-flow2-005/a-thread-the-user-forked-is-refused
+   ~check-flow2-005/every-entry-point-refuses-a-stray-thread
 
    ;; block-and-wait machinery, ported from (letloop flow)'s
    ;; ~check-flow-011 series, plus the branch finding 1's fix added
@@ -182,9 +183,14 @@
   (define (%flow-cancelled-error)
     (make-flow-error 'cancelled "flow2: scope cancelled" '() #f))
 
+  ;; Two callers, one symbol: an operation the loop thread reserves
+  ;; called on a compute thread, and any flow2 operation called on a
+  ;; thread the USER forked. The message names neither, because it
+  ;; cannot: what the caller needs to know is which thread was allowed,
+  ;; and that is the same answer both times.
   (define (%flow-wrong-thread who)
     (raise (make-flow-error 'wrong-thread
-                            "flow2: main-thread-only operation on a compute thread"
+                            "flow2: operation from a thread that does not own it"
                             (list who) #f)))
 
   ;;------------------------------------------------------------
@@ -733,6 +739,7 @@
 
   (define (flow-scope-cancel! scope)
     (when (%worker-current?) (%flow-wrong-thread 'flow-scope-cancel!))
+    (%flow-check-caller-thread! 'flow-scope-cancel!)
     (%scope-fail! scope 'cancelled))
 
   (define (%scope-children scope)
@@ -1029,8 +1036,21 @@
                                 (flow-block-and-wait-off-loop bases)
                                 result)))))))
 
+  ;; The guard belongs HERE, not at the handful of entry points that
+  ;; happened to be named when it was written. Every suspending
+  ;; operation funnels through flow-perform, and on a user-forked
+  ;; thread %worker-current? is #f, so the on-loop branch below is the
+  ;; one taken: it reads the LOOP thread's %scope-current, dequeues
+  ;; under the channel mutex, resumes a parked putter through
+  ;; %flow-spawn-safe -> loop-spawn with no eventfd wake, and parks on
+  ;; a loop-abort that is #f in that thread. flow-get! on a non-empty
+  ;; channel therefore SUCCEEDED off-loop and stranded the putter,
+  ;; while on an empty one it died with "attempt to apply
+  ;; non-procedure #f" — a corruption and a nonsense error where
+  ;; wrong-thread was documented.
   (define flow-perform
     (lambda (event)
+      (%flow-check-caller-thread! 'flow-perform)
       (if (%worker-current?)
           (%flow-perform-off-loop event)
           (let ((scope %scope-current))
@@ -2028,6 +2048,7 @@
   ;; after the children have drained.
   (define (flow-nursery proc)
     (when (%worker-current?) (%flow-wrong-thread 'flow-nursery))
+    (%flow-check-caller-thread! 'flow-nursery)
     ;; A dead scope must not open a live subscope. The link below lands
     ;; AFTER %scope-fail!'s subscope walk, and the walk is CAS-guarded
     ;; so it never reruns: a scope created past that point would be
@@ -2059,6 +2080,7 @@
   ;; cancelled, drained, and a timeout <flow-error> raises.
   (define (flow-monitor seconds thunk)
     (when (%worker-current?) (%flow-wrong-thread 'flow-monitor))
+    (%flow-check-caller-thread! 'flow-monitor)
     ;; Same entry check as flow-nursery, and with more at stake: the
     ;; child fiber is spawned BEFORE the join/deadline race, and the
     ;; race's perform raises on the dead parent before the deadline is
@@ -2130,6 +2152,10 @@
   ;; Doing it after the put instead would be worse: the worker can pick
   ;; the task up and decrement before the increment lands.
   (define (flow-submit! worker-channel thunk response-channel)
+    ;; A submit reaches %channel-put! directly whenever the worker
+    ;; channel has room, so it never touches flow-perform's guard and
+    ;; needs its own.
+    (%flow-check-caller-thread! 'flow-submit!)
     ;; Same boundary as flow-put! and flow-get-try: a submit is a
     ;; channel operation, and a cancelled scope must be observable
     ;; through it — the raise is how the sender learns of its own
@@ -2298,6 +2324,7 @@
 
   (define (flow-stop)
     (when (%worker-current?) (%flow-wrong-thread 'flow-stop))
+    (%flow-check-caller-thread! 'flow-stop)
     (loop-stop))
 
   (include "letloop/flow2.check.scm"))

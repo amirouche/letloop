@@ -2084,3 +2084,80 @@
   ;; still there for whoever is entitled to it
   (assert (eqv? 1 (flow-channel-queue-length channel)))
   #t)
+
+;; Fourth adverse pass, finding 1. The third pass's own fix, applied at
+;; three call sites instead of at the choke point they all pass
+;; through. flow-perform went unguarded, so a stray thread took its
+;; ON-loop branch -- %worker-current? is #f there -- and flow-get! on a
+;; non-empty channel SUCCEEDED: it dequeued off-loop and resumed a
+;; parked putter through loop-spawn with no eventfd wake (the putter
+;; was still parked a second and a half later), while on an empty
+;; channel it died with "attempt to apply non-procedure #f" from
+;; loop-abort. flow-submit! and the four scope/lifecycle entry points
+;; checked only %worker-current?, which a user thread passes.
+;;
+;; One check over every entry point rather than one per procedure: the
+;; failure mode was an ENUMERATION that fell behind, and a test shaped
+;; like the enumeration would fall behind the same way.
+(define (~check-flow2-005/every-entry-point-refuses-a-stray-thread)
+  (define channel (make-flow-channel 'stocked))
+  (define empty (make-flow-channel 'empty))
+  (define replies (make-flow-channel 'replies))
+  (define scope-box (box #f))
+  (define outcomes (box '()))
+  (define done (box #f))
+  (define (attempt name thunk)
+    (set-box! outcomes
+              (cons (cons name
+                          (guard (ex (#t (if (flow-error? ex)
+                                             (flow-error-symbol ex)
+                                             'not-a-flow-error)))
+                            (thunk)
+                            'no-raise))
+                    (unbox outcomes))))
+  (flow-put! channel 'primed)
+  (flow-run
+   (lambda (workers)
+     ;; a live scope for flow-scope-cancel! to be refused on
+     (flow-spawn
+      (lambda ()
+        (flow-nursery
+         (lambda (scope)
+           (set-box! scope-box scope)
+           (flow-spawn (lambda () (flow-sleep 5.0)))))))
+     (let settle ((n 0))
+       (if (or (unbox scope-box) (fx>? n 100))
+           (fork-thread
+            (lambda ()
+              (attempt 'get-stocked (lambda () (flow-get! channel)))
+              (attempt 'get-empty (lambda () (flow-get! empty)))
+              (attempt 'sleep (lambda () (flow-sleep 0.01)))
+              (attempt 'submit
+                       (lambda ()
+                         (flow-submit! (car workers) (lambda () 42) replies)))
+              (attempt 'nursery (lambda () (flow-nursery (lambda (scope) (void)))))
+              (attempt 'monitor
+                       (lambda () (flow-monitor 1.0 (lambda () (void)))))
+              (attempt 'scope-cancel
+                       (lambda () (flow-scope-cancel! (unbox scope-box))))
+              (attempt 'stop (lambda () (flow-stop)))
+              (set-box! done #t)))
+           (begin (flow-sleep 0.01) (settle (fx+ n 1)))))
+     (let wait ((n 0))
+       (flow-sleep 0.01)
+       (if (or (unbox done) (fx>? n 300))
+           (flow-stop)
+           (wait (fx+ n 1)))))
+   1)
+  (assert (unbox done))
+  (assert (unbox scope-box))
+  (for-each (lambda (outcome)
+              (unless (eq? 'wrong-thread (cdr outcome))
+                (flow-log (list 'flow2-check 'not-refused outcome)))
+              (assert (eq? 'wrong-thread (cdr outcome))))
+            (unbox outcomes))
+  ;; eight entry points tried, and the stocked channel still holds the
+  ;; value the off-loop get used to walk away with
+  (assert (eqv? 8 (length (unbox outcomes))))
+  (assert (eqv? 1 (flow-channel-queue-length channel)))
+  #t)
