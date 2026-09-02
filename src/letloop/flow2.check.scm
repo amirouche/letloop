@@ -1573,9 +1573,13 @@
        (equal? result payload)))
 
 ;; A file deliberately larger than the chunk size and not a multiple of
-;; it: the loop must see two full chunks, one short chunk, and then
-;; 'eof -- the caller tracking its own offset the whole way, since these
-;; primitives keep no cursor.
+;; it: the loop must see two full chunks, one short chunk, and then a
+;; clean EOF -- the caller tracking its own offset the whole way, since
+;; these primitives keep no cursor.
+;;
+;; EOF is #t, the same as flow-read's, and #f is still a failure. This
+;; used to be 'eof here and #t there, which is the kind of difference
+;; that is only ever discovered by a caller getting it wrong.
 (define (~check-flow2-009/chunked-read-until-eof)
   (define path (flow2-check-path "flow2-009-chunked.bin"))
   (define chunk 4096)
@@ -1591,7 +1595,7 @@
        (let read-loop ((offset 0))
          (let ((piece (flow-perform (flow-read-at fd offset chunk))))
            (cond
-            ((eq? piece 'eof) (set! saw-eof #t))
+            ((eq? piece #t) (set! saw-eof #t))
             ((not piece) (void))     ;; error: fall through, check fails
             (else
              (set! pieces (cons piece pieces))

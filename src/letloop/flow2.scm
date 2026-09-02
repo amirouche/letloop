@@ -1811,7 +1811,14 @@
                                         (resume
                                          (cond
                                           ((fx<? res 0) #f)
-                                          ((fxzero? res) 'eof)
+                                          ;; #t, not 'eof: flow-read has
+                                          ;; said #t for a clean end of
+                                          ;; stream all along, and two
+                                          ;; encodings for the same
+                                          ;; condition across two read
+                                          ;; verbs is a trap that only
+                                          ;; ever costs a caller.
+                                          ((fxzero? res) #t)
                                           ((fx=? res count) bv)
                                           (else (subbytevector bv 0 res))))))
                       (register-cancel!

@@ -9,15 +9,17 @@ Amirouche A. BOUBEKKI
 ## Status
 
 `(letloop flow2)` is **implemented**, in `src/letloop/flow2.scm`, with
-49 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
+66 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
 `(letloop flow)` stays untouched and keeps serving its current ones.
 
 This document began as a draft specification and is now the library's
 reference, so where the two ever disagree the source wins. It was last
-reconciled against the implementation on 2026-08-17, after an adverse
-review whose findings changed several documented behaviours — channels
-are now bounded by default and a full put parks, which is the one
-change that would break code written against the original draft.
+reconciled against the implementation on 2026-08-26, after the third
+adverse review. Two earlier reconciliations changed documented
+behaviour: channels became bounded by default with a full put parking
+(2026-08-17), which is the one change that would break code written
+against the original draft, and `flow-read-at` now reports a clean EOF
+as `#t` like `flow-read` rather than as `'eof` (2026-08-26).
 Decisions herein were resolved on 2026-08-14; the
 motivating failures are documented in `TODO.md` (sections "monitored
 trees with automatic timeout-and-cancel" and
@@ -287,8 +289,16 @@ channels as its single argument (the empty list when
 zero is the program's business: whoever holds a worker's channel may
 submit to it.
 
-The number of compute threads is fixed for the run. `flow-run`
-returns when the loop stops.
+The number of compute threads is fixed for the run. `flow-run` returns
+once the loop has stopped *and* the compute pool has been joined, which
+is bounded at two seconds — past that it logs
+`(flow2 shutdown-workers-still-running N)` and leaks the eventfd rather
+than hand a live writer a descriptor number about to be reused.
+
+Note what does **not** stop the loop: a raise out of fiber zero. It is
+a fiber like any other, so an unguarded raise kills it, prints one line
+on stderr, and leaves the loop running with nothing to run — `flow-run`
+never returns. Guard fiber zero, or make its last act `flow-stop`.
 
 #### `(flow-stop)`
 
@@ -361,8 +371,10 @@ this is internal.
 #### `(make-flow-channel [name [bound]])`
 
 Returns a fresh channel bounded at 43 values. `NAME` is any object; it
-appears in the saturation warning and in nothing else, so give it one
-you will recognise in a log. A channel created without a name still
+appears in the saturation warning, in an `overflow` error's irritants,
+and in a `compute` error's — where a worker's channel is named
+`(worker . I)` and so identifies the thread the failure came from. Give
+it one you will recognise in a log. A channel created without a name still
 gets a process-unique integer, because a diagnostic that cannot say
 which channel is in trouble is barely a diagnostic. Pass `#f` as
 `BOUND` for a genuinely unbounded channel — deliberately, and visibly
@@ -473,7 +485,10 @@ cancelled.
 
 Returns an event ready after `SECONDS` (a real number). Backed by a
 ring timeout SQE; as a losing choice member it is cancelled on the
-ring. Main thread only (`wrong-thread` from a compute thread).
+ring. Loop thread only — *performing* it from a compute thread raises
+`wrong-thread`, like every other ring event. Constructing one there is
+harmless, which is what lets a worker build an event it hands back for
+the submitting fiber to perform.
 
 #### `(flow-sleep seconds)`
 
@@ -554,7 +569,22 @@ and `MODE` is the permission bits used when `O-CREAT` creates the
 file, and ignored otherwise. Result is the fd, or `#f` on failure.
 
 #### `(flow-read-at fd offset size)`
+
+Event: up to `SIZE` bytes of `FD` at `OFFSET`. These primitives keep no
+cursor — the caller tracks its own offset. Results follow `flow-read`:
+
+| result | meaning |
+|---|---|
+| bytevector | that many bytes were read, possibly fewer than `SIZE` |
+| `#t` | clean EOF, nothing left at that offset |
+| `#f` | the read failed |
+
 #### `(flow-write-at fd offset bytevector)`
+
+Event: one write of `BYTEVECTOR` at `OFFSET`. Result is the count
+actually written, or `#f` on failure; like `flow-write` it does not
+loop, so a caller wanting all of it writes the loop.
+
 #### `(flow-close fd)`
 
 The one ring event that is deliberately **not** cancellable, for the
@@ -572,8 +602,7 @@ the ring. Without that exemption the cleanup below would be the one
 thing cancellation reliably prevents, since the handler releasing an fd
 is reached by the very raise it exists to clean up after.
 
-File events, same shape: result on success, `#f` on failure. No
-`dynamic-wind`: callers close fds explicitly on both the normal and
+No `dynamic-wind`: callers close fds explicitly on both the normal and
 the error path, and cancellation arriving as a raised `cancelled`
 error (rather than a silent kill) is what makes that explicit cleanup
 reachable.
@@ -589,9 +618,10 @@ enclosing cancellation interrupts a nursery's join, the nursery kills
 its own scope, waits — uninterruptibly this time — for its children to
 finish unwinding, and only then re-raises. Nothing outlives its scope,
 including on the cancellation path. The cost is that a child parked in
-an operation that cannot be cancelled will hold its parent there; see
-Issues for the two that still cannot be. Fibers outside any nursery
-belong to the *root scope*,
+an operation that cannot be cancelled will hold its parent there —
+which today means only `flow-close`, and a close always completes on
+its own, so it bounds that wait rather than removing it. Fibers outside
+any nursery belong to the *root scope*,
 which is never cancelled and costs nothing on the hot path.
 
 #### `(flow-nursery proc)`
@@ -611,6 +641,10 @@ If the scope was cancelled by `flow-scope-cancel!`, the join raises
 `cancelled`. Under `flow-monitor`, deadline cancellation raises
 `timeout` instead.
 
+A raise from `PROC` **itself** — not from a child — is treated exactly
+like a child's: it fails the scope, so the children are cancelled and
+drained before it propagates.
+
 #### `(flow-scope? obj)`
 
 Returns `#t` if `OBJ` is a scope, otherwise `#f`.
@@ -628,6 +662,12 @@ fires first, the scope is cancelled and `flow-monitor` raises a
 `timeout` `<flow-error>`. This is the primitive the fan-out patterns
 below build on: "give this whole query N milliseconds, and whatever
 has not answered, cancel its I/O and stop waiting."
+
+Unlike `flow-nursery`, which calls `PROC` inline, `THUNK` runs on a
+**fresh child fiber**. It therefore does not receive the scope, and it
+does not run in the caller's dynamic environment — anything
+`parameterize`d around the `flow-monitor` call is not visible inside
+`THUNK`.
 
 #### `(flow-cancelled?)`
 
@@ -676,9 +716,10 @@ task:
   submission. A task whose scope is cancelled *before* it is
   dequeued is skipped entirely. A *running* task observes
   cancellation cooperatively: every channel operation it performs
-  raises `cancelled` once the scope is dead, and `(flow-cancelled?)`
-  is the explicit checkpoint for compute loops that touch no
-  channel; its puts after cancellation are dropped. Compute between
+  raises `cancelled` once the scope is dead — it does not silently
+  drop the value, it stops the task — and `(flow-cancelled?)` is the
+  explicit checkpoint for compute loops that touch no
+  channel. Compute between
   checkpoints runs to its next checkpoint — a Scheme thread cannot
   be preempted, so an uncooperative infinite loop is out of scope
   (literally).
@@ -733,6 +774,12 @@ What the library itself logs:
 | entry | when |
 |---|---|
 | `(flow2 channel-full NAME BOUND)` | a put parked on a full channel, once per saturation episode |
+| `(flow2 cancel-raised)` | a losing base's cancel thunk raised; the rest of the batch still ran |
+| `(flow2 collector-wait-raised)` | the collector could not re-arm its eventfd read; it retries next tick |
+| `(flow2 shutdown-workers-still-running N)` | `flow-run` gave up joining `N` workers and leaked the eventfd rather than reuse its number |
+
+The last two are the ones to grep for after an unexplained hang or fd
+leak: each names a path that recovered, or deliberately did not.
 
 ## Patterns
 
