@@ -253,7 +253,7 @@ The taxonomy, by symbol:
 | `timeout`      | a `flow-monitor` deadline expired                             |
 | `overflow`     | a full channel with no scheduler to park on, or a re-bound below the current length |
 | `compute`      | a worker task raised; the original object is in the cause     |
-| `wrong-thread` | a main-thread-only operation was attempted on a compute thread|
+| `wrong-thread` | an operation was attempted from a thread that does not own it — a loop-thread-only operation on a compute thread, or any flow2 operation on a thread the user forked |
 
 #### `(make-flow-error symbol message irritants cause)`
 
@@ -709,15 +709,27 @@ called `flow-run`, which owns the ring and runs every fiber, and the
 compute threads that same `flow-run` forked. "Cross-thread" throughout
 this document means between those, and nothing else.
 
-A thread the **user** forked is neither. It holds no worker pool, so a
-channel operation from it would fall through to the loop's own spawn
-path — mutating the loop's pending-thunk list with no synchronization
-against the loop's take-and-clear of it, and sending no eventfd wake, so
-the resume is lost outright or delayed by a whole wait timeout.
-`flow-put!`, `flow-get-try` and `flow-spawn` therefore raise
-`wrong-thread` when called from one, rather than corrupting the loop
-quietly. Outside a `flow-run` there is nothing to corrupt and no check:
-priming a channel before the loop starts is legitimate.
+A thread the **user** forked is neither. It holds no worker pool, so
+flow2 mistakes it for the loop thread: an operation from it reads the
+loop thread's current scope, mutates channels and the loop's
+pending-thunk list with no synchronization against the loop's
+take-and-clear of them, sends no eventfd wake — so a resume is lost
+outright or delayed by a whole wait timeout — and parks on a
+continuation that does not exist in that thread.
+
+**Every flow2 operation raises `wrong-thread` when called from one.**
+Not a list of them: `flow-perform` carries the check, so every
+suspending operation inherits it, and the four that reach a channel or
+the scheduler without suspending — `flow-put!`, `flow-get-try`,
+`flow-submit!`, `flow-spawn` — plus the scope and lifecycle entry
+points (`flow-nursery`, `flow-monitor`, `flow-scope-cancel!`,
+`flow-stop`) check on their own. Read the rule as universal; do not
+read the parenthetical as the boundary. An earlier version of this
+page named three procedures, and the three were the only three that
+had the check.
+
+Outside a `flow-run` there is nothing to corrupt and no check: priming
+a channel before the loop starts is legitimate.
 
 `flow-log` is the one exception, and genuinely takes any thread: it
 appends to a box that the calling thread alone writes.
