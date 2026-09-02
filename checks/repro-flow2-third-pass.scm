@@ -5,18 +5,25 @@
 ;;   letloop check ./src/ ./checks/ ./checks/repro-flow2-third-pass.scm
 ;;
 ;; and each one PASSES only when the library behaves as documented --
-;; so a run against the unfixed tree is a list of the findings.
+;; so a run against the tree as it was on 2026-08-24 is a list of the
+;; findings.
 ;;
-;; Finding 1 (close in a dead scope leaks the fd) is fixed; its
-;; regression check now lives in flow2.check.scm as
-;; ~check-flow2-009/close-in-a-dead-scope-still-closes, and the version
-;; here is kept as the original standalone reproduction. Findings 2
-;; (the README fan-out pattern hangs past the default bound) and 3 (a
-;; flow-read that loses a same-tick race drops received bytes) are
-;; still open.
-(library (repro flow2)
+;; ALL THREE ARE NOW FIXED, and each has a regression check in
+;; flow2.check.scm -- ~check-flow2-009/close-in-a-dead-scope-still-
+;; closes, ~check-flow2-003/gather-after-join-scales-past-the-default-
+;; bound, and ~check-flow2-006/read-losing-a-same-tick-race-keeps-its-
+;; bytes. What is kept here is the original reproduction of each, in the
+;; shape it was first written, because the shape is the argument.
+;;
+;; One of them changed meaning rather than behaviour.
+;; fan-out-pattern-past-bound gathers after the join on a channel left
+;; at the default bound, and it still deadlocks -- that is not a bug,
+;; it is what a bound is for. What was wrong was the README showing that
+;; shape; it now sizes the channel, and this check asserts the timeout
+;; it always produced.
+(library (repro-flow2-third-pass)
   (export ~check-repro/close-in-dead-scope-leaks-fd
-          ~check-repro/fan-out-pattern-hangs-past-bound
+          ~check-repro/fan-out-pattern-past-bound
           ~check-repro/fan-out-pattern-ok-under-bound
           ~check-repro/read-losing-same-tick-drops-bytes)
   (import (chezscheme)
@@ -92,8 +99,11 @@
   (define (~check-repro/fan-out-pattern-ok-under-bound)
     (equal? (run-fan-out 40) '(ok 40)))
 
-  (define (~check-repro/fan-out-pattern-hangs-past-bound)
-    (equal? (run-fan-out 50) '(ok 50)))
+  ;; The README's OLD code at 50 items. It times out, and always did --
+  ;; the finding was that this was the documented pattern, not that a
+  ;; bound blocks a putter.
+  (define (~check-repro/fan-out-pattern-past-bound)
+    (equal? (run-fan-out 50) '(error timeout)))
 
   ;; 3. Server parks on (choice (read client) (timeout 0.05)). The client
   ;;    fiber never yields between t=0 and t=100ms; at t=70ms it pushes
