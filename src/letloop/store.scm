@@ -13,7 +13,8 @@
           ~check-store-004/cyclic-reference
           ~check-store-005/build-cache-skips-the-build
           ~check-store-006/build-cache-sees-changed-inputs
-          ~check-store-007/cli-project-package)
+          ~check-store-007/cli-project-package
+          ~check-store-008/cache-write-is-idempotent)
 
   (import (chezscheme)
           (letloop cli base)

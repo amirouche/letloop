@@ -318,3 +318,20 @@
               (lambda () (letloop-store (list "build" root "store-cli-versioned" "v1"))))
             (and (file-exists? (string-append (store-build '(package store-cli-hello)) "/hello"))
                  (file-exists? (string-append (store-build '(package store-cli-versioned v1)) "/hello"))))))))
+
+;; Two builds racing on the same key both pass BUILD-CACHE-REF's "not
+;; cached yet" check before either finishes, so both call
+;; BUILD-CACHE-SET! for the same key -- found for real building
+;; bootstrap-tls, where an accidental second `letloop store build tls`
+;; overlapping the first crashed with "file exists" from
+;; call-with-output-file's default mode. No sandbox needed: this is
+;; the cache write alone, called twice, which is the exact shape of
+;; the race without needing two builds to actually overlap in time.
+(define ~check-store-008/cache-write-is-idempotent
+  (lambda ()
+    (system! "mkdir -p /tmp/letloop/")
+    (putenv "LETLOOP_STORE" "/tmp/letloop/store-check-008-store")
+    (system! "rm -rf /tmp/letloop/store-check-008-store")
+    (build-cache-set! "racing-key" "/first-writer")
+    (build-cache-set! "racing-key" "/second-writer")
+    #t))

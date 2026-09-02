@@ -335,10 +335,17 @@
                 (file-exists? destination)
                 destination)))))
 
+;; 'replace, not the default: two builds racing on the same key both
+;; pass BUILD-CACHE-REF's "not cached yet" check, both build, and both
+;; land here -- the same race STORE-PLACE! already tolerates by
+;; checking file-exists? first. Whichever writes second must not
+;; crash; content addressing already guarantees they agree on what to
+;; write.
 (define (build-cache-set! key destination)
   (system! (format #f "mkdir -p ~a" (shell-single-quote (store-cache-directory))))
   (call-with-output-file (string-append (store-cache-directory) "/" key)
-    (lambda (port) (display destination port) (newline port))))
+    (lambda (port) (display destination port) (newline port))
+    'replace))
 
 ;; Builds DERIVATION-PATH, first building anything it references
 ;; through (derivation "...") -- as its build-environment root, as an
