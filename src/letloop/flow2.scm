@@ -1992,10 +1992,17 @@
                                    (%scope-dead? scope))
                               (void))
                              (#t
+                              ;; The irritants name the worker — its
+                              ;; request channel's (worker . i) — so a
+                              ;; reply fished out of a shared response
+                              ;; channel still says WHERE it failed,
+                              ;; the always-a-reply design's original
+                              ;; "original + worker id" promise.
                               (%channel-put! (flow-task-response task)
                                              (make-flow-error
                                               'compute "flow2: worker task raised"
-                                              '() ex)
+                                              (list (flow-channel-name channel))
+                                              ex)
                                              #t)))
                     ((flow-task-thunk task)))
                   (%task-scope #f)))

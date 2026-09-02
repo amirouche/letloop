@@ -1028,7 +1028,11 @@
        (flow-stop)))
    1)
   (and (flow-error-compute? result)
-       (eq? 'kaboom (flow-error-cause result))))
+       (eq? 'kaboom (flow-error-cause result))
+       ;; the reply names the worker it came from -- its request
+       ;; channel's name -- so a shared response channel still says
+       ;; WHERE the task failed
+       (equal? '((worker . 0)) (flow-error-irritants result))))
 
 ;; Workers have no I/O verbs: performing a ring event raises
 ;; wrong-thread on the compute thread, catchable by the task.
