@@ -9,12 +9,12 @@ Amirouche A. BOUBEKKI
 ## Status
 
 `(letloop flow2)` is **implemented**, in `src/letloop/flow2.scm`, with
-66 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
+69 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
 `(letloop flow)` stays untouched and keeps serving its current ones.
 
 This document began as a draft specification and is now the library's
 reference, so where the two ever disagree the source wins. It was last
-reconciled against the implementation on 2026-08-26, after the third
+reconciled against the implementation on 2026-08-27, after the fourth
 adverse review. Two earlier reconciliations changed documented
 behaviour: channels became bounded by default with a full put parking
 (2026-08-17), which is the one change that would break code written
@@ -92,6 +92,31 @@ Two costs are stated where they apply rather than here: a write that
 loses a race cannot be recovered the way a read now can (see
 `flow-write`), and a bounded channel drained only after a join must be
 sized for the whole fan-out (see the pattern).
+
+A fourth pass on 2026-08-27 read the third pass's own fixes, and its
+six findings are what those fixes had left behind. The pattern this
+time is **where a fix was applied, not whether it was right**. The
+cross-thread guard was correct and went to the three procedures the
+finding named, while `flow-perform` — which every suspending operation
+funnels through, and which four more entry points bypass — went
+without: `flow-get!` from a thread the user forked did not raise
+`wrong-thread`, it succeeded, dequeuing off-loop and stranding the
+putter it "resumed". `flow-read`'s new backlog was purged on close by
+an index its own recv had never joined, so a late payload could
+re-create the stash under an fd number the kernel was about to reissue
+— the cross-connection leak the purge exists to prevent. And two
+examples still contradicted the reference sections this document had
+just reconciled: one read a clean EOF as falsy after the encoding was
+unified, the other used `#f` as both a sentinel and a legal reply.
+
+So the lesson the third pass drew has a second half. **A fix belongs at
+the choke point the finding passes through, and documentation that
+enumerates what is covered will drift to what was covered.** The three
+procedures named in the Threads section were the three that had the
+check; the guard lives in `flow-perform` now and the section states a
+rule. The reproducers are in `checks/repro-flow2-fourth-pass.scm`, and
+the two for the examples run the page's code as printed — which is the
+third pass's own lesson, applied to the pass that stated it.
 
 The lesson for this document specifically: **reconciling docs against
 code is only right when the code is the part that is right.** The
