@@ -299,3 +299,109 @@ that means hedged requests (`(atlas-stoa hedge)`, which uses
 `flow-worker-io` thunk, not the outer request function -- wrapping
 outside would prep the timeout SQE from the worker and reproduce this
 crash exactly.
+
+## dns.body.scm preps SQEs without null-checking io_uring_get_sqe
+
+`io_uring_get_sqe()` returns NULL when the submission queue is full.
+`loop-get-sqe` (`src/letloop/liburing/low.scm:1998`) exists to handle
+exactly that -- submit, retry once, then raise `"submission queue
+full"`:
+
+```scheme
+(define loop-get-sqe
+  (lambda (ring)
+    (let ((sqe (io-uring-get-sqe ring)))
+      (if (eqv? sqe 0)
+          (begin
+            (io-uring-submit ring)
+            (let ((sqe (io-uring-get-sqe ring)))
+              (if (eqv? sqe 0)
+                  (error 'loop "submission queue full")
+                  sqe)))
+          sqe))))
+```
+
+31 call sites in `flow.scm` use it. `dns.body.scm` does not -- four raw
+`io-uring-get-sqe` calls, each feeding its result straight into a prep
+with no check in between:
+
+| line | prep |
+|---|---|
+| 247 | `io-uring-prep-connect` |
+| 261 | `io-uring-prep-send` |
+| 275 | `io-uring-prep-recv` |
+| 285 | `io-uring-prep-link-timeout` |
+
+All four are built on `io_uring_prep_rw`, which writes fields *through*
+the SQE pointer it is handed. With a full SQ that is a write through
+address 0.
+
+Note this is a DIFFERENT defect from the entry above, and the earlier
+one being fixed does not cover it: there the problem was the right call
+made from the wrong thread; here it is a missing null check on the loop
+thread itself.
+
+### Observed
+
+atlas-stoa's search server (TODO 0x004D there), 2026-08-24. Symptom is
+`Exception: invalid memory reference. Some debugging context lost`,
+logged repeatedly while the server keeps serving -- 112 lines in one
+~4-minute production window, and 752 from a single round of 12
+concurrent queries in a scratch reproduction.
+
+Caught under `gdb -p PID -batch -ex 'handle SIGSEGV stop print pass'
+-ex continue -ex 'thread apply all bt'`:
+
+```
+#0  io_uring_prep_rw () from .../liburing-ffi.so.2
+#1  0x00000000447db548 in ?? ()          <- Scheme frame
+#3  S_call_help ()
+#4  boot_call ()
+#5  Sscheme_start ()
+#6  main ()
+```
+
+Thread 1 -- the loop thread (`main` at the bottom). Every worker was
+parked in `S_condition_wait`, i.e. exactly where `flow-worker-io` puts
+them, which is what rules out the off-loop entry above as the cause.
+
+### Why it needs concurrency to show up
+
+`src/letloop/tls/uring.scm:160` resolves through `dns-resolve-a` on
+connection setup, and `dns.body.scm:23-24` caches results with a
+60-second TTL. So the SQ only fills when many connections are
+established SIMULTANEOUSLY with the DNS entry missing from the cache at
+that same instant -- a cache stampede at TTL expiry, or connection-pool
+exhaustion under a fetch storm. Sequential load did not reproduce it;
+12 concurrent requests did, immediately.
+
+Two consequences worth knowing when hunting this:
+
+- `--optimize-level=0` and `=3` behave identically. It is a C-level
+  null write, so there is no Scheme type check for `-O0` to catch --
+  which also rules out the usual "unchecked record accessor at -O3"
+  explanation for `invalid memory reference`.
+- Attaching gdb can SUPPRESS it. ptrace slows the process enough to
+  keep the SQ from filling; the sequential repro that crashed reliably
+  unattached went clean under the debugger until concurrency was
+  raised.
+
+### Fix
+
+Route the four sites through `loop-get-sqe` instead of raw
+`io-uring-get-sqe`.
+
+**One subtlety, do not substitute naively:** the recv SQE (275) and its
+linked timeout (285) are an `IOSQE-IO-LINK` pair and must be
+CONSECUTIVE in the submission queue. `loop-get-sqe` calls
+`io-uring-submit` on a full queue before retrying, which would flush
+the recv SQE and break the link. That pair needs both SQEs reserved
+before either is prepped -- check both, and do the single
+submit-and-retry up front if either comes back null.
+
+### Check that should exist
+
+Nothing currently fails when an SQE is prepped from a null pointer; it
+simply crashes later, and only under load. A check that fills the
+submission queue and then drives a DNS resolution would pin this --
+same gap the entry above notes for off-loop SQE preparation.
