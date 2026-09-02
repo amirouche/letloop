@@ -536,6 +536,27 @@ static void letloop_register_sodium_symbols(void) {
 #endif /* LETLOOP_SODIUM_STATIC */
 
 #ifdef LETLOOP_ARGON2_STATIC
+/* argon2's three entry points come from libsodium, not libargon2.
+ *
+ * libsodium vendors its own argon2 -- crypto_pwhash is built on it --
+ * and its static archive exports argon2id_hash_raw, _hash_encoded and
+ * _verify as ordinary symbols. libargon2 defines those same three, and
+ * blake2b under them, so the two archives share sixteen symbols and
+ * cannot both appear on one link line: "multiple definition".
+ *
+ * Taking them from libsodium resolves that by not needing libargon2 at
+ * all here. What made it possible is that argon2_encodedlen -- the one
+ * of this library's four entry points libsodium does not provide -- is
+ * computed in Scheme now, being arithmetic over constants rather than
+ * cryptography.
+ *
+ * This does lean on symbols libsodium does not advertise: they are
+ * absent from its shared object, and present in the archive only
+ * because a static archive exposes every object it contains. If a
+ * future libsodium hides them there too, the gate in (letloop package
+ * letloop) fails on the missing symbol at build time rather than at
+ * someone's first password hash.
+ */
 #define LETLOOP_ARGON2_SYM(name)                            \
   do {                                                      \
     extern void name##_letloop_alias(void) __asm__(#name);  \
@@ -546,7 +567,6 @@ static void letloop_register_argon2_symbols(void) {
   LETLOOP_ARGON2_SYM(argon2id_hash_raw);
   LETLOOP_ARGON2_SYM(argon2id_hash_encoded);
   LETLOOP_ARGON2_SYM(argon2id_verify);
-  LETLOOP_ARGON2_SYM(argon2_encodedlen);
 }
 #endif /* LETLOOP_ARGON2_STATIC */
 

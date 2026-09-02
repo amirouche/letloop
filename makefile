@@ -80,16 +80,12 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 	@#
 	@# The same shape is what `letloop compile` produces, by copying its
 	@# own host and appending a different boot. No C compiler runs there.
-	@# argon2 only when sodium is not linked: libsodium vendors its own
-	@# copy of argon2 and defines argon2id_hash_raw, _encoded and
-	@# _verify itself, so linking both archives fails outright with
-	@# "multiple definition" -- observed, not theorised. Taking
-	@# libsodium's three and libargon2's argon2_encodedlen (the one
-	@# libsodium does not export) would need
-	@# --allow-multiple-definition, which silently splices two
-	@# different argon2 implementations into one binary. sodium wins
-	@# because opaque and oprf link against it; (letloop argon2) is
-	@# then unavailable on such a build rather than subtly wrong.
+	@# argon2 needs no archive of its own: libsodium vendors argon2 and
+	@# its static archive exports the three entry points (letloop
+	@# argon2) calls, so registering them costs nothing beyond -lsodium
+	@# already being there. Linking libargon2 alongside is what does
+	@# not work -- the two share sixteen symbols, blake2b included, and
+	@# collide outright.
 	@#
 	@# The optional archives are linked inside --start-group, so their
 	@# order on that line stops mattering: libopaque needs liboprf needs
@@ -134,9 +130,8 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 	         cc -x c -o /dev/null - -lsodium >/dev/null 2>&1; then \
 	        SODIUM_FLAGS="-DLETLOOP_SODIUM_STATIC -lsodium"; \
 	      fi; \
-	      if [ -z "$$SODIUM_FLAGS" ] && printf 'int main(void){return 0;}\n' | \
-	         cc -x c -o /dev/null - -largon2 >/dev/null 2>&1; then \
-	        ARGON2_FLAGS="-DLETLOOP_ARGON2_STATIC -largon2"; \
+	      if [ -n "$$SODIUM_FLAGS" ]; then \
+	        ARGON2_FLAGS="-DLETLOOP_ARGON2_STATIC"; \
 	      fi; \
 	      if printf 'int main(void){return 0;}\n' | \
 	         cc -x c -o /dev/null - -lopaque -loprf -lsodium >/dev/null 2>&1; then \

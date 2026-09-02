@@ -99,13 +99,17 @@
       ;; it is absent -- (letloop http) loses its parser, and sodium
       ;; and opaque fail on first call.
       ;;
-      ;; argon2 is deliberately not among them, and not an oversight:
-      ;; libsodium vendors its own argon2 and defines three of the
-      ;; four symbols (letloop argon2) resolves, so linking both
-      ;; archives fails with "multiple definition". See the makefile,
-      ;; which will not even probe for argon2 once sodium is linked.
+      ;; argon2 is checked but has no input of its own: libsodium
+      ;; vendors argon2, so its archive already carries the three entry
+      ;; points (letloop argon2) calls. Linking libargon2 alongside is
+      ;; what does not work -- sixteen shared symbols, blake2b
+      ;; included. This grep is also the gate on libsodium continuing
+      ;; to export them: they are not its public API, so if a future
+      ;; release hides them the build fails here rather than at
+      ;; someone's first password hash.
       "grep -q phr_parse_request_wrapper /build/symbols\n"
       "grep -q sodium_init /build/symbols\n"
+      "grep -qE ' [tT] argon2id_hash_raw' /build/symbols\n"
       "grep -q opaque_Register /build/symbols\n"
       ;; prove the letloop just built actually runs, here, rather than
       ;; leaving it to whoever picks the artifact up
