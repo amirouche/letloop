@@ -870,6 +870,54 @@
 ;; Compute threads
 ;;------------------------------------------------------------
 
+;; The monitor-side twin of cancelled-parent-drains-grandchildren: the
+;; join/deadline race runs under the PARENT scope so an enclosing
+;; cancellation reaches it, but when it did, the raise used to
+;; propagate straight out of flow-monitor — no %scope-fail!, no
+;; %scope-finish, no drain — so the monitor's children were cancelled
+;; transitively yet nobody waited for them, and they outlived the
+;; monitor call. The child here is a compute task whose completion is
+;; timestamped by a flag: the fiber that called flow-monitor must
+;; observe that flag already set at the moment the interruption passes
+;; through it.
+(define (~check-flow2-004/monitor-interrupted-by-parent-drains-children)
+  (define task-finished? #f)
+  (define seen-at-monitor-exit 'unset)
+  (define outer-raised? #f)
+  (flow-run
+   (lambda (workers)
+     (guard (ex (#t (set! outer-raised? #t)))
+       (flow-nursery
+        (lambda (outer)
+          (flow-spawn
+           (lambda ()
+             (guard (ex (#t (set! seen-at-monitor-exit task-finished?)
+                            (raise ex)))
+               (flow-monitor
+                5.0
+                (lambda ()
+                  ;; owned by the monitor's scope; the worker sleeps
+                  ;; past the sibling's raise, so the drain has
+                  ;; something real to wait for
+                  (flow-submit! (car workers)
+                                (lambda ()
+                                  (sleep (make-time 'time-duration
+                                                    80000000 0))
+                                  (set! task-finished? #t))
+                                (make-flow-channel 'resp))
+                  ;; park the monitor's own fiber too, so the join
+                  ;; cannot win before the interruption arrives
+                  (flow-sleep 5.0))))))
+          (flow-spawn
+           (lambda ()
+             (flow-sleep 0.02)
+             (error 'sibling "boom"))))))
+     (flow-stop))
+   1)
+  (assert outer-raised?)
+  (assert (eq? seen-at-monitor-exit #t))
+  #t)
+
 (define (~check-flow2-005/worker-task-replies)
   (define result #f)
   (flow-run
