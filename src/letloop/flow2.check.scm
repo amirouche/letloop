@@ -2161,3 +2161,71 @@
   (assert (eqv? 8 (length (unbox outcomes))))
   (assert (eqv? 1 (flow-channel-queue-length channel)))
   #t)
+
+;; Fourth adverse pass, finding 2. loop-close-prep! purges the fd's
+;; recv stash, but flow2's recv registered its handler in loop-handlers
+;; ONLY -- never in the per-fd operation index -- so the teardown pass
+;; skipped it and the handler outlived the close. A recv that completed
+;; with data in the window between the cancel submit and the kernel
+;; acting on it then ran loop-recv-backlog-put! AFTER the purge,
+;; re-creating a stash under a number the kernel was about to reissue:
+;; the next connection's first flow-read served the previous
+;; connection's bytes.
+;;
+;; The write is aimed at that window rather than guaranteed to land in
+;; it -- whether the kernel takes the send or the cancel first is not
+;; ours to decide. So this reproduces sometimes and never fails
+;; spuriously: with the recv in the index the stash CANNOT come back,
+;; because the purge deletes the handler and the late CQE finds
+;; nothing (the drain has already recycled its buffer).
+(define (~check-flow2-009/a-closed-fd-does-not-hand-on-a-stash)
+  (define PORT 18253)
+  (define payload (string->utf8 "after-the-close"))
+  (define race 'not-set)
+  (define stash 'not-set)
+  (define closed-fd #f)
+  (flow-run
+   (lambda (workers)
+     (let ((listen-fd (loop-socket-new AF-INET SOCK-STREAM 0)))
+       (loop-bind listen-fd "127.0.0.1" PORT)
+       (loop-listen listen-fd 128)
+       (flow-spawn
+        (lambda ()
+          (let ((client (flow-perform (flow-accept listen-fd))))
+            (set! closed-fd client)
+            (set! race
+                  (flow-perform
+                   (flow-choice
+                    (flow-wrap (flow-read client) (lambda (x) (list 'read x)))
+                    (flow-wrap (flow-timeout 0.05) (lambda (x) 'timeout)))))
+            ;; the fd goes away while the recv is still in the ring
+            (loop-close client)
+            ;; long enough for the late CQE to be drained and for its
+            ;; handler to run, if one is still registered
+            (flow-sleep 0.3)
+            (set! stash (loop-recv-backlog-take! client)))
+          (loop-close listen-fd)
+          (flow-stop)))
+       (flow-spawn
+        (lambda ()
+          (call-with-values (lambda () (make-sockaddr-in 127 0 0 1 PORT))
+            (lambda (addr addrlen)
+              (let ((fd (loop-connect addr addrlen)))
+                (foreign-free addr)
+                ;; let the server park on its choice first
+                (flow-sleep 0.01)
+                (let ((t0 (real-time)))
+                  ;; write(2), not flow-write: this fiber must not yield,
+                  ;; or the loop drains between the deadline and the
+                  ;; send and there is no window left to aim at
+                  (flow2-check-spin-until (+ t0 52))
+                  (%flow2-check-write2 fd payload (bytevector-length payload)))
+                (flow-sleep 1.0)
+                (loop-close fd))))))))) 
+  (assert closed-fd)
+  ;; if the read won outright the close raced nothing and there was
+  ;; never a payload to strand; either way nothing may be left under a
+  ;; closed fd's number
+  (assert (or (eq? race 'timeout) (pair? race)))
+  (assert (not stash))
+  #t)

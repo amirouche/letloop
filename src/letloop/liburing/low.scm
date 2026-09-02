@@ -397,6 +397,12 @@
    ;; per fd and purged with the fd
    loop-recv-backlog-put! loop-recv-backlog-take!
 
+   ;; the per-fd operation index loop-close-prep! tears down, for
+   ;; libraries that build their own SQEs instead of calling loop-read
+   ;; and loop-write -- a socket operation NOT in this index outlives
+   ;; the close of its fd
+   loop-fd-op-add! loop-fd-op-remove!
+
    ;; close split the same way, for libraries that need close to be an
    ;; event they can compose rather than an unconditional suspension
    loop-close-block
@@ -2435,11 +2441,46 @@
   ;; the kernel has already taken those bytes off the socket, so
   ;; dropping them is silent data loss for the connection. Push it here
   ;; instead and the next recv on the fd finds it.
+  ;;
+  ;; Nothing here can tell a live fd from one loop-close-prep! has
+  ;; already purged, and a put after that purge is a cross-connection
+  ;; data leak once the kernel reissues the number. What keeps that
+  ;; from happening is upstream: a recv registered through
+  ;; loop-fd-op-add! has its handler deleted by the purge, so the late
+  ;; CQE never reaches the code that would call this. A caller that
+  ;; skips that registration reopens the leak.
   (define loop-recv-backlog-put!
     (lambda (fd payload)
       (hashtable-set! %recv-backlog fd
                       (append (hashtable-ref %recv-backlog fd '())
                               (list payload)))))
+
+  ;; Register/unregister ID as an operation in flight on FD, so
+  ;; loop-close-prep! can resume it with a synthetic -ECANCELED and
+  ;; take its handler out of loop-handlers. Two things follow from
+  ;; being in this index, and both matter for a socket:
+  ;;
+  ;; - the parked fiber wakes on the close instead of on the CQE, and
+  ;; - the operation's REAL completion then finds no handler and is
+  ;;   dropped by the drain -- which is the only thing that stops a
+  ;;   recv that completed with data just before the cancel landed
+  ;;   from running its handler after the fd is gone.
+  ;;
+  ;; Every registration must be undone on every completion path, or
+  ;; the list grows for the life of the connection.
+  (define loop-fd-op-add!
+    (lambda (fd id)
+      (hashtable-set! %fd-handlers fd
+                      (cons id (hashtable-ref %fd-handlers fd '())))))
+
+  ;; Deletes the key when the last operation goes, rather than leaving
+  ;; an empty list behind under an fd number the kernel will reissue.
+  (define loop-fd-op-remove!
+    (lambda (fd id)
+      (let ((ids (remq id (hashtable-ref %fd-handlers fd '()))))
+        (if (null? ids)
+            (hashtable-delete! %fd-handlers fd)
+            (hashtable-set! %fd-handlers fd ids)))))
 
   ;; Non-blocking: pop the oldest stashed payload for FD, or #f.
   (define loop-recv-backlog-take!
@@ -2518,13 +2559,11 @@
         (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
         (io-uring-sqe-set-buf-group sqe %buf-ring-bgid)
         (io-uring-sqe-set-data64 sqe id)
-        (hashtable-set! %fd-handlers fd
-                        (cons id (hashtable-ref %fd-handlers fd '())))
+        (loop-fd-op-add! fd id)
         (let ((res (loop-abort
                      (lambda (k)
                        (hashtable-set! (loop-handlers %loop) id k)))))
-          (hashtable-set! %fd-handlers fd
-                          (remq id (hashtable-ref %fd-handlers fd '())))
+          (loop-fd-op-remove! fd id)
           (cond
            ((fx<? res 0)
             (hashtable-delete! %buf-data id)
@@ -2547,13 +2586,11 @@
           (io-uring-prep-send sqe fd (bytevector-pointer bv)
                               (bytevector-length bv) 0)
           (io-uring-sqe-set-data64 sqe id)
-          (hashtable-set! %fd-handlers fd
-                          (cons id (hashtable-ref %fd-handlers fd '())))
+          (loop-fd-op-add! fd id)
           (let ((res (loop-abort
                        (lambda (k)
                          (hashtable-set! (loop-handlers %loop) id k)))))
-            (hashtable-set! %fd-handlers fd
-                            (remq id (hashtable-ref %fd-handlers fd '())))
+            (loop-fd-op-remove! fd id)
             (unlock-object bv)
             (cond
              ((fx<=? res 0) #f)

@@ -120,6 +120,7 @@
    ~check-flow2-005/worker-resume-runs-cancels-first
    ~check-flow2-005/a-thread-the-user-forked-is-refused
    ~check-flow2-005/every-entry-point-refuses-a-stray-thread
+   ~check-flow2-009/a-closed-fd-does-not-hand-on-a-stash
 
    ;; block-and-wait machinery, ported from (letloop flow)'s
    ;; ~check-flow-011 series, plus the branch finding 1's fix added
@@ -1650,8 +1651,35 @@
                       (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
                       (io-uring-sqe-set-buf-group sqe (loop-buf-ring-bgid))
                       (io-uring-sqe-set-data64 sqe id)
+                      ;; In the fd's operation index, not just in
+                      ;; loop-handlers. Without it loop-close-prep!'s
+                      ;; teardown pass skipped this recv, so its handler
+                      ;; survived the close -- and a recv that completed
+                      ;; with data in the window between the cancel
+                      ;; submit and the kernel acting on it then ran the
+                      ;; backlog put BELOW, re-creating a stash for an
+                      ;; fd whose stash had just been purged. After the
+                      ;; kernel reissued the number, the next
+                      ;; connection's first flow-read was served the
+                      ;; previous connection's bytes. Registered, the
+                      ;; handler is deleted by the purge and the late
+                      ;; CQE finds nothing (the drain has already
+                      ;; recycled its buffer and drops the orphan).
+                      ;;
+                      ;; flow-write deliberately does NOT register: its
+                      ;; handler is what unlocks the pinned bytevector,
+                      ;; and running it from the synthetic resume would
+                      ;; unlock memory the kernel may not be done
+                      ;; reading. It has no stash to corrupt, and its
+                      ;; real -ECANCELED CQE releases the pin.
+                      (loop-fd-op-add! fd id)
                       (hashtable-set! (loop-handlers (loop-current)) id
                                       (lambda (res)
+                                        ;; On every path out, including
+                                        ;; -ECANCELED: the index is
+                                        ;; per-connection and a read
+                                        ;; loop runs for its lifetime.
+                                        (loop-fd-op-remove! fd id)
                                         (cond
                                          ((fx<? res 0)
                                           (loop-buf-data-take! id)
