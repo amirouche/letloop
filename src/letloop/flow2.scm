@@ -80,6 +80,7 @@
    ~check-flow2-002/channel-bound-overflow
    ~check-flow2-002/channel-bound-below-length
    ~check-flow2-002/channel-bound-zero-rejected
+   ~check-flow2-002/raising-bound-wakes-parked-putters
    ~check-flow2-002/channel-get-try-default
    ~check-flow2-002/channel-get-or-timeout
    ~check-flow2-000/log-is-nonblocking-and-drains
@@ -1369,12 +1370,30 @@
     (unless (or (not n) (and (fixnum? n) (fx>? n 0)))
       (error 'flow-channel-buffer-size!
              "bound must be a positive fixnum, or #f for unbounded" n))
-    (with-mutex (flow-channel-mutex channel)
-      (when (and n (fx>? (flow-channel-length channel) n))
-        (raise (make-flow-error 'overflow
-                                "flow2: channel already over the requested bound"
-                                (list n (flow-channel-length channel)) #f)))
-      (flow-channel-bound! channel n)))
+    (let ((wake
+           (with-mutex (flow-channel-mutex channel)
+             (when (and n (fx>? (flow-channel-length channel) n))
+               (raise (make-flow-error 'overflow
+                                       "flow2: channel already over the requested bound"
+                                       (list n (flow-channel-length channel)) #f)))
+             (flow-channel-bound! channel n)
+             ;; Slots the new bound just opened, each owed one parked
+             ;; putter. %channel-wake-space! otherwise only runs after
+             ;; a dequeue, so growing the bound would leave putters
+             ;; parked despite the room until the next get — and a
+             ;; consumer that stopped consuming is exactly when an
+             ;; operator raises a bound to relieve the producers.
+             (let ((waiting (length (flow-channel-space channel))))
+               (if n
+                   (fxmin waiting
+                          (fxmax 0 (fx- n (flow-channel-length channel))))
+                   waiting)))))
+      ;; Outside the mutex, one wake per opened slot: each call resumes
+      ;; at most one live waiter and rechecks the room itself, so a
+      ;; woken putter racing a slot away turns a later wake into a
+      ;; no-op rather than an over-admission.
+      (do ((i 0 (fx+ i 1))) ((fx>=? i wake))
+        (%channel-wake-space! channel))))
 
   ;;------------------------------------------------------------
   ;; Timers (identical to flow)
