@@ -104,6 +104,7 @@
    ~check-flow2-004/monitor-deadline
    ~check-flow2-004/monitor-interrupted-by-parent-drains-children
    ~check-flow2-005/shutdown-joins-the-worker-pool
+   ~check-flow2-005/straggler-does-not-corrupt-the-next-run
    ~check-flow2-005/nursery-waits-for-its-compute-task
    ~check-flow2-003/cancel-is-visible-to-non-suspending-ops
    ~check-flow2-003/cancelled-parent-drains-grandchildren
@@ -434,38 +435,51 @@
   ;; Cross-thread spawn: the loop's mailbox
   ;;------------------------------------------------------------
 
-  ;; #t only on threads forked by flow-run's compute pool.
+  ;; Everything one flow-run's compute pool shares — the eventfd, its
+  ;; write/read buffer, the spawn mailbox, and the liveness bookkeeping
+  ;; — lives in ONE record created by that flow-run, and every worker
+  ;; holds its own run's record through %worker-current?. These used to
+  ;; be globals, and a straggler worker that outlived its run's 2s
+  ;; shutdown join then corrupted the NEXT run through them: its exit
+  ;; decremented the new run's live count, so the new shutdown
+  ;; undercounted and closed the eventfd with one of its own workers
+  ;; still live — resurrecting exactly the close-while-a-writer-lives
+  ;; bug the join exists to prevent — and its spawn-safe calls consed a
+  ;; dead run's continuations into the new loop's mailbox. With the
+  ;; record, a straggler can only ever touch the run that created it:
+  ;; its signals land on its own leaked fd, its thunks in a mailbox
+  ;; nobody drains (a dead run's resumes SHOULD be dropped), and its
+  ;; exit wakes a join that has already given up on it.
+  ;;
+  ;; The buffer is one 8-byte cell holding the value 1, allocated with
+  ;; the eventfd and never written from Scheme again, so every
+  ;; cross-thread wake-up is a bare write(2) instead of a
+  ;; foreign-alloc / foreign-free pair on the hottest path the pool
+  ;; has. The live count is guarded by the mutex rather than CAS'd
+  ;; because the shutdown join needs a condition variable anyway.
+  (define-record-type* <flow2-pool>
+    (make-flow-pool% eventfd buffer spawns mutex gone live running?)
+    %flow-pool?
+    (eventfd  %pool-eventfd)
+    (buffer   %pool-buffer)
+    (spawns   %pool-spawns)
+    (mutex    %pool-mutex)
+    (gone     %pool-gone)
+    (live     %pool-live     %pool-live!)
+    (running? %pool-running? %pool-running?!))
+
+  ;; This run's pool on threads forked by flow-run's compute pool, #f
+  ;; on the loop thread — so it doubles as the am-I-on-a-worker test.
   (define %worker-current? (make-thread-parameter #f))
 
   ;; The scope of the task currently running on THIS compute thread;
   ;; #f while the worker idles on its request channel.
   (define %task-scope (make-thread-parameter #f))
 
-  ;; Thunks a compute thread wants run on the loop thread — resuming
-  ;; a fiber whose channel get a worker's put just completed. Drained
-  ;; by the collector fiber, woken through the eventfd.
-  (define %cross-thread-spawns (box '()))
-  (define %flow2-eventfd #f)
-  (define %flow2-workers-running? #f)
-
-  ;; One 8-byte buffer holding the value 1, allocated with the eventfd
-  ;; and never written again, so every cross-thread wake-up is a bare
-  ;; write(2) instead of a foreign-alloc / foreign-free pair on the
-  ;; hottest path this pool has. Shared by every worker, which is safe
-  ;; precisely because nobody mutates it after this.
-  (define %flow2-eventfd-buffer #f)
-
-  ;; Worker liveness, so shutdown can join rather than hope. The count
-  ;; is guarded by the mutex rather than CAS'd because the waiter needs
-  ;; a condition variable anyway.
-  (define %flow2-workers-live 0)
-  (define %flow2-workers-mutex (make-mutex))
-  (define %flow2-workers-gone (make-condition))
-
-  (define (%flow-worker-exited!)
-    (with-mutex %flow2-workers-mutex
-      (set! %flow2-workers-live (fx- %flow2-workers-live 1))
-      (condition-broadcast %flow2-workers-gone)))
+  (define (%flow-worker-exited! pool)
+    (with-mutex (%pool-mutex pool)
+      (%pool-live! pool (fx- (%pool-live pool) 1))
+      (condition-broadcast (%pool-gone pool))))
 
   (define %eventfd-create
     (let ((func (foreign-procedure __atomic __disable_interrupts __errno
@@ -480,8 +494,9 @@
   (define %eventfd-signal!
     (let ((func (foreign-procedure __atomic __disable_interrupts __errno
                                    "write" (int void* size_t) integer-64)))
-      (lambda (fd)
-        (call-with-values (lambda () (func fd %flow2-eventfd-buffer 8))
+      (lambda (pool)
+        (call-with-values (lambda () (func (%pool-eventfd pool)
+                                           (%pool-buffer pool) 8))
           (lambda (n errno) (>= n 0))))))
 
   (define %eventfd-close
@@ -489,35 +504,37 @@
                                    "close" (int) int)))
       (lambda (fd) (call-with-values (lambda () (func fd)) (lambda (r e) r)))))
 
-  ;; Park the collector fiber on FD until a worker signals it.
-  ;; Reads into a buffer owned by the pool rather than one allocated
-  ;; per wait. The collector parks here and, at shutdown, is simply
-  ;; never resumed -- the loop has stopped -- so a per-wait allocation
-  ;; was freed on every path except the one that always happens, and
-  ;; leaked eight bytes plus its header per flow-run.
+  ;; Park the collector fiber on the pool's eventfd until a worker
+  ;; signals it. Reads into the buffer owned by the pool rather than
+  ;; one allocated per wait. The collector parks here and, at shutdown,
+  ;; is simply never resumed -- the loop has stopped -- so a per-wait
+  ;; allocation was freed on every path except the one that always
+  ;; happens, and leaked eight bytes plus its header per flow-run.
   (define %eventfd-wait
-    (lambda (fd)
+    (lambda (pool)
       (let* ((sqe (loop-get-sqe (loop-ring (loop-current))))
              (id (loop-alloc-id!)))
-        (io-uring-prep-read sqe fd %flow2-eventfd-buffer 8 0)
+        (io-uring-prep-read sqe (%pool-eventfd pool) (%pool-buffer pool) 8 0)
         (io-uring-sqe-set-data64 sqe id)
         (loop-abort
          (lambda (k)
            (hashtable-set! (loop-handlers (loop-current)) id k))))))
 
   ;; loop-spawn from the loop thread (the hot path, untouched); from
-  ;; a compute thread, queue the thunk and wake the loop through the
-  ;; eventfd. Only channel internals reach this from a worker — there
-  ;; is deliberately no user-facing cross-thread spawn.
+  ;; a compute thread, queue the thunk on the worker's OWN run's pool
+  ;; and wake that run's loop through its eventfd. Only channel
+  ;; internals reach this from a worker — there is deliberately no
+  ;; user-facing cross-thread spawn. A worker always holds its pool,
+  ;; and a straggler's pool keeps its (leaked) fd, so there is no
+  ;; no-pool case left to error on.
   (define %flow-spawn-safe
     (lambda (thunk)
-      (if (%worker-current?)
-          (begin
-            (unless %flow2-eventfd
-              (error 'flow2 "cross-thread resume with no compute pool running"))
-            (flow-box-cons! %cross-thread-spawns thunk)
-            (%eventfd-signal! %flow2-eventfd))
-          (loop-spawn thunk))))
+      (let ((pool (%worker-current?)))
+        (if pool
+            (begin
+              (flow-box-cons! (%pool-spawns pool) thunk)
+              (%eventfd-signal! pool))
+            (loop-spawn thunk)))))
 
   ;; The reverse is load-bearing. flow-box-drain! yields newest-first,
   ;; and loop-spawn conses, so spawning the drained list as-is REVERSES
@@ -542,19 +559,18 @@
   ;; which point loop-run-once's submit has freed SQ slots; the
   ;; eventfd counter keeps any signal sent meanwhile, so the re-armed
   ;; read completes immediately and nothing is lost.
-  (define %collector
-    (lambda ()
-      (let loop ()
-        (when %flow2-workers-running?
-          (let ((armed? (guard (ex (#t (flow-log (list 'flow2 'collector-wait-raised))
-                                       #f))
-                          (%eventfd-wait %flow2-eventfd)
-                          #t)))
-            (for-each loop-spawn
-                      (reverse (flow-box-drain! %cross-thread-spawns)))
-            (if armed?
-                (loop)
-                (loop-spawn %collector)))))))
+  (define (%collector pool)
+    (let loop ()
+      (when (%pool-running? pool)
+        (let ((armed? (guard (ex (#t (flow-log (list 'flow2 'collector-wait-raised))
+                                     #f))
+                        (%eventfd-wait pool)
+                        #t)))
+          (for-each loop-spawn
+                    (reverse (flow-box-drain! (%pool-spawns pool))))
+          (if armed?
+              (loop)
+              (loop-spawn (lambda () (%collector pool))))))))
 
   ;;------------------------------------------------------------
   ;; Scopes (nurseries)
@@ -1947,8 +1963,8 @@
   ;; dead is the task unwinding, not a failure — no reply, by design
   ;; (nobody in that scope is listening). Everything else, wrap and
   ;; force onto the response channel, past any bound.
-  (define (%worker-body channel)
-    (%worker-current? #t)
+  (define (%worker-body pool channel)
+    (%worker-current? pool)
     (let loop ()
       (let ((task (flow-get! channel)))
         (unless (eq? task %flow-worker-stop)
@@ -1992,82 +2008,81 @@
       ((proc compute-count)
        (loop-new)
        (set! %scope-current %root-scope)
-       (set! %cross-thread-spawns (box '()))
-       (let ((channels
-              (if (fxzero? compute-count)
-                  '()
-                  (begin
-                    (set! %flow2-eventfd (%eventfd-create))
-                    (set! %flow2-eventfd-buffer (foreign-alloc 8))
-                    (foreign-set! 'unsigned-64 %flow2-eventfd-buffer 0 1)
-                    (set! %flow2-workers-running? #t)
-                    (set! %flow2-workers-live compute-count)
-                    (loop-spawn %collector)
-                    (let start ((i 0) (channels '()))
-                      (if (fx=? i compute-count)
-                          (reverse channels)
-                          (let ((channel (make-flow-channel (cons 'worker i))))
-                            (fork-thread
-                             (lambda ()
-                               (dynamic-wind
-                                 void
-                                 (lambda () (%worker-body channel))
-                                 %flow-worker-exited!)))
-                            (start (fx+ i 1) (cons channel channels)))))))))
+       ;; The pool is created per run and handed to the workers and the
+       ;; collector as a closure, never through a global — a straggler
+       ;; from a previous run therefore cannot touch this run's eventfd,
+       ;; mailbox, or live count (see <flow2-pool>).
+       (let* ((pool
+               (and (not (fxzero? compute-count))
+                    (let ((buffer (foreign-alloc 8)))
+                      (foreign-set! 'unsigned-64 buffer 0 1)
+                      (make-flow-pool% (%eventfd-create) buffer (box '())
+                                       (make-mutex) (make-condition)
+                                       compute-count #t))))
+              (channels
+               (if pool
+                   (begin
+                     (loop-spawn (lambda () (%collector pool)))
+                     (let start ((i 0) (channels '()))
+                       (if (fx=? i compute-count)
+                           (reverse channels)
+                           (let ((channel (make-flow-channel (cons 'worker i))))
+                             (fork-thread
+                              (lambda ()
+                                (dynamic-wind
+                                  void
+                                  (lambda () (%worker-body pool channel))
+                                  (lambda () (%flow-worker-exited! pool)))))
+                             (start (fx+ i 1) (cons channel channels))))))
+                   '())))
          (loop-spawn (lambda ()
                        (set! %scope-current %root-scope)
                        (proc channels)))
          (loop-run)
-         (unless (null? channels)
-           (%flow-shutdown-pool! channels))
+         (when pool
+           (%flow-shutdown-pool! pool channels))
          (void)))))
 
   ;; Stop the pool and, crucially, WAIT before dismantling what the
   ;; workers are still using.
   ;;
-  ;; The old order signalled the eventfd, closed it, and set it to #f
-  ;; with workers possibly still inside a task. Two ways that goes
-  ;; wrong, both silent: a worker reaching %flow-spawn-safe afterwards
-  ;; finds the #f and raises "cross-thread resume with no compute pool
-  ;; running" from inside its own guard, or it wins the race, holds the
-  ;; old fd number, and writes eight bytes into whatever the next
-  ;; loop-new or socket call has since been given that number.
-  ;;
-  ;; So the fd is closed only once every worker has provably exited.
+  ;; The fd is closed only once every worker has provably exited.
   ;; Where that cannot be established -- a task parked on a channel
   ;; nobody will ever put to, which flow-stop does not cancel because it
-  ;; is a shutdown and not a cancellation -- the eventfd is deliberately
-  ;; LEAKED and the situation logged. Leaking one descriptor is strictly
-  ;; better than handing a live writer a number the process is about to
-  ;; reuse, and the log names how many workers were still out.
+  ;; is a shutdown and not a cancellation -- the eventfd and its buffer
+  ;; are deliberately LEAKED with the pool record and the situation
+  ;; logged. Leaking one descriptor is strictly better than handing a
+  ;; live writer a number the process is about to reuse, and the log
+  ;; names how many workers were still out. Because the straggler keeps
+  ;; its pool — and through it that same leaked fd — its later signals,
+  ;; spawns, and its final exit all land on the dead run's record and
+  ;; never on the next run's (see <flow2-pool>).
   (define %flow-shutdown-join-seconds 2.0)
 
-  (define (%flow-shutdown-pool! channels)
-    (set! %flow2-workers-running? #f)
+  (define (%flow-shutdown-pool! pool channels)
+    (%pool-running?! pool #f)
     (for-each (lambda (channel)
                 (%channel-put! channel %flow-worker-stop #t))
               channels)
-    (%eventfd-signal! %flow2-eventfd)
+    (%eventfd-signal! pool)
     (let ((deadline (+ (real-time)
                        (exact (round (* 1000 %flow-shutdown-join-seconds))))))
       (let ((stragglers
-             (with-mutex %flow2-workers-mutex
+             (with-mutex (%pool-mutex pool)
                (let wait ()
                  (cond
-                  ((fxzero? %flow2-workers-live) 0)
-                  ((>= (real-time) deadline) %flow2-workers-live)
+                  ((fxzero? (%pool-live pool)) 0)
+                  ((>= (real-time) deadline) (%pool-live pool))
                   (else
                    ;; Bounded, so a stuck worker cannot make flow-run
                    ;; itself hang.
-                   (condition-wait %flow2-workers-gone %flow2-workers-mutex
+                   (condition-wait (%pool-gone pool) (%pool-mutex pool)
                                    (make-time 'time-duration 50000000 0))
                    (wait)))))))
         (cond
          ((fxzero? stragglers)
-          (%eventfd-close %flow2-eventfd)
-          (foreign-free %flow2-eventfd-buffer)
-          (set! %flow2-eventfd #f)
-          (set! %flow2-eventfd-buffer #f))
+          (%eventfd-close (%pool-eventfd pool))
+          (foreign-free (%pool-buffer pool)))
          (else
           (flow-log (list 'flow2 'shutdown-workers-still-running stragglers))))))
     (void))
