@@ -462,6 +462,7 @@
   (define PORT 18248)
   (define first-count #f)
   (define rest-count #f)
+  (define empty-count #f)
   (define echoed #f)
   (define payload (string->utf8 "0123456789"))
   (flow-run
@@ -491,6 +492,12 @@
                           0
                           (flow-perform
                            (flow-write fd payload first-count))))
+                ;; start = length is a legal index and a zero-byte
+                ;; remainder: ready with count 0, not a failure --
+                ;; res = 0 from an actual send still reads as one
+                (set! empty-count
+                      (flow-perform
+                       (flow-write fd payload (bytevector-length payload))))
                 (loop-close fd))))
           (loop-close listen-fd)
           (flow-stop))))))
@@ -498,6 +505,7 @@
   (assert (fx>? first-count 0))
   (assert (fx=? (bytevector-length payload)
                 (fx+ first-count rest-count)))
+  (assert (eqv? 0 empty-count))
   (assert (equal? "0123456789" echoed))
   ;; an out-of-range start is a mistake at the call site, not a
   ;; surprise at completion time
