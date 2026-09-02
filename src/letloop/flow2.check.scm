@@ -2053,3 +2053,34 @@
   (assert (eq? 'timeout result))
   (assert (memq 'later (unbox ran)))
   #t)
+
+;; Third adverse pass, finding 9. A perform inside a dead scope must not
+;; consume anything on its way to raising. flow-poll starts its walk at
+;; a random base, so a ready channel get could be tried before the
+;; scope's own cancellation base and win it: the value is dequeued and
+;; handed to a fiber that raises at its very next operation, and goes
+;; with it. The cancellation base is polled first now, before the
+;; rotation, and the early dead-scope test in flow-perform is the outer
+;; guarantee this pins.
+(define (~check-flow2-003/a-dead-scope-does-not-eat-a-queued-value)
+  (define channel (make-flow-channel 'dead-scope))
+  (define outcome 'not-set)
+  (flow-run
+   (lambda (workers)
+     (guard (ex (#t (void)))
+       (flow-nursery
+        (lambda (scope)
+          (flow-spawn
+           (lambda ()
+             ;; a value IS waiting, so the get's try would succeed
+             (flow-put! channel 'payload)
+             (flow-scope-cancel! scope)
+             (set! outcome
+                   (guard (ex (#t (and (flow-error? ex)
+                                       (flow-error-symbol ex))))
+                     (list 'got (flow-perform (flow-get channel))))))))))
+     (flow-stop)))
+  (assert (eq? 'cancelled outcome))
+  ;; still there for whoever is entitled to it
+  (assert (eqv? 1 (flow-channel-queue-length channel)))
+  #t)
