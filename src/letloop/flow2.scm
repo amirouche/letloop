@@ -856,30 +856,50 @@
                      (condition-broadcast ready))
                    #t))))
         ;; Registration runs on this thread's own stack, so unlike the
-        ;; on-loop case a raise here does propagate to the task's guard
-        ;; by itself. What it would leave behind is the bases that DID
-        ;; register — a channel getter entry, say — still live and
-        ;; pointing at a perform nobody will ever complete. Mark this
-        ;; perform synched so the next deliverer drops that entry, fire
-        ;; whatever cancels were registered, then let the raise go.
-        (guard (ex (#t
-                    (box-cas! state 'waiting 'synched)
-                    (let ((pending (unbox cancels)))
-                      (when (pair? pending)
-                        (%flow-spawn-safe
-                         (lambda ()
-                           (for-each (lambda (pair) ((cdr pair))) pending)))))
-                    (raise ex)))
-          (for-each (lambda (base)
-                      (let ((tag (cons #f #f)))
-                        ((flow-block-proc base) state
-                         (lambda (raw)
-                           (resume-from tag ((flow-wrap-proc base) raw)))
-                         (lambda (thunk)
-                           (set-box! cancels
-                                     (cons (cons tag thunk)
-                                           (unbox cancels)))))))
-                    bases))
+        ;; on-loop case a raise here can propagate to the task's guard
+        ;; by itself. Whether it SHOULD depends on the same CAS the
+        ;; on-loop path consults: if this perform is still unclaimed,
+        ;; the raise wins it — fire whatever cancels were registered so
+        ;; no getter entry outlives a perform nobody will complete, and
+        ;; re-raise. But if an earlier base already won during
+        ;; registration, the caller is committed to that value — a
+        ;; channel get may already have DEQUEUED it — and re-raising
+        ;; would destroy it, the lost-value shape finding 7 was about.
+        ;; Report on stderr exactly as the on-loop path does, and fall
+        ;; through to the wait, which the winner has already (or is
+        ;; about to) satisfy.
+        (let ((raised
+               (guard (ex (#t
+                           (if (box-cas! state 'waiting 'synched)
+                               (begin
+                                 (let ((pending (unbox cancels)))
+                                   (when (pair? pending)
+                                     (%flow-spawn-safe
+                                      (lambda ()
+                                        (for-each (lambda (pair) ((cdr pair)))
+                                                  pending)))))
+                                 (list ex))
+                               (begin
+                                 (display "flow2: block registration raised after another base won: "
+                                          (current-error-port))
+                                 (if (condition? ex)
+                                     (display-condition ex (current-error-port))
+                                     (display ex (current-error-port)))
+                                 (newline (current-error-port))
+                                 (flush-output-port (current-error-port))
+                                 #f))))
+                 (for-each (lambda (base)
+                             (let ((tag (cons #f #f)))
+                               ((flow-block-proc base) state
+                                (lambda (raw)
+                                  (resume-from tag ((flow-wrap-proc base) raw)))
+                                (lambda (thunk)
+                                  (set-box! cancels
+                                            (cons (cons tag thunk)
+                                                  (unbox cancels)))))))
+                           bases)
+                 #f)))
+          (when raised (raise (car raised))))
         (with-mutex mutex
           (let wait ()
             (unless done?
