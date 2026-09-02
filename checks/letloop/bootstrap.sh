@@ -242,6 +242,24 @@ test -e "$OPAQUE_DESTINATION/lib/libopaque.a" || {
     exit 1
 }
 
+# The largest build in this chain: real LibreSSL, not Debian/Ubuntu's
+# libretls shim -- see (letloop package tls)'s own header for why that
+# distinction matters here specifically.
+TLS_DESTINATION=$("$LETLOOP" store build tls | tail -1)
+echo "tls: $TLS_DESTINATION"
+test -e "$TLS_DESTINATION/lib/libtls.a" || {
+    echo "FAIL: no libtls.a"
+    exit 1
+}
+test -e "$TLS_DESTINATION/lib/libssl.a" || {
+    echo "FAIL: no libssl.a"
+    exit 1
+}
+test -e "$TLS_DESTINATION/lib/libcrypto.a" || {
+    echo "FAIL: no libcrypto.a"
+    exit 1
+}
+
 LETLOOP_DESTINATION=$("$LETLOOP" store build letloop | tail -1)
 echo "letloop: $LETLOOP_DESTINATION"
 
