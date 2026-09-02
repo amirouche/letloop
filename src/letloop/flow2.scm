@@ -75,6 +75,7 @@
    ~check-flow2-000/error-predicates
    ~check-flow2-001/always-ready
    ~check-flow2-001/wrap-order
+   ~check-flow2-001/a-raising-cancel-does-not-skip-the-others
    ~check-flow2-002/channel-buffered-fifo
    ~check-flow2-002/channel-get-parks-until-put
    ~check-flow2-002/channel-bound-overflow
@@ -777,6 +778,25 @@
   ;; Synchronization: poll, then park
   ;;------------------------------------------------------------
 
+  ;; Fire every registered cancel except the winner's. One thunk, so the
+  ;; whole batch lands before the resumed fiber does — that ordering is
+  ;; load-bearing — but one guard PER cancel, which is the part that was
+  ;; missing: most of these thunks call loop-get-sqe, which raises
+  ;; "submission queue full" when the kernel will not take more, and a
+  ;; raise from one aborted the walk and skipped every cancel after it.
+  ;; One transient SQ-full could therefore leave a read in the ring and
+  ;; a timeout armed with its continuation pinned until it fires, on
+  ;; bases that had nothing to do with the failure.
+  ;;
+  ;; TAG is the winner's; pass #f to fire all of them, since every real
+  ;; tag is a fresh pair.
+  (define (%flow-run-cancels! pending tag)
+    (for-each (lambda (pair)
+                (unless (eq? (car pair) tag)
+                  (guard (ex (#t (flow-log (list 'flow2 'cancel-raised))))
+                    ((cdr pair)))))
+              pending))
+
   ;; SCOPE is the fiber's scope at perform time, reinstalled around
   ;; the parked continuation so the fiber wakes up where it went to
   ;; sleep. Everything else is flow's design unchanged: one shared
@@ -812,11 +832,7 @@
                          (set! %scope-current scope)
                          (k value)))
                       (%flow-spawn-safe
-                       (lambda ()
-                         (for-each (lambda (pair)
-                                     (unless (eq? (car pair) tag)
-                                       ((cdr pair))))
-                                   (unbox cancels))))
+                       (lambda () (%flow-run-cancels! (unbox cancels) tag)))
                       #t))))
            ;; Registration runs on the scheduler's stack, so a raise
            ;; here cannot reach the fiber by unwinding — see
@@ -875,11 +891,7 @@
                    (let ((pending (unbox cancels)))
                      (when (pair? pending)
                        (%flow-spawn-safe
-                        (lambda ()
-                          (for-each (lambda (pair)
-                                      (unless (eq? (car pair) tag)
-                                        ((cdr pair))))
-                                    pending)))))
+                        (lambda () (%flow-run-cancels! pending tag)))))
                    (with-mutex mutex
                      (set! slot value)
                      (set! done? #t)
@@ -906,8 +918,7 @@
                                    (when (pair? pending)
                                      (%flow-spawn-safe
                                       (lambda ()
-                                        (for-each (lambda (pair) ((cdr pair)))
-                                                  pending)))))
+                                        (%flow-run-cancels! pending #f)))))
                                  (list ex))
                                (begin
                                  (display "flow2: block registration raised after another base won: "
