@@ -499,6 +499,15 @@ Dequeues and returns a value if one is immediately available,
 otherwise returns `DEFAULT`. Never parks. Callable from the loop thread
 or from a **compute** thread — see [Threads](#threads).
 
+`DEFAULT` is returned, not distinguished: nothing marks it as coming
+from an empty channel rather than from the queue. `#f` is the tempting
+choice and the wrong one wherever `#f` is a legal value on that
+channel, because a gather loop written as `(let loop () (let ((v
+(flow-get-try ch #f))) (if v ...)))` then stops at the first real `#f`
+and drops everything queued behind it. Count the values when the count
+is known, or pass a sentinel that cannot collide — a fresh `(list
+'empty)`, compared with `eq?`.
+
 Raises `cancelled` if the calling scope is already dead. Not parking is
 not the same as not being a cancellation point: a channel operation
 reports a dead scope whether or not it would have suspended, so a fiber
@@ -861,7 +870,7 @@ and not by reflex on the hottest path you have.
 ### Fan out, gather, and never hang
 
 The pattern that motivated the nursery. No guard in the fetch fiber,
-no counting N replies:
+and no wait loop that a dead fiber can hang forever:
 
 ```scheme
 (define (query-ngrams ngrams)
@@ -876,10 +885,18 @@ no counting N replies:
                     (flow-put! replies (fetch-ngram ngram)))))
                ngrams)))
   ;; the join guarantees: every fiber returned, or one raised and
-  ;; the nursery re-raised it after cancelling the others' I/O.
-  (let loop ((out '()))
-    (let ((r (flow-get-try replies #f)))
-      (if r (loop (cons r out)) out))))
+  ;; the nursery re-raised it after cancelling the others' I/O -- so
+  ;; there are exactly (length ngrams) replies and the gather counts
+  ;; them out. It does NOT stop on a falsy reply: flow-get-try's default
+  ;; is a value like any other, so `(flow-get-try replies #f)` as the
+  ;; loop test truncates the gather at the first fetch-ngram that
+  ;; legitimately returned #f, silently dropping every reply queued
+  ;; behind it. A sentinel that cannot collide -- (list 'empty) -- is
+  ;; the alternative when the count is not known.
+  (let loop ((n (length ngrams)) (out '()))
+    (if (zero? n)
+        out
+        (loop (- n 1) (cons (flow-get-try replies #f) out)))))
 ```
 
 If `fetch-ngram` raises in any fiber, the nursery cancels every
@@ -946,16 +963,23 @@ created for itself.
             (lambda ()                          ; N read-ats overlap on the ring
               (flow-put! down (apply do-read-at (cdr msg)))))
            (loop))
-          ((done) (cadr msg))))))))
+          ((done) (cadr msg))
+          ((failed) (error 'run-indexing "read failed" (cadr msg)))))))))
 
 ;; --- compute thread: pure compute, I/O by message ---
 (define (index-file down up filepath)
   (let loop ((offset 0) (index empty-index))
     (flow-put! up `(read-at ,filepath ,offset 65536))
     (let ((chunk (flow-get! down)))             ; parks the OS thread
-      (if chunk
-          (loop (+ offset 65536) (index-chunk index chunk))
-          (flow-put! up `(done ,index))))))
+      (cond
+       ((bytevector? chunk)
+        (loop (+ offset 65536) (index-chunk index chunk)))
+       ;; #t is a clean EOF and #f is a failure -- the three-way result
+       ;; of flow-read-at, not a truth test. `(if chunk ...)` here loops
+       ;; forever on EOF, feeding #t to index-chunk, and reports a
+       ;; failure as a normal `done` carrying a truncated index.
+       ((eq? chunk #t) (flow-put! up `(done ,index)))
+       (else (flow-put! up `(failed ,offset)))))))
 ```
 
 Two things to notice. The main-side handler *spawns a fiber per
