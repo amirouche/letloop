@@ -530,13 +530,31 @@
   ;; on fd", the exact regression the on-loop spawn order fix closed.
   ;; Reversing restores cons order into loop-spawn's LIFO, so a
   ;; worker's spawn-safe calls behave like the same calls made on-loop.
+  ;; The wait is guarded because %eventfd-wait preps an SQE, and
+  ;; loop-get-sqe raises "submission queue full" when the kernel
+  ;; refuses to take more — the same raise source the <flow2-raise>
+  ;; comment below calls realistic. Unguarded, that raise killed the
+  ;; collector through loop-apply's catch-all, and every later
+  ;; worker→loop resume accumulated in a box nobody would ever drain:
+  ;; total, silent loss of all cross-thread traffic, presenting as a
+  ;; zero-CPU hang. The failure path drains what is already pending
+  ;; (loop-spawn raises nothing) and retries on the next tick, by
+  ;; which point loop-run-once's submit has freed SQ slots; the
+  ;; eventfd counter keeps any signal sent meanwhile, so the re-armed
+  ;; read completes immediately and nothing is lost.
   (define %collector
     (lambda ()
       (let loop ()
         (when %flow2-workers-running?
-          (%eventfd-wait %flow2-eventfd)
-          (for-each loop-spawn (reverse (flow-box-drain! %cross-thread-spawns)))
-          (loop)))))
+          (let ((armed? (guard (ex (#t (flow-log (list 'flow2 'collector-wait-raised))
+                                       #f))
+                          (%eventfd-wait %flow2-eventfd)
+                          #t)))
+            (for-each loop-spawn
+                      (reverse (flow-box-drain! %cross-thread-spawns)))
+            (if armed?
+                (loop)
+                (loop-spawn %collector)))))))
 
   ;;------------------------------------------------------------
   ;; Scopes (nurseries)
