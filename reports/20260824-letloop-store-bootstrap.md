@@ -4,6 +4,16 @@
 **Branch:** `dev-letloop-os`
 **Repo:** `private-letloop`
 
+> **Superseded in part, same day.** Everything below was accurate when
+> written and is kept as the record of that work. Four things it lists as
+> open or parked were then done, in commits `0f73584`, `3229bd7`,
+> `5da0e7b` and `71bbc82`: C-dependency inference was built, `--static`
+> was removed again as a flag that should never have existed, `letloop
+> check` was moved onto compiled programs and `letloop exec` deleted, and
+> argon2 stopped needing libargon2 at all. The affected passages below
+> are struck through and corrected in place; the closing section is
+> rewritten. Nothing else changed.
+
 ## Abstract
 
 `letloop store` is a Nix-style, content-addressed package manager built into
@@ -260,18 +270,29 @@ no `NEEDED` entries; `nm`: `tls_init`/`blake3_hasher_init`/
   it, using only a statically linked letloop as the fetcher throughout. Every
   fetch in every gate run so far has gone through an ordinary host letloop
   using the host's own dynamic `libtls.so`.
-- **Dropping `letloop exec`** and **sweeping `dlopen` out of the Scheme
-  codebase** — both raised as a bundled idea this session, both deliberately
-  split off as separate, larger, undecided questions. The former is gated on
-  knowing the cost of compiling under this design; the latter would need the
-  parked "infer C dependencies from the import closure, pinned by
-  conventional name" work to land first, since static-by-default otherwise
-  means every consumer links every optional archive whether it uses it or
-  not.
-- **Inferring C dependencies from letloop's own import closure** remains
-  parked, per `src/letloop/store/README.md`'s own "Direction" section — but
-  this session's package-naming convention work is exactly the prerequisite
-  the README named for it to stop being parked.
+- ~~**Dropping `letloop exec`** and **sweeping `dlopen` out of the Scheme
+  codebase** — both deliberately split off as separate, larger, undecided
+  questions.~~ **Done, and the framing above was wrong.** `exec` was never
+  what kept dlopen alive: `letloop check` eval'd in the same in-process
+  path, so removing `exec` alone would have left the divergence exactly
+  where it did damage. Checks are compiled now, one program per library —
+  forced rather than chosen, since one program importing the whole tree
+  would have to link every archive at once and libsodium and libargon2
+  both define `argon2id_hash_raw`. `exec` went with it. The cost that had
+  parked this was measured rather than argued: +94ms on a trivial program,
+  209ms on one importing ten heavy libraries, because the object cache is
+  primed and compiling is amalgamation, not recompilation.
+- ~~**Inferring C dependencies from letloop's own import closure** remains
+  parked.~~ **Built.** A binding library declares its C with
+  `define-shared-object` and `(letloop sodium)` names `(letloop package
+  sodium)`, so a program's import closure is already the list of packages
+  it wants, and each package's own `inputs` supply the C-level
+  dependencies no Scheme import can express — importing `(letloop opaque)`
+  links libopaque.a, liboprf.a and libsodium.a. Ordering, which the README
+  expected to be the hard part, evaporated: the set is linked inside
+  `-Wl,--start-group` and the linker re-scans. There is no flag; a
+  compiled program links whatever the store already has and never starts a
+  build of its own.
 - **letloop's own source as a pinned, fetchable package** remains explicitly
   blocked on a standing instruction from earlier in this engagement (no
   public URL currently serves this private repo's actual source tree) —
@@ -286,17 +307,34 @@ no `NEEDED` entries; `nm`: `tls_init`/`blake3_hasher_init`/
 
 ## Conclusion
 
-`letloop store` can now resolve versioned, project-overridable package names
-through the same argument-parsing convention the rest of the CLI already
-uses, and the bootstrap chain it drives covers all but one of letloop's eight
-dlopen'ed FFI libraries — including, as of this session, real LibreSSL,
-statically linked into the bootstrap binary itself with a CA bundle resolved
-at runtime rather than relying on a path that never survives relocation. Every
-claim here is backed by a gate that would fail if it stopped being true: the
-full chain builds from an empty store, a rebuild is byte-identical, and the
-resulting binary is independently confirmed static, dependency-free, and
-capable of a genuine HTTPS request with nothing but itself. What remains open
-is recorded rather than assumed solved — `vulkan`, the full cold-start
-end-to-end run, `letloop exec`, the broader `dlopen` question, and C-dependency
-inference are each a real next decision, not a rounding error against what
-was actually verified this session.
+`letloop store` resolves versioned, project-overridable package names through
+the same argument-parsing convention the rest of the CLI uses, and the
+bootstrap chain it drives covers all but one of letloop's eight dlopen'ed FFI
+libraries — including real LibreSSL, statically linked into the bootstrap
+binary with a CA bundle resolved at runtime rather than a path that never
+survives relocation. Every claim is backed by a gate that would fail if it
+stopped being true: the chain builds from an empty store, a rebuild is
+byte-identical, and the binary is independently confirmed static,
+dependency-free, and capable of a genuine HTTPS request with nothing but
+itself.
+
+The follow-on work the section above records taught two things worth keeping
+separate from what was built. The first is that a question can be parked on
+the wrong reason: `letloop exec` was held for years-equivalent on "the cost
+of compiling is unknown", and the cost turned out to be 94ms — what had
+actually blocked it was `check`, which nobody had named. The second is that
+the "two archives defining one symbol" hazard the store README listed as
+unanswered is real, was met head-on, and was resolved by removing the need
+for one of the archives rather than by reconciling them: libsodium vendors
+argon2, and once `argon2_encodedlen` became Scheme — arithmetic over
+constants that had been sitting behind a `dlopen` — libargon2 was not needed
+statically at all. An `objcopy --redefine-sym` rename was built first, worked,
+and was thrown away when the simpler answer appeared.
+
+What remains open is recorded rather than assumed solved: `vulkan`, which
+cannot be static-linked meaningfully because libvulkan is itself a loader;
+the full cold-start run, where the mechanism is proven but the whole chain
+has never been driven by a static letloop end to end; letloop's own source as
+a pinned fetch, still blocked externally; and a substituter, which inference
+made matter more than it did when it was deferred. Each is a real next
+decision, not a rounding error against what was verified.
