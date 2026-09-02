@@ -2250,7 +2250,14 @@
         (set! %loop
           (loop-base-new (jiffy-current) '() #t ring cqe-ptr handlers 0 '()))
         (set! %read-timeout-ts  (make-timespec %read-timeout-seconds 0))
-        (set! %wait-timeout     (make-timespec 0 100000000))
+        ;; LETLOOP_WAIT_TIMEOUT_MS: the loop's idle CQE-wait tick.
+        ;; Default 100ms, the historical constant; env-tunable so an
+        ;; A/B benchmark (e.g. atlas-stoa 0x0042's serve runs) can try
+        ;; a shorter tick without a source edit.
+        (set! %wait-timeout
+          (let* ((env (getenv "LETLOOP_WAIT_TIMEOUT_MS"))
+                 (ms (or (and env (string->number env)) 100)))
+            (make-timespec (div ms 1000) (* (mod ms 1000) 1000000))))
         (set! %multishots       (make-eqv-hashtable))
         (set! %multishot-ids    (make-eqv-hashtable))
         (set! %buf-data         (make-eqv-hashtable))
