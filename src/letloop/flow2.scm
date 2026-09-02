@@ -138,7 +138,8 @@
    ~check-flow2-009/open-nonexistent-fails
    ~check-flow2-009/open-loses-choice-no-fd-leak
    ~check-flow2-009/close-under-choice-fd-actually-closed
-   ~check-flow2-009/close-while-read-in-flight)
+   ~check-flow2-009/close-while-read-in-flight
+   ~check-flow2-009/close-in-a-dead-scope-still-closes)
 
   (import (chezscheme)
           (letloop r999)
@@ -917,6 +918,35 @@
            (memq (car tag) '(flow2-get flow2-space flow2-scope))
            #t)))
 
+  ;; A perform whose every base is a close runs even under a scope that
+  ;; is already dead, and gets no cancel base appended.
+  ;;
+  ;; Cancellation is delivered by raising at suspension points, so the
+  ;; handler that releases an fd is reached by the very raise it exists
+  ;; to clean up after. If that cleanup's own flow-close then raises
+  ;; cancelled before touching the ring — which is what the dead-scope
+  ;; test below did — the fd is never closed at all, on precisely the
+  ;; path the design points at as the one that closes it. Measured: the
+  ;; descriptor was still open 100ms after the scope died, and with it
+  ;; unclosed, loop-close-prep!'s cancel-fd never runs either, so any
+  ;; operation still in flight on that fd stays in flight.
+  ;;
+  ;; Exempting it is safe for the same reason flow-close registers no
+  ;; cancel in the first place: a close always completes on its own, so
+  ;; it can never hold a cancelled parent in %scope-finish's drain. It
+  ;; is the move that drain already makes for itself when it re-waits
+  ;; under %root-scope.
+  ;;
+  ;; EVERY base, not any: (flow-choice (flow-close fd) (flow-read fd))
+  ;; is a real operation and stays cancellable. flow-wrap carries the
+  ;; tag through, so a wrapped close is still exempt.
+  (define (%bases-cancel-exempt? bases)
+    (and (pair? bases)
+         (let lp ((bases bases))
+           (or (null? bases)
+               (and (eq? (flow-data (car bases)) 'flow2-close)
+                    (lp (cdr bases)))))))
+
   (define (%flow-perform-off-loop event)
     (let ((scope (%task-scope)))
       (when (and scope (%scope-dead? scope))
@@ -952,15 +982,25 @@
                         (%flow-settle
                          (flow-block-and-wait-on-loop bases scope))
                         result)))
-                (begin
-                  (when (%scope-dead? scope)
-                    (raise (%flow-cancelled-error)))
-                  (let ((bases (append (flow-flatten event)
-                                       (list (%scope-cancel-base scope)))))
-                    (let ((result (flow-poll bases)))
-                      (%flow-settle (if (eq? result %flow-not-ready)
-                                        (flow-block-and-wait-on-loop bases scope)
-                                        result))))))))))
+                (let ((bases (flow-flatten event)))
+                  (if (%bases-cancel-exempt? bases)
+                      ;; Cleanup, not work — no dead-scope test, no
+                      ;; cancel base. See %bases-cancel-exempt?.
+                      (let ((result (flow-poll bases)))
+                        (%flow-settle
+                         (if (eq? result %flow-not-ready)
+                             (flow-block-and-wait-on-loop bases scope)
+                             result)))
+                      (begin
+                        (when (%scope-dead? scope)
+                          (raise (%flow-cancelled-error)))
+                        (let ((bases (append bases
+                                             (list (%scope-cancel-base scope)))))
+                          (let ((result (flow-poll bases)))
+                            (%flow-settle
+                             (if (eq? result %flow-not-ready)
+                                 (flow-block-and-wait-on-loop bases scope)
+                                 result))))))))))))
 
   ;;------------------------------------------------------------
   ;; Channels: buffered, mutex-protected, cross-thread
@@ -1753,15 +1793,20 @@
   ;; leak the fd, which is precisely what the cancelling scope is trying
   ;; to clean up. So the close is left to complete.
   ;;
-  ;; Nothing waits for it. The scope's cancellation wins this perform,
-  ;; the fiber unwinds, and the completion handler's resume then reports
-  ;; #f and is discarded — the kernel has released the descriptor either
-  ;; way. A close also always completes on its own, so unlike an accept
-  ;; or a read it can never hold a cancelled parent in %scope-finish's
-  ;; drain.
+  ;; That argument only holds if the close is ISSUED. It is tagged
+  ;; 'flow2-close so that %bases-cancel-exempt? can let it run under a
+  ;; dead scope, where the dead-scope test used to raise before the SQE
+  ;; was ever prepped — the fd then leaked on the one path whose whole
+  ;; job is to release it. Everything else about cancellation still
+  ;; applies to a close that was already in flight: the scope's
+  ;; cancellation wins whatever perform was parked, the fiber unwinds,
+  ;; and this handler's resume reports #f and is discarded — the kernel
+  ;; released the descriptor either way. A close also always completes
+  ;; on its own, so unlike an accept or a read it can never hold a
+  ;; cancelled parent in %scope-finish's drain.
   (define flow-close
     (lambda (fd)
-      (make-flow% 'base #f
+      (make-flow% 'base 'flow2-close
                   (lambda (x) x)
                   (lambda () #f)
                   (lambda (state resume register-cancel!)
@@ -1829,7 +1874,9 @@
     ;; The cost is honest and worth stating: a child parked in an
     ;; operation that cannot be cancelled will hold its parent here.
     ;; Cancellation is prompt for everything that registers a cancel
-    ;; thunk; flow-write-at and flow-close still do not (see Issues).
+    ;; thunk, which is now every ring event but flow-close — and a
+    ;; close always completes on its own, so it bounds the wait rather
+    ;; than removing it.
     (let ((interrupted
            (and (not (fxzero? (%scope-children scope)))
                 (guard (ex (#t ex))

@@ -550,6 +550,12 @@ the descriptor either way. A close also always completes on its own, so
 unlike an accept or a read it can never hold a cancelled parent in the
 drain described under Nurseries.
 
+For the same reason a close **also runs under a scope that is already
+dead**, where every other event raises `cancelled` before it reaches
+the ring. Without that exemption the cleanup below would be the one
+thing cancellation reliably prevents, since the handler releasing an fd
+is reached by the very raise it exists to clean up after.
+
 File events, same shape: result on success, `#f` on failure. No
 `dynamic-wind`: callers close fds explicitly on both the normal and
 the error path, and cancellation arriving as a raised `cancelled`

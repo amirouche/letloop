@@ -1797,3 +1797,59 @@
        close-done
        (eqv? close-result 0)
        (or (equal? read-result payload) (eq? read-result #f))))
+
+;; F_GETFD on a closed descriptor fails, which is the only way from
+;; inside the process to tell "the close was issued" from "the fiber
+;; unwound past it". Cheap enough to be a probe rather than a helper
+;; the rest of the file uses.
+(define %flow2-check-fcntl (foreign-procedure "fcntl" (int int) int))
+(define (flow2-check-fd-open? fd) (fx>=? (%flow2-check-fcntl fd 1) 0))
+
+;; Cancellation is delivered by RAISING at a suspension point, so the
+;; handler that releases an fd is reached by the very raise it exists
+;; to clean up after -- that is the shape the design points at as the
+;; one that closes descriptors. But flow-perform's dead-scope test used
+;; to raise cancelled a second time, before the close SQE was ever
+;; prepped, so the cleanup never touched the ring and the fd leaked on
+;; exactly that path. Verified to fail before %bases-cancel-exempt?:
+;; the close raised cancelled and F_GETFD still succeeded afterwards.
+(define (~check-flow2-009/close-in-a-dead-scope-still-closes)
+  (define path (flow2-check-path "flow2-009-close-dead-scope.bin"))
+  (define fd #f)
+  (define close-outcome 'never-ran)
+  (define still-open 'unknown)
+  (flow2-check-remove! path)
+  (flow-run
+   (lambda (workers)
+     ;; the nursery re-raises the sibling's boom; this check is about
+     ;; what the cancelled child managed to do on its way out
+     (guard (ex (#t (void)))
+       (flow-nursery
+        (lambda (scope)
+          (flow-spawn
+           (lambda ()
+             (set! fd (flow-perform
+                       (flow-open path
+                                  (fxior O-WRONLY O-CREAT O-TRUNC)
+                                  #o600)))
+             (guard (ex ((flow-error-cancelled? ex)
+                         (set! close-outcome
+                               (guard (ex2 (#t (list 'raised
+                                                     (and (flow-error? ex2)
+                                                          (flow-error-symbol ex2)))))
+                                 (flow-perform (flow-close fd))))
+                         (raise ex)))
+               (flow-sleep 10))))
+          (flow-spawn (lambda () (flow-sleep 0.05) (raise 'boom))))))
+     ;; the close was issued by a fiber that is unwinding, so give its
+     ;; completion a few ticks to land before probing the descriptor
+     (flow-sleep 0.1)
+     (set! still-open (flow2-check-fd-open? fd))
+     (flow-stop)))
+  (flow2-check-remove! path)
+  (assert (fixnum? fd))
+  ;; the cleanup reached the ring rather than being cancelled again
+  (assert (eqv? 0 close-outcome))
+  ;; and the descriptor really is gone
+  (assert (not still-open))
+  #t)
