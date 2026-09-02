@@ -812,7 +812,7 @@ What the library itself logs:
 | entry | when |
 |---|---|
 | `(flow2 channel-full NAME BOUND)` | a put parked on a full channel, once per saturation episode |
-| `(flow2 cancel-raised)` | a losing base's cancel thunk raised; the rest of the batch still ran |
+| `(flow2 cancel-raised BASE CONDITION)` | a losing base's cancel thunk raised; the rest of the batch still ran. `BASE` is the base's tag (`(flow2-get NAME)` for a channel get, `#f` for a ring event or a base built with `make-flow`), `CONDITION` the raised object, rendered |
 | `(flow2 collector-wait-raised)` | the collector could not re-arm its eventfd read; it retries next tick |
 | `(flow2 shutdown-workers-still-running N)` | `flow-run` gave up joining `N` workers and leaked the eventfd rather than reuse its number |
 

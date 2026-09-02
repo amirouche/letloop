@@ -1323,6 +1323,16 @@
 ;; leaves behind; each check also deletes its own file on the way out.
 (define %flow2-check-directory "/tmp/letloop")
 
+;; Only used to assert that a log line rendered a condition rather than
+;; writing #<condition> -- the whole point of the entry.
+(define (flow2-check-substring? needle haystack)
+  (let ((n (string-length needle))
+        (h (string-length haystack)))
+    (let loop ((i 0))
+      (and (fx<=? (fx+ i n) h)
+           (or (string=? needle (substring haystack i (fx+ i n)))
+               (loop (fx+ i 1)))))))
+
 (define (flow2-check-path name)
   (unless (file-exists? %flow2-check-directory)
     (mkdir %flow2-check-directory))
@@ -2052,6 +2062,24 @@
      (flow-stop)))
   (assert (eq? 'timeout result))
   (assert (memq 'later (unbox ran)))
+  ;; The log line is the only trace a raising cancel leaves, and it used
+  ;; to be a bare (flow2 cancel-raised) -- an operator sent here by the
+  ;; README after an unexplained hang learned that something raised
+  ;; somewhere. It names the base and renders the condition now.
+  (let ((entry (let find ((entries (flow-log-drain!)))
+                 (cond
+                  ((null? entries) #f)
+                  ((and (fx>? (length (car entries)) 4)
+                        (eq? 'cancel-raised (caddr (car entries)))
+                        (string? (list-ref (car entries) 4))
+                        (flow2-check-substring? "cancel raised"
+                                                (list-ref (car entries) 4)))
+                   (car entries))
+                  (else (find (cdr entries)))))))
+    (assert entry)
+    ;; a base built with make-flow carries no data, and #f is the honest
+    ;; answer rather than an invented name
+    (assert (not (list-ref entry 3))))
   #t)
 
 ;; Third adverse pass, finding 9. A perform inside a dead scope must not
