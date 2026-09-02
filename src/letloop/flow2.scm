@@ -1441,12 +1441,19 @@
                   (lambda (x) (void))
                   (lambda () #f)
                   (lambda (state resume register-cancel!)
+                    ;; The SQE is claimed BEFORE the timespec is
+                    ;; foreign-alloc'd: loop-get-sqe raises when the
+                    ;; ring is full, and an allocation made ahead of it
+                    ;; had no owner to free it — 16 leaked bytes per
+                    ;; raise, on exactly the overloaded tick that
+                    ;; produces many of them. The other events allocate
+                    ;; only GC-managed bytevectors ahead of their SQE.
                     (let* ((ring (loop-ring (loop-current)))
                            (id   (loop-alloc-id!))
                            (ns   (exact (round (* seconds 1000000000))))
+                           (sqe  (loop-get-sqe ring))
                            (ts   (make-timespec (div ns 1000000000)
-                                                (mod ns 1000000000)))
-                           (sqe  (loop-get-sqe ring)))
+                                                (mod ns 1000000000))))
                       (io-uring-prep-timeout sqe (ftype-pointer-address ts) 0 0)
                       (io-uring-sqe-set-data64 sqe id)
                       (hashtable-set! (loop-handlers (loop-current)) id
