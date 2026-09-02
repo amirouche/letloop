@@ -744,7 +744,9 @@ no counting N replies:
 
 ```scheme
 (define (query-ngrams ngrams)
-  (define replies (make-flow-channel))
+  ;; nothing drains REPLIES until after the join, so its bound has to
+  ;; cover the whole fan-out — see the note below
+  (define replies (make-flow-channel 'replies (max 1 (length ngrams))))
   (flow-nursery
    (lambda (scope)
      (for-each (lambda (ngram)
@@ -762,6 +764,25 @@ no counting N replies:
 If `fetch-ngram` raises in any fiber, the nursery cancels every
 sibling's in-flight read, and the raise surfaces here — instead of a
 wait loop hanging on a message a dead fiber will never send.
+
+**Bound a channel by who drains it, and when.** Gather-after-join and a
+bound smaller than the fan-out are incompatible, and the failure is
+quiet: left at the default bound of 43 this pattern deadlocks on the
+44th reply, because that put parks waiting for room, the only drainer
+runs after the join, and the join waits for the parked putter. Nothing
+raises. `flow-monitor` is what turns it into a `timeout` you can see.
+
+Sizing the channel to the fan-out is the right answer when the fan-out
+is known and its results fit in memory, which is the usual case for
+something a nursery gathers. When it is not, gather *concurrently* — a
+fiber inside the nursery reading `replies` as they arrive — and the
+default bound goes back to doing its job, parking a producer that
+outruns the gatherer until it catches up.
+
+The same shape bites across threads. A `flow-submit!` under a nursery
+whose response channel is only read after the join parks the *worker's*
+reply put; the join waits for the task; and at shutdown that worker is
+one of the stragglers `flow-run` logs.
 
 ### Bound a whole query
 

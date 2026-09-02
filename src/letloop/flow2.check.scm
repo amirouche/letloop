@@ -1853,3 +1853,49 @@
   ;; and the descriptor really is gone
   (assert (not still-open))
   #t)
+
+;; The README's "Fan out, gather, and never hang" pattern, transcribed.
+;; BOUND #f is the naive spelling that leaves the channel at the
+;; default; anything else sizes it to the fan-out, which is what the
+;; pattern now shows.
+(define (flow2-check-fan-out n bound)
+  (let ((replies (if bound
+                     (make-flow-channel 'replies bound)
+                     (make-flow-channel 'replies))))
+    (flow-nursery
+     (lambda (scope)
+       (for-each (lambda (i)
+                   (flow-spawn (lambda () (flow-put! replies i))))
+                 (iota n))))
+    (let loop ((out '()))
+      (let ((r (flow-get-try replies #f)))
+        (if r (loop (cons r out)) out)))))
+
+;; Gather-after-join and a bound smaller than the fan-out are
+;; incompatible, and the failure is silent: the put that fills the
+;; channel parks waiting for room, the only drainer runs after the
+;; join, and the join waits for the parked putter. Nothing raises --
+;; only a monitor turns it into something visible.
+;;
+;; Both halves are pinned here, because the rule is only worth its
+;; space in the README if the naive shape really does hang: the sized
+;; channel completes past the default bound, the default-bound one
+;; times out at the same size.
+(define (~check-flow2-003/gather-after-join-scales-past-the-default-bound)
+  (define sized 'not-set)
+  (define naive 'not-set)
+  (assert (fx>? 50 (flow-channel-bound (make-flow-channel))))
+  (flow-run
+   (lambda (workers)
+     (set! sized
+           (guard (ex ((flow-error? ex) (list 'raised (flow-error-symbol ex))))
+             (length (flow-monitor 2.0
+                                   (lambda () (flow2-check-fan-out 50 50))))))
+     (set! naive
+           (guard (ex ((flow-error? ex) (list 'raised (flow-error-symbol ex))))
+             (length (flow-monitor 0.4
+                                   (lambda () (flow2-check-fan-out 50 #f))))))
+     (flow-stop)))
+  (assert (eqv? 50 sized))
+  (assert (equal? '(raised timeout) naive))
+  #t)

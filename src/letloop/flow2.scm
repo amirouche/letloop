@@ -100,6 +100,7 @@
    ~check-flow2-003/nursery-in-dead-scope-raises
    ~check-flow2-003/block-raise-reaches-the-scope
    ~check-flow2-003/waiter-on-dead-scope-is-woken
+   ~check-flow2-003/gather-after-join-scales-past-the-default-bound
    ~check-flow2-004/monitor-in-time
    ~check-flow2-004/monitor-deadline
    ~check-flow2-004/monitor-interrupted-by-parent-drains-children
