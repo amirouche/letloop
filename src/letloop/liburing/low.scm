@@ -2242,7 +2242,7 @@
       (let ((ring     (make-io-uring))
             (cqe-ptr  (make-cqe-pointer))
             (handlers (make-eqv-hashtable)))
-        (let ((ret (io-uring-queue-init 256 ring 0)))
+        (let ((ret (io-uring-queue-init 512 ring 0)))
           (unless (fxzero? ret)
             (error 'loop-new
                    (format #f "io_uring_queue_init failed: ~a"
