@@ -92,7 +92,11 @@ letloop review [DIRECTORY ...]
 
 Key flags: `--dev` (debug, profile, instruction counts),
 `--optimize-level=0..3`, `--disable-garbage-collector`,
-`--visible-libraries`, `--boot=PATH`.
+`--visible-libraries`, `--boot=PATH`, `--static`.
+
+`--static` links the C libraries a program imports rather than
+dlopening them at run time, working out which ones from the import
+closure and pulling each package's own C dependencies along with it.
 
 ## Libraries in tree
 

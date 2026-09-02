@@ -30,6 +30,20 @@ The following flags are available:
                       that resolves a library name at run time, with
                       environment or eval.
 
+  --static  Link the C libraries the program imports, instead of
+            dlopening them at run time. Which ones is worked out from
+            the import closure: a library that declares a shared object
+            with define-shared-object is asked for the matching
+            (letloop package NAME), and that package's own derivation
+            supplies whatever C libraries sit under it -- importing
+            (letloop opaque) links libopaque.a, liboprf.a and
+            libsodium.a, though only the first is named anywhere in
+            Scheme. The archives come from the store, and are built if
+            not already there. What was linked is always printed; a
+            library with no package behind it keeps dlopening, which is
+            the only thing available for (letloop desktop vulkan low),
+            whose libvulkan dlopens drivers of its own regardless.
+
 `letloop compile` writes ./a.out, one self-contained file that needs
 nothing beside it, and no C compiler unless a static library is named
 below: letloop's own host binary, then a boot

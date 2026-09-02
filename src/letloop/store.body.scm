@@ -131,6 +131,57 @@
         project
         (cons* 'letloop 'package components))))
 
+;; Every static archive a package provides, plus those of every package
+;; it names as an input, transitively -- so asking for `opaque` also
+;; yields liboprf.a and libsodium.a, which nothing but opaque's own
+;; derivation knows it needs. COMPONENTS is a library name's tail, the
+;; way RESOLVE-PACKAGE-REFERENCE takes it, so a project package shadows
+;; a shipped one here exactly as it does on the command line.
+;;
+;; '() rather than an error when no package of that name exists: this
+;; is called speculatively, once per library in a program's import
+;; closure, and most of them are ordinary Scheme with no C behind them.
+;;
+;; Order is deliberately not managed. Static archives are
+;; order-sensitive and getting that right from a dependency graph is
+;; its own problem; the caller links the whole set inside
+;; --start-group, which makes the linker resolve the order itself.
+(define (package-archive-file? name)
+  (let ((length* (string-length name)))
+    (and (fx>? length* 2)
+         (string=? (substring name (fx- length* 2) length*) ".a"))))
+
+(define (store-package-archives components)
+  (let ((reference (resolve-package-reference components)))
+    ;; Only a package that actually exists: resolve-package-reference
+    ;; falls back to the shipped namespace whether or not anything is
+    ;; there, so existence is checked here rather than inferred.
+    (if (not (guard (ex (#t #f)) (environment reference) #t))
+        '()
+        (let loop ((pending (list reference)) (seen '()) (out '()))
+          (cond
+           ((null? pending) (reverse out))
+           ((member (car pending) seen) (loop (cdr pending) seen out))
+           (else
+            (let* ((reference (car pending))
+                   (seen (cons reference seen))
+                   (destination (guard (ex (#t #f)) (store-build reference))))
+              (if (not destination)
+                  (loop (cdr pending) seen out)
+                  (let* ((d (reference-derivation reference))
+                         (inputs (map input-package-name
+                                       (filter input-package-reference?
+                                               (derivation-inputs d))))
+                         (lib (string-append destination "/lib"))
+                         (archives (if (file-directory? lib)
+                                       (map (lambda (x) (string-append lib "/" x))
+                                            (filter package-archive-file?
+                                                    (directory-list lib)))
+                                       '())))
+                    (loop (append (cdr pending) inputs)
+                          seen
+                          (append (reverse archives) out)))))))))))
+
 ;; A (derivation "...") reference resolves relative to the directory of
 ;; the derivation file that names it, not the invoker's cwd -- so a
 ;; chain of derivations sitting next to each other can reference

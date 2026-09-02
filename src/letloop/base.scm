@@ -441,6 +441,66 @@
                         (filter pair? (map extract-library-name (cdr imports)))
                         '())))))))))
 
+  (define library-name->path
+    ;; The file a library name resolves to, by the R6RS/Chez
+    ;; convention every component but the last is a directory:
+    ;; (letloop tls low) is letloop/tls/low.scm under some library
+    ;; directory. Purely a path lookup -- nothing is read or
+    ;; instantiated, unlike maybe-library-name, which resolves a name
+    ;; by importing it.
+    (lambda (name)
+      (and (list? name)
+           (let ((relative (fold-left (lambda (accumulator component)
+                                        (string-append accumulator "/" (symbol->string component)))
+                                      ""
+                                      name)))
+             (let loop ((directories (library-directories)))
+               (and (pair? directories)
+                    (let ((root (let ((directory (car directories)))
+                                  (if (pair? directory) (car directory) directory))))
+                      (let extension-loop ((extensions (library-extensions)))
+                        (if (null? extensions)
+                            (loop (cdr directories))
+                            (let ((candidate (string-append root relative (caar extensions))))
+                              (if (file-exists? candidate)
+                                  candidate
+                                  (extension-loop (cdr extensions)))))))))))))
+
+  (define import-closure
+    ;; Every library name reachable from FILENAME's own imports.
+    ;;
+    ;; Walked syntactically, through library-imports, rather than by
+    ;; importing anything: the amalgamating compile path deliberately
+    ;; keeps every library out of this process so the child can compile
+    ;; them, so instantiating them here to ask what they import would
+    ;; defeat the thing this runs inside of.
+    (lambda (filename)
+      (let loop ((pending (library-imports filename)) (seen '()))
+        (cond
+         ((null? pending) (reverse seen))
+         ((member (car pending) seen) (loop (cdr pending) seen))
+         (else
+          (let* ((name (car pending))
+                 (path (library-name->path name)))
+            (loop (append (cdr pending) (if path (library-imports path) '()))
+                  (cons name seen))))))))
+
+  (define library-package-components
+    ;; The package names to try for a library, longest first:
+    ;; (letloop tls low) asks about `tls low`, then `tls` -- so a
+    ;; package named for the exact library wins over one named for the
+    ;; subsystem it belongs to, and (letloop tls low) finds
+    ;; (letloop package tls) without either having to know about the
+    ;; other. A leading `letloop` is dropped so the store's own
+    ;; resolver sees the same shape a caller types on the command line.
+    (lambda (name)
+      (and (pair? name)
+           (let ((tail (if (eq? (car name) 'letloop) (cdr name) name)))
+             (let loop ((tail tail) (out '()))
+               (if (null? tail)
+                   (reverse out)
+                   (loop (reverse (cdr (reverse tail))) (cons tail out))))))))
+
   (define topological-sort-libraries
     (lambda (discovered)
       ;; discovered: list of (root . filepath) pairs
@@ -739,6 +799,7 @@
   (define cli-read (lazy '(letloop cli base) 'cli-read))
   (define transparent (lazy '(letloop http server) 'transparent))
   (define letloop-store (lazy '(letloop store) 'letloop-store))
+  (define store-package-archives (lazy '(letloop store) 'store-package-archives))
   (define letloop-review (lazy '(letloop review) 'letloop-review))
 
   (define letloop-compile
@@ -795,6 +856,7 @@
       (define optimize-level* 0)
       (define optimize-level-given? #f)
       (define visible-libraries? #f)
+      (define static? #f)
       (define extra '())
       (define sorted-discovered #f)
 
@@ -829,6 +891,8 @@
                 (set! disable-garbage-collector? #t))
                ((and (eq? (car keyword) '--visible-libraries) (not (string? (cdr keyword))))
                 (set! visible-libraries? #t))
+               ((and (eq? (car keyword) '--static) (not (string? (cdr keyword))))
+                (set! static? #t))
                ((and (eq? (car keyword) '--optimize-level)
                      (string->number (cdr keyword))
                      (<= 0 (string->number (cdr keyword)) 3))
@@ -1259,18 +1323,113 @@
             (let* ((triple (let ((lines (run/lines (format #f "~a -dumpmachine" compiler))))
                              (if (null? lines) "" (car lines))))
                    (static-flag (if (string-contains? "musl" triple) "-static" ""))
+                   ;; --start-group, so the linker resolves the order
+                   ;; itself. Static archives are order-sensitive --
+                   ;; libopaque must precede liboprf must precede
+                   ;; libsodium -- and emitting a correct order from a
+                   ;; dependency graph is its own problem, one an
+                   ;; inferred archive set would have to solve before
+                   ;; it could be trusted. A group makes the linker
+                   ;; re-scan until nothing new resolves, which is the
+                   ;; answer it already has for exactly this.
+                   (grouped
+                    (if (null? archives)
+                        ""
+                        (fold-left (lambda (out archive) (string-append out " " archive))
+                                   " -Wl,--start-group" archives)))
                    (command
-                    (format #f "~a -I~a -I~a ~a ~a ~a~a -o ~a ~a -ldl -lm -lpthread"
+                    (format #f "~a -I~a -I~a ~a ~a ~a~a~a -o ~a ~a -ldl -lm -lpthread"
                             compiler boot* temporary-directory
                             source extra.c kernel.o
-                            (fold-left (lambda (out archive) (string-append out " " archive))
-                                       "" archives)
+                            grouped
+                            (if (null? archives) "" " -Wl,--end-group")
                             destination static-flag)))
               (when LETLOOP_DEBUG (pk 'link command))
               (unless (fxzero? (system command))
                 (format (current-error-port)
                         "* Ooops :|\n** Linking the static libraries failed:\n** ~a\n" command)
                 (exit 1))))))
+
+      (define library-declares-shared-object?
+        ;; Whether a library names a shared object of its own. This is
+        ;; the statement that it has C behind it, and it was already
+        ;; written years before anything inferred anything: importing
+        ;; (letloop sodium) is what says libsodium is wanted, and
+        ;; define-shared-object is where it says so.
+        ;;
+        ;; Restricting inference to these libraries is also what keeps
+        ;; it from ever building something that is not an archive.
+        ;; Several packages under (letloop package ...) are test
+        ;; fixtures whose output is a compiled program -- flow2,
+        ;; review, hello -- and matching on name alone would cheerfully
+        ;; build one, minutes of sandboxed work, only to find no .a
+        ;; inside it. A library that declares no shared object is
+        ;; never asked about, so a fixture is never reached by name.
+        (lambda (filename)
+          (guard (ex (else #f))
+            (call-with-input-file filename
+              (lambda (port)
+                (let ((text (get-string-all port)))
+                  (and (string? text)
+                       (string-contains? "define-shared-object" text))))))))
+
+      (define archives-for-library
+        ;; The archives one library needs, or '() -- its longest
+        ;; matching package wins, so (letloop tls low) takes
+        ;; (letloop package tls) only because no (letloop package tls
+        ;; low) exists.
+        (lambda (name)
+          (let loop ((candidates (or (library-package-components name) '())))
+            (if (null? candidates)
+                '()
+                (let ((found (store-package-archives (car candidates))))
+                  (if (pair? found) found (loop (cdr candidates))))))))
+
+      (define infer-archives!
+        ;; Which static archives a program needs, worked out from what
+        ;; it imports rather than from what someone remembered to type
+        ;; on the command line.
+        ;;
+        ;; Both halves of this already existed and only needed
+        ;; joining: a binding library names its package by its own name
+        ;; -- (letloop sodium) means (letloop package sodium) -- so a
+        ;; program's import closure is already the list of packages it
+        ;; wants, and each package's own derivation already carries the
+        ;; C-level dependencies underneath it, which is the part no
+        ;; import can express (libopaque needs liboprf and libsodium,
+        ;; and only opaque's derivation says so).
+        ;;
+        ;; A library with no package behind it contributes nothing, so
+        ;; most of a closure is simply skipped -- and (letloop desktop
+        ;; vulkan low) skips for a reason worth keeping: libvulkan is a
+        ;; loader that dlopens drivers itself, so there is no archive
+        ;; that would make it static, and inference correctly declines
+        ;; to invent one.
+        ;;
+        ;; Reported, never silent. This repository has been bitten more
+        ;; than once by a link-time probe that failed quietly and left
+        ;; a binary that looked healthy until something reached the
+        ;; part needing the symbols; an inferred link has exactly that
+        ;; shape unless it says what it did.
+        (lambda ()
+          (let loop ((names (filter (lambda (name)
+                                      (let ((path (library-name->path name)))
+                                        (and path (library-declares-shared-object? path))))
+                                    (import-closure library.scm)))
+                     (found '()))
+            (if (pair? names)
+                (loop (cdr names)
+                      (fold-left (lambda (out archive)
+                                   (if (member archive out) out (append out (list archive))))
+                                 found
+                                 (archives-for-library (car names))))
+                (let ((new (filter (lambda (archive) (not (member archive archives))) found)))
+                  (if (null? new)
+                      (display "* Inferred no static archive from the import closure.\n")
+                      (begin
+                        (display "* Inferred static archives from the import closure:\n")
+                        (for-each (lambda (archive) (format #t "** ~a\n" archive)) new)))
+                  (set! archives (append archives new)))))))
 
       (define emit-program!
         ;; One self-contained file: the host binary, then the
@@ -1380,6 +1539,8 @@
       (if visible-libraries?
           (build-boot-file/visible-libraries)
           (build-boot-file/whole-program))
+
+      (when static? (infer-archives!))
 
       (emit-program!)))
 

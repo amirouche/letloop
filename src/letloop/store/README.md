@@ -199,43 +199,57 @@ binary can be verified by rebuilding it — but did not remove it.
 
 **Static linking is the default** for a compiled program.
 
-**Inferring C dependencies from the import closure is parked.** The
-data for it is already in the source: nine libraries name their shared
-object with `define-shared-object`, and letloop already computes the
-import closure for amalgamation, so importing `(letloop blake3)` is
-itself the statement that libblake3 is wanted — no symbol-level
-analysis needed. What parks it is that a program's identity would then
-include *which* archive it linked, so a binary would only be
-reproducible if that were pinned, and would arguably need addressing
-by its whole closure.
+~~**Inferring C dependencies from the import closure is parked.**~~
+Built, as `letloop compile --static`. The data was always in the
+source: nine libraries name their shared object with
+`define-shared-object`, and importing `(letloop blake3)` is itself the
+statement that libblake3 is wanted — no symbol-level analysis needed.
+What parked it was that a program's identity would then include
+*which* archive it linked, and that dissolved once a binding pinned
+its package by a conventional name rather than a bare `.so`: the
+version is fixed by the letloop release that ships the definitions, so
+a program's identity is its source plus a letloop version.
 
-That dissolves rather than needs managing if a binding pins its
-package by a conventional name instead of naming a bare `.so`: the
-version is then fixed by the letloop release, which already bundles
-the definitions, so a program's identity is its source plus a letloop
-version and nothing further. Which puts inference back behind the same
-prerequisite as everything else.
+Of the three things it still had to answer, two are answered and one
+is not:
 
-Three things it will still have to answer, none solved by pinning:
+- ~~C libraries have C dependencies of their own — libtls pulls libssl
+  and libcrypto — and static archives are order-sensitive.~~ The
+  closure comes from each package's own `inputs`, which is the only
+  place it was ever written down; importing `(letloop opaque)` links
+  libopaque.a, liboprf.a and libsodium.a. Order is not emitted at all:
+  the set is linked inside `-Wl,--start-group`, which makes the linker
+  re-scan until nothing new resolves. Getting a dependency-first order
+  right from a graph was the harder half of this, and it turned out
+  not to need solving.
+- **Two archives defining one symbol still resolve silently by link
+  order, and a group makes that no better.** With explicit arguments a
+  person chose them; with inference nobody did. Nothing detects it
+  today — the honest statement is that this is unaddressed, not that
+  `--start-group` covers it.
+- ~~`define-shared-object` cannot say whether a library is required or
+  merely faster.~~ Still true of the declaration, but it stopped
+  mattering: `--static` is opt-in and prints every archive it linked,
+  so linking blake3 is a speed choice someone can see and undo, not a
+  correctness cliff — `(letloop blake3 scheme)` remains the floor.
 
-- C libraries have C dependencies of their own — libtls pulls libssl
-  and libcrypto — and static archives are order-sensitive, so
-  inference needs a closure emitted dependency-first, not the flat
-  list `letloop compile`'s `.a` arguments take today.
-- Two archives defining one symbol resolve silently by link order.
-  With explicit arguments a person chose them; with inference nobody
-  did.
-- `define-shared-object` cannot say whether a library is required or
-  merely faster. blake3 is now the latter, since `(letloop blake3
-  pure)` is the floor.
+One thing inference must *not* do, and does not: reach a package that
+is not an archive. Several `(letloop package ...)` entries are test
+fixtures whose output is a compiled program (`flow2`, `review`,
+`hello`), and matching on name alone would build one — minutes of
+sandboxed work — to find no `.a` in it. Only a library that declares a
+shared object is asked about, and no fixture's library does.
 
 **Inference makes a substituter matter more than it did when it was
-deferred.** Deferring was right for explicit builds: asking for
-`store build libgegl` is asking for a wait. Inference makes the build
-implicit, so compiling a hello-world that happens to import
-`(letloop blake3)` could trigger a sandboxed build, or on a cold
-machine most of the chain, with no visible cause. Prebuilt outputs
-stop being an optimisation at that point.
+deferred, and now that inference exists this is live.** Deferring was
+right for explicit builds: asking for `store build libgegl` is asking
+for a wait. `--static` makes the build implicit — compiling a
+hello-world that imports `(letloop blake3)` can trigger a sandboxed
+build, or on a cold machine most of the chain. Two things blunt it
+rather than fix it: the flag is opt-in, so nobody meets this without
+asking, and every archive linked is printed, so the cause is visible
+rather than mysterious. Neither makes the wait shorter. Prebuilt
+outputs stopped being an optimisation the moment this landed.
 
 **A program's own C library keeps the explicit path.** Inference only
 covers bindings letloop ships, so `letloop compile prog.scm main

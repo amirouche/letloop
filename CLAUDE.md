@@ -181,7 +181,9 @@ letloop exec [DIRECTORY ...] LIBRARY.SCM PROCEDURE [-- ARGUMENT ...]
 letloop repl
 ```
 
-Key flags: `--dev` (debug/profile), `--optimize-level=0-3`, `--disable-garbage-collector`, `--visible-libraries` (do not amalgamate).
+Key flags: `--dev` (debug/profile), `--optimize-level=0-3`, `--disable-garbage-collector`, `--visible-libraries` (do not amalgamate), `--static` (link imported C libraries instead of dlopening them).
+
+**`letloop compile --static` infers its own archives.** A program's import closure is already the list of C libraries it wants: a binding library says so with `define-shared-object`, and `(letloop sodium)` names `(letloop package sodium)`. That package's derivation then supplies the C-level dependencies underneath it, which no Scheme import can express — `(letloop opaque)` links libopaque.a, liboprf.a *and* libsodium.a. Only libraries declaring a shared object are consulted, which is also what stops a fixture package (`flow2`, `review`) from being built by a bare name match. Archives are linked inside `-Wl,--start-group`, so the linker resolves their order rather than this having to emit it correctly. Without `--static`, and for any library with no package behind it, the shared object is dlopened at run time exactly as before.
 
 ## Environment
 

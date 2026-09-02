@@ -5,6 +5,7 @@
           store-build
           store-directory
           store-path
+          store-package-archives
 
           ~check-store-000
           ~check-store-001/fetch-only
@@ -14,7 +15,8 @@
           ~check-store-005/build-cache-skips-the-build
           ~check-store-006/build-cache-sees-changed-inputs
           ~check-store-007/cli-project-package
-          ~check-store-008/cache-write-is-idempotent)
+          ~check-store-008/cache-write-is-idempotent
+          ~check-store-009/package-archives)
 
   (import (chezscheme)
           (letloop cli base)

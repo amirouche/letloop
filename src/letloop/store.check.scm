@@ -319,6 +319,79 @@
             (and (file-exists? (string-append (store-build '(package store-cli-hello)) "/hello"))
                  (file-exists? (string-append (store-build '(package store-cli-versioned v1)) "/hello"))))))))
 
+(define (store-check-ends-with? string suffix)
+  (let ((n (string-length string)) (m (string-length suffix)))
+    (and (fx>=? n m) (string=? (substring string (fx- n m) n) suffix))))
+
+;; store-package-archives: the C-level dependency closure a program
+;; cannot express through its Scheme imports. Importing (letloop
+;; opaque) says nothing about liboprf or libsodium -- only opaque's own
+;; derivation does -- so the archives of a package's (package ...)
+;; inputs have to come back too, transitively, or an inferred link is
+;; missing exactly the symbols nobody wrote down.
+;;
+;; ar over a plain file rather than a compiled object: what is under
+;; test is which archives are collected and from where, not whether
+;; the sandbox has a working compiler, which `hello` already gates.
+(define ~check-store-009/package-archives
+  (lambda ()
+    (if (not (bwrap-available?))
+        (begin (display "** SKIP: /usr/bin/bwrap not found\n") #t)
+        (guard (ex (#t (display "** SKIP: bwrap sandbox unavailable in this environment\n") #t))
+          (define mkdtemp (foreign-procedure "mkdtemp" (string) string))
+          (define (write-package! path form)
+            (call-with-output-file path (lambda (port) (write form port))))
+          (system! "mkdir -p /tmp/letloop/")
+          (let* ((rootfs (mkdtemp "/tmp/letloop/store-check-009-rootfs-XXXXXX"))
+                 (root (mkdtemp "/tmp/letloop/store-check-009-root-XXXXXX"))
+                 (package-directory (string-append root "/package")))
+            (store-check-fixture-rootfs! rootfs)
+            (system! "rm -rf /tmp/letloop/store-check-009-store")
+            (putenv "LETLOOP_STORE" "/tmp/letloop/store-check-009-store")
+            (system! (format #f "mkdir -p ~a" (shell-single-quote package-directory)))
+            (library-directories (append (library-directories) (list root)))
+            (source-directories (append (source-directories) (list root)))
+            (write-package!
+             (string-append package-directory "/archive-leaf.scm")
+             `(library (package archive-leaf)
+                (export package)
+                (import (chezscheme))
+                (define package
+                  '(derivation
+                    (name "archive-leaf")
+                    (build-environment (root (directory ,rootfs)))
+                    (script "set -e\n"
+                            "mkdir -p out/lib\n"
+                            "echo leaf > leaf\n"
+                            "ar rcs out/lib/libleaf.a leaf\n")
+                    (output "out")))))
+            (write-package!
+             (string-append package-directory "/archive-root.scm")
+             `(library (package archive-root)
+                (export package)
+                (import (chezscheme))
+                (define package
+                  '(derivation
+                    (name "archive-root")
+                    (build-environment (root (directory ,rootfs)))
+                    (inputs ((package (package archive-leaf))))
+                    (script "set -e\n"
+                            "mkdir -p out/lib\n"
+                            "echo root > root\n"
+                            "ar rcs out/lib/libroot.a root\n")
+                    (output "out")))))
+            (let ((found (store-package-archives '(archive-root))))
+              (and (= (length found) 2)
+                   ;; the package's own archive, and the one only its
+                   ;; derivation knew it depended on
+                   (find (lambda (x) (store-check-ends-with? x "/libroot.a")) found)
+                   (find (lambda (x) (store-check-ends-with? x "/libleaf.a")) found)
+                   ;; a name with no package behind it contributes
+                   ;; nothing, rather than raising -- most of a real
+                   ;; import closure is ordinary Scheme
+                   (null? (store-package-archives '(no-such-package-here)))
+                   #t)))))))
+
 ;; Two builds racing on the same key both pass BUILD-CACHE-REF's "not
 ;; cached yet" check before either finishes, so both call
 ;; BUILD-CACHE-SET! for the same key -- found for real building
