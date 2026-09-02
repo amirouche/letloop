@@ -106,7 +106,7 @@
 ;; per-fd timestamp goes stale and eventually kills the connection out
 ;; from under an in-flight, healthy request, silently, with no log
 ;; line anywhere).
-(define %dispatch-timeout-seconds 25)
+(define %dispatch-timeout-seconds 28)
 
 ;; Cooperative cancellation handed to DISPATCH alongside REQ. NEEDED?
 ;; starts #t; the server flips it to #f once it has given up on this
