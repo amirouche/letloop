@@ -65,7 +65,6 @@ print a `** SKIP` note and pass.
 ```
 letloop check [--fail-fast] [DIRECTORY ...] LIBRARY.SCM ...
 letloop compile [DIRECTORY ...] LIBRARY.SCM PROCEDURE [-- CC-FLAGS ...]
-letloop exec [DIRECTORY ...] LIBRARY.SCM PROCEDURE [-- ARGUMENT ...]
 letloop http serve [--port=PORT] [DIRECTORY ...] LIBRARY.SCM
 letloop repl
 letloop review [DIRECTORY ...]
@@ -78,7 +77,6 @@ letloop review [DIRECTORY ...]
   single unit, so that calls across library boundaries can be inlined;
   `--visible-libraries` compiles them separately and leaves them
   importable at run time instead.
-- **exec** — compile and run in one step, forwarding arguments after `--`.
 - **http serve** — serve a web library exporting `application`,
   `context`, and `dispatch` over the io_uring HTTP server (see
   `examples/my-web-library.scm`).

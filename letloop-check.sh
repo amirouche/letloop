@@ -67,10 +67,14 @@ fi
 
 # Testing letoop compile, and libraries embedding
 
-# executing the procedure code-usage at checks/codex/base.scm works
-$LETLOOP exec checks/ checks/codex/base.scm codex-usage
+# running the procedure codex-usage at checks/codex/base.scm works.
+# Compiled and run, since `letloop exec` is gone: a compiled program is
+# the only kind letloop produces now, so it is the only kind worth
+# checking.
+$LETLOOP compile checks/ checks/codex/base.scm codex-usage && ./a.out
 if [ $? -eq 0 ]; then
   echo codex execute success
+  rm -f a.out a.out.boot
 else
   exit 1
 fi

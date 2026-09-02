@@ -68,7 +68,7 @@ make check
 **Run a single test manually:**
 ```bash
 $LETLOOP check checks/check/ checks/check/check-success.scm
-$LETLOOP exec checks/ checks/codex/base.scm codex-usage
+$LETLOOP compile checks/ checks/codex/base.scm codex-usage && ./a.out
 ```
 
 **Find in-progress items:**
@@ -93,7 +93,7 @@ Prefer these skills for common workflows:
 
 ```
 src/letloop-main.c           C host — parses no flags, finds its boot in its own trailer
-src/letloop/base.scm         Main entry point: letloop-main, letloop-compile, letloop-exec,
+src/letloop/base.scm         Main entry point: letloop-main, letloop-compile,
                             letloop-repl, letloop-check — handles CLI dispatch, library
                             discovery, and compilation
 src/letloop/cli/base.scm     Argument parser — cli-read / cli-write, parses flags,
@@ -177,7 +177,6 @@ The `checks/` directory is only for proving the test runner itself works:
 ```
 letloop check [--fail-fast] [DIRECTORY ...] LIBRARY.SCM ...
 letloop compile [DIRECTORY ...] LIBRARY.SCM PROCEDURE
-letloop exec [DIRECTORY ...] LIBRARY.SCM PROCEDURE [-- ARGUMENT ...]
 letloop repl
 ```
 

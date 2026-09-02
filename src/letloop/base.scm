@@ -1,6 +1,6 @@
 #!chezscheme
 (library (letloop base)
-  (export letloop-main letloop-compile letloop-exec letloop-repl letloop-check letloop-review)
+  (export letloop-main letloop-compile letloop-repl letloop-check letloop-review)
   ;; Nothing from letloop is imported here on purpose -- see
   ;; letloop-library-path!. An imported library would be folded into the
   ;; letloop program, and a folded library is invisible: its name would
@@ -1572,96 +1572,6 @@
 
   (define letloop-compile* (lambda () (letloop-compile (command-line-arguments))))
 
-  (define (letloop-exec arguments)
-
-    ;; parse ARGUMENTS, and set the following variables:
-
-    (define extensions '())
-    (define directories '())
-    (define dev? #f)
-    (define disable-garbage-collector? #f)
-    (define optimize-level* 0)
-    (define extra '())
-    (define program.scm #f)
-    (define library.scm #f)
-    (define main #f)
-
-    (define errors (make-accumulator))
-
-    (define massage-standalone!
-      (lambda (standalone)
-        (unless (null? standalone)
-          (call-with-values (lambda () (guess (car standalone)))
-            (lambda (type string*)
-              (case type
-                (directory (set! directories (cons string* directories)))
-                (extension (set! extensions (cons string* extensions)))
-                (file (if library.scm
-                          (errors (format #f "Already registred a library to execute, maybe remove: ~a" (car standalone)))
-                          (set! library.scm string*)))
-                ;; letloop exec runs the interpreted/dlopen'd path, not
-                ;; a linked binary -- there is no step that would ever
-                ;; make an archive's symbols resolve. Reject it here,
-                ;; rather than silently dropping the argument and
-                ;; letting the first foreign-procedure call into it
-                ;; fail later with an unrelated "no entry for" error:
-                ;; see letloop compile for linking a .a into a program.
-                (archive (errors (format #f "letloop exec cannot link a static library, only letloop compile can: ~a" (car standalone))))
-                (unknown (if main
-                             (errors (format #f "Already registred a main procedure, maybe remove: ~a" (car standalone)))
-                             (set! main string*))))))
-          (massage-standalone! (cdr standalone)))))
-
-    (define massage-keywords!
-      (lambda (keywords)
-        (unless (null? keywords)
-          (let ((keyword (car keywords)))
-            (cond
-             ((and (eq? (car keyword) '--dev) (not (string? (cdr keyword))))
-              (set! dev? #t))
-             ((and (eq? (car keyword) '--disable-garbage-collector) (not (string? (cdr keyword))))
-              (set! disable-garbage-collector? #t))
-             ((and (eq? (car keyword) '--optimize-level)
-                   (string->number (cdr keyword))
-                   (<= 0 (string->number (cdr keyword)) 3))
-              (set! optimize-level* (string->number (cdr keyword))))
-             (else (errors (format #f "Dubious keyword: ~a" (car keyword))))))
-          (massage-keywords! (cdr keywords)))))
-
-    (call-with-values (lambda () (cli-read arguments))
-      (lambda (keywords standalone extra*)
-        (massage-standalone! standalone)
-        (massage-keywords! keywords)
-        (set! extra extra*)))
-
-    (maybe-display-errors-then-exit errors)
-
-    (unless (null? directories)
-      (library-directories directories)
-      (source-directories directories))
-
-    ;; the override above drops letloop's own libraries off the path
-    (letloop-library-path!)
-
-    (when optimize-level*
-      (optimize-level optimize-level*))
-
-    (unless (null? extensions)
-      (library-extensions (append extensions (library-extensions))))
-
-    (dev! dev?)
-    (disable-garbage-collector! disable-garbage-collector?)
-
-    (dynamic-wind
-        (lambda () (void))
-        (lambda () (let ((exp (cons (string->symbol main) extra))
-                         (env (environment (maybe-library-name library.scm))))
-                     (pk 'to 'exec exp env)
-                     (eval exp env)))
-        (lambda ()
-          (when dev?
-            (profile-dump-html)))))
-
   (define (letloop-http-serve arguments)
 
     ;; letloop http serve [--port=PORT] [DIRECTORY ...] LIBRARY.SCM
@@ -1847,12 +1757,82 @@
                     (loop (cdr objects)
                           (cons (cons (car objects) #t) out)))))))
 
-      (define build-check-program
-        (lambda (spec fail-fast?)
-          ;; TODO: add prefix to import, and rename procedures
-          (define libraries (pk 'libraries (reverse (uniquify (map car spec)))))
-          (define procedures (map cdr spec))
+      (define run-check-driver!
+        ;; Compile one library's checks and run them, returning whether
+        ;; they passed.
+        ;;
+        ;; A child `letloop compile`, rather than calling the compile
+        ;; path in this process, because that path replaces the library
+        ;; directories, the optimize level and the object cache
+        ;; wholesale -- doing that once per library inside the process
+        ;; running the checks would leave each library's run depending
+        ;; on the ones before it. A child starts clean every time.
+        ;;
+        ;; It compiles in its own directory, so ./a.out lands there
+        ;; rather than on top of whatever the invoker happens to have
+        ;; in the directory they ran this from. The paths handed to it
+        ;; are absolute already -- guess makes them so -- which is what
+        ;; makes moving the child's cwd safe.
+        (lambda (temporary-directory library-name procedures fail-fast?)
+          (let* ((directory (string-append temporary-directory "/"
+                                            (number->string (length procedures))
+                                            "-" (symbol->string (car (reverse library-name)))))
+                 (driver (string-append directory "/letloop-check-driver.scm"))
+                 (output (string-append directory "/compile.log")))
+            (system* (format #f "mkdir -p ~a" directory))
+            (call-with-output-file driver
+              (lambda (port)
+                (write (build-check-driver library-name procedures fail-fast?) port)))
+            (format #t "* ~a\n" library-name)
+            (flush-output-port (current-output-port))
+            (let ((compiled
+                   (fxzero?
+                    (system (format #f "cd ~a && ~a compile~a ~a ~a main > ~a 2>&1"
+                                     directory
+                                     (or (executable-path) "letloop")
+                                     (fold-left (lambda (out d) (string-append out " " d))
+                                                "" directories)
+                                     directory driver output)))))
+              (if (not compiled)
+                  (begin
+                    ;; Never silent: a library whose checks could not be
+                    ;; built is not a library whose checks passed, and
+                    ;; the compiler already said why.
+                    (format #t "** Could not compile the checks for ~a:\n" library-name)
+                    (guard (ex (else (void)))
+                      (call-with-input-file output
+                        (lambda (port) (display (get-string-all port)))))
+                    #f)
+                  (fxzero? (system (format #f "cd ~a && ./a.out" directory))))))))
 
+      (define build-check-driver
+        ;; One library's checks, as a program `letloop compile` can
+        ;; take, rather than as a form to eval in this process.
+        ;;
+        ;; Compiling is what makes a check test the thing that ships. A
+        ;; check run through eval reaches its C libraries by dlopen; a
+        ;; compiled program links them as static archives. Those are
+        ;; not the same program, and the one being tested was the one
+        ;; nobody deploys -- most sharply on a statically linked
+        ;; letloop, where dlopen does not work at all, so the
+        ;; interpreted path could not even reach the code it claimed to
+        ;; be checking.
+        ;;
+        ;; One driver per library, not one for the whole tree, and this
+        ;; is forced rather than chosen: a single program importing
+        ;; everything would have to link every archive at once, and
+        ;; libsodium and libargon2 both define argon2id_hash_raw, so
+        ;; such a binary cannot be linked at all. Per library the
+        ;; conflict cannot arise, since no library imports both.
+        (lambda (library-name procedures fail-fast?)
+          `(library (letloop-check-driver)
+             (export main)
+             (import (chezscheme) ,library-name)
+             (define (main . arguments)
+               ,(build-check-body procedures fail-fast?)))))
+
+      (define build-check-body
+        (lambda (procedures fail-fast?)
           (pk 'program
               `(begin
                  (define errored? #f)
@@ -1863,12 +1843,6 @@
                      (display-condition ex)
                      (newline (current-error-port))))
                  
-                 (display "* Will run tests from the following libraries:\n")
-                 (for-each
-                  (lambda (x)
-                    (format #t "** ~a\n" x)) ',libraries)
-
-                 (newline)
                  (let loop ((thunks (list ,@procedures)))
                    (unless (null? thunks)
                      (format #t "* Checking `~a`:\n" (car thunks))
@@ -1930,7 +1904,7 @@
                                              (map maybe-read-library
                                                   files))))
                          (discover directories)))
-             (program (build-check-program checks fail-fast?)))
+             (ignore (void)))
 
         (when (null? checks)
           (format #t "* Error, no checks found!\n")
@@ -1950,28 +1924,26 @@
                  (format #t "** Dry checking `~a`:\n" (car thunks)))
                thunks))
 
-            (begin
-              ;; Do NOT change the current directory here: checks run
-              ;; in the directory letloop was invoked from, like exec.
-              ;; A chdir before EVAL used to break every relative path
-              ;; the invoker relied on -- most notably a relative
-              ;; LD_LIBRARY_PATH entry, because glibc resolves relative
-              ;; entries against the cwd at each dlopen, so every
-              ;; lazy-foreign-procedure whose shared object lives only
-              ;; on such an entry failed with "cannot dlopen shared
-              ;; object" once the first foreign call happened after the
-              ;; chdir. The profile dump lands in TEMPORARY-DIRECTORY
-              ;; via profile-dump-html's path-prefix argument instead.
-              (dynamic-wind
-                  (lambda () (void))
-                  (lambda () (eval program (copy-environment (apply environment '(chezscheme)
-                                                                    (reverse (uniquify (map car checks))))
-                                                             #t)))
-                  (lambda ()
-                    ;; profile-dump-html may fail if there is no temporary directory
-                    (guard (ex (else (void)))
-                      (profile-dump-html (string-append temporary-directory "/"))
-                      (format (current-output-port) "* Coverage profile can be found at: ~a/profile.html\n" temporary-directory)))))))))
+            (let* ((libraries (reverse (uniquify (map car checks))))
+                   (failed
+                    (fold-left
+                     (lambda (failed library-name)
+                       (let ((procedures (map cdr (filter (lambda (check)
+                                                            (equal? (car check) library-name))
+                                                          checks))))
+                         (if (run-check-driver! temporary-directory library-name
+                                                procedures fail-fast?)
+                             failed
+                             (begin
+                               (when fail-fast? (newline) (exit 1))
+                               (cons library-name failed)))))
+                     '()
+                     libraries)))
+              (newline)
+              (unless (null? failed)
+                (display "* Libraries with failing checks:\n")
+                (for-each (lambda (name) (format #t "** ~a\n" name)) (reverse failed))
+                (exit 1)))))))
 
   (define letloop-main
     (lambda args
@@ -1990,7 +1962,6 @@
         ((version --version) (letloop-version) (exit 0))
         ((check) (letloop-check (cdr args)))
         ((compile) (letloop-compile (cdr args)))
-        ((exec) (letloop-exec (cdr args)))
         ((http) (letloop-http (cdr args)))
         ((repl) (letloop-repl (cdr args)))
         ((store) (letloop-store (cdr args)))

@@ -35,7 +35,7 @@
 ;;
 ;; Run (~30s):
 ;;
-;;   ./venv $(pwd)/local/ local/bin/letloop exec --optimize-level=3 \
+;;   ./venv $(pwd)/local/ local/bin/letloop compile --optimize-level=3 \
 ;;     ./src/ ./benchmarks/ benchmarks/flow2-nursery-bench.scm \
 ;;     flow2-nursery-bench
 (library (flow2-nursery-bench)

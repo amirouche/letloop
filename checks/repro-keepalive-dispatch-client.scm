@@ -32,7 +32,7 @@
 ;;   cd submodules/letloop
 ;;   PORT=18080 KEEPALIVE_CONNS=20 KEEPALIVE_REQUESTS_PER_CONN=20 \
 ;;   FRESH_REQUESTS=400 LD_LIBRARY_PATH=$PWD/local/lib \
-;;     local/bin/letloop exec src checks \
+;;     local/bin/letloop compile src checks \
 ;;       checks/repro-keepalive-dispatch-client.scm main
 (library (repro-keepalive-dispatch-client)
   (export main)

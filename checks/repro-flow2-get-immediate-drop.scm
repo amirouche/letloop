@@ -37,9 +37,9 @@
 ;;
 ;; Run (does NOT hang):
 ;;
-;;   timeout 25 ./venv $(pwd)/local/ local/bin/letloop exec \
+;;   timeout 25 ./venv $(pwd)/local/ local/bin/letloop compile \
 ;;     ./src/ ./checks/ checks/repro-flow2-get-immediate-drop.scm \
-;;     repro-flow2-get-immediate-drop
+;;     repro-flow2-get-immediate-drop && ./a.out
 ;;
 ;; Buggy build (dev @ 89bb403):
 ;;

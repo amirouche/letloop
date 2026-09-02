@@ -38,9 +38,9 @@
 ;;
 ;; Run (takes ~10s, does NOT hang):
 ;;
-;;   timeout 60 ./venv $(pwd)/local/ local/bin/letloop exec \
+;;   timeout 60 ./venv $(pwd)/local/ local/bin/letloop compile \
 ;;     ./src/ ./checks/ checks/repro-flow2-getter-leak.scm \
-;;     repro-flow2-getter-leak
+;;     repro-flow2-getter-leak && ./a.out
 ;;
 ;; Buggy build (dev @ 89bb403): retention grows linearly with rounds
 ;; and the per-round slope is hundreds of bytes; prints "LEAK".

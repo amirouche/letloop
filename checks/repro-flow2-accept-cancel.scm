@@ -36,9 +36,9 @@
 ;; the raise below kills the fiber outside the scope guard, so the
 ;; monitor's join never completes; always use timeout):
 ;;
-;;   timeout 25 ./venv $(pwd)/local/ local/bin/letloop exec \
+;;   timeout 25 ./venv $(pwd)/local/ local/bin/letloop compile \
 ;;     ./src/ ./checks/ checks/repro-flow2-accept-cancel.scm \
-;;     repro-flow2-accept-cancel
+;;     repro-flow2-accept-cancel && ./a.out
 ;;
 ;; Buggy build (current dev):
 ;;

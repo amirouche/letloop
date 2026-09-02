@@ -43,9 +43,9 @@
 ;;
 ;; Run (does NOT hang -- the final wait is itself bounded by a monitor):
 ;;
-;;   timeout 400 ./venv $(pwd)/local/ local/bin/letloop exec \
+;;   timeout 400 ./venv $(pwd)/local/ local/bin/letloop compile \
 ;;     ./src/ ./checks/ checks/repro-flow2-scope-waiter-race.scm \
-;;     repro-flow2-scope-waiter-race
+;;     repro-flow2-scope-waiter-race && ./a.out
 ;;
 ;; Buggy build (current dev): "WORKER LOST: no reply in 2s".
 ;; Fixed build: "(worker alive)".

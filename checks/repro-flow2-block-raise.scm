@@ -29,9 +29,9 @@
 ;;
 ;; Run (case C hangs on a buggy build -- always use timeout):
 ;;
-;;   timeout 25 ./venv $(pwd)/local/ local/bin/letloop exec \
+;;   timeout 25 ./venv $(pwd)/local/ local/bin/letloop compile \
 ;;     ./src/ ./checks/ checks/repro-flow2-block-raise.scm \
-;;     repro-flow2-block-raise
+;;     repro-flow2-block-raise && ./a.out
 ;;
 ;; Buggy build (current dev): A passes; B prints "fiber died" on stderr
 ;; and is rescued only by the enclosing monitor's deadline, which then

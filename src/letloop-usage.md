@@ -4,7 +4,6 @@ Usage:
   letloop version
   letloop check [--fail-fast] [DIRECTORY ...] LIBRARY.SCM ...
   letloop compile [DIRECTORY ...] LIBRARY.SCM PROCEDURE [LIBRARY.A ...]
-  letloop exec [DIRECTORY ...] LIBRARY.SCM PROCEDURE [-- ARGUMENT ...]
   letloop http serve [--port=PORT] [DIRECTORY ...] LIBRARY.SCM
   letloop repl
   letloop store build DERIVATION.scm

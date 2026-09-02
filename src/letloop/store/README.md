@@ -255,11 +255,25 @@ outputs stopped being an optimisation the moment this landed.
 covers bindings letloop ships, so `letloop compile prog.scm main
 libfoo.a` stays the escape hatch; the two compose.
 
-**`letloop exec` stays** until the cost of compiling under this design
-is known. It is the fast-iteration path, and the argument for removing
-it — that a program run through `exec` links dlopen'd shared objects
-while a compiled one links static archives, so the two are not quite
-the same program — only outweighs that if compiling stays cheap.
+~~**`letloop exec` stays** until the cost of compiling under this
+design is known.~~ Gone. The cost was the question, and it was
+answered by measuring: compiling is +94ms on a trivial program and
+209ms on one importing ten heavy libraries, because the object cache
+is already primed and compiling is amalgamation, not recompilation.
+
+The argument for removing it was always that a program run through
+`exec` links dlopen'd shared objects while a compiled one links static
+archives, so the two are not the same program and the one being tested
+was the one nobody deploys. Inference widened that gap rather than
+closing it, which is what finally settled this.
+
+`letloop check` went first, and had to: it ran its checks through the
+same in-process eval, so removing `exec` alone would have left the
+divergence exactly where it did damage. Checks are now compiled, one
+program per library — which is forced, not chosen, since a single
+program importing the whole tree would have to link every archive at
+once and libsodium and libargon2 both define `argon2id_hash_raw`. Per
+library the conflict cannot arise; no library imports both.
 
 ## Issues
 

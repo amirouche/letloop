@@ -353,7 +353,7 @@ opaque: oprf ## Build libopaque from source (skips if $(PREFIX)/lib/libopaque.so
 dependencies: liburing argon2 blake3 picohttpparser opaque ## Build every optional FFI shared-object dependency from source (liburing, argon2, blake3, picohttpparser, sodium, oprf, opaque); each skips if already built
 
 check: dependencies letloop-check.sh clean ## Hit the ground running!
-	echo '(source-directories (list "./src/")) (guard (ex (else (exit 1))) (eval (quote (import (letloop base))) (interaction-environment)) (eval (quote (letloop-check (list "./src/"))) (interaction-environment)) (exit 0))' | LD_LIBRARY_PATH=$(PREFIX)/lib/ $(SCHEME) --quiet --libdirs ./src/
+	LD_LIBRARY_PATH=$(PREFIX)/lib/ $(LETLOOP) check ./src/
 	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) sh letloop-check.sh
 	LETLOOP=$(LETLOOP) bash checks/letloop/srp.sh
 	LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) bash checks/check-transparenturing.sh
@@ -368,7 +368,7 @@ stress: clean ## check stress implementations
 	LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) sh checks/stress-transparenturing.sh
 
 check-fail-fast: dependencies letloop-check.sh clean ## Hit the ground running!
-	echo '(source-directories (list "./src/")) (guard (ex (else (exit 1))) (eval (quote (import (letloop base))) (interaction-environment)) (eval (quote (letloop-check (list "./src/" "--fail-fast"))) (interaction-environment)) (exit 0))' | LD_LIBRARY_PATH=$(PREFIX)/lib/ $(SCHEME) --quiet --libdirs ./src/
+	LD_LIBRARY_PATH=$(PREFIX)/lib/ $(LETLOOP) check --fail-fast ./src/
 	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) sh letloop-check.sh
 	LETLOOP=$(LETLOOP) bash checks/letloop/srp.sh
 	LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) bash checks/check-transparenturing.sh
