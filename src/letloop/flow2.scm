@@ -108,6 +108,7 @@
    ~check-flow2-005/worker-ring-event-raises-wrong-thread
    ~check-flow2-005/worker-cancelled-along-monitor
    ~check-flow2-005/worker-io-protocol-roundtrip
+   ~check-flow2-005/worker-resume-runs-cancels-first
 
    ;; block-and-wait machinery, ported from (letloop flow)'s
    ;; ~check-flow-011 series, plus the branch finding 1's fix added
@@ -514,12 +515,23 @@
             (%eventfd-signal! %flow2-eventfd))
           (loop-spawn thunk))))
 
+  ;; The reverse is load-bearing. flow-box-drain! yields newest-first,
+  ;; and loop-spawn conses, so spawning the drained list as-is REVERSES
+  ;; it a second time relative to loop-run-once's front-to-back walk:
+  ;; two thunks a worker queued in order A, B would run B first. That
+  ;; silently broke resume-from's cancels-before-k ordering for every
+  ;; worker-completed rendezvous — the resumed fiber ran before the
+  ;; losers' cancels, and a fiber that re-performed flow-accept right
+  ;; after winning a worker's put against it raised "concurrent accept
+  ;; on fd", the exact regression the on-loop spawn order fix closed.
+  ;; Reversing restores cons order into loop-spawn's LIFO, so a
+  ;; worker's spawn-safe calls behave like the same calls made on-loop.
   (define %collector
     (lambda ()
       (let loop ()
         (when %flow2-workers-running?
           (%eventfd-wait %flow2-eventfd)
-          (for-each loop-spawn (flow-box-drain! %cross-thread-spawns))
+          (for-each loop-spawn (reverse (flow-box-drain! %cross-thread-spawns)))
           (loop)))))
 
   ;;------------------------------------------------------------
