@@ -182,6 +182,29 @@
   (assert (= 3 (flow-channel-queue-length ch)))
   #t)
 
+;; Growing the bound is itself a source of room, so it must wake the
+;; putters parked on the old bound — %channel-wake-space! otherwise
+;; only runs after a dequeue, and a consumer that stopped consuming is
+;; exactly when an operator raises a bound to relieve the producers.
+(define (~check-flow2-002/raising-bound-wakes-parked-putters)
+  (define ch (make-flow-channel 'growing 1))
+  (define done '())
+  (flow-run
+   (lambda (workers)
+     (flow-put! ch 1)                     ;; at the bound
+     (flow-spawn (lambda () (flow-put! ch 2) (set! done (cons 2 done))))
+     (flow-spawn (lambda () (flow-put! ch 3) (set! done (cons 3 done))))
+     (flow-sleep 0.01)                    ;; both park
+     (assert (null? done))
+     (flow-channel-buffer-size! ch 4)     ;; room for both, no get involved
+     (flow-sleep 0.01)
+     (assert (= 2 (length done)))
+     (flow-stop)))
+  (assert (= 3 (flow-channel-queue-length ch)))
+  ;; nothing left parked behind
+  (assert (= 0 (flow-channel-space-length ch)))
+  #t)
+
 (define (~check-flow2-002/channel-get-try-default)
   (define ch (make-flow-channel))
   (assert (eq? 'nope (flow-get-try ch 'nope)))
