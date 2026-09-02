@@ -1899,3 +1899,76 @@
   (assert (eqv? 50 sized))
   (assert (equal? '(raised timeout) naive))
   #t)
+
+;; Third adverse pass, finding 3. A recv and the base that beat it can
+;; complete in the same tick -- the loop drains the completion queue in
+;; CQ order, so the timeout's handler wins the CAS and the recv's
+;; handler then finds its resume returning #f. Before the recv backlog
+;; those bytes were simply dropped, and the kernel had already taken
+;; them off the socket, so a second read on the same fd saw nothing:
+;; a truncated request with no error anywhere.
+;;
+;; Forcing the race needs the loop held busy across the window, which is
+;; what the spin does: the peer fiber never yields between the write and
+;; the deadline, so both CQEs are waiting together when the loop finally
+;; drains. Reproducer: checks/repro-flow2-third-pass.scm.
+(define %flow2-check-write2
+  (foreign-procedure "write" (int u8* size_t) ssize_t))
+
+(define (flow2-check-spin-until ms)
+  (let spin () (when (< (real-time) ms) (spin))))
+
+(define (~check-flow2-006/read-losing-a-same-tick-race-keeps-its-bytes)
+  (define PORT 18251)
+  (define payload (string->utf8 "payload"))
+  (define first-race 'not-set)
+  (define second-read 'not-set)
+  (flow-run
+   (lambda (workers)
+     (let ((listen-fd (loop-socket-new AF-INET SOCK-STREAM 0)))
+       (loop-bind listen-fd "127.0.0.1" PORT)
+       (loop-listen listen-fd 128)
+       (flow-spawn
+        (lambda ()
+          (guard (ex (#t (set! second-read 'raised)))
+            (let ((client (flow-perform (flow-accept listen-fd))))
+              (set! first-race
+                    (flow-perform
+                     (flow-choice
+                      (flow-wrap (flow-read client) (lambda (x) (list 'read x)))
+                      (flow-wrap (flow-timeout 0.05) (lambda (x) 'timeout)))))
+              ;; whatever won above, the bytes must still be reachable
+              (set! second-read
+                    (flow-perform
+                     (flow-choice
+                      (flow-wrap (flow-read client) (lambda (x) (list 'read x)))
+                      (flow-wrap (flow-timeout 0.5) (lambda (x) 'timeout)))))
+              (loop-close client)))
+          (loop-close listen-fd)
+          (flow-stop)))
+       (flow-spawn
+        (lambda ()
+          (call-with-values (lambda () (make-sockaddr-in 127 0 0 1 PORT))
+            (lambda (addr addrlen)
+              (let ((fd (loop-connect addr addrlen)))
+                (foreign-free addr)
+                ;; let the server park on its choice first
+                (flow-sleep 0.01)
+                (let ((t0 (real-time)))
+                  ;; write(2) rather than flow-write: this fiber must not
+                  ;; yield, so the loop cannot drain between the send and
+                  ;; the deadline
+                  (flow2-check-spin-until (+ t0 70))
+                  (%flow2-check-write2 fd payload (bytevector-length payload))
+                  (flow2-check-spin-until (+ t0 100)))
+                ;; keep the socket open until the server is done with it
+                (flow-sleep 1.0)
+                (loop-close fd))))))))) 
+  ;; Either outcome of the race is legitimate -- what is not is losing
+  ;; the payload. If the read won outright the bytes came back there;
+  ;; otherwise they were stashed and the second read finds them.
+  (assert (or (equal? first-race (list 'read payload))
+              (eq? first-race 'timeout)))
+  (let ((delivered (if (eq? first-race 'timeout) second-read first-race)))
+    (assert (equal? delivered (list 'read payload))))
+  #t)

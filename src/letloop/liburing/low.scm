@@ -392,6 +392,11 @@
    ;; the caller until a client arrives
    loop-accept-try loop-accept-block
 
+   ;; the same backlog, for the recv side: a payload whose waiter lost
+   ;; its choice cannot be handed back to the kernel, so it is stashed
+   ;; per fd and purged with the fd
+   loop-recv-backlog-put! loop-recv-backlog-take!
+
    ;; close split the same way, for libraries that need close to be an
    ;; event they can compose rather than an unconditional suspension
    loop-close-block
@@ -1963,6 +1968,15 @@
   ;; while no loop-accept waiter was parked; loop-accept pops from
   ;; here before parking, so already-accepted clients are not leaked.
   (define %accept-backlog (make-eqv-hashtable))
+  ;; fd → FIFO list of payloads a recv completed for a waiter that had
+  ;; already lost its choice. The accept side has had %accept-backlog
+  ;; from the start for exactly this reason; recv needs it more, because
+  ;; a dropped payload is data the kernel has already taken off the
+  ;; socket and nobody can ask for again. Kept here rather than in the
+  ;; caller so loop-close-prep! purges it with everything else the fd
+  ;; owns — a stash keyed by an fd number that outlives the fd would
+  ;; hand a stale payload to whatever reopens that number.
+  (define %recv-backlog (make-eqv-hashtable))
   (define ECANCELED 125)
   (define %read-timeout-seconds 5)
   (define %read-timeout-ts #f)
@@ -2264,6 +2278,7 @@
         (set! %fd-handlers      (make-eqv-hashtable))
         (set! %active-connections (make-eqv-hashtable))
         (set! %accept-backlog   (make-eqv-hashtable))
+        (set! %recv-backlog     (make-eqv-hashtable))
         (let ((err-ptr (foreign-alloc 4)))
           (foreign-set! 'integer-32 err-ptr 0 0)
           (let ((br (io-uring-setup-buf-ring ring %buf-ring-nentries
@@ -2357,6 +2372,12 @@
                     (io-uring-sqe-set-data64 sqe id)))
                 (hashtable-ref %accept-backlog fd '()))
       (hashtable-delete! %accept-backlog fd)
+      ;; Payloads nobody claimed: dropping them here is correct and is
+      ;; the whole reason the stash lives at this level. The fd is going
+      ;; away, so there is no one left to deliver them to, and leaving
+      ;; them keyed by a number the kernel is about to reissue is how a
+      ;; stash becomes a cross-connection data leak.
+      (hashtable-delete! %recv-backlog fd)
       (hashtable-delete! %active-connections fd)
       (let* ((cancel-sqe (loop-get-sqe (loop-ring %loop)))
              (cancel-id  (loop-alloc-id!)))
@@ -2402,6 +2423,34 @@
                    (hashtable-delete! %accept-backlog fd)
                    (hashtable-set! %accept-backlog fd (cdr backlog)))
                (loop-accept-client-setup! (car backlog)))))))
+
+  ;; The recv counterpart of the accept backlog, for a caller whose
+  ;; recv handler completed with data that its own waiter can no longer
+  ;; take — it lost a flow-choice, or its scope was cancelled, in the
+  ;; same tick the CQE arrived. Both CQEs sit in the completion queue
+  ;; together whenever the loop is late draining, which is under load,
+  ;; which is exactly when an idle timeout races a read.
+  ;;
+  ;; Unlike a declined accept there is no way to put a payload back:
+  ;; the kernel has already taken those bytes off the socket, so
+  ;; dropping them is silent data loss for the connection. Push it here
+  ;; instead and the next recv on the fd finds it.
+  (define loop-recv-backlog-put!
+    (lambda (fd payload)
+      (hashtable-set! %recv-backlog fd
+                      (append (hashtable-ref %recv-backlog fd '())
+                              (list payload)))))
+
+  ;; Non-blocking: pop the oldest stashed payload for FD, or #f.
+  (define loop-recv-backlog-take!
+    (lambda (fd)
+      (let ((backlog (hashtable-ref %recv-backlog fd '())))
+        (and (pair? backlog)
+             (begin
+               (if (null? (cdr backlog))
+                   (hashtable-delete! %recv-backlog fd)
+                   (hashtable-set! %recv-backlog fd (cdr backlog)))
+               (car backlog))))))
 
   ;; Arms fd's multishot accept if it isn't already running, then
   ;; registers HANDLER against its next completion. HANDLER is called
