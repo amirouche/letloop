@@ -1535,7 +1535,17 @@
                 (list start (bytevector-length bv))))
        (make-flow% 'base #f
                    (lambda (x) x)
-                   (lambda () #f)
+                   ;; A zero-byte remainder is ready with count 0, no
+                   ;; syscall: START may legitimately equal the length
+                   ;; (the validation above allows it, and a caller-side
+                   ;; resume loop naturally produces it), and sending
+                   ;; zero bytes returns res = 0, which the handler
+                   ;; below must keep reading as failure for a real
+                   ;; send. 0 is truthy in Scheme, so callers testing
+                   ;; (and n ...) see success, as flow-write-all! does.
+                   (lambda ()
+                     (and (fx=? start (bytevector-length bv))
+                          (lambda () 0)))
                    (lambda (state resume register-cancel!)
                      (let* ((ring (loop-ring (loop-current)))
                             (id   (loop-alloc-id!))
