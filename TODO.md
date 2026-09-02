@@ -302,6 +302,13 @@ crash exactly.
 
 ## dns.body.scm preps SQEs without null-checking io_uring_get_sqe
 
+**FIXED 2026-08-24** (commit e2ee962): all four sites now go through
+`loop-get-sqe`, with the recv/link-timeout pair reserved together so the
+submit-and-retry cannot split it. The cache also honours the record's
+own TTL now, bounded, so a TTL of 0 cannot recreate the stampede that
+filled the queue. Measured downstream: 1691 crashes -> 0 on the same
+cold-cache benchmark. Kept below as the diagnosis trail.
+
 `io_uring_get_sqe()` returns NULL when the submission queue is full.
 `loop-get-sqe` (`src/letloop/liburing/low.scm:1998`) exists to handle
 exactly that -- submit, retry once, then raise `"submission queue
