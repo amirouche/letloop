@@ -197,6 +197,51 @@ test -e "$BLAKE3_DESTINATION/lib/libblake3.a" || {
     exit 1
 }
 
+# The rest of letloop's dlopen'ed FFI libraries, as static archives --
+# not linked into the bootstrap letloop itself the way liburing and
+# blake3 are (letloop-main.c registers no symbols for these), but
+# built and gated here so a `letloop compile ... archive.a` consumer
+# has something proven to link against, and so a change to any of
+# these derivations is caught before it reaches a user.
+ARGON2_DESTINATION=$("$LETLOOP" store build argon2 | tail -1)
+echo "argon2: $ARGON2_DESTINATION"
+test -e "$ARGON2_DESTINATION/lib/libargon2.a" || {
+    echo "FAIL: no libargon2.a"
+    exit 1
+}
+
+SODIUM_DESTINATION=$("$LETLOOP" store build sodium | tail -1)
+echo "sodium: $SODIUM_DESTINATION"
+test -e "$SODIUM_DESTINATION/lib/libsodium.a" || {
+    echo "FAIL: no libsodium.a"
+    exit 1
+}
+
+PICOHTTPPARSER_DESTINATION=$("$LETLOOP" store build picohttpparser | tail -1)
+echo "picohttpparser: $PICOHTTPPARSER_DESTINATION"
+test -e "$PICOHTTPPARSER_DESTINATION/lib/libpicohttpparser.a" || {
+    echo "FAIL: no libpicohttpparser.a"
+    exit 1
+}
+
+# oprf and opaque exercise (package ...) inputs that are themselves
+# (package ...) derivations, not just fetches or the toolchain rootfs
+# -- the first place in this chain two application-level packages
+# depend on each other.
+OPRF_DESTINATION=$("$LETLOOP" store build oprf | tail -1)
+echo "oprf: $OPRF_DESTINATION"
+test -e "$OPRF_DESTINATION/lib/liboprf.a" || {
+    echo "FAIL: no liboprf.a"
+    exit 1
+}
+
+OPAQUE_DESTINATION=$("$LETLOOP" store build opaque | tail -1)
+echo "opaque: $OPAQUE_DESTINATION"
+test -e "$OPAQUE_DESTINATION/lib/libopaque.a" || {
+    echo "FAIL: no libopaque.a"
+    exit 1
+}
+
 LETLOOP_DESTINATION=$("$LETLOOP" store build letloop | tail -1)
 echo "letloop: $LETLOOP_DESTINATION"
 

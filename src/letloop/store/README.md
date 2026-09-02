@@ -49,7 +49,8 @@ letloop without Alpine or any other distribution. Each is
 | `make` | GNU make, from source, via its own `build.sh` |
 | `busybox` | BusyBox, from source |
 | `rootfs-final` | the rootfs downstream work uses: toolchain + the two above |
-| `liburing`, `blake3` | from source, for the archives letloop links |
+| `liburing`, `blake3` | from source, for the archives letloop links into its own host |
+| `argon2`, `sodium`, `picohttpparser`, `oprf`, `opaque` | from source, static archives for the rest of letloop's dlopen'ed FFI libraries -- not linked into the bootstrap letloop itself, for a `letloop compile` consumer to link |
 | `chezscheme` | ChezScheme 10.4.1, from source |
 | `letloop` | letloop itself, from source, against all of it |
 
@@ -120,6 +121,8 @@ gate, it is not a claim.
 | Actually drive io_uring, not merely link it | `flow2` — the full flow2 suite |
 | Actually run the store that built it | `bootstrap.sh`'s self-hosted build, which needs BLAKE3 |
 | Compile a Scheme program against a C archive | `static-lib`, and `letloop-check.sh` on the host |
+| Build a static archive for the rest of letloop's dlopen'ed FFI libraries | `argon2`/`sodium`/`picohttpparser`/`oprf`/`opaque`, each checked for the archive and its own entry points |
+| Build one application-level package against another, not just against the rootfs | `opaque` (needs both `sodium` and `oprf` as `(package ...)` inputs) |
 | Run all of the above relocated, on a foreign libc | copied to a fresh directory and run there |
 
 Known gaps, all of them deliberate:
