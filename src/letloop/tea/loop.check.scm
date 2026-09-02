@@ -8,7 +8,14 @@
   ;; We don't have a real tty, so the loop is exercised over a pipe.  The
   ;; reader side is fed by a separate write(2) call from the test driver.
 
-  (define libc (load-shared-object "libc.so.6"))
+  ;; Best-effort, and it matters more here than it looks: this file is
+  ;; `include`d into (letloop tea loop), so its body runs whenever that
+  ;; library is instantiated -- not only when a check runs. Unguarded,
+  ;; it takes down anything reaching tea on a statically linked build,
+  ;; where there is no loader to service the dlopen. `letloop review`
+  ;; died on exactly this. pipe2 is registered by letloop-main.c there,
+  ;; so the foreign-procedure below resolves without it.
+  (define libc (guard (ex (#t #f)) (load-shared-object "libc.so.6")))
   (define c-pipe2 (foreign-procedure "pipe2" (void* int) int))
 
   (define (make-pipe)
