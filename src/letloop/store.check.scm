@@ -266,3 +266,55 @@
       (guard (ex (#t #t))
         (store-build a-path)
         #f))))
+
+;; letloop-store's own CLI: a directory argument extends the library
+;; path exactly like `letloop check`/`letloop compile`, and every
+;; trailing name-component argument becomes one segment of a
+;; (package ...) library name -- `letloop store build libgegl v1.2.3
+;; pre` resolves (package libgegl v1.2.3 pre), matching a directory-
+;; per-component library layout. Exercises both a plain and a
+;; versioned project package, driven through letloop-store itself
+;; rather than store-build, so a regression in argument parsing shows
+;; up here rather than only in resolve-package-reference.
+(define ~check-store-007/cli-project-package
+  (lambda ()
+    (if (not (bwrap-available?))
+        (begin (display "** SKIP: /usr/bin/bwrap not found\n") #t)
+        (guard (ex (#t (display "** SKIP: bwrap sandbox unavailable in this environment\n") #t))
+          (define mkdtemp (foreign-procedure "mkdtemp" (string) string))
+          (define (write-package! path library-name output-name rootfs)
+            (call-with-output-file path
+              (lambda (port)
+                (write `(library ,library-name
+                          (export package)
+                          (import (chezscheme))
+                          (define package
+                            '(derivation
+                              (name ,output-name)
+                              (build-environment (root (directory ,rootfs)))
+                              (script "mkdir -p out\n" "echo hello > out/hello\n")
+                              (output "out"))))
+                       port))))
+          (system! "mkdir -p /tmp/letloop/")
+          (let* ((rootfs (mkdtemp "/tmp/letloop/store-check-007-rootfs-XXXXXX"))
+                 (root (mkdtemp "/tmp/letloop/store-check-007-root-XXXXXX")))
+            (store-check-fixture-rootfs! rootfs)
+            (system! "rm -rf /tmp/letloop/store-check-007-store")
+            (putenv "LETLOOP_STORE" "/tmp/letloop/store-check-007-store")
+            ;; (package NAME ...) resolves against ROOT the same way
+            ;; (letloop package NAME) resolves against letloop's own
+            ;; installed src: through the literal "package" directory.
+            (system! (format #f "mkdir -p ~a"
+                              (shell-single-quote (string-append root "/package"))))
+            (write-package! (string-append root "/package/store-cli-hello.scm")
+                             '(package store-cli-hello) "store-cli-hello" rootfs)
+            (system! (format #f "mkdir -p ~a"
+                              (shell-single-quote (string-append root "/package/store-cli-versioned"))))
+            (write-package! (string-append root "/package/store-cli-versioned/v1.scm")
+                             '(package store-cli-versioned v1) "store-cli-versioned" rootfs)
+            (with-output-to-string
+              (lambda () (letloop-store (list "build" root "store-cli-hello"))))
+            (with-output-to-string
+              (lambda () (letloop-store (list "build" root "store-cli-versioned" "v1"))))
+            (and (file-exists? (string-append (store-build '(package store-cli-hello)) "/hello"))
+                 (file-exists? (string-append (store-build '(package store-cli-versioned v1)) "/hello"))))))))

@@ -108,12 +108,28 @@
                       (eval 'package (environment reference))
                       (call-with-input-file reference read))))
 
-;; The library a package name resolves to: `letloop store build blake3`
-;; means (letloop package blake3). Deliberately not (letloop store
-;; blake3) -- that namespace already holds the store's own modules, so
-;; a package named hash or fetch would collide with one of them.
-(define (package-library-name name)
-  (list 'letloop 'package (string->symbol name)))
+;; A bare CLI name resolves to a library carrying a package, tried two
+;; ways: `letloop store build libgegl v1.2.3 pre` first looks for
+;; (package libgegl v1.2.3 pre), the shape a project's own packages
+;; take -- reachable once its packages directory is on the library
+;; path, with no prefix needed -- and falls back to
+;; (letloop package libgegl v1.2.3 pre), what a shipped package is
+;; actually named. Deliberately not (letloop store libgegl ...) --
+;; that namespace already holds the store's own modules, so a package
+;; named hash or fetch would collide with one of them.
+;;
+;; ENVIRONMENT is used rather than a file-existence check because a
+;; package library may only exist compiled, with no source file beside
+;; it -- exactly the shape a release ships. Any failure to resolve the
+;; project name (missing library, syntax error, whatever) falls
+;; through to the shipped name rather than being reported directly, so
+;; the error a caller sees always names the shape that was actually
+;; meant.
+(define (resolve-package-reference components)
+  (let ((project (cons 'package components)))
+    (if (guard (ex (#t #f)) (environment project) #t)
+        project
+        (cons* 'letloop 'package components))))
 
 ;; A (derivation "...") reference resolves relative to the directory of
 ;; the derivation file that names it, not the invoker's cwd -- so a
@@ -380,19 +396,65 @@
 (define (store-build derivation-path)
   (store-build/resolving derivation-path '() (box '())))
 
+;; $LETLOOP_PROJECT_PATH itself, added to the library path whenever it
+;; exists, so a project's own (package ...) libraries are found
+;; without the caller having to spell out a directory on every
+;; invocation -- mirrors $LETLOOP_PROJECT_PATH/store from
+;; STORE-DIRECTORY, one project directory, several conventional
+;; children under it. A library named (package NAME) resolves against
+;; a source directory the same way (letloop package NAME) resolves
+;; against letloop's own installed src: through the "package" segment
+;; itself, so the file this puts on disk is
+;; $LETLOOP_PROJECT_PATH/package/NAME.scm -- no separate "packages"
+;; directory to keep in sync with the library name's own first
+;; component.
+(define (project-library-directory)
+  (let ((project (getenv "LETLOOP_PROJECT_PATH")))
+    (and project (file-directory? project) project)))
+
 (define (letloop-store args)
   (if (null? args)
       (begin
-        (display "Choose: build.\nAs of yet, only: letloop store build DERIVATION.scm\n")
+        (display "Choose: build.\nAs of yet, only: letloop store build [DIRECTORY ...] NAME [COMPONENT ...]\n")
         (exit 1))
       (case (string->symbol (car args))
         ((build)
-         ;; A path if it names a file, otherwise a package: `letloop
-         ;; store build blake3` builds what (letloop package blake3)
-         ;; defines.
-         (let ((argument (cadr args)))
-           (display (store-build (if (file-exists? argument)
-                                     argument
-                                     (package-library-name argument))))
-           (newline)))
+         ;; Standalone arguments split two ways, order-independent like
+         ;; `letloop check`/`letloop compile`: an existing directory
+         ;; extends the library path (so a project's packages can be
+         ;; named explicitly, in addition to the implicit
+         ;; PROJECT-LIBRARY-DIRECTORY below); everything else
+         ;; accumulates, in order, as the trailing components of a
+         ;; package's library name. `letloop store build libgegl
+         ;; v1.2.3 pre` therefore resolves the same package a
+         ;; directory-per-component library layout already names
+         ;; (package libgegl v1.2.3 pre).
+         (call-with-values (lambda () (cli-read (cdr args)))
+           (lambda (keywords standalone extra)
+             (let loop ((standalone standalone) (directories '()) (components '()))
+               (if (null? standalone)
+                   (let ((directories (let ((project (project-library-directory)))
+                                         (if project
+                                             (cons project (reverse directories))
+                                             (reverse directories)))))
+                     (unless (null? directories)
+                       (library-directories (append (library-directories) directories))
+                       (source-directories (append (source-directories) directories)))
+                     (when (null? components)
+                       (display "A name is required: letloop store build [DIRECTORY ...] NAME [COMPONENT ...]\n")
+                       (exit 1))
+                     (let ((components (reverse components)))
+                       ;; A lone existing file stays a derivation path,
+                       ;; for `letloop store build DERIVATION.scm` --
+                       ;; a package name is never a path on disk.
+                       (display (store-build (if (and (null? (cdr components))
+                                                       (file-exists? (car components)))
+                                                  (car components)
+                                                  (resolve-package-reference
+                                                   (map string->symbol components)))))
+                       (newline)))
+                   (let ((head (car standalone)))
+                     (if (file-directory? head)
+                         (loop (cdr standalone) (cons head directories) components)
+                         (loop (cdr standalone) directories (cons head components)))))))))
         (else (display "A typo? try: letloop store build DERIVATION.scm\n") (exit 1)))))

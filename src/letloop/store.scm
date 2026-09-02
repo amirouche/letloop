@@ -12,9 +12,11 @@
           ~check-store-003/derivation-root
           ~check-store-004/cyclic-reference
           ~check-store-005/build-cache-skips-the-build
-          ~check-store-006/build-cache-sees-changed-inputs)
+          ~check-store-006/build-cache-sees-changed-inputs
+          ~check-store-007/cli-project-package)
 
   (import (chezscheme)
+          (letloop cli base)
           (letloop store derivation)
           (letloop store hash)
           (letloop store sandbox)
