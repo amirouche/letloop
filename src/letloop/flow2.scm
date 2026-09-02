@@ -102,6 +102,7 @@
    ~check-flow2-003/block-raise-reaches-the-scope
    ~check-flow2-003/waiter-on-dead-scope-is-woken
    ~check-flow2-003/gather-after-join-scales-past-the-default-bound
+   ~check-flow2-003/a-dead-scope-does-not-eat-a-queued-value
    ~check-flow2-004/monitor-in-time
    ~check-flow2-004/monitor-deadline
    ~check-flow2-004/monitor-interrupted-by-parent-drains-children
@@ -436,6 +437,26 @@
                 (if thunk
                     ((flow-wrap-proc (car bs)) (thunk))
                     (loop (cdr bs)))))))))
+
+  ;; Poll FIRST before the rest, without the rotation. Cancellation is
+  ;; a precondition, not a fairness participant: flow-poll picks a
+  ;; random starting point among the bases, so a scope that was already
+  ;; dead could still lose to a channel get tried before it — the get
+  ;; DEQUEUES, hands the value to a task that raises at its very next
+  ;; operation, and the value goes with it. That is the lost-value shape
+  ;; the redeposit machinery exists to prevent, arrived at from the
+  ;; other end.
+  ;;
+  ;; FIRST is in BASES too, so it is retried in the walk; that costs one
+  ;; extra try call and is the right answer if it became ready in
+  ;; between. What remains is the genuine tie — the scope dying after
+  ;; this try and before a get's — which is unavoidable and identical on
+  ;; both threads.
+  (define (%flow-poll-first first bases)
+    (let ((thunk ((flow-try-proc first))))
+      (if thunk
+          ((flow-wrap-proc first) (thunk))
+          (flow-poll bases))))
 
   ;;------------------------------------------------------------
   ;; Cross-thread spawn: the loop's mailbox
@@ -996,13 +1017,17 @@
                     (unless (%base-off-loop-safe? base)
                       (%flow-wrong-thread 'flow-perform)))
                   bases)
-        (let ((bases (if (and scope (not (eq? scope %root-scope)))
-                         (append bases (list (%scope-cancel-base scope)))
-                         bases)))
-          (let ((result (flow-poll bases)))
-            (%flow-settle (if (eq? result %flow-not-ready)
-                              (flow-block-and-wait-off-loop bases)
-                              result)))))))
+        (if (and scope (not (eq? scope %root-scope)))
+            (let* ((cancel-base (%scope-cancel-base scope))
+                   (bases (append bases (list cancel-base))))
+              (let ((result (%flow-poll-first cancel-base bases)))
+                (%flow-settle (if (eq? result %flow-not-ready)
+                                  (flow-block-and-wait-off-loop bases)
+                                  result))))
+            (let ((result (flow-poll bases)))
+              (%flow-settle (if (eq? result %flow-not-ready)
+                                (flow-block-and-wait-off-loop bases)
+                                result)))))))
 
   (define flow-perform
     (lambda (event)
@@ -1034,9 +1059,9 @@
                       (begin
                         (when (%scope-dead? scope)
                           (raise (%flow-cancelled-error)))
-                        (let ((bases (append bases
-                                             (list (%scope-cancel-base scope)))))
-                          (let ((result (flow-poll bases)))
+                        (let* ((cancel-base (%scope-cancel-base scope))
+                               (bases (append bases (list cancel-base))))
+                          (let ((result (%flow-poll-first cancel-base bases)))
                             (%flow-settle
                              (if (eq? result %flow-not-ready)
                                  (flow-block-and-wait-on-loop bases scope)
