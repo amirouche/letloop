@@ -819,11 +819,35 @@
   ;;
   ;; TAG is the winner's; pass #f to fire all of them, since every real
   ;; tag is a fresh pair.
+  ;; Both reduce an object to something a log line can hold. A base's
+  ;; data is (TAG . RECORD) for channel and scope bases, so writing it
+  ;; raw would dump a whole channel -- queue included -- into the log;
+  ;; a condition writes as #<condition> and says nothing at all.
+  (define (%flow-base-name data)
+    (cond ((not (pair? data)) data)          ; 'flow2-close, or #f for a ring event
+          ((flow-channel? (cdr data)) (list (car data) (flow-channel-name (cdr data))))
+          (else (car data))))
+
+  (define (%flow-condition-sexp ex)
+    (cond ((flow-error? ex)
+           (list 'flow-error (flow-error-symbol ex) (flow-error-message ex)))
+          ((condition? ex)
+           (call-with-string-output-port
+            (lambda (port) (display-condition ex port))))
+          (else ex)))
+
+  ;; An entry is (TAG DATA . THUNK). DATA is the base's own, carried
+  ;; only so that a raise here can say which base it came from: a bare
+  ;; (flow2 cancel-raised) is what an operator reaches after an
+  ;; unexplained hang or fd leak, and it named neither the base nor the
+  ;; condition -- the two things that would end the investigation.
   (define (%flow-run-cancels! pending tag)
-    (for-each (lambda (pair)
-                (unless (eq? (car pair) tag)
-                  (guard (ex (#t (flow-log (list 'flow2 'cancel-raised))))
-                    ((cdr pair)))))
+    (for-each (lambda (entry)
+                (unless (eq? (car entry) tag)
+                  (guard (ex (#t (flow-log (list 'flow2 'cancel-raised
+                                                 (%flow-base-name (cadr entry))
+                                                 (%flow-condition-sexp ex)))))
+                    ((cddr entry)))))
               pending))
 
   ;; SCOPE is the fiber's scope at perform time, reinstalled around
@@ -895,7 +919,9 @@
                                 (resume-from tag ((flow-wrap-proc base) raw)))
                               (lambda (thunk)
                                 (set-box! cancels
-                                          (cons (cons tag thunk)
+                                          (cons (cons tag
+                                                      (cons (flow-data base)
+                                                            thunk))
                                                 (unbox cancels)))))))
                          bases))))))))
 
@@ -965,7 +991,9 @@
                                   (resume-from tag ((flow-wrap-proc base) raw)))
                                 (lambda (thunk)
                                   (set-box! cancels
-                                            (cons (cons tag thunk)
+                                            (cons (cons tag
+                                                        (cons (flow-data base)
+                                                              thunk))
                                                   (unbox cancels)))))))
                            bases)
                  #f)))
