@@ -58,11 +58,24 @@
     (guard (c (#t #f)) (shared-object) #t))
 
   ;; For ~check-* procedures over optional shared objects: run BODY, or
-  ;; print a SKIP note and pass when the shared object is unavailable.
+  ;; print a SKIP note and pass when the library is unavailable.
+  ;;
+  ;; SYMBOL is a representative entry point of the library, and asking
+  ;; about it rather than about the shared object is what makes this
+  ;; correct on a statically linked build. There, dlopen does not work
+  ;; at all -- but letloop-main.c has registered these symbols with
+  ;; Sforeign_symbol, so the library IS available, and "can this be
+  ;; dlopen'd?" answers a question nobody asked: every check would
+  ;; report SKIP on precisely the build where the linking is most
+  ;; load-bearing, which reads exactly like the library being missing.
+  ;;
+  ;; Same correction (letloop blake3)'s own c-usable? already makes for
+  ;; the same reason: decide by trying the thing, not by asking whether
+  ;; the loader could have provided it.
   (define-syntax check-skip-unless
     (syntax-rules ()
-      ((_ shared-object body ...)
-       (if (shared-object-available? shared-object)
+      ((_ shared-object symbol body ...)
+       (if (or (foreign-entry? symbol) (shared-object-available? shared-object))
            (begin body ...)
            (begin
              (display "** SKIP: missing shared object for ")

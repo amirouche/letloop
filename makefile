@@ -80,6 +80,23 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 	@#
 	@# The same shape is what `letloop compile` produces, by copying its
 	@# own host and appending a different boot. No C compiler runs there.
+	@# argon2 only when sodium is not linked: libsodium vendors its own
+	@# copy of argon2 and defines argon2id_hash_raw, _encoded and
+	@# _verify itself, so linking both archives fails outright with
+	@# "multiple definition" -- observed, not theorised. Taking
+	@# libsodium's three and libargon2's argon2_encodedlen (the one
+	@# libsodium does not export) would need
+	@# --allow-multiple-definition, which silently splices two
+	@# different argon2 implementations into one binary. sodium wins
+	@# because opaque and oprf link against it; (letloop argon2) is
+	@# then unavailable on such a build rather than subtly wrong.
+	@#
+	@# The optional archives are linked inside --start-group, so their
+	@# order on that line stops mattering: libopaque needs liboprf needs
+	@# libsodium, and a group makes the linker re-scan until nothing new
+	@# resolves rather than requiring the order be spelled correctly
+	@# here. Same reasoning as `letloop compile --static`'s own link.
+	@#
 	@# set -e, because the steps below are chained with `;`: without it a
 	@# failing cc leaves letloop-host missing, the cat below produces a
 	@# file that is just the boot image with no ELF header, and the only
@@ -91,6 +108,10 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 	  URING_FLAGS=""; \
 	  BLAKE3_FLAGS=""; \
 	  TLS_FLAGS=""; \
+	  PHR_FLAGS=""; \
+	  SODIUM_FLAGS=""; \
+	  ARGON2_FLAGS=""; \
+	  OPAQUE_FLAGS=""; \
 	  case "$$(cc -dumpmachine)" in \
 	    *musl*) STATIC_FLAG="-static"; \
 	      if printf 'int main(void){return 0;}\n' | \
@@ -104,10 +125,28 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 	      if printf 'int main(void){return 0;}\n' | \
 	         cc -x c -o /dev/null - -ltls -lssl -lcrypto >/dev/null 2>&1; then \
 	        TLS_FLAGS="-DLETLOOP_TLS_STATIC -ltls -lssl -lcrypto"; \
+	      fi; \
+	      if printf 'int main(void){return 0;}\n' | \
+	         cc -x c -o /dev/null - -lpicohttpparser >/dev/null 2>&1; then \
+	        PHR_FLAGS="-DLETLOOP_PICOHTTPPARSER_STATIC -lpicohttpparser"; \
+	      fi; \
+	      if printf 'int main(void){return 0;}\n' | \
+	         cc -x c -o /dev/null - -lsodium >/dev/null 2>&1; then \
+	        SODIUM_FLAGS="-DLETLOOP_SODIUM_STATIC -lsodium"; \
+	      fi; \
+	      if [ -z "$$SODIUM_FLAGS" ] && printf 'int main(void){return 0;}\n' | \
+	         cc -x c -o /dev/null - -largon2 >/dev/null 2>&1; then \
+	        ARGON2_FLAGS="-DLETLOOP_ARGON2_STATIC -largon2"; \
+	      fi; \
+	      if printf 'int main(void){return 0;}\n' | \
+	         cc -x c -o /dev/null - -lopaque -loprf -lsodium >/dev/null 2>&1; then \
+	        OPAQUE_FLAGS="-DLETLOOP_OPAQUE_STATIC -lopaque -loprf"; \
 	      fi ;; \
 	  esac; \
 	  cc -I"$$BOOT" src/letloop-main.c "$$BOOT/kernel.o" \
-	     -o "$$BOOT/letloop-host" $$STATIC_FLAG $$URING_FLAGS $$BLAKE3_FLAGS $$TLS_FLAGS \
+	     -o "$$BOOT/letloop-host" $$STATIC_FLAG \
+	     -Wl,--start-group $$URING_FLAGS $$BLAKE3_FLAGS $$TLS_FLAGS \
+	     $$PHR_FLAGS $$SODIUM_FLAGS $$ARGON2_FLAGS $$OPAQUE_FLAGS -Wl,--end-group \
 	     -ldl -lm -lpthread; \
 	  install -m 644 a.out.boot "$$BOOT/letloop.boot"; \
 	  { cat "$$BOOT/letloop-host" a.out.boot; \

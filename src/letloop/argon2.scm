@@ -180,7 +180,7 @@
 
   (define ~check-argon2-0
     (lambda ()
-      (check-skip-unless libargon2.so.1
+      (check-skip-unless libargon2.so.1 "argon2id_hash_raw"
       (let* ((salt (bytevector-random 256))
              (password (bytevector-random 256))
              (encoded (argon2id-encode salt password)))

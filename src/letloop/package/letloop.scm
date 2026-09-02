@@ -35,6 +35,10 @@
               (package (letloop package liburing))
               (package (letloop package blake3))
               (package (letloop package tls))
+              (package (letloop package picohttpparser))
+              (package (letloop package sodium))
+              (package (letloop package opaque))
+              (package (letloop package oprf))
               (package (letloop package ca-certificates))))
      (script
       "set -e\n"
@@ -73,8 +77,8 @@
       ;; the first time this derivation was written, for the first two.
       ;; gcc reads all three of these itself; no makefile change beyond
       ;; the probes themselves is needed.
-      "export LIBRARY_PATH=/build/inputs/bootstrap-liburing/lib:/build/inputs/bootstrap-blake3/lib:/build/inputs/bootstrap-tls/lib\n"
-      "export C_INCLUDE_PATH=/build/inputs/bootstrap-liburing/include:/build/inputs/bootstrap-blake3/include:/build/inputs/bootstrap-tls/include\n"
+      "export LIBRARY_PATH=/build/inputs/bootstrap-liburing/lib:/build/inputs/bootstrap-blake3/lib:/build/inputs/bootstrap-tls/lib:/build/inputs/bootstrap-picohttpparser/lib:/build/inputs/bootstrap-sodium/lib:/build/inputs/bootstrap-opaque/lib:/build/inputs/bootstrap-oprf/lib\n"
+      "export C_INCLUDE_PATH=/build/inputs/bootstrap-liburing/include:/build/inputs/bootstrap-blake3/include:/build/inputs/bootstrap-tls/include:/build/inputs/bootstrap-picohttpparser/include:/build/inputs/bootstrap-sodium/include:/build/inputs/bootstrap-opaque/include\n"
       "make letloop SCHEME=\"$SCHEME\" PREFIX=/build/out\n"
       ;; letloop-libraries (a `make letloop` prerequisite) does
       ;; `rm -rf $(PREFIX)/lib/letloop` before repopulating it, so this
@@ -90,6 +94,19 @@
       "grep -q io_uring_queue_init /build/symbols\n"
       "grep -q blake3_hasher_init /build/symbols\n"
       "grep -q tls_init /build/symbols\n"
+      ;; The ones with no Scheme fallback at all: under static musl
+      ;; dlopen does not work, so an unregistered one is not slower,
+      ;; it is absent -- (letloop http) loses its parser, and sodium
+      ;; and opaque fail on first call.
+      ;;
+      ;; argon2 is deliberately not among them, and not an oversight:
+      ;; libsodium vendors its own argon2 and defines three of the
+      ;; four symbols (letloop argon2) resolves, so linking both
+      ;; archives fails with "multiple definition". See the makefile,
+      ;; which will not even probe for argon2 once sodium is linked.
+      "grep -q phr_parse_request_wrapper /build/symbols\n"
+      "grep -q sodium_init /build/symbols\n"
+      "grep -q opaque_Register /build/symbols\n"
       ;; prove the letloop just built actually runs, here, rather than
       ;; leaving it to whoever picks the artifact up
       "/build/out/bin/letloop version\n")

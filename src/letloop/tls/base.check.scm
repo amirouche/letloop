@@ -122,7 +122,7 @@
 ;; ---- the handshake read timeout, deterministically ----
 
 (define (~check-tls-handshake-timeout)
-  (check-skip-unless libtls
+  (check-skip-unless libtls "tls_init"
     (let-values (((listener port) (%blackhole-listen)))
       (let-values (((seconds text)
                     (%elapsed-raising
@@ -142,7 +142,7 @@
 ;; ---- the connect timeout, where the environment permits ----
 
 (define (~check-tls-connect-timeout)
-  (check-skip-unless libtls
+  (check-skip-unless libtls "tls_init"
     ;; SO_SNDTIMEO is what bounds connect(2). Proving that needs an
     ;; address that silently drops SYNs: 192.0.2.1 is TEST-NET-1, which
     ;; is reserved and normally goes nowhere. But a host with no route
@@ -182,7 +182,7 @@
 (define (~check-tls-request-000)
   ;; Needs the network, like the ~check-tls-uring-000 it mirrors. One
   ;; retry to absorb a flake.
-  (check-skip-unless libtls
+  (check-skip-unless libtls "tls_init"
     (or (%request-attempt) (%request-attempt))))
 
 ;; ---- bundled-ca-file: no network, no libtls needed ----

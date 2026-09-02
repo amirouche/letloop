@@ -485,6 +485,91 @@ static void letloop_register_tls_symbols(void) {
 }
 #endif /* LETLOOP_TLS_STATIC */
 
+/* The remaining four optional libraries letloop dlopens, each behind
+ * its own probe. Same asm-label aliasing as the liburing, blake3 and
+ * tls blocks above, and for the same reason -- no header is included
+ * here, so the address linked in from the archive is all there is to
+ * take.
+ *
+ * These matter only on a static build, and there they matter
+ * absolutely rather than as a speed-up: dlopen does not work at all
+ * under static musl (see src/letloop/store/README.md's Issues
+ * section), so without registration every one of these libraries is
+ * simply unavailable to a statically linked letloop -- (letloop http)
+ * loses picohttpparser's parser, and sodium, argon2 and opaque fail
+ * on their first call rather than falling back to anything. There is
+ * no Scheme floor under these the way (letloop blake3 scheme) is one
+ * under blake3.
+ *
+ * Each list is every symbol the corresponding binding library
+ * resolves through lazy-foreign-procedure, mechanically extracted.
+ */
+#ifdef LETLOOP_PICOHTTPPARSER_STATIC
+#define LETLOOP_PHR_SYM(name)                               \
+  do {                                                      \
+    extern void name##_letloop_alias(void) __asm__(#name);  \
+    Sforeign_symbol(#name, (void *)name##_letloop_alias);   \
+  } while (0)
+
+static void letloop_register_picohttpparser_symbols(void) {
+  LETLOOP_PHR_SYM(phr_parse_request_wrapper);
+  LETLOOP_PHR_SYM(phr_parse_response_wrapper);
+}
+#endif /* LETLOOP_PICOHTTPPARSER_STATIC */
+
+#ifdef LETLOOP_SODIUM_STATIC
+#define LETLOOP_SODIUM_SYM(name)                            \
+  do {                                                      \
+    extern void name##_letloop_alias(void) __asm__(#name);  \
+    Sforeign_symbol(#name, (void *)name##_letloop_alias);   \
+  } while (0)
+
+static void letloop_register_sodium_symbols(void) {
+  LETLOOP_SODIUM_SYM(sodium_init);
+  LETLOOP_SODIUM_SYM(sodium_memcmp);
+  LETLOOP_SODIUM_SYM(randombytes_buf);
+  LETLOOP_SODIUM_SYM(crypto_hash_sha256);
+  LETLOOP_SODIUM_SYM(crypto_aead_xchacha20poly1305_ietf_encrypt);
+  LETLOOP_SODIUM_SYM(crypto_aead_xchacha20poly1305_ietf_decrypt);
+  LETLOOP_SODIUM_SYM(crypto_aead_xchacha20poly1305_ietf_keygen);
+}
+#endif /* LETLOOP_SODIUM_STATIC */
+
+#ifdef LETLOOP_ARGON2_STATIC
+#define LETLOOP_ARGON2_SYM(name)                            \
+  do {                                                      \
+    extern void name##_letloop_alias(void) __asm__(#name);  \
+    Sforeign_symbol(#name, (void *)name##_letloop_alias);   \
+  } while (0)
+
+static void letloop_register_argon2_symbols(void) {
+  LETLOOP_ARGON2_SYM(argon2id_hash_raw);
+  LETLOOP_ARGON2_SYM(argon2id_hash_encoded);
+  LETLOOP_ARGON2_SYM(argon2id_verify);
+  LETLOOP_ARGON2_SYM(argon2_encodedlen);
+}
+#endif /* LETLOOP_ARGON2_STATIC */
+
+#ifdef LETLOOP_OPAQUE_STATIC
+#define LETLOOP_OPAQUE_SYM(name)                            \
+  do {                                                      \
+    extern void name##_letloop_alias(void) __asm__(#name);  \
+    Sforeign_symbol(#name, (void *)name##_letloop_alias);   \
+  } while (0)
+
+static void letloop_register_opaque_symbols(void) {
+  LETLOOP_OPAQUE_SYM(opaque_Register);
+  LETLOOP_OPAQUE_SYM(opaque_CreateRegistrationRequest);
+  LETLOOP_OPAQUE_SYM(opaque_CreateRegistrationResponse);
+  LETLOOP_OPAQUE_SYM(opaque_FinalizeRequest);
+  LETLOOP_OPAQUE_SYM(opaque_StoreUserRecord);
+  LETLOOP_OPAQUE_SYM(opaque_CreateCredentialRequest);
+  LETLOOP_OPAQUE_SYM(opaque_CreateCredentialResponse);
+  LETLOOP_OPAQUE_SYM(opaque_RecoverCredentials);
+  LETLOOP_OPAQUE_SYM(opaque_UserAuth);
+}
+#endif /* LETLOOP_OPAQUE_STATIC */
+
 /* Hook for symbols that are not letloop's to know about: the static
  * libraries a *user program* brings to `letloop compile`. That path
  * cannot copy the existing host -- the archives have to be linked in
@@ -567,6 +652,22 @@ static void letloop_register_foreign_symbols(void) {
 
 #ifdef LETLOOP_TLS_STATIC
   letloop_register_tls_symbols();
+#endif
+
+#ifdef LETLOOP_PICOHTTPPARSER_STATIC
+  letloop_register_picohttpparser_symbols();
+#endif
+
+#ifdef LETLOOP_SODIUM_STATIC
+  letloop_register_sodium_symbols();
+#endif
+
+#ifdef LETLOOP_ARGON2_STATIC
+  letloop_register_argon2_symbols();
+#endif
+
+#ifdef LETLOOP_OPAQUE_STATIC
+  letloop_register_opaque_symbols();
 #endif
 
   /* No-op unless a program brought static libraries of its own; see

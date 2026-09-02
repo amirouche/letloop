@@ -152,7 +152,7 @@
 
   (define ~check-sodium-0
     (lambda ()
-      (check-skip-unless libsodium
+      (check-skip-unless libsodium "sodium_init"
       (sodium-init)
       (let* ((data (string->bytevector "hello" (make-transcoder (utf-8-codec))))
              (hash1 (crypto-hash-sha256 data))
@@ -166,7 +166,7 @@
 
   (define ~check-sodium-1
     (lambda ()
-      (check-skip-unless libsodium
+      (check-skip-unless libsodium "sodium_init"
       ;; XChaCha20-Poly1305 encrypt/decrypt round-trip
       (sodium-init)
       (let* ((key (crypto-aead-xchacha20poly1305-ietf-keygen))
@@ -184,7 +184,7 @@
 
   (define ~check-sodium-2
     (lambda ()
-      (check-skip-unless libsodium
+      (check-skip-unless libsodium "sodium_init"
       ;; Decrypt with wrong key fails
       (sodium-init)
       (let* ((key (crypto-aead-xchacha20poly1305-ietf-keygen))
