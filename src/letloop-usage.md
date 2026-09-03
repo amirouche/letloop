@@ -42,9 +42,10 @@ build the binary it ships, and which --visible-libraries folds. Only
 
 Because that host parses no arguments at all, a compiled program -- and
 letloop itself -- receives --help, --version and every other flag
-untouched. Compiling needs a real `scheme` binary for its child process,
-looked up as $LETLOOP_SCHEME, then beside letloop's boot files, then on
-$PATH.
+untouched. Compiling runs in a child process, which is letloop itself
+re-executed with LETLOOP_BUILD_SCRIPT set, so nothing beyond the boot
+files beside it is needed. $LETLOOP_SCHEME names a stock Chez to use
+instead.
 
 A standalone argument ending in .a is a static library to link into the
 program, and may appear in any position. Its symbols are then reachable

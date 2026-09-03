@@ -972,8 +972,10 @@
         ;; compile-whole-program then has nothing to fold, and it does not
         ;; complain: it reports the libraries it gave up on through its
         ;; return value and carries on. That is what silently produced an
-        ;; unamalgamated binary before. So: re-exec ourselves with only
-        ;; petite.boot and scheme.boot registered, and make the child
+        ;; unamalgamated binary before. So: re-exec ourselves as a fresh
+        ;; process, in which nothing but the folded (letloop base) is
+        ;; defined and every (letloop ...) library compiles from the
+        ;; sources and .wpo files letloop ships, and make the child
         ;; treat a non-empty return value as fatal.
         (lambda ()
 
@@ -999,37 +1001,62 @@
                           "** Set LETLOOP_BOOT_DIRECTORY, or compile with --visible-libraries.\n")
                   (exit 1))))
 
-          (define scheme-executable
-            ;; The child has to be a Chez that still parses -b and
-            ;; --script. letloop's own binary is no use for it: its main
-            ;; hands argv straight to scheme-start without reading a
-            ;; single flag, which is the whole point of that main.
+          (define shell-quote
+            (lambda (str)
+              (let loop ((chars (string->list str)) (out '()))
+                (cond
+                 ((null? chars) (list->string (append '(#\') (reverse out) '(#\'))))
+                 ((char=? (car chars) #\')
+                  (loop (cdr chars) (append (reverse (string->list "'\\''")) out)))
+                 (else (loop (cdr chars) (cons (car chars) out)))))))
+
+          (define letloop-host?
+            ;; Whether EXE is a letloop host with its payload appended,
+            ;; told by the magic that ends the trailer -- the same check
+            ;; emit-program! makes, on the last 8 bytes only. Under
+            ;; upstream scheme, which is how `make letloop` bootstraps,
+            ;; there is no trailer.
             (lambda ()
-              (define split
-                (lambda (str sep)
-                  (let loop ((chars (string->list str)) (current '()) (out '()))
-                    (cond
-                     ((null? chars)
-                      (reverse (cons (list->string (reverse current)) out)))
-                     ((char=? (car chars) sep)
-                      (loop (cdr chars) '() (cons (list->string (reverse current)) out)))
-                     (else (loop (cdr chars) (cons (car chars) current) out))))))
-              (define usable
-                (lambda (path) (and path (file-exists? path) path)))
-              (or (usable (getenv "LETLOOP_SCHEME"))
-                  (usable (string-append boot-directory* "scheme"))
-                  (let loop ((rest (split (or (getenv "PATH") "") #\:)))
-                    (cond
-                     ((null? rest) #f)
-                     ((usable (string-append (car rest) "/scheme")))
-                     (else (loop (cdr rest)))))
-                  (begin
-                    (format (current-error-port)
-                            "* Ooops :|\n** Cannot find a scheme binary to compile with.\n")
-                    (format (current-error-port)
-                            "** Tried $LETLOOP_SCHEME, ~ascheme, and scheme on $PATH.\n"
-                            boot-directory*)
-                    (exit 1)))))
+              (guard (ex (else #f))
+                (call-with-port (open-file-input-port exe)
+                  (lambda (port)
+                    (let ((size (port-length port)))
+                      (and (> size 16)
+                           (begin (set-port-position! port (- size 8))
+                                  (equal? (get-bytevector-n port 8)
+                                          #vu8(76 69 84 76 79 79 80 1))))))))))
+
+          (define compiler-command
+            ;; The child is this very binary, re-executed with
+            ;; LETLOOP_BUILD_SCRIPT set; letloop-main runs the script
+            ;; before it reads a single argument. It used to be a real
+            ;; `scheme`, found beside the boot files or on $PATH, because
+            ;; the host parses no -b and no --script. That left a
+            ;; relocated letloop unable to compile wherever that scheme
+            ;; could not run -- a statically linked letloop beside a
+            ;; musl-linked scheme, copied onto a glibc host, ran its
+            ;; programs but could not build one. Now nothing beyond the
+            ;; boot files is needed, and those are only read.
+            ;;
+            ;; When the running binary is not a letloop host, it is
+            ;; upstream scheme running letloop-compile from source --
+            ;; `make letloop`'s own bootstrap -- and that scheme is the
+            ;; child, with -b and --script, since it has no letloop-main
+            ;; to honour the variable. $LETLOOP_SCHEME names a stock Chez
+            ;; to use instead in either case, to compare against one.
+            (lambda ()
+              (define stock
+                (lambda (scheme)
+                  (format #f "~a -b ~apetite.boot -b ~ascheme.boot --quiet --script ~a"
+                          (shell-quote scheme) boot-directory* boot-directory*
+                          (shell-quote build.scm))))
+              (let ((scheme (getenv "LETLOOP_SCHEME")))
+                (cond
+                 ((and scheme (file-exists? scheme)) (stock scheme))
+                 ((letloop-host?)
+                  (format #f "LETLOOP_BUILD_SCRIPT=~a ~a"
+                          (shell-quote build.scm) (shell-quote exe)))
+                 (else (stock exe))))))
 
           (define letloop-src
             (and=> (letloop-library-directory)
@@ -1167,9 +1194,7 @@
               (pretty-print '(exit 0) port))
             'truncate)
 
-          (system*
-           (pk (format #f "~a -b ~apetite.boot -b ~ascheme.boot --quiet --script ~a"
-                       (scheme-executable) boot-directory* boot-directory* build.scm)))))
+          (system* (pk (compiler-command)))))
 
       ;; The lines a command wrote to stdout. Read with get-line rather
       ;; than read-string, which this library only has at expand time.
@@ -1947,6 +1972,21 @@
 
   (define letloop-main
     (lambda args
+
+      ;; The compiler child. `letloop compile` re-executes this very
+      ;; binary with LETLOOP_BUILD_SCRIPT naming the build script it
+      ;; wrote, and nothing else on the command line: the host parses
+      ;; no flags, so the environment is the one channel that cannot
+      ;; collide with a program's own arguments. Checked before a
+      ;; single argument is read, so the child is as pristine as a
+      ;; bare scheme -- the only library defined here is (letloop
+      ;; base), folded and invisible, which no program can import
+      ;; anyway. See build-boot-file/whole-program for why the
+      ;; compile cannot happen in the parent.
+      (let ((script (getenv "LETLOOP_BUILD_SCRIPT")))
+        (when script
+          (load script)
+          (exit 0)))
 
       (pk 'args args)
 
