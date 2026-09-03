@@ -9,10 +9,13 @@ deduping against an existing path with the same hash. See
 `src/letloop/store/derivation.body.scm` for the exact format and
 `src/letloop/store/sandbox.body.scm` for the sandbox invocation.
 
-The store is `$LETLOOP_STORE` if set, else `$LETLOOP_PROJECT_PATH/store`,
-else `~/.local/letloop/store`. `./venv` sets the middle one, so working
-on letloop fills the checkout's own store rather than the one a user has
-been accumulating packages in.
+The store is `$LETLOOP_STORE` if set, else `store/` inside letloop's
+own installed directory, `$LETLOOP_PREFIX/lib/letloop` -- found through
+`$LETLOOP_PREFIX`, or by walking up from the running binary -- else
+`~/.local/letloop/store`. `./venv` sets `$LETLOOP_PREFIX`, so working on
+letloop fills the checkout's own store rather than the one a user has
+been accumulating packages in. A project's own packages live beside it,
+at `$LETLOOP_PREFIX/lib/letloop/package/NAME.scm`.
 
 A package is an ordinary Scheme library exporting `package`, under
 `src/letloop/package/`, so `letloop store build blake3` resolves

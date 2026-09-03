@@ -177,7 +177,10 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 CACHE_LEVELS=0 3
 
 letloop-libraries: ## Install letloop's sources and their per-level .wpo cache into $(PREFIX)/lib/letloop
-	rm -rf $(PREFIX)/lib/letloop
+	@# Only what this target writes. $(PREFIX)/lib/letloop is also where
+	@# the store (store/) and a project's own packages (package/) live,
+	@# and a rebuild must not throw away hours of sandboxed builds.
+	rm -rf $(PREFIX)/lib/letloop/src $(PREFIX)/lib/letloop/obj $(PREFIX)/lib/letloop/STAMP
 	mkdir -p $(PREFIX)/lib/letloop/src
 	cp -a src/letloop $(PREFIX)/lib/letloop/src/
 	@# The host's own source ships too: `letloop compile` recompiles it

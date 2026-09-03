@@ -15,27 +15,71 @@
 ;; hashing, expected-hash verification, placement, the .drv sidecar --
 ;; is identical either way.
 
+;; The directory holding the running binary, with a trailing slash,
+;; or #f. (letloop base) and (letloop tls base) define the identical
+;; helper: base is folded into the amalgamated letloop program and
+;; must import nothing of letloop's own, so it cannot be shared by
+;; import; small enough to duplicate rather than restructure. readlink
+;; is a registered symbol on a static build, so no dlopen is needed.
+(define executable-directory
+  (let ((cached 'unknown))
+    (lambda ()
+      (when (eq? cached 'unknown)
+        (set! cached
+              (guard (ex (else #f))
+                (let* ((readlink (foreign-procedure "readlink" (string u8* uptr) iptr))
+                       (buffer (make-bytevector 4096))
+                       (count (readlink "/proc/self/exe" buffer (bytevector-length buffer))))
+                  (and (fx> count 0)
+                       (let ((out (make-bytevector count)))
+                         (bytevector-copy! buffer 0 out 0 count)
+                         (let* ((path (utf8->string out))
+                                (slash (let loop ((index (fx- (string-length path) 1)))
+                                         (cond
+                                          ((fx<? index 0) #f)
+                                          ((char=? (string-ref path index) #\/) index)
+                                          (else (loop (fx- index 1)))))))
+                           (and slash (substring path 0 (fx+ slash 1))))))))))
+      cached)))
+
+;; letloop's own installed directory, $LETLOOP_PREFIX/lib/letloop --
+;; the one holding src/ and obj/ -- resolved the same way (letloop
+;; base)'s letloop-library-directory resolves it: $LETLOOP_PREFIX
+;; first, taken as given, then walked up from the running executable
+;; and accepted where a src/ is found, since a relocated binary
+;; carries no absolute install path of its own. #f when letloop was
+;; never installed and no prefix is named.
+;;
+;; The store and a project's own packages both live here, as store/
+;; and package/, beside the sources: one directory per installed
+;; letloop, and nothing shared between two installs by accident. A
+;; checkout's ./venv names its own prefix, so working on letloop
+;; fills local/lib/letloop/store rather than the store a user has been
+;; accumulating packages in.
+(define (letloop-directory)
+  (let ((prefix (getenv "LETLOOP_PREFIX")))
+    (if prefix
+        (string-append prefix "/lib/letloop")
+        (let ((exe (or (executable-directory) "")))
+          (let loop ((ups '("" "../" "../../" "../../../")))
+            (cond
+             ((null? ups) #f)
+             ((file-directory? (string-append exe (car ups) "lib/letloop/src"))
+              (string-append exe (car ups) "lib/letloop"))
+             (else (loop (cdr ups)))))))))
+
 ;; Where the store lives, most specific first:
 ;;
-;;   $LETLOOP_STORE            the store directory outright
-;;   $LETLOOP_PROJECT_PATH     a project's letloop directory; the store
-;;                             is `store` inside it
-;;   ~/.local/letloop/store    otherwise
-;;
-;; The middle one is what keeps a checkout's builds out of the user's
-;; own store: ./venv points it at $LETLOOP_PREFIX/letloop, so working
-;; on letloop fills local/letloop/store rather than the store a user
-;; has been accumulating packages in. Same reason a language runtime
-;; grows a per-project directory -- one machine, several worlds, and
-;; nothing shared between them by accident.
+;;   $LETLOOP_STORE                     the store directory outright
+;;   $LETLOOP_PREFIX/lib/letloop/store  inside the installed letloop
+;;   ~/.local/letloop/store             otherwise
 ;;
 ;; $LETLOOP_STORE stays because a caller sometimes wants to name a
 ;; store directly, and because every check here does.
 (define (store-directory)
   (cond
    ((getenv "LETLOOP_STORE"))
-   ((getenv "LETLOOP_PROJECT_PATH")
-    => (lambda (project) (string-append project "/store")))
+   ((letloop-directory) => (lambda (directory) (string-append directory "/store")))
    (else (string-append (getenv "HOME") "/.local/letloop/store"))))
 
 (define (store-tmp-directory)
@@ -498,21 +542,21 @@
 (define (store-build derivation-path)
   (store-build/resolving derivation-path '() (box '())))
 
-;; $LETLOOP_PROJECT_PATH itself, added to the library path whenever it
+;; LETLOOP-DIRECTORY itself, added to the library path whenever it
 ;; exists, so a project's own (package ...) libraries are found
 ;; without the caller having to spell out a directory on every
-;; invocation -- mirrors $LETLOOP_PROJECT_PATH/store from
-;; STORE-DIRECTORY, one project directory, several conventional
-;; children under it. A library named (package NAME) resolves against
-;; a source directory the same way (letloop package NAME) resolves
-;; against letloop's own installed src: through the "package" segment
-;; itself, so the file this puts on disk is
-;; $LETLOOP_PROJECT_PATH/package/NAME.scm -- no separate "packages"
-;; directory to keep in sync with the library name's own first
-;; component.
+;; invocation -- the same directory STORE-DIRECTORY puts the store
+;; under, one installed letloop, several conventional children under
+;; it. A library named (package NAME) resolves against a source
+;; directory the same way (letloop package NAME) resolves against
+;; letloop's own installed src: through the "package" segment itself,
+;; so the file this puts on disk is
+;; $LETLOOP_PREFIX/lib/letloop/package/NAME.scm -- no separate
+;; "packages" directory to keep in sync with the library name's own
+;; first component.
 (define (project-library-directory)
-  (let ((project (getenv "LETLOOP_PROJECT_PATH")))
-    (and project (file-directory? project) project)))
+  (let ((directory (letloop-directory)))
+    (and directory (file-directory? directory) directory)))
 
 (define (letloop-store args)
   (if (null? args)
