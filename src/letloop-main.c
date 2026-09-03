@@ -26,14 +26,675 @@
  * appended it runs that instead.
  */
 
+/* pipe2 and signalfd are behind _GNU_SOURCE on glibc; musl exposes
+ * them regardless. */
+#define _GNU_SOURCE
+
+#include <dlfcn.h>
 #include <fcntl.h>
+#include <signal.h>
+#include <sys/ioctl.h>
+#include <sys/signalfd.h>
+#include <termios.h>
+#include <netdb.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/eventfd.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+
 #include "scheme.h"
+
+extern char **environ;
+
+/* (load-shared-object #f) -- dlopen(NULL, ...), "hand me the main
+ * program's own handle" -- is how nearly every (foreign-procedure
+ * ...) call in this codebase reaches ordinary libc functions: one
+ * file calls it eagerly at library-instantiation time (e.g. cffi.scm,
+ * imported almost everywhere) and every other file's bare
+ * foreign-procedure calls, with no load-shared-object of their own,
+ * ride on that as a process-wide side effect. There is no dynamic
+ * linker to service dlopen(NULL, ...) in a statically-linked binary,
+ * so it fails there, and Chez's own error-formatting code for that
+ * failure crashes on the NULL path it was given (see
+ * src/letloop/store/README.md's Issues section for the full trace).
+ *
+ * Rather than convert every call site (tried, and it breaks: it loses
+ * the "one eager call unlocks everything else" side effect even for
+ * ordinary dynamic builds, since a site that already resolves its own
+ * symbol via Sforeign_symbol never falls back to load-shared-object
+ * for anything ELSE that used to ride along with it), this probes
+ * once, safely, in C, before any Scheme runs, and exposes the result:
+ * letloop_self_dlopen_safe() is always registered (so callers can
+ * always ask), and reports 1 only when dlopen(NULL, ...) actually
+ * works here. Scheme-side code (see cffi.scm's ensure-self-loaded!)
+ * calls (load-shared-object #f) eagerly, exactly as before, only when
+ * this says it is safe -- preserving today's behavior byte for byte
+ * on a dynamic build. When it is not safe, the small, hand-audited
+ * set of libc symbols below -- exactly what (letloop store build)'s
+ * own dependency chain needs (root.scm, and tls/base.scm for the
+ * fixed-output fetch step's HTTPS client) -- is registered instead,
+ * via Sforeign_symbol, a public Chez embedding API independent of
+ * dlopen that (foreign-procedure ...) and foreign-entry already
+ * search first.
+ *
+ * The list is not exhaustive by construction -- a static build
+ * exercising a file outside that chain needs its own entry here -- and
+ * a missing one shows up only as "no entry for X" the first time that
+ * code path runs, which is a poor way to find them one at a time. To
+ * get the whole set instead, list every eagerly-resolved symbol in the
+ * tree and subtract what is already registered:
+ *
+ *   grep -rhoE '\(foreign-procedure[^"]*"([a-zA-Z_][a-zA-Z0-9_]*)"' \
+ *        src/letloop --include='*.scm' | grep -v lazy-foreign-procedure
+ *
+ * Symbols reached through lazy-foreign-procedure do not belong here:
+ * those probe first and fall back to their own dlopen, which is how
+ * optional shared objects (blake3, picohttpparser, liburing) stay
+ * optional. Nor do the Windows/macOS spellings in environment.scm.
+ */
+static int letloop_self_dlopen_safe_result = 0;
+
+static int letloop_self_dlopen_safe(void) {
+  return letloop_self_dlopen_safe_result;
+}
+
+#ifdef LETLOOP_LIBURING_STATIC
+/* liburing's own "-ffi" build variant exists because liburing.h leans
+ * heavily on `static inline` functions (io_uring_prep_*, the sqe/cqe
+ * accessors, io_uring_cq_advance, ...) -- several of those
+ * (io_uring_cq_advance, io_uring_cqe_seen, the ring-index bookkeeping
+ * in general) internally call the barrier primitives in
+ * liburing/barrier.h (io_uring_smp_load_acquire /
+ * io_uring_smp_store_release), which enforce the ordering the kernel
+ * relies on between userspace and the SQ/CQ ring's shared memory.
+ * liburing ships a dedicated ffi.c to get real, addressable symbols
+ * for these, compiled with IOURINGINLINE defined empty so every
+ * IOURINGINLINE-guarded function in the header becomes an ordinary,
+ * externally-linked definition instead of `static inline`; Alpine's
+ * liburing-ffi.a is exactly that object file, pre-built by upstream.
+ *
+ * An earlier version of this file took each `static inline`
+ * function's address directly (default liburing.h, no IOURINGINLINE
+ * override), reasoning that address-taking forces the compiler to
+ * materialize an equivalent out-of-line copy in this translation
+ * unit. That is a *different* compiled instantiation of the barrier
+ * code than the one upstream ships and tests -- not provably wrong,
+ * but a real, unresolved gap during (letloop liburing low)'s
+ * still-uninvestigated runtime crash. A later attempt to close that
+ * gap by defining IOURINGINLINE here directly (so this file compiles
+ * the exact same real definitions liburing-ffi.c does) failed at
+ * link time instead: liburing.a's own queue.ol already carries real,
+ * non-inline definitions of a handful of these names (io_uring_get_sqe,
+ * io_uring_get_events -- kept for ABI back-compat from before they
+ * became header-only), and duplicating them here collides with
+ * -luring ("multiple definition of io_uring_get_sqe").
+ *
+ * The fix that actually avoids both problems: reference the
+ * pre-built liburing-ffi.a symbols directly, under a distinct local C
+ * name aliased to the real linker symbol via GCC's asm-label
+ * extension, so this translation unit never defines or re-inlines
+ * any of these functions itself -- it only takes the address the
+ * archive already provides, identical to what a dynamic FFI consumer
+ * would dlopen. No liburing.h inclusion is needed for this: only a
+ * matching symbol name, resolved by the linker.
+ *
+ * The dlopen path (liburing-ffi.so) is what does not work here
+ * (see the big comment above): confirmed empirically against a real
+ * static build, dlopen("liburing-ffi.so.2", RTLD_NOW) fails with
+ * musl's own "Dynamic loading not supported" -- a stronger limitation
+ * than the dlopen(NULL, ...) case, this is *any* dlopen, named or
+ * not, on this static libc. So liburing-ffi.a is linked statically
+ * instead (LETLOOP_LIBURING_STATIC pairs with -luring-ffi in the
+ * makefile, replacing plain -luring: liburing-ffi.a is a strict
+ * superset -- setup.ol, queue.ol, register.ol, syscall.ol, version.ol,
+ * plus ffi.ol -- so nothing else needs to change).
+ *
+ * The list is every io_uring_* symbol src/letloop/liburing/low.scm
+ * resolves via lazy-foreign-procedure, mechanically extracted, minus
+ * io_uring_prep_ftruncate, which this liburing version (2.9) does not
+ * have -- low.scm's own corresponding wrapper was already unreachable
+ * on any build using this liburing version, static or dynamic; this
+ * does not change that.
+ */
+#define LETLOOP_URING_SYM(name) \
+  do { \
+    extern void name##_letloop_ffi_stub(void) __asm__(#name); \
+    Sforeign_symbol(#name, (void *)name##_letloop_ffi_stub); \
+  } while (0)
+
+static void letloop_register_liburing_symbols(void) {
+  LETLOOP_URING_SYM(io_uring_buf_ring_add);
+  LETLOOP_URING_SYM(io_uring_buf_ring_advance);
+  LETLOOP_URING_SYM(io_uring_buf_ring_available);
+  LETLOOP_URING_SYM(io_uring_buf_ring_cq_advance);
+  LETLOOP_URING_SYM(io_uring_buf_ring_init);
+  LETLOOP_URING_SYM(io_uring_buf_ring_mask);
+  LETLOOP_URING_SYM(io_uring_check_version);
+  LETLOOP_URING_SYM(io_uring_close_ring_fd);
+  LETLOOP_URING_SYM(io_uring_cq_advance);
+  LETLOOP_URING_SYM(io_uring_cq_has_overflow);
+  LETLOOP_URING_SYM(io_uring_cq_ready);
+  LETLOOP_URING_SYM(io_uring_cqe_get_data);
+  LETLOOP_URING_SYM(io_uring_cqe_get_data64);
+  LETLOOP_URING_SYM(io_uring_cqe_seen);
+  LETLOOP_URING_SYM(io_uring_enable_rings);
+  LETLOOP_URING_SYM(io_uring_enter);
+  LETLOOP_URING_SYM(io_uring_enter2);
+  LETLOOP_URING_SYM(io_uring_free_buf_ring);
+  LETLOOP_URING_SYM(io_uring_free_probe);
+  LETLOOP_URING_SYM(io_uring_get_events);
+  LETLOOP_URING_SYM(io_uring_get_probe);
+  LETLOOP_URING_SYM(io_uring_get_probe_ring);
+  LETLOOP_URING_SYM(io_uring_get_sqe);
+  LETLOOP_URING_SYM(io_uring_major_version);
+  LETLOOP_URING_SYM(io_uring_minor_version);
+  LETLOOP_URING_SYM(io_uring_opcode_supported);
+  LETLOOP_URING_SYM(io_uring_peek_batch_cqe);
+  LETLOOP_URING_SYM(io_uring_peek_cqe);
+  LETLOOP_URING_SYM(io_uring_prep_accept);
+  LETLOOP_URING_SYM(io_uring_prep_accept_direct);
+  LETLOOP_URING_SYM(io_uring_prep_bind);
+  LETLOOP_URING_SYM(io_uring_prep_cancel);
+  LETLOOP_URING_SYM(io_uring_prep_cancel64);
+  LETLOOP_URING_SYM(io_uring_prep_cancel_fd);
+  LETLOOP_URING_SYM(io_uring_prep_close);
+  LETLOOP_URING_SYM(io_uring_prep_close_direct);
+  LETLOOP_URING_SYM(io_uring_prep_cmd_sock);
+  LETLOOP_URING_SYM(io_uring_prep_connect);
+  LETLOOP_URING_SYM(io_uring_prep_epoll_ctl);
+  LETLOOP_URING_SYM(io_uring_prep_fadvise);
+  LETLOOP_URING_SYM(io_uring_prep_fallocate);
+  LETLOOP_URING_SYM(io_uring_prep_fgetxattr);
+  LETLOOP_URING_SYM(io_uring_prep_files_update);
+  LETLOOP_URING_SYM(io_uring_prep_fixed_fd_install);
+  LETLOOP_URING_SYM(io_uring_prep_fsetxattr);
+  LETLOOP_URING_SYM(io_uring_prep_fsync);
+  LETLOOP_URING_SYM(io_uring_prep_futex_wait);
+  LETLOOP_URING_SYM(io_uring_prep_futex_waitv);
+  LETLOOP_URING_SYM(io_uring_prep_futex_wake);
+  LETLOOP_URING_SYM(io_uring_prep_getxattr);
+  LETLOOP_URING_SYM(io_uring_prep_link);
+  LETLOOP_URING_SYM(io_uring_prep_link_timeout);
+  LETLOOP_URING_SYM(io_uring_prep_linkat);
+  LETLOOP_URING_SYM(io_uring_prep_listen);
+  LETLOOP_URING_SYM(io_uring_prep_madvise);
+  LETLOOP_URING_SYM(io_uring_prep_mkdir);
+  LETLOOP_URING_SYM(io_uring_prep_mkdirat);
+  LETLOOP_URING_SYM(io_uring_prep_msg_ring);
+  LETLOOP_URING_SYM(io_uring_prep_msg_ring_cqe_flags);
+  LETLOOP_URING_SYM(io_uring_prep_msg_ring_fd);
+  LETLOOP_URING_SYM(io_uring_prep_msg_ring_fd_alloc);
+  LETLOOP_URING_SYM(io_uring_prep_multishot_accept);
+  LETLOOP_URING_SYM(io_uring_prep_multishot_accept_direct);
+  LETLOOP_URING_SYM(io_uring_prep_nop);
+  LETLOOP_URING_SYM(io_uring_prep_open);
+  LETLOOP_URING_SYM(io_uring_prep_open_direct);
+  LETLOOP_URING_SYM(io_uring_prep_openat);
+  LETLOOP_URING_SYM(io_uring_prep_openat_direct);
+  LETLOOP_URING_SYM(io_uring_prep_poll_add);
+  LETLOOP_URING_SYM(io_uring_prep_poll_multishot);
+  LETLOOP_URING_SYM(io_uring_prep_poll_remove);
+  LETLOOP_URING_SYM(io_uring_prep_poll_update);
+  LETLOOP_URING_SYM(io_uring_prep_provide_buffers);
+  LETLOOP_URING_SYM(io_uring_prep_read);
+  LETLOOP_URING_SYM(io_uring_prep_read_fixed);
+  LETLOOP_URING_SYM(io_uring_prep_read_multishot);
+  LETLOOP_URING_SYM(io_uring_prep_readv);
+  LETLOOP_URING_SYM(io_uring_prep_readv2);
+  LETLOOP_URING_SYM(io_uring_prep_recv);
+  LETLOOP_URING_SYM(io_uring_prep_recv_multishot);
+  LETLOOP_URING_SYM(io_uring_prep_recvmsg);
+  LETLOOP_URING_SYM(io_uring_prep_recvmsg_multishot);
+  LETLOOP_URING_SYM(io_uring_prep_remove_buffers);
+  LETLOOP_URING_SYM(io_uring_prep_rename);
+  LETLOOP_URING_SYM(io_uring_prep_renameat);
+  LETLOOP_URING_SYM(io_uring_prep_rw);
+  LETLOOP_URING_SYM(io_uring_prep_send);
+  LETLOOP_URING_SYM(io_uring_prep_send_bundle);
+  LETLOOP_URING_SYM(io_uring_prep_send_set_addr);
+  LETLOOP_URING_SYM(io_uring_prep_send_zc);
+  LETLOOP_URING_SYM(io_uring_prep_send_zc_fixed);
+  LETLOOP_URING_SYM(io_uring_prep_sendmsg);
+  LETLOOP_URING_SYM(io_uring_prep_sendmsg_zc);
+  LETLOOP_URING_SYM(io_uring_prep_sendto);
+  LETLOOP_URING_SYM(io_uring_prep_setxattr);
+  LETLOOP_URING_SYM(io_uring_prep_shutdown);
+  LETLOOP_URING_SYM(io_uring_prep_socket);
+  LETLOOP_URING_SYM(io_uring_prep_socket_direct);
+  LETLOOP_URING_SYM(io_uring_prep_socket_direct_alloc);
+  LETLOOP_URING_SYM(io_uring_prep_splice);
+  LETLOOP_URING_SYM(io_uring_prep_statx);
+  LETLOOP_URING_SYM(io_uring_prep_symlink);
+  LETLOOP_URING_SYM(io_uring_prep_symlinkat);
+  LETLOOP_URING_SYM(io_uring_prep_sync_file_range);
+  LETLOOP_URING_SYM(io_uring_prep_tee);
+  LETLOOP_URING_SYM(io_uring_prep_timeout);
+  LETLOOP_URING_SYM(io_uring_prep_timeout_remove);
+  LETLOOP_URING_SYM(io_uring_prep_timeout_update);
+  LETLOOP_URING_SYM(io_uring_prep_unlink);
+  LETLOOP_URING_SYM(io_uring_prep_unlinkat);
+  LETLOOP_URING_SYM(io_uring_prep_waitid);
+  LETLOOP_URING_SYM(io_uring_prep_write);
+  LETLOOP_URING_SYM(io_uring_prep_write_fixed);
+  LETLOOP_URING_SYM(io_uring_prep_writev);
+  LETLOOP_URING_SYM(io_uring_prep_writev2);
+  LETLOOP_URING_SYM(io_uring_queue_exit);
+  LETLOOP_URING_SYM(io_uring_queue_init);
+  LETLOOP_URING_SYM(io_uring_queue_init_params);
+  LETLOOP_URING_SYM(io_uring_queue_mmap);
+  LETLOOP_URING_SYM(io_uring_recvmsg_cmsg_firsthdr);
+  LETLOOP_URING_SYM(io_uring_recvmsg_cmsg_nexthdr);
+  LETLOOP_URING_SYM(io_uring_recvmsg_name);
+  LETLOOP_URING_SYM(io_uring_recvmsg_payload);
+  LETLOOP_URING_SYM(io_uring_recvmsg_payload_length);
+  LETLOOP_URING_SYM(io_uring_recvmsg_validate);
+  LETLOOP_URING_SYM(io_uring_register);
+  LETLOOP_URING_SYM(io_uring_register_buf_ring);
+  LETLOOP_URING_SYM(io_uring_register_buffers);
+  LETLOOP_URING_SYM(io_uring_register_buffers_sparse);
+  LETLOOP_URING_SYM(io_uring_register_buffers_tags);
+  LETLOOP_URING_SYM(io_uring_register_buffers_update_tag);
+  LETLOOP_URING_SYM(io_uring_register_eventfd);
+  LETLOOP_URING_SYM(io_uring_register_eventfd_async);
+  LETLOOP_URING_SYM(io_uring_register_file_alloc_range);
+  LETLOOP_URING_SYM(io_uring_register_files);
+  LETLOOP_URING_SYM(io_uring_register_files_sparse);
+  LETLOOP_URING_SYM(io_uring_register_files_tags);
+  LETLOOP_URING_SYM(io_uring_register_files_update);
+  LETLOOP_URING_SYM(io_uring_register_files_update_tag);
+  LETLOOP_URING_SYM(io_uring_register_iowq_max_workers);
+  LETLOOP_URING_SYM(io_uring_register_napi);
+  LETLOOP_URING_SYM(io_uring_register_personality);
+  LETLOOP_URING_SYM(io_uring_register_probe);
+  LETLOOP_URING_SYM(io_uring_register_restrictions);
+  LETLOOP_URING_SYM(io_uring_register_ring_fd);
+  LETLOOP_URING_SYM(io_uring_register_sync_cancel);
+  LETLOOP_URING_SYM(io_uring_ring_dontfork);
+  LETLOOP_URING_SYM(io_uring_setup);
+  LETLOOP_URING_SYM(io_uring_setup_buf_ring);
+  LETLOOP_URING_SYM(io_uring_sq_ready);
+  LETLOOP_URING_SYM(io_uring_sq_space_left);
+  LETLOOP_URING_SYM(io_uring_sqe_set_buf_group);
+  LETLOOP_URING_SYM(io_uring_sqe_set_data);
+  LETLOOP_URING_SYM(io_uring_sqe_set_data64);
+  LETLOOP_URING_SYM(io_uring_sqe_set_flags);
+  LETLOOP_URING_SYM(io_uring_sqring_wait);
+  LETLOOP_URING_SYM(io_uring_submit);
+  LETLOOP_URING_SYM(io_uring_submit_and_get_events);
+  LETLOOP_URING_SYM(io_uring_submit_and_wait);
+  LETLOOP_URING_SYM(io_uring_submit_and_wait_timeout);
+  LETLOOP_URING_SYM(io_uring_unregister_buf_ring);
+  LETLOOP_URING_SYM(io_uring_unregister_buffers);
+  LETLOOP_URING_SYM(io_uring_unregister_eventfd);
+  LETLOOP_URING_SYM(io_uring_unregister_files);
+  LETLOOP_URING_SYM(io_uring_unregister_napi);
+  LETLOOP_URING_SYM(io_uring_unregister_personality);
+  LETLOOP_URING_SYM(io_uring_unregister_ring_fd);
+  LETLOOP_URING_SYM(io_uring_wait_cqe);
+  LETLOOP_URING_SYM(io_uring_wait_cqe_nr);
+  LETLOOP_URING_SYM(io_uring_wait_cqe_timeout);
+  LETLOOP_URING_SYM(io_uring_wait_cqes);
+}
+#endif /* LETLOOP_LIBURING_STATIC */
+
+#ifdef LETLOOP_BLAKE3_STATIC
+/* BLAKE3. Was, briefly, the one optional shared object a static
+ * letloop could not treat as optional: before (letloop blake3 scheme)
+ * existed, (letloop store) hashed every output through the dispatching
+ * (letloop blake3), so a statically linked letloop without this
+ * registration could compile programs but not run `letloop store
+ * build` -- it failed with "cannot dlopen shared object" the moment a
+ * build finished and wanted a hash. (letloop store) now imports
+ * (letloop blake3 scheme) directly and never reaches this path at all,
+ * so this registration is back to being what it looks like: a speed-up
+ * for whatever else imports (letloop blake3), not a store dependency.
+ *
+ * Only the three entry points (letloop blake3) resolves; the rest of
+ * the archive is reached through them. Same asm-label aliasing as the
+ * liburing block above and for the same reason -- no header is
+ * included here, so the address is all there is to take.
+ */
+#define LETLOOP_BLAKE3_SYM(name)                            \
+  do {                                                      \
+    extern void name##_letloop_alias(void) __asm__(#name);  \
+    Sforeign_symbol(#name, (void *)name##_letloop_alias);   \
+  } while (0)
+
+static void letloop_register_blake3_symbols(void) {
+  LETLOOP_BLAKE3_SYM(blake3_hasher_init);
+  LETLOOP_BLAKE3_SYM(blake3_hasher_update);
+  LETLOOP_BLAKE3_SYM(blake3_hasher_finalize);
+}
+#endif /* LETLOOP_BLAKE3_STATIC */
+
+#ifdef LETLOOP_TLS_STATIC
+/* LibreSSL's libtls, plus the libssl/libcrypto it is built against --
+ * (letloop tls low) dlopen's libtls.so.28 at runtime, and (letloop
+ * www)'s HTTPS path is what `letloop store build`'s own fetch-verify!
+ * step uses, so a statically linked letloop without this can compile
+ * programs and run a *warm* store, but cannot fetch anything new --
+ * the same gap src/letloop/store/README.md's cold-start section
+ * already names, one static registration closer to closed.
+ *
+ * Same asm-label aliasing as the liburing and blake3 blocks above,
+ * for the same reason: no header is included here, so the address
+ * linked into the binary from libtls.a is all there is to take.
+ *
+ * The list is every tls_* symbol src/letloop/tls/low.scm resolves via
+ * lazy-foreign-procedure, mechanically extracted. strlen is already
+ * registered above, generically -- low.scm's own use of it through
+ * the same libtls handle was never actually libtls-specific.
+ */
+#define LETLOOP_TLS_SYM(name)                              \
+  do {                                                      \
+    extern void name##_letloop_alias(void) __asm__(#name);  \
+    Sforeign_symbol(#name, (void *)name##_letloop_alias);   \
+  } while (0)
+
+static void letloop_register_tls_symbols(void) {
+  LETLOOP_TLS_SYM(tls_accept_fds);
+  LETLOOP_TLS_SYM(tls_accept_socket);
+  LETLOOP_TLS_SYM(tls_client);
+  LETLOOP_TLS_SYM(tls_close);
+  LETLOOP_TLS_SYM(tls_config_add_keypair_file);
+  LETLOOP_TLS_SYM(tls_config_add_keypair_mem);
+  LETLOOP_TLS_SYM(tls_config_add_keypair_ocsp_file);
+  LETLOOP_TLS_SYM(tls_config_add_keypair_ocsp_mem);
+  LETLOOP_TLS_SYM(tls_config_add_ticket_key);
+  LETLOOP_TLS_SYM(tls_config_clear_keys);
+  LETLOOP_TLS_SYM(tls_config_error);
+  LETLOOP_TLS_SYM(tls_config_free);
+  LETLOOP_TLS_SYM(tls_config_insecure_noverifycert);
+  LETLOOP_TLS_SYM(tls_config_insecure_noverifyname);
+  LETLOOP_TLS_SYM(tls_config_insecure_noverifytime);
+  LETLOOP_TLS_SYM(tls_config_new);
+  LETLOOP_TLS_SYM(tls_config_ocsp_require_stapling);
+  LETLOOP_TLS_SYM(tls_config_parse_protocols);
+  LETLOOP_TLS_SYM(tls_config_prefer_ciphers_client);
+  LETLOOP_TLS_SYM(tls_config_prefer_ciphers_server);
+  LETLOOP_TLS_SYM(tls_config_set_alpn);
+  LETLOOP_TLS_SYM(tls_config_set_ca_file);
+  LETLOOP_TLS_SYM(tls_config_set_ca_mem);
+  LETLOOP_TLS_SYM(tls_config_set_ca_path);
+  LETLOOP_TLS_SYM(tls_config_set_cert_file);
+  LETLOOP_TLS_SYM(tls_config_set_cert_mem);
+  LETLOOP_TLS_SYM(tls_config_set_ciphers);
+  LETLOOP_TLS_SYM(tls_config_set_crl_file);
+  LETLOOP_TLS_SYM(tls_config_set_dheparams);
+  LETLOOP_TLS_SYM(tls_config_set_ecdhecurve);
+  LETLOOP_TLS_SYM(tls_config_set_ecdhecurves);
+  LETLOOP_TLS_SYM(tls_config_set_key_file);
+  LETLOOP_TLS_SYM(tls_config_set_key_mem);
+  LETLOOP_TLS_SYM(tls_config_set_keypair_file);
+  LETLOOP_TLS_SYM(tls_config_set_keypair_mem);
+  LETLOOP_TLS_SYM(tls_config_set_keypair_ocsp_file);
+  LETLOOP_TLS_SYM(tls_config_set_keypair_ocsp_mem);
+  LETLOOP_TLS_SYM(tls_config_set_ocsp_staple_file);
+  LETLOOP_TLS_SYM(tls_config_set_ocsp_staple_mem);
+  LETLOOP_TLS_SYM(tls_config_set_protocols);
+  LETLOOP_TLS_SYM(tls_config_set_session_fd);
+  LETLOOP_TLS_SYM(tls_config_set_session_id);
+  LETLOOP_TLS_SYM(tls_config_set_session_lifetime);
+  LETLOOP_TLS_SYM(tls_config_set_verify_depth);
+  LETLOOP_TLS_SYM(tls_config_verify);
+  LETLOOP_TLS_SYM(tls_config_verify_client);
+  LETLOOP_TLS_SYM(tls_config_verify_client_optional);
+  LETLOOP_TLS_SYM(tls_configure);
+  LETLOOP_TLS_SYM(tls_conn_alpn_selected);
+  LETLOOP_TLS_SYM(tls_conn_cipher);
+  LETLOOP_TLS_SYM(tls_conn_cipher_strength);
+  LETLOOP_TLS_SYM(tls_conn_servername);
+  LETLOOP_TLS_SYM(tls_conn_session_resumed);
+  LETLOOP_TLS_SYM(tls_conn_version);
+  LETLOOP_TLS_SYM(tls_connect);
+  LETLOOP_TLS_SYM(tls_connect_fds);
+  LETLOOP_TLS_SYM(tls_connect_servername);
+  LETLOOP_TLS_SYM(tls_connect_socket);
+  LETLOOP_TLS_SYM(tls_default_ca_cert_file);
+  LETLOOP_TLS_SYM(tls_error);
+  LETLOOP_TLS_SYM(tls_free);
+  LETLOOP_TLS_SYM(tls_handshake);
+  LETLOOP_TLS_SYM(tls_init);
+  LETLOOP_TLS_SYM(tls_load_file);
+  LETLOOP_TLS_SYM(tls_ocsp_process_response);
+  LETLOOP_TLS_SYM(tls_peer_cert_chain_pem);
+  LETLOOP_TLS_SYM(tls_peer_cert_contains_name);
+  LETLOOP_TLS_SYM(tls_peer_cert_hash);
+  LETLOOP_TLS_SYM(tls_peer_cert_issuer);
+  LETLOOP_TLS_SYM(tls_peer_cert_notafter);
+  LETLOOP_TLS_SYM(tls_peer_cert_notbefore);
+  LETLOOP_TLS_SYM(tls_peer_cert_provided);
+  LETLOOP_TLS_SYM(tls_peer_cert_subject);
+  LETLOOP_TLS_SYM(tls_peer_ocsp_cert_status);
+  LETLOOP_TLS_SYM(tls_peer_ocsp_crl_reason);
+  LETLOOP_TLS_SYM(tls_peer_ocsp_next_update);
+  LETLOOP_TLS_SYM(tls_peer_ocsp_response_status);
+  LETLOOP_TLS_SYM(tls_peer_ocsp_result);
+  LETLOOP_TLS_SYM(tls_peer_ocsp_revocation_time);
+  LETLOOP_TLS_SYM(tls_peer_ocsp_this_update);
+  LETLOOP_TLS_SYM(tls_peer_ocsp_url);
+  LETLOOP_TLS_SYM(tls_read);
+  LETLOOP_TLS_SYM(tls_reset);
+  LETLOOP_TLS_SYM(tls_server);
+  LETLOOP_TLS_SYM(tls_unload_file);
+  LETLOOP_TLS_SYM(tls_write);
+}
+#endif /* LETLOOP_TLS_STATIC */
+
+/* The remaining four optional libraries letloop dlopens, each behind
+ * its own probe. Same asm-label aliasing as the liburing, blake3 and
+ * tls blocks above, and for the same reason -- no header is included
+ * here, so the address linked in from the archive is all there is to
+ * take.
+ *
+ * These matter only on a static build, and there they matter
+ * absolutely rather than as a speed-up: dlopen does not work at all
+ * under static musl (see src/letloop/store/README.md's Issues
+ * section), so without registration every one of these libraries is
+ * simply unavailable to a statically linked letloop -- (letloop http)
+ * loses picohttpparser's parser, and sodium, argon2 and opaque fail
+ * on their first call rather than falling back to anything. There is
+ * no Scheme floor under these the way (letloop blake3 scheme) is one
+ * under blake3.
+ *
+ * Each list is every symbol the corresponding binding library
+ * resolves through lazy-foreign-procedure, mechanically extracted.
+ */
+#ifdef LETLOOP_PICOHTTPPARSER_STATIC
+#define LETLOOP_PHR_SYM(name)                               \
+  do {                                                      \
+    extern void name##_letloop_alias(void) __asm__(#name);  \
+    Sforeign_symbol(#name, (void *)name##_letloop_alias);   \
+  } while (0)
+
+static void letloop_register_picohttpparser_symbols(void) {
+  LETLOOP_PHR_SYM(phr_parse_request_wrapper);
+  LETLOOP_PHR_SYM(phr_parse_response_wrapper);
+}
+#endif /* LETLOOP_PICOHTTPPARSER_STATIC */
+
+#ifdef LETLOOP_SODIUM_STATIC
+#define LETLOOP_SODIUM_SYM(name)                            \
+  do {                                                      \
+    extern void name##_letloop_alias(void) __asm__(#name);  \
+    Sforeign_symbol(#name, (void *)name##_letloop_alias);   \
+  } while (0)
+
+static void letloop_register_sodium_symbols(void) {
+  LETLOOP_SODIUM_SYM(sodium_init);
+  LETLOOP_SODIUM_SYM(sodium_memcmp);
+  LETLOOP_SODIUM_SYM(randombytes_buf);
+  LETLOOP_SODIUM_SYM(crypto_hash_sha256);
+  LETLOOP_SODIUM_SYM(crypto_aead_xchacha20poly1305_ietf_encrypt);
+  LETLOOP_SODIUM_SYM(crypto_aead_xchacha20poly1305_ietf_decrypt);
+  LETLOOP_SODIUM_SYM(crypto_aead_xchacha20poly1305_ietf_keygen);
+}
+#endif /* LETLOOP_SODIUM_STATIC */
+
+#ifdef LETLOOP_ARGON2_STATIC
+/* argon2's three entry points come from libsodium, not libargon2.
+ *
+ * libsodium vendors its own argon2 -- crypto_pwhash is built on it --
+ * and its static archive exports argon2id_hash_raw, _hash_encoded and
+ * _verify as ordinary symbols. libargon2 defines those same three, and
+ * blake2b under them, so the two archives share sixteen symbols and
+ * cannot both appear on one link line: "multiple definition".
+ *
+ * Taking them from libsodium resolves that by not needing libargon2 at
+ * all here. What made it possible is that argon2_encodedlen -- the one
+ * of this library's four entry points libsodium does not provide -- is
+ * computed in Scheme now, being arithmetic over constants rather than
+ * cryptography.
+ *
+ * This does lean on symbols libsodium does not advertise: they are
+ * absent from its shared object, and present in the archive only
+ * because a static archive exposes every object it contains. If a
+ * future libsodium hides them there too, the gate in (letloop package
+ * letloop) fails on the missing symbol at build time rather than at
+ * someone's first password hash.
+ */
+#define LETLOOP_ARGON2_SYM(name)                            \
+  do {                                                      \
+    extern void name##_letloop_alias(void) __asm__(#name);  \
+    Sforeign_symbol(#name, (void *)name##_letloop_alias);   \
+  } while (0)
+
+static void letloop_register_argon2_symbols(void) {
+  LETLOOP_ARGON2_SYM(argon2id_hash_raw);
+  LETLOOP_ARGON2_SYM(argon2id_hash_encoded);
+  LETLOOP_ARGON2_SYM(argon2id_verify);
+}
+#endif /* LETLOOP_ARGON2_STATIC */
+
+#ifdef LETLOOP_OPAQUE_STATIC
+#define LETLOOP_OPAQUE_SYM(name)                            \
+  do {                                                      \
+    extern void name##_letloop_alias(void) __asm__(#name);  \
+    Sforeign_symbol(#name, (void *)name##_letloop_alias);   \
+  } while (0)
+
+static void letloop_register_opaque_symbols(void) {
+  LETLOOP_OPAQUE_SYM(opaque_Register);
+  LETLOOP_OPAQUE_SYM(opaque_CreateRegistrationRequest);
+  LETLOOP_OPAQUE_SYM(opaque_CreateRegistrationResponse);
+  LETLOOP_OPAQUE_SYM(opaque_FinalizeRequest);
+  LETLOOP_OPAQUE_SYM(opaque_StoreUserRecord);
+  LETLOOP_OPAQUE_SYM(opaque_CreateCredentialRequest);
+  LETLOOP_OPAQUE_SYM(opaque_CreateCredentialResponse);
+  LETLOOP_OPAQUE_SYM(opaque_RecoverCredentials);
+  LETLOOP_OPAQUE_SYM(opaque_UserAuth);
+}
+#endif /* LETLOOP_OPAQUE_STATIC */
+
+/* Hook for symbols that are not letloop's to know about: the static
+ * libraries a *user program* brings to `letloop compile`. That path
+ * cannot copy the existing host -- the archives have to be linked in
+ * -- so it recompiles this file together with a generated companion
+ * that lists their symbols, and that companion defines this function.
+ *
+ * Weak, so this default stands whenever no companion is linked, which
+ * is every ordinary build including letloop's own. Keeping the
+ * generated code on the other side of a hook is what lets it be
+ * generated at all: nothing here has to know a library's symbol names,
+ * and adding one never means editing this file.
+ */
+__attribute__((weak)) void letloop_register_extra_symbols(void) {}
+
+static void letloop_register_foreign_symbols(void) {
+  void *probe = dlopen(NULL, RTLD_LAZY);
+  if (probe != NULL) {
+    letloop_self_dlopen_safe_result = 1;
+    dlclose(probe);
+  }
+
+  Sforeign_symbol("letloop_self_dlopen_safe", (void *)letloop_self_dlopen_safe);
+  Sforeign_symbol("strerror", (void *)strerror);
+  Sforeign_symbol("mkdtemp", (void *)mkdtemp);
+  Sforeign_symbol("readlink", (void *)readlink);
+  Sforeign_symbol("unsetenv", (void *)unsetenv);
+  Sforeign_symbol("getaddrinfo", (void *)getaddrinfo);
+  Sforeign_symbol("freeaddrinfo", (void *)freeaddrinfo);
+  Sforeign_symbol("socket", (void *)socket);
+  Sforeign_symbol("connect", (void *)connect);
+  Sforeign_symbol("setsockopt", (void *)setsockopt);
+  Sforeign_symbol("getsockopt", (void *)getsockopt);
+  Sforeign_symbol("bind", (void *)bind);
+  Sforeign_symbol("listen", (void *)listen);
+  Sforeign_symbol("getpeername", (void *)getpeername);
+  Sforeign_symbol("close", (void *)close);
+  Sforeign_symbol("execve", (void *)execve);
+  Sforeign_symbol("strlen", (void *)strlen);
+  Sforeign_symbol("memcpy", (void *)memcpy);
+  Sforeign_symbol("fcntl", (void *)fcntl);
+  Sforeign_symbol("eventfd", (void *)eventfd);
+  Sforeign_symbol("write", (void *)write);
+  Sforeign_symbol("read", (void *)read);
+  Sforeign_symbol("open", (void *)open);
+  Sforeign_symbol("pipe2", (void *)pipe2);
+  Sforeign_symbol("ioctl", (void *)ioctl);
+  Sforeign_symbol("isatty", (void *)isatty);
+  Sforeign_symbol("mmap", (void *)mmap);
+  Sforeign_symbol("mprotect", (void *)mprotect);
+  Sforeign_symbol("getsockname", (void *)getsockname);
+  Sforeign_symbol("tcgetattr", (void *)tcgetattr);
+  Sforeign_symbol("tcsetattr", (void *)tcsetattr);
+  Sforeign_symbol("cfmakeraw", (void *)cfmakeraw);
+  Sforeign_symbol("sigemptyset", (void *)sigemptyset);
+  Sforeign_symbol("sigaddset", (void *)sigaddset);
+  Sforeign_symbol("sigprocmask", (void *)sigprocmask);
+  Sforeign_symbol("signalfd", (void *)signalfd);
+  /* Deliberately NOT registering "environ": doing so broke
+   * environment-variables (letloop/environment.scm) even on an
+   * ordinary dynamic build, reproducibly, with an otherwise
+   * unexplained "invalid memory reference" -- some ELF data-symbol
+   * aliasing subtlety between this registration's &environ and
+   * dlsym(handle, "environ") on a later, separate (load-shared-object
+   * "libc.so.6"), not fully root-caused. Not needed for the store
+   * build path either way: root.scm's execve!/environ lookup backs
+   * `letloop root exec` (interactive use), not
+   * `letloop store build`'s sandbox-build!, which shells out to
+   * /usr/bin/bwrap directly and never touches this code path. A
+   * static `letloop root exec` remains unsupported until this is
+   * understood properly.
+   */
+
+#ifdef LETLOOP_LIBURING_STATIC
+  letloop_register_liburing_symbols();
+#endif
+
+#ifdef LETLOOP_BLAKE3_STATIC
+  letloop_register_blake3_symbols();
+#endif
+
+#ifdef LETLOOP_TLS_STATIC
+  letloop_register_tls_symbols();
+#endif
+
+#ifdef LETLOOP_PICOHTTPPARSER_STATIC
+  letloop_register_picohttpparser_symbols();
+#endif
+
+#ifdef LETLOOP_SODIUM_STATIC
+  letloop_register_sodium_symbols();
+#endif
+
+#ifdef LETLOOP_ARGON2_STATIC
+  letloop_register_argon2_symbols();
+#endif
+
+#ifdef LETLOOP_OPAQUE_STATIC
+  letloop_register_opaque_symbols();
+#endif
+
+  /* No-op unless a program brought static libraries of its own; see
+   * the weak definition above. Last, so a program can shadow anything
+   * registered here with its own build of the same symbol. */
+  letloop_register_extra_symbols();
+}
 
 #define LETLOOP_MAGIC "LETLOOP\1"
 #define LETLOOP_MAGIC_SIZE 8
@@ -104,9 +765,9 @@ int main(int argc, const char *argv[]) {
 
   if (boot != NULL) {
     Sregister_boot_file_bytes("program", boot, size);
-    Sbuild_heap(NULL, 0);
+    Sbuild_heap(NULL, letloop_register_foreign_symbols);
   } else {
-    Sbuild_heap(argv[0], 0);
+    Sbuild_heap(argv[0], letloop_register_foreign_symbols);
   }
 
   status = Sscheme_start(argc, argv);

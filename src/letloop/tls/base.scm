@@ -14,7 +14,9 @@
           ~check-tls-url-parse-002
           ~check-tls-handshake-timeout
           ~check-tls-connect-timeout
-          ~check-tls-request-000)
+          ~check-tls-request-000
+          ~check-tls-bundled-ca-file-found
+          ~check-tls-bundled-ca-file-absent)
 
   (import (chezscheme)
           (letloop cffi)
@@ -31,6 +33,67 @@
           (unless (zero? rc)
             (error 'tls-open "tls_init failed" rc))
           (set! %tls-initialized #t)))))
+
+  ;; The directory holding the running binary, with a trailing slash,
+  ;; or #f. Not a Chez builtin -- (letloop base) defines the identical
+  ;; helper for the same reason (letloop-library-directory needs it),
+  ;; but that library is folded into the amalgamated letloop program
+  ;; and must import nothing of letloop's own, so it cannot be shared
+  ;; by import; small enough to duplicate rather than restructure.
+  (define executable-directory
+    (let ((cached 'unknown))
+      (lambda ()
+        (when (eq? cached 'unknown)
+          (set! cached
+                (guard (ex (else #f))
+                  (let* ((readlink (foreign-procedure "readlink" (string u8* uptr) iptr))
+                         (buffer (make-bytevector 4096))
+                         (count (readlink "/proc/self/exe" buffer (bytevector-length buffer))))
+                    (and (fx> count 0)
+                         (let* ((out (make-bytevector count)))
+                           (bytevector-copy! buffer 0 out 0 count)
+                           (let* ((path (utf8->string out))
+                                  (slash (let loop ((index (fx- (string-length path) 1)))
+                                           (cond
+                                            ((fx<? index 0) #f)
+                                            ((char=? (string-ref path index) #\/) index)
+                                            (else (loop (fx- index 1)))))))
+                             (and slash (substring path 0 (fx+ slash 1))))))))))
+        cached)))
+
+  ;; A CA bundle shipped beside letloop's own installed tree, at
+  ;; $PREFIX/lib/letloop/cert.pem -- for a statically linked letloop,
+  ;; whose libtls was built against a compile-time CA path that only
+  ;; ever existed inside the sandbox that built it (see
+  ;; src/letloop/store/README.md's cold-start section). Resolved the
+  ;; same way (letloop base)'s letloop-library-directory resolves
+  ;; $PREFIX/lib/letloop itself -- not imported from there, since
+  ;; (letloop base) is folded into the amalgamated letloop program and
+  ;; must import nothing of letloop's own -- $LETLOOP_PREFIX first,
+  ;; then walked up from the running executable, since a relocated
+  ;; binary carries no absolute install path of its own.
+  ;;
+  ;; #f when none is found, which is the ordinary case on a dynamic
+  ;; build: the host's own libtls.so already has a working default (a
+  ;; real, distro-maintained /etc/ssl/... path), and this must not
+  ;; override that with a bundle that may not even be present.
+  ;;
+  ;; Not memoized: tls-open is not a hot path (it does a TCP connect
+  ;; and a TLS handshake right after this), and a cached result would
+  ;; be wrong the moment $LETLOOP_PREFIX changes within one process --
+  ;; exactly what the checks below do to exercise both branches.
+  (define (bundled-ca-file)
+    (define candidates
+      (let ((exe (or (executable-directory) "")))
+        (append (let ((prefix (getenv "LETLOOP_PREFIX")))
+                  (if prefix (list (string-append prefix "/lib/letloop/cert.pem")) '()))
+                (map (lambda (up) (string-append exe up "lib/letloop/cert.pem"))
+                     (list "" "../" "../../" "../../../")))))
+    (let loop ((candidates candidates))
+      (cond
+       ((null? candidates) #f)
+       ((file-exists? (car candidates)) (car candidates))
+       (else (loop (cdr candidates))))))
 
   ;; ---- Owned socket, with timeouts ----
   ;;
@@ -175,6 +238,14 @@
         (when (zero? config)
           (%close fd)
           (error 'tls-open "tls_config_new failed"))
+        (let ((ca-file (bundled-ca-file)))
+          (when ca-file
+            (let ((rc (tls-config-set-ca-file config ca-file)))
+              (unless (zero? rc)
+                (let ((msg (tls-config-error config)))
+                  (tls-config-free config)
+                  (%close fd)
+                  (error 'tls-open "tls_config_set_ca_file failed" ca-file msg))))))
         (let ((rc (tls-config-set-protocols config TLS_PROTOCOLS_DEFAULT)))
           (unless (zero? rc)
             (let ((msg (tls-config-error config)))

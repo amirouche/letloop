@@ -8,7 +8,14 @@
   ;; We don't have a real tty, so the loop is exercised over a pipe.  The
   ;; reader side is fed by a separate write(2) call from the test driver.
 
-  (define libc (load-shared-object "libc.so.6"))
+  ;; Best-effort, and it matters more here than it looks: this file is
+  ;; `include`d into (letloop tea loop), so its body runs whenever that
+  ;; library is instantiated -- not only when a check runs. Unguarded,
+  ;; it takes down anything reaching tea on a statically linked build,
+  ;; where there is no loader to service the dlopen. `letloop review`
+  ;; died on exactly this. pipe2 is registered by letloop-main.c there,
+  ;; so the foreign-procedure below resolves without it.
+  (define libc (guard (ex (#t #f)) (load-shared-object "libc.so.6")))
   (define c-pipe2 (foreign-procedure "pipe2" (void* int) int))
 
   (define (make-pipe)
@@ -45,7 +52,7 @@
           (loop (fx+ rounds 1)))))))
 
   (define (~check-loop-pipe-arrow-key)
-    (check-skip-unless liburing-ffi
+    (check-skip-unless liburing-ffi "io_uring_queue_init"
     (let-values (((rd wr) (make-pipe)))
       (let* ((parser (make-input-parser xterm-caps))
              (l      (make-tea-loop rd parser)))
@@ -58,7 +65,7 @@
                (eq? (key-event-key e) 'arrow-up)))))))
 
   (define (~check-loop-pipe-multibyte-utf8)
-    (check-skip-unless liburing-ffi
+    (check-skip-unless liburing-ffi "io_uring_queue_init"
     (let-values (((rd wr) (make-pipe)))
       (let* ((parser (make-input-parser xterm-caps))
              (l      (make-tea-loop rd parser)))
@@ -77,7 +84,7 @@
 
   (define (~check-loop-pipe-esc-flush)
     ;; Send a lone ESC; the loop's 50ms timer should fire and yield esc.
-    (check-skip-unless liburing-ffi
+    (check-skip-unless liburing-ffi "io_uring_queue_init"
     (let-values (((rd wr) (make-pipe)))
       (let* ((parser (make-input-parser xterm-caps))
              (l      (make-tea-loop rd parser)))

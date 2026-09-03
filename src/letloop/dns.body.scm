@@ -19,9 +19,33 @@
 (define %dns-nameserver #f)
 
 ;; hostname → #(a b c d expiry-jiffy); avoids a full DNS round-trip on
-;; every request to the same host
+;; every request to the same host.
+;;
+;; Expiry comes from the A record's OWN TTL (%dns-rr-ttl), not a flat
+;; assumption -- a 60s constant here both ignored records that ask to
+;; be held far longer and overrode ones that ask to be refreshed
+;; sooner. The bounds below exist because the cache is the only thing
+;; standing between a burst of connection setups and a resolve per
+;; connection: a TTL of 0 (legal, and what some load balancers send)
+;; would mean never caching at all, which is precisely the stampede
+;; that fills the io_uring submission queue. So a floor keeps a
+;; pathological TTL from disabling the cache, and a ceiling keeps a
+;; very long one from pinning a stale address for hours.
 (define %dns-cache (make-hashtable string-hash string=?))
-(define %dns-cache-ttl-jiffies (* 60 (expt 10 9)))
+(define %dns-cache-ttl-minimum-seconds 5)
+(define %dns-cache-ttl-maximum-seconds 3600)
+
+(define %dns-cache-expiry
+  (lambda (ttl-seconds)
+    (let ((bounded (cond
+                     ((not (and (integer? ttl-seconds) (>= ttl-seconds 0)))
+                      %dns-cache-ttl-minimum-seconds)
+                     ((< ttl-seconds %dns-cache-ttl-minimum-seconds)
+                      %dns-cache-ttl-minimum-seconds)
+                     ((> ttl-seconds %dns-cache-ttl-maximum-seconds)
+                      %dns-cache-ttl-maximum-seconds)
+                     (else ttl-seconds))))
+      (+ (jiffy-current) (* bounded (expt 10 9))))))
 
 ;; a linked timeout cancels the DNS recv when the nameserver never
 ;; answers, instead of hanging the coroutine forever
@@ -108,10 +132,20 @@
            (qclass (bytevector 0 1))) ;; IN class
       (bytevector-append header name qtype qclass))))
 
+;; RR wire layout after the name: TYPE(2) CLASS(2) TTL(4) RDLENGTH(2)
+;; RDATA. TTL is the record's own lifetime in seconds, big-endian at
+;; offset 4 -- read it rather than assuming one.
+(define %dns-rr-ttl
+  (lambda (bv rr-pos)
+    (+ (* 16777216 (bytevector-u8-ref bv (+ rr-pos 4)))
+       (* 65536 (bytevector-u8-ref bv (+ rr-pos 5)))
+       (* 256 (bytevector-u8-ref bv (+ rr-pos 6)))
+       (bytevector-u8-ref bv (+ rr-pos 7)))))
+
 (define %dns-parse-response
   (lambda (bv id)
-    ;; Returns (a b c d) for IPv4 or #f on failure. ID is the query
-    ;; identifier the response must echo back.
+    ;; Returns (a b c d ttl-seconds) for IPv4 or #f on failure. ID is
+    ;; the query identifier the response must echo back.
     (guard (ex (else #f))
       (when (< (bytevector-length bv) 12)
         (error 'dns "Response too short"))
@@ -160,7 +194,8 @@
                                   (list (bytevector-u8-ref bv rdata-pos)
                                         (bytevector-u8-ref bv (+ rdata-pos 1))
                                         (bytevector-u8-ref bv (+ rdata-pos 2))
-                                        (bytevector-u8-ref bv (+ rdata-pos 3)))
+                                        (bytevector-u8-ref bv (+ rdata-pos 3))
+                                        (%dns-rr-ttl bv rr-pos))
                                   (parse-answers (+ rdata-pos rdlen) (+ i 1)))))
                            ;; Null terminator — end of name, RR fields follow
                            ((fxzero? b)
@@ -174,7 +209,8 @@
                                   (list (bytevector-u8-ref bv rdata-pos)
                                         (bytevector-u8-ref bv (+ rdata-pos 1))
                                         (bytevector-u8-ref bv (+ rdata-pos 2))
-                                        (bytevector-u8-ref bv (+ rdata-pos 3)))
+                                        (bytevector-u8-ref bv (+ rdata-pos 3))
+                                        (%dns-rr-ttl bv rr-pos))
                                   (parse-answers (+ rdata-pos rdlen) (+ i 1)))))
                            ;; Normal label — skip length byte + label bytes
                            (else
@@ -244,7 +280,7 @@
             (lambda (a b c d)
               (call-with-values (lambda () (make-sockaddr-in a b c d 53))
                 (lambda (ns-addr ns-addrlen)
-                  (let* ((sqe (io-uring-get-sqe (loop-ring (loop-current))))
+                  (let* ((sqe (loop-get-sqe (loop-ring (loop-current))))
                          (id (loop-alloc-id!)))
                     (io-uring-prep-connect sqe udp-fd ns-addr ns-addrlen)
                     (io-uring-sqe-set-data64 sqe id)
@@ -258,7 +294,7 @@
           ;; Build and send DNS query
           (let ((query (%dns-build-query hostname query-id)))
             (lock-object query)
-            (let* ((sqe (io-uring-get-sqe (loop-ring (loop-current))))
+            (let* ((sqe (loop-get-sqe (loop-ring (loop-current))))
                    (id (loop-alloc-id!)))
               (io-uring-prep-send sqe udp-fd (bytevector-pointer query) (bytevector-length query) 0)
               (io-uring-sqe-set-data64 sqe id)
@@ -272,7 +308,18 @@
           ;; Receive DNS response
           (let ((buf (make-bytevector 512)))
             (lock-object buf)
-            (let* ((sqe (io-uring-get-sqe (loop-ring (loop-current))))
+            ;; IOSQE-IO-LINK requires the recv SQE and its timeout to be
+            ;; CONSECUTIVE in the submission queue, so both are reserved
+            ;; here BEFORE either is prepped. loop-get-sqe submits on a
+            ;; full queue before retrying, and a submit between the two
+            ;; would flush the recv on its own and break the link --
+            ;; hence reserve-then-prep rather than a per-site
+            ;; substitution. Reserving in order also keeps them adjacent:
+            ;; the second call cannot submit, because the first already
+            ;; guaranteed a slot and nothing else preps in between.
+            (let* ((ring (loop-ring (loop-current)))
+                   (sqe (loop-get-sqe ring))
+                   (tsqe (loop-get-sqe ring))
                    (id (loop-alloc-id!)))
               (io-uring-prep-recv sqe udp-fd (bytevector-pointer buf) 512 0)
               (io-uring-sqe-set-data64 sqe id)
@@ -282,7 +329,7 @@
               (unless %dns-recv-timeout-ts
                 (set! %dns-recv-timeout-ts
                       (make-timespec %dns-recv-timeout-seconds 0)))
-              (let ((tsqe (io-uring-get-sqe (loop-ring (loop-current)))))
+              (begin
                 (io-uring-prep-link-timeout
                  tsqe (ftype-pointer-address %dns-recv-timeout-ts) 0)
                 (io-uring-sqe-set-data64 tsqe (loop-alloc-id!)))
@@ -300,8 +347,8 @@
                   (hashtable-set! %dns-cache hostname
                                   (vector (car parsed) (cadr parsed)
                                           (caddr parsed) (cadddr parsed)
-                                          (+ (jiffy-current)
-                                             %dns-cache-ttl-jiffies)))
+                                          ;; the record's own TTL, bounded
+                                          (%dns-cache-expiry (car (cddddr parsed)))))
                   (make-sockaddr-in (car parsed) (cadr parsed)
                                     (caddr parsed) (cadddr parsed)
                                     port))))))))

@@ -1,15 +1,28 @@
-.PHONY: help letloop letloop-libraries argon2 blake3 sodium oprf opaque liburing picohttpparser dependencies check shaders font-bundle
+.PHONY: help letloop letloop-libraries argon2 blake3 sodium oprf opaque liburing picohttpparser dependencies check check-reproducible shaders font-bundle
 
 SCHEME=$(shell which scheme)
 PWD=$(shell pwd)
 LETLOOP=$(shell which letloop)
-SHELL=/bin/bash
+# Plain sh, not bash: every recipe here is POSIX, and requiring bash
+# kept letloop from being built in a minimal environment that has only
+# BusyBox -- which is exactly what the bootstrap rootfs in
+# checks/letloop/bootstrap*.derivation.scm provides.
+SHELL=/bin/sh
 PREFIX=$(PWD)/local
 
-# Which ChezScheme to build. There is no v10.5.0 tag upstream: main carries
-# scheme-version #x0a050001, i.e. 10.5.0-pre-release.1, while the latest
-# release tag is v10.4.1. Pin this to a tag when one lands.
-CHEZ_REF=main
+# Which ChezScheme to build. A tag, not main: main is not a fixed point,
+# so two people building "the same" letloop could not be building the
+# same thing, and the bootstrap chain cannot track it either -- a
+# network-off sandbox cannot fetch the submodules a git checkout needs,
+# where the release tarball bundles them. Pinning both here means the
+# letloop you develop with and the one `letloop store build letloop`
+# produces are the same version.
+#
+# Nothing in the tree needs anything newer: __errno and
+# scheme-pre-release, the two things this depends on that are at all
+# recent, both work in 10.4.1 -- the bootstrap letloop is built with it
+# and compiles the whole tree, flow2 checks included.
+CHEZ_REF=v10.4.1
 
 help: ## Help!...
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST) | sort
@@ -28,7 +41,15 @@ chezscheme: ## Compile chezscheme $(CHEZ_REF) into $(PREFIX)
 letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## Produce the letloop binary from letloop/base.scm's letloop-main, and install it
 	echo $(SCHEME)
 	$(SCHEME) --version
-	echo '(source-directories (list "./src/")) (generate-wpo-files #t)(import (letloop base)) (letloop-compile (list "./src/" "src/letloop/base.scm" "letloop-main"))' | $(SCHEME) --quiet --libdirs ./src/ --compile-imported-libraries
+	@# The session key has to be set in *this* process too, not only in
+	@# the child letloop-compile spawns: --compile-imported-libraries
+	@# writes a .so and .wpo for every library base.scm imports, right
+	@# here, and those carry gensym names into the boot image. Without
+	@# it the build is irreproducible however well the child behaves.
+	{ [ -n "$$LETLOOP_SESSION_KEY" ] && \
+	    echo "(#%\$$set-top-level-value! '\$$session-key \"$$LETLOOP_SESSION_KEY-outer-\")"; \
+	  echo '(source-directories (list "./src/")) (generate-wpo-files #t)(import (letloop base)) (letloop-compile (list "./src/" "src/letloop/base.scm" "letloop-main"))'; \
+	} | $(SCHEME) --quiet --libdirs ./src/ --compile-imported-libraries
 	@# The ./a.out written here is built on upstream scheme, whose main
 	@# knows nothing of the appended payload -- only its boot file is any
 	@# use to us, and the binary is assembled below.
@@ -50,11 +71,78 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 	@# nothing beside it. letloop.boot is installed too: it is what
 	@# --visible-libraries folds into a program.
 	@#
+	@# $(PREFIX)/bin/letloop is a *relative* symlink, and has to stay one:
+	@# scheme-binarypath* finds the boot directory through
+	@# dirname($$SCHEME) + readlink. It is computed by hand below rather
+	@# than with `ln -sr`, whose -r is a GNU extension BusyBox lacks --
+	@# BOOT always lives under PREFIX, so stripping that prefix gives the
+	@# path to descend from PREFIX/bin.
+	@#
 	@# The same shape is what `letloop compile` produces, by copying its
 	@# own host and appending a different boot. No C compiler runs there.
-	BOOT=$$(dirname $$(readlink -f $(SCHEME))); \
+	@# argon2 needs no archive of its own: libsodium vendors argon2 and
+	@# its static archive exports the three entry points (letloop
+	@# argon2) calls, so registering them costs nothing beyond -lsodium
+	@# already being there. Linking libargon2 alongside is what does
+	@# not work -- the two share sixteen symbols, blake2b included, and
+	@# collide outright.
+	@#
+	@# The optional archives are linked inside --start-group, so their
+	@# order on that line stops mattering: libopaque needs liboprf needs
+	@# libsodium, and a group makes the linker re-scan until nothing new
+	@# resolves rather than requiring the order be spelled correctly
+	@# here. Same reasoning as `letloop compile --static`'s own link.
+	@#
+	@# set -e, because the steps below are chained with `;`: without it a
+	@# failing cc leaves letloop-host missing, the cat below produces a
+	@# file that is just the boot image with no ELF header, and the only
+	@# symptom is a "syntax error" when the shell later tries to run that
+	@# as a script.
+	set -e; \
+	  BOOT=$$(dirname $$(readlink -f $(SCHEME))); \
+	  STATIC_FLAG=""; \
+	  URING_FLAGS=""; \
+	  BLAKE3_FLAGS=""; \
+	  TLS_FLAGS=""; \
+	  PHR_FLAGS=""; \
+	  SODIUM_FLAGS=""; \
+	  ARGON2_FLAGS=""; \
+	  OPAQUE_FLAGS=""; \
+	  case "$$(cc -dumpmachine)" in \
+	    *musl*) STATIC_FLAG="-static"; \
+	      if printf 'int main(void){return 0;}\n' | \
+	         cc -x c -o /dev/null - -luring-ffi >/dev/null 2>&1; then \
+	        URING_FLAGS="-DLETLOOP_LIBURING_STATIC -luring-ffi"; \
+	      fi; \
+	      if printf 'int main(void){return 0;}\n' | \
+	         cc -x c -o /dev/null - -lblake3 >/dev/null 2>&1; then \
+	        BLAKE3_FLAGS="-DLETLOOP_BLAKE3_STATIC -lblake3"; \
+	      fi; \
+	      if printf 'int main(void){return 0;}\n' | \
+	         cc -x c -o /dev/null - -ltls -lssl -lcrypto >/dev/null 2>&1; then \
+	        TLS_FLAGS="-DLETLOOP_TLS_STATIC -ltls -lssl -lcrypto"; \
+	      fi; \
+	      if printf 'int main(void){return 0;}\n' | \
+	         cc -x c -o /dev/null - -lpicohttpparser >/dev/null 2>&1; then \
+	        PHR_FLAGS="-DLETLOOP_PICOHTTPPARSER_STATIC -lpicohttpparser"; \
+	      fi; \
+	      if printf 'int main(void){return 0;}\n' | \
+	         cc -x c -o /dev/null - -lsodium >/dev/null 2>&1; then \
+	        SODIUM_FLAGS="-DLETLOOP_SODIUM_STATIC -lsodium"; \
+	      fi; \
+	      if [ -n "$$SODIUM_FLAGS" ]; then \
+	        ARGON2_FLAGS="-DLETLOOP_ARGON2_STATIC"; \
+	      fi; \
+	      if printf 'int main(void){return 0;}\n' | \
+	         cc -x c -o /dev/null - -lopaque -loprf -lsodium >/dev/null 2>&1; then \
+	        OPAQUE_FLAGS="-DLETLOOP_OPAQUE_STATIC -lopaque -loprf"; \
+	      fi ;; \
+	  esac; \
 	  cc -I"$$BOOT" src/letloop-main.c "$$BOOT/kernel.o" \
-	     -o "$$BOOT/letloop-host" -ldl -lm -luuid -lpthread; \
+	     -o "$$BOOT/letloop-host" $$STATIC_FLAG \
+	     -Wl,--start-group $$URING_FLAGS $$BLAKE3_FLAGS $$TLS_FLAGS \
+	     $$PHR_FLAGS $$SODIUM_FLAGS $$ARGON2_FLAGS $$OPAQUE_FLAGS -Wl,--end-group \
+	     -ldl -lm -lpthread; \
 	  install -m 644 a.out.boot "$$BOOT/letloop.boot"; \
 	  { cat "$$BOOT/letloop-host" a.out.boot; \
 	    n=$$(stat -c%s a.out.boot); i=0; \
@@ -67,7 +155,17 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 	  mv -f "$$BOOT/letloop.tmp" "$$BOOT/letloop"; \
 	  rm -f a.out.boot; \
 	  mkdir -p $(PREFIX)/bin; \
-	  ln -srf "$$BOOT/letloop" $(PREFIX)/bin/letloop; \
+	  PREFIX_NO_SLASH="$(PREFIX)"; \
+	  PREFIX_NO_SLASH=$${PREFIX_NO_SLASH%/}; \
+	  BOOT_RELATIVE=$${BOOT#$$PREFIX_NO_SLASH/}; \
+	  if [ "$$BOOT_RELATIVE" = "$$BOOT" ]; then \
+	    echo "make letloop: SCHEME resolves to $$BOOT, which is not under PREFIX ($$PREFIX_NO_SLASH)." >&2; \
+	    echo "  bin/letloop has to be a symlink relative to PREFIX -- scheme-binarypath* finds" >&2; \
+	    echo "  the boot directory as dirname(\$$SCHEME) + readlink(\$$SCHEME) -- so the Chez" >&2; \
+	    echo "  installation must live inside PREFIX. Install or copy it there first." >&2; \
+	    exit 1; \
+	  fi; \
+	  ln -sf "../$$BOOT_RELATIVE/letloop" $(PREFIX)/bin/letloop; \
 	  echo "Installed $$BOOT/letloop and $(PREFIX)/bin/letloop"
 	$(MAKE) letloop-libraries
 	@echo What is done is not to be done!
@@ -79,9 +177,18 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 CACHE_LEVELS=0 3
 
 letloop-libraries: ## Install letloop's sources and their per-level .wpo cache into $(PREFIX)/lib/letloop
-	rm -rf $(PREFIX)/lib/letloop
+	@# Only what this target writes. $(PREFIX)/lib/letloop is also where
+	@# the store (store/) and a project's own packages (package/) live,
+	@# and a rebuild must not throw away hours of sandboxed builds.
+	rm -rf $(PREFIX)/lib/letloop/src $(PREFIX)/lib/letloop/obj $(PREFIX)/lib/letloop/STAMP
 	mkdir -p $(PREFIX)/lib/letloop/src
 	cp -a src/letloop $(PREFIX)/lib/letloop/src/
+	@# The host's own source ships too: `letloop compile` recompiles it
+	@# when a program brings static libraries of its own to link in,
+	@# which is the one case where copying the existing host is not
+	@# enough. It sits beside src/letloop rather than inside it so a
+	@# library scan never mistakes it for Scheme.
+	cp -a src/letloop-main.c $(PREFIX)/lib/letloop/src/
 	@# One pass per level, and one pass only: .wpo files from separate
 	@# compilations disagree ("does not define expected compilation
 	@# instance of library").
@@ -244,7 +351,7 @@ opaque: oprf ## Build libopaque from source (skips if $(PREFIX)/lib/libopaque.so
 dependencies: liburing argon2 blake3 picohttpparser opaque ## Build every optional FFI shared-object dependency from source (liburing, argon2, blake3, picohttpparser, sodium, oprf, opaque); each skips if already built
 
 check: dependencies letloop-check.sh clean ## Hit the ground running!
-	echo '(source-directories (list "./src/")) (guard (ex (else (exit 1))) (eval (quote (import (letloop base))) (interaction-environment)) (eval (quote (letloop-check (list "./src/"))) (interaction-environment)) (exit 0))' | LD_LIBRARY_PATH=$(PREFIX)/lib/ $(SCHEME) --quiet --libdirs ./src/
+	LD_LIBRARY_PATH=$(PREFIX)/lib/ $(LETLOOP) check ./src/
 	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) sh letloop-check.sh
 	LETLOOP=$(LETLOOP) bash checks/letloop/srp.sh
 	LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) bash checks/check-transparenturing.sh
@@ -252,11 +359,14 @@ check: dependencies letloop-check.sh clean ## Hit the ground running!
 check-integration: dependencies ## Run the checks that want live services (PostgreSQL at 127.0.0.1:5432); they SKIP-pass without one
 	LD_LIBRARY_PATH=$(PREFIX)/lib/ $(LETLOOP) check src/ src/letloop/postgresql/base.scm
 
+check-reproducible: ## Build letloop twice through the store, require byte-identical output (run before a release; needs checks/letloop/bootstrap.sh to have run)
+	LETLOOP=$(LETLOOP) bash checks/letloop/reproducible.sh
+
 stress: clean ## check stress implementations
 	LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) sh checks/stress-transparenturing.sh
 
 check-fail-fast: dependencies letloop-check.sh clean ## Hit the ground running!
-	echo '(source-directories (list "./src/")) (guard (ex (else (exit 1))) (eval (quote (import (letloop base))) (interaction-environment)) (eval (quote (letloop-check (list "./src/" "--fail-fast"))) (interaction-environment)) (exit 0))' | LD_LIBRARY_PATH=$(PREFIX)/lib/ $(SCHEME) --quiet --libdirs ./src/
+	LD_LIBRARY_PATH=$(PREFIX)/lib/ $(LETLOOP) check --fail-fast ./src/
 	SCHEME=$(SCHEME) LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) sh letloop-check.sh
 	LETLOOP=$(LETLOOP) bash checks/letloop/srp.sh
 	LD_LIBRARY_PATH=$(PREFIX)/lib/ LETLOOP=$(LETLOOP) bash checks/check-transparenturing.sh

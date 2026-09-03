@@ -122,7 +122,7 @@
 ;; ---- the handshake read timeout, deterministically ----
 
 (define (~check-tls-handshake-timeout)
-  (check-skip-unless libtls
+  (check-skip-unless libtls "tls_init"
     (let-values (((listener port) (%blackhole-listen)))
       (let-values (((seconds text)
                     (%elapsed-raising
@@ -142,7 +142,7 @@
 ;; ---- the connect timeout, where the environment permits ----
 
 (define (~check-tls-connect-timeout)
-  (check-skip-unless libtls
+  (check-skip-unless libtls "tls_init"
     ;; SO_SNDTIMEO is what bounds connect(2). Proving that needs an
     ;; address that silently drops SYNs: 192.0.2.1 is TEST-NET-1, which
     ;; is reserved and normally goes nowhere. But a host with no route
@@ -182,5 +182,39 @@
 (define (~check-tls-request-000)
   ;; Needs the network, like the ~check-tls-uring-000 it mirrors. One
   ;; retry to absorb a flake.
-  (check-skip-unless libtls
+  (check-skip-unless libtls "tls_init"
     (or (%request-attempt) (%request-attempt))))
+
+;; ---- bundled-ca-file: no network, no libtls needed ----
+
+;; Both checks juggle $LETLOOP_PREFIX by hand, restoring it afterward,
+;; because bundled-ca-file is deliberately not memoized -- see its own
+;; comment -- so it re-reads the environment on every call, which is
+;; exactly what lets one process exercise both branches.
+(define (%with-letloop-prefix prefix thunk)
+  (define original (getenv "LETLOOP_PREFIX"))
+  (putenv "LETLOOP_PREFIX" prefix)
+  (let ((result (thunk)))
+    (if original (putenv "LETLOOP_PREFIX" original) (putenv "LETLOOP_PREFIX" ""))
+    result))
+
+(define (~check-tls-bundled-ca-file-found)
+  (define mkdtemp (foreign-procedure "mkdtemp" (string) string))
+  (system "mkdir -p /tmp/letloop/")
+  (let* ((prefix (mkdtemp "/tmp/letloop/tls-check-ca-XXXXXX"))
+         (expected (string-append prefix "/lib/letloop/cert.pem")))
+    (system (string-append "mkdir -p " prefix "/lib/letloop"))
+    (call-with-output-file expected (lambda (port) (display "dummy" port)))
+    (%with-letloop-prefix prefix
+      (lambda () (equal? (bundled-ca-file) expected)))))
+
+;; $LETLOOP_PREFIX pointed at a real, empty directory (not one that
+;; simply does not exist) -- so a false positive here could only come
+;; from the executable-directory fallback candidates, not from a typo
+;; in the prefix itself.
+(define (~check-tls-bundled-ca-file-absent)
+  (define mkdtemp (foreign-procedure "mkdtemp" (string) string))
+  (system "mkdir -p /tmp/letloop/")
+  (let ((prefix (mkdtemp "/tmp/letloop/tls-check-no-ca-XXXXXX")))
+    (%with-letloop-prefix prefix
+      (lambda () (not (bundled-ca-file))))))

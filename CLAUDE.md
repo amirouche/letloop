@@ -8,6 +8,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Main branch for PRs: `dev`
 
+## Commits
+
+Use [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/):
+`<type>(<scope>): <description>`, lowercase, imperative, no trailing period.
+
+- **Types:** `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`.
+- **Scope** is the library or subsystem, matching its source path — `flow`,
+  `flow2`, `liburing`, `http`, `aql`, `kernel`, `checks`. Omit it only for
+  changes that genuinely span the tree.
+- **Breaking changes** take a `!` before the colon (`feat(flow)!: ...`) and a
+  `BREAKING CHANGE:` footer saying what callers must do.
+- The body is where the reasoning goes: what was wrong, why the fix is shaped
+  the way it is, and what a reader would otherwise have to rediscover. A
+  `fix:` for a defect that was observed in practice should say how it
+  presented — this repository's history is one of the main debugging tools.
+
+Keep commits small and focused, one architectural change each. Do not push
+unless explicitly asked.
+
 ## System Dependencies
 
 ### Optional shared objects (dlopen'd lazily, on first use)
@@ -31,7 +50,7 @@ FFI binding libraries (`tls`, `liburing`, `vulkan`, `sodium`, `argon2`, `blake3`
 **First-time setup** (builds ChezScheme from source, ~5–15 min):
 ```bash
 ./venv               # enters a shell with SCHEME, LETLOOP_ROOT, LD_LIBRARY_PATH set
-make chezscheme      # ChezScheme $(CHEZ_REF), currently main = 10.5.0-pre-release.1
+make chezscheme      # ChezScheme $(CHEZ_REF), pinned to the v10.4.1 tag
 make letloop         # installs itself, no `mv a.out` step
 make check
 ```
@@ -49,7 +68,7 @@ make check
 **Run a single test manually:**
 ```bash
 $LETLOOP check checks/check/ checks/check/check-success.scm
-$LETLOOP exec checks/ checks/codex/base.scm codex-usage
+$LETLOOP compile checks/ checks/codex/base.scm codex-usage && ./a.out
 ```
 
 **Find in-progress items:**
@@ -74,12 +93,11 @@ Prefer these skills for common workflows:
 
 ```
 src/letloop-main.c           C host — parses no flags, finds its boot in its own trailer
-src/letloop/base.scm         Main entry point: letloop-main, letloop-compile, letloop-exec,
+src/letloop/base.scm         Main entry point: letloop-main, letloop-compile,
                             letloop-repl, letloop-check — handles CLI dispatch, library
                             discovery, and compilation
 src/letloop/cli/base.scm     Argument parser — cli-read / cli-write, parses flags,
                             positional args, and extra args (after --)
-src/letloop/root/base.scm    Isolated execution environments (container-like sandboxes)
 src/letloop/r999.scm         define-record-type* macro (extended record types)
 src/letloop/sq.scm           Priority queue (sq-new, sq-add!, sq-min, sq-split)
 src/letloop/match.scm        Pattern matching (SRFI 241)
@@ -106,7 +124,9 @@ $PREFIX/lib/letloop/obj/<optimize-level>/**       their .so and .wpo, per level
 
 **Building letloop now requires a Chez installation**, for `scheme.h` and `kernel.o`. Compiling a *user* program still requires no C compiler — `letloop compile` copies its own host and appends a different boot — but it does require a real `scheme` binary for its child process.
 
-**`(letloop base)` imports nothing from letloop, on purpose.** It resolves `cli-read`, `transparent`, `letloop-root` and `letloop-review` at first use through `lazy` / `letloop-library-path!`, against the sources installed at `$PREFIX/lib/letloop`. Two reasons, and both bite hard if someone adds an import back:
+**`letloop compile` output is self-contained: `a.out` alone is the deliverable.** The boot image is appended to the executable itself (same host+boot+trailer shape as the letloop binary above), so the `a.out.boot` sibling it also writes is NOT needed at run time — deploy just the executable; do not copy the `.boot` file alongside it.
+
+**`(letloop base)` imports nothing from letloop, on purpose.** It resolves `cli-read`, `transparent`, `letloop-store` and `letloop-review` at first use through `lazy` / `letloop-library-path!`, against the sources installed at `$PREFIX/lib/letloop`. Two reasons, and both bite hard if someone adds an import back:
 
 - A library imported by `(letloop base)` gets folded into the amalgamated letloop program, and a folded library is **invisible** — its name then blocks *user* programs from importing that same library. `(environment '(letloop match))` fails with "attempt to import invisible library" even with the source on the path.
 - Loading letloop's libraries at startup costs **36 ms**. letloop starts in 35.06 ms against a bare Chez floor of 33.04 ms; before this it was 69.6 ms.
@@ -127,11 +147,11 @@ Three things about that host are load-bearing:
 
 **`letloop compile` builds the same shape without a C compiler**: it reads its own binary, strips its own payload to recover the bare host, and appends the new program's boot. That is why `emit-program!` also writes `./a.out.boot` — `make letloop` needs the boot alone to assemble the binary it ships, and `--visible-libraries` folds it. Only `./a.out` is needed to run a program.
 
-**The compiler child cannot be letloop itself** any more, precisely because letloop no longer parses `-b` or `--script`. `scheme-executable` looks up `$LETLOOP_SCHEME`, then `scheme` beside the boot directory, then `$PATH`. A version-mismatched Chez here is the failure CLAUDE.md warns about elsewhere, so the error names all three places it looked.
+**The compiler child is letloop itself, re-executed.** `letloop compile` writes `build.scm` and runs `LETLOOP_BUILD_SCRIPT=build.scm <own binary>`; `letloop-main` loads that script before reading a single argument, so the host's refusal to parse `-b` or `--script` does not matter and no separate `scheme` binary is needed — a relocated static letloop compiles wherever it runs. The child is pristine enough: only the folded, invisible `(letloop base)` is defined in it. The choice is made by reading the trailer of the running binary: without one, the compiler is running under upstream `scheme` (that is how `make letloop` bootstraps), and that `scheme` becomes the child with `-b` and `--script`. `$LETLOOP_SCHEME` names a stock Chez to compile with instead, for comparison; `petite.boot` and `scheme.boot` beside the binary are still read as `make-boot-file` inputs, so the error for a missing boot directory stays.
 
 **`letloop compile` amalgamates by default:** the program and every library it imports become one compilation unit via `compile-program` + `compile-whole-program`, so calls across library boundaries can be inlined — worth ~14% on the HTTP benchmark. Two things make that possible and are easy to break:
 
-- It runs in a **child process** spawned as `<scheme> -b petite.boot -b scheme.boot --script build.scm`. A library already defined in the process shadows its own source and is never recompiled, so no `.wpo` is written for it — and every `(letloop ...)` library arrives with the boot image. `compile-whole-program` then folds nothing and reports it only through its return value, which is why the child treats a non-empty return as fatal. `<scheme>` is a **real Chez**, not letloop — letloop's own host parses no flags, so it cannot honour `-b` or `--script`; see `scheme-executable`.
+- It runs in a **child process**, letloop re-executed with `LETLOOP_BUILD_SCRIPT=build.scm`. A library already defined in the process shadows its own source and is never recompiled, so no `.wpo` is written for it — and every `(letloop ...)` library arrives with the boot image. `compile-whole-program` then folds nothing and reports it only through its return value, which is why the child treats a non-empty return as fatal. See `compiler-command`.
 - The `.wpo` cache is **per optimize level**. Folding a level 0 cache into a level 3 program measured 401k req/s against 456k for a level 3 cache. `CACHE_LEVELS` in the makefile primes 0 and 3; any other level is built on demand.
 
 `--visible-libraries` restores the old behaviour, and is required by a program that resolves a library name at run time with `environment` or `eval`.
@@ -140,7 +160,9 @@ Three things about that host are load-bearing:
 
 ## Testing Framework
 
-Test files use the `letloop check` subcommand. Procedures prefixed `~check-` are test cases; `~benchmark-` are benchmarks. The test runner validates output via MD5 hash comparison.
+Test files use the `letloop check` subcommand. Procedures prefixed `~check-` are test cases; `~benchmark-` are benchmarks.
+
+**Pass/fail is the check procedure's own return value, not output comparison.** Confirmed directly from the generated driver (`LETLOOP_DEBUG=1`): `(let ((out ((car thunks)))) (if (and (not (eq? out (void))) out) SUCCESS FAILED))` — a `~check-*` procedure passes only if its return value is neither `(void)` nor `#f`. `(assert expr)` itself returns `#t` on success (not void), so a check whose *last* expression is directly an `assert` is always safe. The trap: any check whose last expression is something else — most commonly a cleanup helper (`(foo-test-directory-remove dir)`) — inherits *that* call's return value instead, and filesystem cleanup helpers built from `delete-file`/`delete-directory` commonly return `#f` on a partial failure rather than raising (e.g. `delete-file` on a path that turns out to be a directory just returns `#f`; it doesn't error). That turns a check whose every `assert` actually passed into a reported `** FAILED`, with no exception, no detail — genuinely confusing to debug, and easy to reintroduce silently (e.g. a test starts producing a nested `sstables/` subdirectory for the first time, as soon as it starts calling something that flushes, and a previously-fine cleanup helper written for flat file lists suddenly starts failing on it). **The robust idiom: always make the last expression of a `~check-*` procedure an explicit `#t`** (or otherwise something guaranteed truthy/non-void), rather than relying on whatever a trailing side-effecting call happens to return.
 
 **Library checks live with their library** under `src/`: the library exports its `~check-*` procedures and `include`s a sibling `NAME.check.scm` fragment (see `src/letloop/aql/morton.scm` or `src/letloop/tea/cell.scm` for the pattern). `make check` discovers them by scanning `./src/`. Checks that want a live service (e.g. PostgreSQL) print a SKIP note and pass when the service is absent.
 
@@ -155,14 +177,12 @@ The `checks/` directory is only for proving the test runner itself works:
 ```
 letloop check [--fail-fast] [DIRECTORY ...] LIBRARY.SCM ...
 letloop compile [DIRECTORY ...] LIBRARY.SCM PROCEDURE
-letloop exec [DIRECTORY ...] LIBRARY.SCM PROCEDURE [-- ARGUMENT ...]
 letloop repl
-letloop root available
-letloop root create DISTRIBUTION VERSION MACHINE DIRECTORY
-letloop root exec DIRECTORY TARGET-DIRECTORY -- COMMAND ...
 ```
 
 Key flags: `--dev` (debug/profile), `--optimize-level=0-3`, `--disable-garbage-collector`, `--visible-libraries` (do not amalgamate).
+
+**`letloop compile` infers its own static archives, always.** A program's import closure is already the list of C libraries it wants: a binding library says so with `define-shared-object`, and `(letloop sodium)` names `(letloop package sodium)`. That package's derivation then supplies the C-level dependencies underneath it, which no Scheme import can express — `(letloop opaque)` links libopaque.a, liboprf.a *and* libsodium.a. Only libraries declaring a shared object are consulted, which is also what stops a fixture package (`flow2`, `review`) from being built by a bare name match. Archives are linked inside `-Wl,--start-group`, so the linker resolves their order rather than this having to emit it correctly. There is no flag: static is simply what a compiled program is, so the only question is whether the store has the archive. It is never built here — `letloop compile` links what is present and reports, by name and with the command to fix it, any package that exists but is unbuilt; that program dlopens at run time exactly as before. Builds stay where they are asked for, at `letloop store build`.
 
 ## Environment
 
