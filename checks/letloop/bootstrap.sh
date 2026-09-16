@@ -67,7 +67,12 @@
 # rather than only existing in a checkout.
 #
 # Opt-in, NOT run by `make check`: fetches ~95 MB, compiles make and
-# BusyBox from source, and needs bwrap.
+# BusyBox from source, and needs bwrap to build with plus file,
+# readelf, nm and diff to check what it built. Those four are the
+# gates' own tools, not the chain's -- nothing they inspect ends up
+# depending on them -- but one missing stops the run at `command not
+# found` under set -e, before the assertion it belongs to can print a
+# FAIL, which reads as a crash rather than as a host lacking a tool.
 set -exo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"

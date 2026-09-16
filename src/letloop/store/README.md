@@ -57,6 +57,17 @@ letloop without Alpine or any other distribution. Each is
 | `chezscheme` | ChezScheme 10.4.1, from source |
 | `letloop` | letloop itself, from source, against all of it |
 
+**What the host has to provide**, beyond a POSIX shell and coreutils:
+`bwrap`, which every sandboxed build runs under, and `file`, `readelf`,
+`nm` and `diff`, which the gates use to assert that an artifact is
+static, carries the symbols it claims, and rebuilds to the same bytes.
+None of them reaches an output -- they are how `bootstrap.sh` checks
+its work, not how anything is built; a build sees only its rootfs. One
+missing is worth recognising on sight, because it does not look like a
+gate failing: under `set -e` the run dies at `command not found` with
+no `FAIL:` line at all, since the assertion never got as far as
+comparing anything.
+
 **Exactly two prebuilt binaries are trusted**, both pinned by BLAKE3
 with their provenance recorded in each package library's header. Trusting a
 prebuilt compiler is Nix's bargain, taken deliberately: building a C
