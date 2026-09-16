@@ -7,6 +7,7 @@
           store-path
           store-package-archives
           store-package-unbuilt?
+          store-package-path
 
           ~check-store-000
           ~check-store-001/fetch-only
@@ -17,7 +18,8 @@
           ~check-store-006/build-cache-sees-changed-inputs
           ~check-store-007/cli-project-package
           ~check-store-008/cache-write-is-idempotent
-          ~check-store-009/package-archives)
+          ~check-store-009/package-archives
+          ~check-store-010/package-path)
 
   (import (chezscheme)
           (letloop cli base)

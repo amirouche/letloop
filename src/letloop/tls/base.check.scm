@@ -218,3 +218,98 @@
   (let ((prefix (mkdtemp "/tmp/letloop/tls-check-no-ca-XXXXXX")))
     (%with-letloop-prefix prefix
       (lambda () (not (bundled-ca-file))))))
+
+;; SSL_CERT_FILE/SSL_CERT_DIR juggled the same way LETLOOP_PREFIX is
+;; above, restoring to "" rather than truly unsetting -- there is no
+;; unsetenv in this codebase, and resolve-ca-actions treats an empty
+;; value as absent for exactly this reason (see its own comment).
+(define (%with-env name value thunk)
+  (define original (getenv name))
+  (putenv name (or value ""))
+  (let ((result (thunk)))
+    (putenv name (or original ""))
+    result))
+
+;; SSL_CERT_FILE outranks a bundled cert.pem AND an embedded bundle
+;; that would otherwise both also resolve -- an operator's own choice
+;; must be the only action returned, not merely the first of several.
+(define (~check-tls-ca-actions-env-file-wins)
+  (define mkdtemp (foreign-procedure "mkdtemp" (string) string))
+  (system "mkdir -p /tmp/letloop/")
+  (let* ((prefix (mkdtemp "/tmp/letloop/tls-check-ca-actions-XXXXXX"))
+         (bundled (string-append prefix "/lib/letloop/cert.pem")))
+    (system (string-append "mkdir -p " prefix "/lib/letloop"))
+    (call-with-output-file bundled (lambda (port) (display "bundled" port)))
+    (%with-letloop-prefix prefix
+      (lambda ()
+        (%with-env "SSL_CERT_FILE" "/tmp/letloop/env-cert.pem"
+          (lambda ()
+            (%with-env "SSL_CERT_DIR" #f
+              (lambda ()
+                (parameterize ((embedded-ca-bundle (string->utf8 "embedded")))
+                  (equal? (resolve-ca-actions)
+                          (list (cons 'file "/tmp/letloop/env-cert.pem"))))))))))))
+
+;; SSL_CERT_DIR alone, no SSL_CERT_FILE -- both env candidates are
+;; independent, so a directory-only override must still win on its
+;; own rather than being ignored for lack of a paired file.
+(define (~check-tls-ca-actions-env-dir-wins)
+  (%with-env "SSL_CERT_FILE" #f
+    (lambda ()
+      (%with-env "SSL_CERT_DIR" "/tmp/letloop/certs.d"
+        (lambda ()
+          (equal? (resolve-ca-actions)
+                  (list (cons 'path "/tmp/letloop/certs.d"))))))))
+
+;; No env override: a cert.pem placed beside the binary outranks an
+;; embedded snapshot that would otherwise also resolve.
+(define (~check-tls-ca-actions-bundled-over-embedded)
+  (define mkdtemp (foreign-procedure "mkdtemp" (string) string))
+  (system "mkdir -p /tmp/letloop/")
+  (let* ((prefix (mkdtemp "/tmp/letloop/tls-check-ca-actions-XXXXXX"))
+         (bundled (string-append prefix "/lib/letloop/cert.pem")))
+    (system (string-append "mkdir -p " prefix "/lib/letloop"))
+    (call-with-output-file bundled (lambda (port) (display "bundled" port)))
+    (%with-env "SSL_CERT_FILE" #f
+      (lambda ()
+        (%with-env "SSL_CERT_DIR" #f
+          (lambda ()
+            (%with-letloop-prefix prefix
+              (lambda ()
+                (parameterize ((embedded-ca-bundle (string->utf8 "embedded")))
+                  (equal? (resolve-ca-actions)
+                          (list (cons 'file bundled))))))))))))
+
+;; Nothing found on disk, nothing in the environment: the embedded
+;; snapshot is the last resort that still lets a relocated static
+;; binary work with zero configuration.
+(define (~check-tls-ca-actions-embedded-last-resort)
+  (define mkdtemp (foreign-procedure "mkdtemp" (string) string))
+  (system "mkdir -p /tmp/letloop/")
+  (let ((prefix (mkdtemp "/tmp/letloop/tls-check-no-ca-XXXXXX")))
+    (%with-env "SSL_CERT_FILE" #f
+      (lambda ()
+        (%with-env "SSL_CERT_DIR" #f
+          (lambda ()
+            (%with-letloop-prefix prefix
+              (lambda ()
+                (let ((bytes (string->utf8 "embedded")))
+                  (parameterize ((embedded-ca-bundle bytes))
+                    (equal? (resolve-ca-actions)
+                            (list (cons 'mem bytes)))))))))))))
+
+;; Nothing resolves anywhere: '(), so tls-open configures nothing and
+;; defers entirely to libtls's own compiled-in default -- the
+;; ordinary dynamic build's whole path, unchanged by any of this.
+(define (~check-tls-ca-actions-none)
+  (define mkdtemp (foreign-procedure "mkdtemp" (string) string))
+  (system "mkdir -p /tmp/letloop/")
+  (let ((prefix (mkdtemp "/tmp/letloop/tls-check-no-ca-XXXXXX")))
+    (%with-env "SSL_CERT_FILE" #f
+      (lambda ()
+        (%with-env "SSL_CERT_DIR" #f
+          (lambda ()
+            (%with-letloop-prefix prefix
+              (lambda ()
+                (parameterize ((embedded-ca-bundle #f))
+                  (null? (resolve-ca-actions)))))))))))

@@ -229,6 +229,18 @@
            (and (fx=? (length matches) 1)
                 (string-append store "/" (car matches)))))))
 
+;; The output directory a package already has in the store, or #f --
+;; looked up by name the way store-package-archives is, for a caller
+;; that wants a package's own files rather than its archives. Exists
+;; for (letloop compile)'s CA-bundle embedding, which needs
+;; ca-certificates' cert.pem directly -- a data file, not a .a to
+;; link, so store-package-archives (which only looks under a
+;; package's lib/ for *.a files) cannot answer this.
+(define (store-package-path components)
+  (let ((reference (resolve-package-reference components)))
+    (and (guard (ex (#t #f)) (environment reference) #t)
+         (guard (ex (#t #f)) (store-package-output reference)))))
+
 ;; Whether a package exists but has no output yet -- the one case
 ;; worth telling a caller about, since it is the difference between
 ;; "there is no C library here" and "there is one, and a single

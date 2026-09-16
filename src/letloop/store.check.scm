@@ -417,3 +417,57 @@
     (build-cache-set! "racing-key" "/first-writer")
     (build-cache-set! "racing-key" "/second-writer")
     #t))
+
+;; store-package-path answers a different question than
+;; store-package-archives: not "what can be linked" but "where did
+;; this land", for a package whose output is a data file rather than
+;; an archive -- ca-certificates' cert.pem is the motivating case, but
+;; this fixture keeps its own dependency on bwrap the same way
+;; check-009 does, since building the package for real is still the
+;; only way to prove the lookup finds a real path.
+(define ~check-store-010/package-path
+  (lambda ()
+    (if (not (bwrap-available?))
+        (begin (display "** SKIP: /usr/bin/bwrap not found\n") #t)
+        (guard (ex (#t (display "** SKIP: bwrap sandbox unavailable in this environment\n") #t))
+          (define mkdtemp (foreign-procedure "mkdtemp" (string) string))
+          (define (write-package! path form)
+            (call-with-output-file path (lambda (port) (write form port))))
+          (system! "mkdir -p /tmp/letloop/")
+          (let* ((rootfs (mkdtemp "/tmp/letloop/store-check-010-rootfs-XXXXXX"))
+                 (root (mkdtemp "/tmp/letloop/store-check-010-root-XXXXXX"))
+                 (package-directory (string-append root "/package")))
+            (store-check-fixture-rootfs! rootfs)
+            (system! "rm -rf /tmp/letloop/store-check-010-store")
+            (putenv "LETLOOP_STORE" "/tmp/letloop/store-check-010-store")
+            (system! (format #f "mkdir -p ~a" (shell-single-quote package-directory)))
+            (library-directories (append (library-directories) (list root)))
+            (source-directories (append (source-directories) (list root)))
+            (write-package!
+             (string-append package-directory "/data-only.scm")
+             `(library (package data-only)
+                (export package)
+                (import (chezscheme))
+                (define package
+                  '(derivation
+                    (name "data-only")
+                    (build-environment (root (directory ,rootfs)))
+                    (script "set -e\n"
+                            "mkdir -p out\n"
+                            "echo marker > out/marker.txt\n")
+                    (output "out")))))
+            ;; Unbuilt: no path yet, and no archive either -- both
+            ;; questions answer the same way before anything exists.
+            (unless (and (not (store-package-path '(data-only)))
+                         (null? (store-package-archives '(data-only))))
+              (error 'check-store-010 "an unbuilt package should offer no path"))
+            (store-build '(package data-only))
+            (let ((path (store-package-path '(data-only))))
+              (and path
+                   (file-exists? (string-append path "/marker.txt"))
+                   ;; a data-only package has no lib/*.a, so it
+                   ;; contributes nothing to the archive question --
+                   ;; the two lookups answer independently
+                   (null? (store-package-archives '(data-only)))
+                   (not (store-package-path '(no-such-package-here)))
+                   #t)))))))

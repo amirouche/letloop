@@ -8,6 +8,7 @@
           tls-shutdown
           url-parse
           https-request
+          embedded-ca-bundle
 
           ~check-tls-url-parse-000
           ~check-tls-url-parse-001
@@ -16,7 +17,12 @@
           ~check-tls-connect-timeout
           ~check-tls-request-000
           ~check-tls-bundled-ca-file-found
-          ~check-tls-bundled-ca-file-absent)
+          ~check-tls-bundled-ca-file-absent
+          ~check-tls-ca-actions-env-file-wins
+          ~check-tls-ca-actions-env-dir-wins
+          ~check-tls-ca-actions-bundled-over-embedded
+          ~check-tls-ca-actions-embedded-last-resort
+          ~check-tls-ca-actions-none)
 
   (import (chezscheme)
           (letloop cffi)
@@ -94,6 +100,56 @@
        ((null? candidates) #f)
        ((file-exists? (car candidates)) (car candidates))
        (else (loop (cdr candidates))))))
+
+  ;; A CA bundle's bytes, baked into program.scm at compile time by
+  ;; (letloop compile) -- see infer-archives! in src/letloop/base.scm
+  ;; -- when a program links libtls statically and the store has a
+  ;; ca-certificates package built. #f for every other build,
+  ;; including the ordinary dynamic one: its dlopen'd libtls.so
+  ;; already has a real, distro-maintained default, and a compile-time
+  ;; snapshot would only be a worse answer to a question that build
+  ;; does not have.
+  ;;
+  ;; A parameter, not a plain variable, so a generated program.scm can
+  ;; set it with a direct call -- (embedded-ca-bundle #vu8(...)) --
+  ;; the same idiom already used there for suppress-greeting and
+  ;; collect-request-handler.
+  (define embedded-ca-bundle (make-parameter #f))
+
+  ;; Which CA source(s) to hand libtls, and in what order to try them.
+  ;; Returns a list of (tag . value) actions for tls-open to apply, in
+  ;; libtls call order, or '() to configure nothing at all and defer
+  ;; entirely to libtls's own compiled-in default -- today's only
+  ;; behaviour, kept as the last rung for a program compiled without a
+  ;; ca-certificates package to embed from.
+  ;;
+  ;; Ranked so that whoever has the most immediate say wins: an
+  ;; operator's own SSL_CERT_FILE/SSL_CERT_DIR (the same convention
+  ;; curl, git and OpenSSL/LibreSSL itself already honour) outranks
+  ;; anything this program carries on its own, a file a deployer chose
+  ;; to place beside the binary outranks a snapshot baked in when
+  ;; nobody who runs the binary had any say in it, and the embedded
+  ;; snapshot -- last, not first -- exists only so a relocated static
+  ;; binary still works with zero configuration when nobody supplied
+  ;; anything at all, never so it can override someone who did.
+  (define (resolve-ca-actions)
+    ;; An empty value counts as unset, the same as a missing one --
+    ;; there is no putenv-based unsetenv in this codebase (see
+    ;; %with-env below, which relies on exactly this), and a real
+    ;; SSL_CERT_FILE="" left over from some other tool's environment
+    ;; should not resolve to "use the path ''" any more than a
+    ;; genuinely absent one would.
+    (define (set? value) (and value (not (string=? value "")) value))
+    (define from-environment
+      (let ((file (set? (getenv "SSL_CERT_FILE")))
+            (dir (set? (getenv "SSL_CERT_DIR"))))
+        (append (if file (list (cons 'file file)) '())
+                (if dir (list (cons 'path dir)) '()))))
+    (cond
+     ((pair? from-environment) from-environment)
+     ((bundled-ca-file) => (lambda (path) (list (cons 'file path))))
+     ((embedded-ca-bundle) => (lambda (bytes) (list (cons 'mem bytes))))
+     (else '())))
 
   ;; ---- Owned socket, with timeouts ----
   ;;
@@ -238,14 +294,23 @@
         (when (zero? config)
           (%close fd)
           (error 'tls-open "tls_config_new failed"))
-        (let ((ca-file (bundled-ca-file)))
-          (when ca-file
-            (let ((rc (tls-config-set-ca-file config ca-file)))
-              (unless (zero? rc)
-                (let ((msg (tls-config-error config)))
-                  (tls-config-free config)
-                  (%close fd)
-                  (error 'tls-open "tls_config_set_ca_file failed" ca-file msg))))))
+        (for-each
+         (lambda (action)
+           (let ((rc (case (car action)
+                       ((file) (tls-config-set-ca-file config (cdr action)))
+                       ((path) (tls-config-set-ca-path config (cdr action)))
+                       ((mem)
+                        (let ((bytes (cdr action)))
+                          (with-lock (list bytes)
+                            (tls-config-set-ca-mem config
+                                                    (bytevector-pointer bytes)
+                                                    (bytevector-length bytes))))))))
+             (unless (zero? rc)
+               (let ((msg (tls-config-error config)))
+                 (tls-config-free config)
+                 (%close fd)
+                 (error 'tls-open "tls_config_set_ca failed" action msg)))))
+         (resolve-ca-actions))
         (let ((rc (tls-config-set-protocols config TLS_PROTOCOLS_DEFAULT)))
           (unless (zero? rc)
             (let ((msg (tls-config-error config)))

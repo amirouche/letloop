@@ -801,6 +801,7 @@
   (define letloop-store (lazy '(letloop store) 'letloop-store))
   (define store-package-archives (lazy '(letloop store) 'store-package-archives))
   (define store-package-unbuilt? (lazy '(letloop store) 'store-package-unbuilt?))
+  (define store-package-path (lazy '(letloop store) 'store-package-path))
   (define letloop-review (lazy '(letloop review) 'letloop-review))
 
   (define letloop-compile
@@ -850,6 +851,10 @@
       (define extensions '())
       (define directories '())
       (define archives '())
+      ;; The CA bundle's bytes to embed in program.scm, or #f -- set
+      ;; by ca-bundle-to-embed, below, before either build-boot-file
+      ;; branch runs, since both need it while generating program.scm.
+      (define ca-bundle #f)
       (define main #f)
       (define library.scm #f)
       (define dev? #f)
@@ -942,9 +947,13 @@
           (call-with-output-file program.scm
             (lambda (port)
               (write '(suppress-greeting #t) port)
-              (write `(import ,(pk library.scm (maybe-library-name library.scm))) port)
+              (write `(import ,(pk library.scm (maybe-library-name library.scm))
+                               ,@(if ca-bundle '((letloop tls base)) '()))
+                     port)
               (when disable-garbage-collector?
                 (write '(collect-request-handler void) port))
+              (when ca-bundle
+                (write `(embedded-ca-bundle ,ca-bundle) port))
               (write `(scheme-start ,(string->symbol main)) port)) 'truncate)
           (maybe-compile-file program.scm)
 
@@ -1157,10 +1166,14 @@
               ;; compile-whole-program rejects loose top-level forms.
               (display "#!chezscheme\n" port)
               (for-each (lambda (form) (pretty-print form port))
-                        `((import (chezscheme) ,library-name)
+                        `((import (chezscheme) ,library-name
+                                  ,@(if ca-bundle '((letloop tls base)) '()))
                           (suppress-greeting #t)
                           ,@(if disable-garbage-collector?
                                 '((collect-request-handler void))
+                                '())
+                          ,@(if ca-bundle
+                                `((embedded-ca-bundle ,ca-bundle))
                                 '())
                           (scheme-start ,(string->symbol main)))))
             'truncate)
@@ -1482,6 +1495,34 @@
                              (loop (cdr candidates))))))
                    unbuilt-candidates))))))
 
+      (define ca-bundle-to-embed
+        ;; The bytes to bake into program.scm as (letloop tls base)'s
+        ;; last-resort CA source, or #f. Asks the same question
+        ;; infer-archives! asks of every shared-object-declaring
+        ;; library, scoped to tls alone, and run before either
+        ;; build-boot-file branch so the answer is ready while
+        ;; program.scm is generated -- infer-archives! itself runs
+        ;; too late for that, called only for emit-program!'s linking
+        ;; step, after program.scm is already compiled.
+        ;;
+        ;; A dynamically-linked program needs none of this: its
+        ;; dlopen'd libtls.so already has a real, distro-maintained
+        ;; default, and embedding a compile-time snapshot into every
+        ;; TLS-using program regardless would be an unasked-for change
+        ;; of trust source for the common case, not a fix for one.
+        (lambda ()
+          (and (member '(letloop tls low) (import-closure library.scm))
+               (pair? (archives-for-library '(letloop tls low)))
+               (let ((directory (store-package-path '(ca-certificates))))
+                 (if (not directory)
+                     (begin
+                       (display "* tls is linked statically but no ca-certificates package is built; libtls will fall back to its own compile-time default, which exists only inside the sandbox that built it.\n** Build one: letloop store build ca-certificates\n")
+                       #f)
+                     (let ((path (string-append directory "/cert.pem")))
+                       (and (file-exists? path)
+                            (call-with-port (open-file-input-port path)
+                              get-bytevector-all))))))))
+
       (define emit-program!
         ;; One self-contained file: the host binary, then the
         ;; standalone boot image, then a trailer giving its length.
@@ -1586,6 +1627,8 @@
         (errors "--dev sets its own optimize level, it cannot be combined with --optimize-level"))
 
       (maybe-display-errors-then-exit errors)
+
+      (set! ca-bundle (ca-bundle-to-embed))
 
       (if visible-libraries?
           (build-boot-file/visible-libraries)
