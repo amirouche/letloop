@@ -154,6 +154,23 @@ Known gaps, all of them deliberate:
   the sandbox on this session's glibc host, makes a real HTTPS GET
   with no host `libtls.so` and no host CA store.
 
+  **This covered letloop's own binary and left the same gap open for
+  a compiled program.** `bundled-ca-file` finds `lib/letloop/cert.pem`
+  only because `(letloop package letloop)`'s own derivation copies it
+  there; `letloop compile`'s output carries no such thing, static tls
+  or not, and `emit-program!` never packaged one — `./a.out` alone is
+  the deliverable (see CLAUDE.md), and a directory-adjacent file would
+  have broken that. Reproduced directly: a program built against this
+  session's bootstrap store, statically linking tls, run from a bare
+  directory with nothing beside it, failed exactly the way the
+  paragraph above describes — `failed to open CA file
+  '/build/out/etc/ssl/cert.pem'`. Closed by embedding the bundle in
+  `program.scm` at compile time (`tls-config-set-ca-mem`, resolved
+  through the new `store-package-path`) rather than shipping a second
+  file, with `$SSL_CERT_FILE`/`$SSL_CERT_DIR` checked first so an
+  operator's own choice still overrides a compile-time snapshot. See
+  `(letloop tls base)`'s `resolve-ca-actions`.
+
   Not fixed by turning off certificate verification instead, which
   was on the table for a moment — that trades a build-time gap for a
   runtime security hole, in every program this store's `tls` output
