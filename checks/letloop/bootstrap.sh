@@ -311,7 +311,12 @@ cat > "$ELSEWHERE2/work/hi.scm" <<'SCM'
   (import (chezscheme))
   (define (main . args) (display "bootstrap letloop works\n")))
 SCM
-EXEC_OUTPUT=$("$ELSEWHERE2/bin/letloop" exec "$ELSEWHERE2/work/" "$ELSEWHERE2/work/hi.scm" main)
+# Compiled rather than exec'd: `letloop exec` is gone, so a program is
+# built and then run. That makes this gate stronger than it was --
+# compiling is the path this letloop has to support on a foreign host,
+# and it re-executes itself as the compiler child to do it.
+( cd "$ELSEWHERE2/work" && "$ELSEWHERE2/bin/letloop" compile . hi.scm main )
+EXEC_OUTPUT=$("$ELSEWHERE2/work/a.out")
 [ "$EXEC_OUTPUT" = "bootstrap letloop works" ] || {
     echo "FAIL: bootstrap letloop cannot run a program: $EXEC_OUTPUT"
     exit 1
@@ -331,7 +336,8 @@ cat > "$ELSEWHERE2/work/https-probe.scm" <<'SCM'
       (lambda (code headers body)
         (display code) (newline)))))
 SCM
-HTTPS_OUTPUT=$("$ELSEWHERE2/bin/letloop" exec "$ELSEWHERE2/work/" "$ELSEWHERE2/work/https-probe.scm" main 2>&1)
+( cd "$ELSEWHERE2/work" && "$ELSEWHERE2/bin/letloop" compile . https-probe.scm main )
+HTTPS_OUTPUT=$("$ELSEWHERE2/work/a.out" 2>&1)
 case "$HTTPS_OUTPUT" in
     *200*) ;;
     *) echo "FAIL: relocated bootstrap letloop cannot make an HTTPS request: $HTTPS_OUTPUT"
