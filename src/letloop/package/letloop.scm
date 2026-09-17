@@ -43,19 +43,15 @@
      (script
       "set -e\n"
       "cp -a /tmp/letloop-bootstrap/letloop-src /build/src\n"
-      ;; ChezScheme has to be copied out of the store before use, not used
-      ;; in place: `make letloop` assembles the binary into the directory
-      ;; holding the boot files, which it finds from $SCHEME's own resolved
-      ;; location. Pointed at the input directly that is a read-only bind,
-      ;; and the writes fail -- silently, since the recipe chains with `;`
-      ;; rather than `&&`, leaving a dangling bin/letloop symlink as the
-      ;; only evidence.
-      ;; ChezScheme is copied *into the prefix being built*, not used
-      ;; beside it. `make letloop` assembles the binary next to the boot
-      ;; files, which it locates from $SCHEME's own resolved path, and then
-      ;; links PREFIX/bin/letloop to it relatively -- so Chez has to live
-      ;; under PREFIX for that link to resolve. This is the same layout a
-      ;; normal ./venv install has.
+      ;; ChezScheme is copied *into the prefix being built*, not used in
+      ;; place: `make letloop` assembles the binary into the directory
+      ;; holding the boot files, which the makefile finds from $SCHEME's
+      ;; resolved location, and then links PREFIX/bin/letloop to it
+      ;; relatively -- so Chez has to live under PREFIX for that link to
+      ;; resolve, the same layout a normal ./venv install has. Pointed at
+      ;; the input directly that is a read-only bind, and the writes fail
+      ;; -- silently, since the recipe chains with `;` rather than `&&`,
+      ;; leaving a dangling bin/letloop symlink as the only evidence.
       ;;
       ;; The trailing /. copies contents rather than the directory:
       ;; /build/inputs/<name> is itself a symlink into the store, and a

@@ -71,12 +71,13 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 	@# nothing beside it. letloop.boot is installed too: it is what
 	@# --visible-libraries folds into a program.
 	@#
-	@# $(PREFIX)/bin/letloop is a *relative* symlink, and has to stay one:
-	@# scheme-binarypath* finds the boot directory through
-	@# dirname($$SCHEME) + readlink. It is computed by hand below rather
+	@# $(PREFIX)/bin/letloop is a *relative* symlink, so the prefix can be
+	@# copied or moved as a tree. It is computed by hand below rather
 	@# than with `ln -sr`, whose -r is a GNU extension BusyBox lacks --
 	@# BOOT always lives under PREFIX, so stripping that prefix gives the
-	@# path to descend from PREFIX/bin.
+	@# path to descend from PREFIX/bin. letloop itself never reads the
+	@# link: it walks up from /proc/self/exe for its boot files and its
+	@# libraries.
 	@#
 	@# The same shape is what `letloop compile` produces, by copying its
 	@# own host and appending a different boot. No C compiler runs there.
@@ -160,8 +161,7 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 	  BOOT_RELATIVE=$${BOOT#$$PREFIX_NO_SLASH/}; \
 	  if [ "$$BOOT_RELATIVE" = "$$BOOT" ]; then \
 	    echo "make letloop: SCHEME resolves to $$BOOT, which is not under PREFIX ($$PREFIX_NO_SLASH)." >&2; \
-	    echo "  bin/letloop has to be a symlink relative to PREFIX -- scheme-binarypath* finds" >&2; \
-	    echo "  the boot directory as dirname(\$$SCHEME) + readlink(\$$SCHEME) -- so the Chez" >&2; \
+	    echo "  bin/letloop has to be a symlink relative to PREFIX, so the Chez" >&2; \
 	    echo "  installation must live inside PREFIX. Install or copy it there first." >&2; \
 	    exit 1; \
 	  fi; \

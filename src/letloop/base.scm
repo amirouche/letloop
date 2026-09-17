@@ -79,62 +79,6 @@
      ((char=? (string-ref filepath 0) #\/) filepath)
      (else (string-append (current-directory) "/" filepath))))
 
-  (meta define basename
-        (lambda (string)
-          (let loop ((index (string-length string)))
-            (if (char=? (string-ref string (- index 1)) #\/)
-                (substring string index (string-length string))
-                (loop (- index 1))))))
-
-  (meta define dirname
-        (lambda (out)
-          (substring out 0 (- (string-length out)
-                              (string-length (basename out))))))
-
-  (meta define scheme-binarypath
-        (lambda ()
-          (let* ((out (if (getenv "SCHEME")
-                          (string-append (dirname (getenv "SCHEME"))
-                                         "/"
-                                         (run/output (format #f "readlink -n ~a" (getenv "SCHEME"))))
-                          (run/output "readlink -n /proc/self/exe"))))
-            (dirname out))))
-
-  (meta define binarypath->scheme-home
-        (lambda (scheme what)
-          (format #f "~a/~a" scheme what)))
-
-  #;(meta define binarypath->scheme-home
-        (lambda (scheme what)
-          (call/cc
-           (lambda (k)
-             (for-each
-              (lambda (path)
-                (call-with-values (lambda () (scheme-version-number))
-                  (lambda args
-                    (let* ((version (let loop ((args args)
-                                               (out '()))
-                                      (if (null? args)
-                                          (apply string-append (reverse (cdr out)))
-                                          (loop (cdr args)
-                                                (cons* "."
-                                                       (number->string (car args))
-                                                       out)))))
-                           (prefix (run/output (format #f "realpath $(ls -d ~a/../lib/csv~a*) | tr -d '\n'" path version))))
-                      (let ((out (format #f "~a/~a/~a" prefix (machine-type) what)))
-                        (when (file-exists? out)
-                          (k out)))))))
-              (list scheme "/usr/local/bin/" "/usr/bin/"))))))
-
-  (define-syntax include-chez-file
-    (lambda (x)
-      (syntax-case x ()
-        [(k filename)
-         (let* ([fn (datum filename)]
-                [fn (binarypath->scheme-home (scheme-binarypath) fn)])
-           (with-syntax ([exp (get-bytevector-all (open-file-input-port fn))])
-             #'exp))])))
-
   (define filepath->bytevector
     (lambda (filepath)
       (define port (open-file-input-port filepath))
@@ -230,54 +174,6 @@
                                    "date -u -d \"@$SOURCE_DATE_EPOCH\" +\"%Y-%m-%dT%H:%M:%S%z\""
                                    "date +\"%Y-%m-%dT%H:%M:%S%z\""))])
              #'exp))])))
-
-  (define scheme-binarypath*
-    ;; it is redefined to avoid the scary:
-    ;;
-    ;;   Exception: attempt to reference out-of-phase identifier
-    ;;   scheme-binarypath.
-    ;;
-    ;; It is only used when preparing a letloop release, when
-    ;; letloop-compile is executed with upstream scheme, hence no
-    ;; petite.boot, scheme.boot, letloop.boot symbols were
-    ;; registred. See the procedure petite.boot-fallback, the file
-    ;; letloop-main.c
-    (lambda ()
-
-      (define read-string
-        (lambda (p)
-          (let loop ([x (read-char p)]
-                     [out '()])
-            (if (eof-object? x)
-                (begin (close-input-port p)
-                       (list->string (reverse out)))
-                (loop (read-char p)
-                      (cons x out))))))
-
-      (define basename
-        (lambda (string)
-          (let loop ((index (string-length string)))
-            (if (char=? (string-ref string (- index 1)) #\/)
-                (substring string index (string-length string))
-                (loop (- index 1))))))
-
-      (define dirname
-        (lambda (out)
-          (substring out 0 (- (string-length out)
-                              (string-length (basename out))))))
-
-      (define (run/output command)
-        (call-with-values (lambda ()
-                            (open-process-ports command 'line (current-transcoder)))
-          (lambda (stdin stdout stderr pid)
-            (read-string stdout))))
-
-      (let* ((out (if (getenv "SCHEME")
-                      (string-append (dirname (getenv "SCHEME"))
-                                     "/"
-                                     (run/output (format #f "readlink -n ~a" (getenv "SCHEME"))))
-                      (run/output "readlink -n /proc/self/exe"))))
-        (dirname out))))
 
   (define LETLOOP_DEBUG (getenv "LETLOOP_DEBUG"))
 
@@ -634,8 +530,7 @@
       (string-append (basename-without-extension x) ".wpo")))
 
   ;; Runtime counterparts of the meta helpers near the top of this
-  ;; library: those only exist at expand time, and scheme-binarypath*
-  ;; keeps private copies to stay clear of out-of-phase identifiers.
+  ;; library: those only exist at expand time.
 
   (define basename*
     (lambda (filepath)
@@ -704,12 +599,11 @@
                (filter (lambda (x) (string-prefix? "csv" x))
                        (directory-list* lib)))))
       (define candidates
-        (let ((exe (or (executable-directory) ""))
-              (scheme (guard (ex (else "")) (scheme-binarypath*))))
+        (let ((exe (or (executable-directory) "")))
           (filter (lambda (x) (not (fxzero? (string-length x))))
                   (append (let ((given (getenv "LETLOOP_BOOT_DIRECTORY")))
                             (if given (list (string-append given "/")) '()))
-                          (list exe scheme)
+                          (list exe)
                           (csv (string-append exe "../lib/"))
                           (csv (string-append exe "../../lib/"))
                           (list (string-append exe "../../boot/" machine "/"))))))
@@ -720,6 +614,22 @@
                (file-exists? (string-append (car candidates) "scheme.boot")))
           (car candidates))
          (else (loop (cdr candidates)))))))
+
+  (define boot-directory!
+    ;; boot-directory, or a message and exit. There is no other place
+    ;; to look: the boot files sit beside the running binary or in the
+    ;; Chez layout above it, and both are walked from /proc/self/exe.
+    ;; A fallback through $SCHEME used to sit here, from the days when
+    ;; letloop was the scheme binary renamed; a compiled letloop is the
+    ;; only letloop, and it knows where it is.
+    (lambda ()
+      (or (boot-directory)
+          (begin
+            (format (current-error-port)
+                    "* Ooops :|\n** Cannot find petite.boot and scheme.boot near ~a.\n"
+                    (or (executable-path) "this binary"))
+            (format (current-error-port) "** Set LETLOOP_BOOT_DIRECTORY.\n")
+            (exit 1)))))
 
   (define letloop-library-directory
     ;; Where letloop's own sources are installed, $LETLOOP_PREFIX/lib/letloop,
@@ -832,9 +742,7 @@
         ;; they are folded into the output boot file by name, so nothing
         ;; here reads several megabytes into the heap.
         (lambda (name)
-          (string-append (or (boot-directory)
-                             (string-append (scheme-binarypath*) "/"))
-                         name)))
+          (string-append (boot-directory!) name)))
 
       (define petite.boot (lambda () (boot-path "petite.boot")))
 
@@ -1246,7 +1154,7 @@
       ;; whose copies are local to it.
       (define boot-directory-path
         (lambda ()
-          (or (boot-directory) (string-append (scheme-binarypath*) "/"))))
+          (boot-directory!)))
 
       (define letloop-source-directory
         (lambda ()

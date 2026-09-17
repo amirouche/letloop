@@ -143,7 +143,7 @@ Three things about that host are load-bearing:
 - **It `mmap`s rather than reads.** A `malloc` + `fread` of the 3.3 MB payload on every start measured **~0.8 ms** against the old separate-boot arrangement; `mmap` brought that to ~0.36 ms. On a 27 ms startup that is the difference between 3% and 1.3%.
 - **The whole file is mapped**, because `mmap` offsets must be page-aligned and the payload starts wherever the host happens to end. The mapping is never unmapped — Chez keeps the pointer for the run.
 
-`$PREFIX/bin/letloop` is a plain *relative* symlink; it must stay relative because `scheme-binarypath*` locates the boot directory through `dirname($SCHEME) + "/" + readlink($SCHEME)`.
+`$PREFIX/bin/letloop` is a plain *relative* symlink, computed by hand in the makefile because BusyBox's `ln` has no `-r`. Nothing at run time depends on it: letloop finds its boot files and its libraries by walking up from `/proc/self/exe`.
 
 **`letloop compile` builds the same shape without a C compiler**: it reads its own binary, strips its own payload to recover the bare host, and appends the new program's boot. That is why `emit-program!` also writes `./a.out.boot` — `make letloop` needs the boot alone to assemble the binary it ships, and `--visible-libraries` folds it. Only `./a.out` is needed to run a program.
 
