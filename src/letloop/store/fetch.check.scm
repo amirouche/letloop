@@ -29,3 +29,21 @@
                        "0000000000000000000000000000000000000000000000000000000000000000"
                        "/tmp/letloop/fetch-check-001")
        #f))))
+
+;; The same acceptance through curl: the downloader the bootstrap
+;; program uses under upstream scheme, where www-request has no tls to
+;; go through. Hash-checked like any other fetch, so the bytes must
+;; match what www-request itself gets for the same URL.
+(define ~check-fetch-002/curl
+  (lambda ()
+    (check-skip-unless-network
+     (call-with-values (lambda () (www-request 'GET fetch-check-url '() (bytevector)))
+       (lambda (code headers body)
+         (unless (= code 200) (error 'check-fetch-002 "probe request failed" code))
+         (let* ((expected-hash-hex (bytevector->hex-string (blake3 body)))
+                (destination "/tmp/letloop/fetch-check-002"))
+           (system! "mkdir -p /tmp/letloop/")
+           (parameterize ((fetch-downloader fetch-with-curl))
+             (fetch-verify! "probe" fetch-check-url expected-hash-hex destination))
+           (let ((written (call-with-port (open-file-input-port destination) get-bytevector-all)))
+             (bytevector=? written body))))))))

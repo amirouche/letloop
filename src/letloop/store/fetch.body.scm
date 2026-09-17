@@ -42,8 +42,38 @@
          (else
           (error 'fetch-verify! "fetch failed" name url code)))))))
 
+;; Who actually downloads: a procedure of NAME and URL returning the
+;; body as a bytevector, or #f for fetch-following-redirects above.
+;; That default goes through www-request and so through (letloop
+;; tls), which a compiled letloop always has -- static from the store,
+;; or dlopen'd from the host. The bootstrap program
+;; (checks/letloop/bootstrap.scm) is the one caller that has neither:
+;; it runs under upstream scheme, before any letloop exists, and sets
+;; this to fetch-with-curl. A parameter rather than a second entry
+;; point so that run-fetches! and run-fetch-only-build! in
+;; store.body.scm need not know there is a choice.
+(define fetch-downloader (make-parameter #f))
+
+;; curl, shelled out to: --location follows the same redirects
+;; fetch-following-redirects does, --fail turns an HTTP error into a
+;; nonzero exit rather than an error page saved as the body, and the
+;; user agent matches fetch-user-agent for the same ftp.gnu.org reason.
+;; The bytes still go through fetch-verify!'s hash check below, so
+;; curl is trusted for transport only, never for content.
+(define (fetch-with-curl name url)
+  (define mkdtemp (foreign-procedure "mkdtemp" (string) string))
+  (system! "mkdir -p /tmp/letloop/")
+  (let* ((directory (mkdtemp "/tmp/letloop/fetch-XXXXXX"))
+         (path (string-append directory "/" name)))
+    (system! (format #f "curl --fail --silent --show-error --location --user-agent letloop-store/1 --output ~a ~a"
+                     (shell-single-quote path)
+                     (shell-single-quote url)))
+    (let ((body (call-with-port (open-file-input-port path) get-bytevector-all)))
+      (system! (format #f "rm -rf ~a" (shell-single-quote directory)))
+      (if (eof-object? body) (bytevector) body))))
+
 (define (fetch-verify! name url expected-hash-hex destination-path)
-  (let* ((body (fetch-following-redirects name url))
+  (let* ((body ((or (fetch-downloader) fetch-following-redirects) name url))
          (actual-hash-hex (bytevector->hex-string (blake3 body))))
     (unless (string-ci=? actual-hash-hex expected-hash-hex)
       (error 'fetch-verify!
