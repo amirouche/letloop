@@ -359,7 +359,7 @@ check: dependencies letloop-check.sh clean ## Hit the ground running!
 check-integration: dependencies ## Run the checks that want live services (PostgreSQL at 127.0.0.1:5432); they SKIP-pass without one
 	LD_LIBRARY_PATH=$(PREFIX)/lib/ $(LETLOOP) check src/ src/letloop/postgresql/base.scm
 
-check-reproducible: ## Build letloop twice through the store, require byte-identical output (run before a release; needs checks/letloop/bootstrap.sh to have run)
+check-reproducible: ## Build letloop twice through the store, require byte-identical output (run before a release; needs checks/letloop/bootstrap.scm to have run)
 	LETLOOP=$(LETLOOP) bash checks/letloop/reproducible.sh
 
 stress: clean ## check stress implementations

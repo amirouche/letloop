@@ -11,7 +11,7 @@
   ;;
   ;; The source tree arrives as a literal input path rather than a
   ;; (derivation ...) reference: it is the working tree being built, not
-  ;; something the store produced, and bootstrap.sh stages a clean copy
+  ;; something the store produced, and bootstrap.scm stages a clean copy
   ;; of it at that path first. Literal inputs are bind-mounted at the
   ;; same absolute path inside the sandbox as outside, so the script
   ;; finds it exactly where the derivation names it.

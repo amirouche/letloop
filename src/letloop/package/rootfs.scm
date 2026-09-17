@@ -12,7 +12,7 @@
   ;; an oversight: sandbox-build! runs `sh -e /build/build.sh` inside
   ;; whatever rootfs it is given, so the build that produces the first
   ;; rootfs-with-a-shell cannot itself run in one. Something has to break
-  ;; the loop from outside. bootstrap.sh supplies a rootfs of symlinks
+  ;; the loop from outside. bootstrap.scm supplies a rootfs of symlinks
   ;; into the host's own /usr, /bin, /lib (the same fixture trick
   ;; store.check.scm uses), so the host's shell and tar act as
   ;; scaffolding for this one step.

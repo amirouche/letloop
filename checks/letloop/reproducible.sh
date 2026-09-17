@@ -4,11 +4,11 @@
 # what lets anyone rebuild a published binary and confirm it is the one
 # they were given.
 #
-# Separate from bootstrap.sh, and from `make check`, because it is a
+# Separate from bootstrap.scm, and from `make check`, because it is a
 # release-time question rather than a did-the-chain-work one: it costs
 # two full letloop builds. Run it before publishing.
 #
-# bootstrap.sh already gates the cheap half -- a Scheme program
+# bootstrap.scm already gates the cheap half -- a Scheme program
 # compiling reproducibly -- which covers the session key reaching the
 # child `letloop compile` spawns. It cannot cover the rest: the outer
 # scheme that --compile-imported-libraries writes .so and .wpo from,
@@ -30,13 +30,13 @@ DERIVATION=letloop
 export LETLOOP_STORE="$WORKDIR/store"
 
 # The chain has to exist first: this compares two builds of letloop, it
-# does not bootstrap one. bootstrap.sh is what produces the inputs.
+# does not bootstrap one. bootstrap.scm is what produces the inputs.
 test -d "$LETLOOP_STORE" || {
-    echo "FAIL: no store at $LETLOOP_STORE -- run checks/letloop/bootstrap.sh first"
+    echo "FAIL: no store at $LETLOOP_STORE -- run checks/letloop/bootstrap.scm first"
     exit 1
 }
 
-# Staged fresh, as bootstrap.sh does: a stale snapshot silently builds
+# Staged fresh, as bootstrap.scm does: a stale snapshot silently builds
 # something other than the working tree.
 rm -rf "$WORKDIR/letloop-src"
 mkdir -p "$WORKDIR/letloop-src"

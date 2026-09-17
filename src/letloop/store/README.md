@@ -40,9 +40,23 @@ the store.
 ## The bootstrap chain
 
 The packages under `src/letloop/package/`, driven by
-`checks/letloop/bootstrap.sh`, build a statically linked, relocatable
+`checks/letloop/bootstrap.scm`, build a statically linked, relocatable
 letloop without Alpine or any other distribution. Each is
-`letloop store build <name>`:
+`letloop store build <name>`, and the program is run by upstream Chez,
+not by letloop:
+
+```
+scheme --script checks/letloop/bootstrap.scm
+```
+
+No letloop is needed to produce the first static letloop, on purpose.
+`(letloop store)` is an ordinary library and runs under a stock
+`scheme`; the one thing a plain scheme cannot do on its own is HTTPS,
+so the program points the store's fetcher at `curl`
+(`fetch-with-curl`), with every fetched byte still hash-checked by
+`fetch-verify!`. The chain used to be a shell script driving the
+letloop that `make letloop` builds with the host compiler -- the
+dynamic, glibc-linked binary this chain exists to make unnecessary.
 
 | package | what it is |
 | --- | --- |
@@ -58,15 +72,13 @@ letloop without Alpine or any other distribution. Each is
 | `letloop` | letloop itself, from source, against all of it |
 
 **What the host has to provide**, beyond a POSIX shell and coreutils:
-`bwrap`, which every sandboxed build runs under, and `file`, `readelf`,
-`nm` and `diff`, which the gates use to assert that an artifact is
-static, carries the symbols it claims, and rebuilds to the same bytes.
-None of them reaches an output -- they are how `bootstrap.sh` checks
-its work, not how anything is built; a build sees only its rootfs. One
-missing is worth recognising on sight, because it does not look like a
-gate failing: under `set -e` the run dies at `command not found` with
-no `FAIL:` line at all, since the assertion never got as far as
-comparing anything.
+an upstream Chez Scheme to run the program (`make chezscheme` builds
+one), `curl` for the fetches, `bwrap`, which every sandboxed build
+runs under, and `file`, `readelf`, `nm`, `cmp` and `sha256sum`, which
+the gates use to assert that an artifact is static, carries the
+symbols it claims, and rebuilds to the same bytes. None of them
+reaches an output -- they are how `bootstrap.scm` checks its work, not
+how anything is built; a build sees only its rootfs.
 
 **Exactly two prebuilt binaries are trusted**, both pinned by BLAKE3
 with their provenance recorded in each package library's header. Trusting a
@@ -74,13 +86,13 @@ prebuilt compiler is Nix's bargain, taken deliberately: building a C
 compiler needs a C compiler, and the alternative is Guix's hex0/mes
 chain -- years of work that still bottoms out in trusting a seed
 binary. The prebuilt BusyBox *is* retired: `bootstrap-busybox`
-rebuilds it from source, and `bootstrap.sh` asserts the fetched
+rebuilds it from source, and `bootstrap.scm` asserts the fetched
 binary's bytes are not in the final rootfs.
 
 One bounded exception remains, and it is structural rather than an
 oversight: `sandbox-build!` runs `sh` inside whatever rootfs it is
 given, so the build that produces the first rootfs-with-a-shell
-cannot itself run in one. `bootstrap.sh` breaks that loop from outside
+cannot itself run in one. `bootstrap.scm` breaks that loop from outside
 with a fixture of symlinks into the host's own `/usr` and `/bin` --
 scaffolding for that one assembly step, which only unpacks and links
 bytes from the two pinned inputs. Nothing is compiled there, so no
@@ -129,11 +141,11 @@ gate, it is not a claim.
 | Skip an unchanged build, and *not* skip a changed one | `~check-store-00{5,6}` |
 | Assemble a rootfs that compiles C, from two pinned binaries | `rootfs`, `hello` |
 | **Compile a Scheme program to a standalone static binary** | `scheme-hello` — the thing the store is actually for, and the one gate that fails when only *that* is broken |
-| Rebuild its own shell and build driver from source | `busybox`/`make`, and `bootstrap.sh` comparing bytes against the fetched BusyBox |
+| Rebuild its own shell and build driver from source | `busybox`/`make`, and `bootstrap.scm` comparing bytes against the fetched BusyBox |
 | Build ChezScheme and letloop with no distribution involved | `chezscheme`/`letloop` |
 | Produce a letloop that needs no dynamic loader, anywhere | absent `INTERP` segment, checked per artifact |
 | Actually drive io_uring, not merely link it | `flow2` — the full flow2 suite |
-| Actually run the store that built it | `bootstrap.sh`'s self-hosted build, which needs BLAKE3 |
+| Actually run the store that built it | `bootstrap.scm`'s self-hosted build, which needs BLAKE3 |
 | Compile a Scheme program against a C archive | `static-lib`, and `letloop-check.sh` on the host |
 | Build a static archive for the rest of letloop's dlopen'ed FFI libraries | `argon2`/`sodium`/`picohttpparser`/`oprf`/`opaque`/`tls`, each checked for the archive and its own entry points |
 | Build one application-level package against another, not just against the rootfs | `opaque` (needs both `sodium` and `oprf` as `(package ...)` inputs) |
@@ -142,7 +154,7 @@ gate, it is not a claim.
 Known gaps, all of them deliberate:
 
 - ~~**No cold start.**~~ The mechanism is closed, gated by
-  `bootstrap.sh`: `tls` builds real LibreSSL statically,
+  `bootstrap.scm`: `tls` builds real LibreSSL statically,
   `bootstrap-letloop` links it in like `liburing`/`blake3`, and
   `(letloop tls base)`'s `tls-open` resolves a CA bundle explicitly
   (`bundled-ca-file`, walked up from the running executable) rather
@@ -176,15 +188,17 @@ Known gaps, all of them deliberate:
   runtime security hole, in every program this store's `tls` output
   ever gets linked into, not just the bootstrap chain.
 
-  What "closed" does not cover: the gate above proves the *mechanism*
-  — an already-built relocated letloop can fetch over HTTPS — not
-  that the *whole chain*, from `toolchain` through `letloop`, has been
-  run starting from a machine with nothing on it at all. Every fetch
-  in this chain so far has run under an ordinary host letloop, using
-  the host's own dynamic `libtls.so`; nobody has yet driven
-  `bootstrap.sh` itself using only a statically linked letloop as the
-  fetcher. That would be the actual end-to-end cold-start proof, and
-  it is still unattempted.
+  What "closed" covers now: `bootstrap.scm`'s self-hosting gate has
+  the relocated static letloop run `store build shell` into an empty
+  store -- a real fetch over HTTPS, with its own static tls and its
+  own `lib/letloop/cert.pem`, hash-checked -- and a compiled program
+  copied alone into an empty directory, with `SSL_CERT_FILE`,
+  `SSL_CERT_DIR` and every `LETLOOP_*` variable unset, makes an HTTPS
+  request on the embedded bundle and nothing else. What it still does
+  not cover: the *whole chain*, `toolchain` through `letloop`, driven
+  by a static letloop as the fetcher rather than by upstream scheme
+  and curl. That is a longer run of the same two mechanisms, not a
+  different one.
 
   Fetching over plain HTTP instead looked like the cheap way out at
   one point, since every fetch is hash-pinned and TLS therefore adds
