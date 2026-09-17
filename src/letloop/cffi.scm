@@ -164,10 +164,20 @@
             (unless unsafe?
               (load-shared-object #f)))))))
 
+  ;; Before strerror, not after it: strerror's foreign-procedure is
+  ;; evaluated while this library initialises, and under upstream
+  ;; scheme -- where no letloop-main.c has registered libc's symbols --
+  ;; it needs dlopen(NULL) to have happened first. Ordered the other
+  ;; way round this failed with `no entry for "strerror"` on the first
+  ;; call into (letloop store) from a plain scheme, and nothing noticed
+  ;; for as long as every consumer was a compiled letloop, whose host
+  ;; registers strerror in C before any Scheme runs. A definition
+  ;; rather than a bare expression, because a library body must keep
+  ;; its defines ahead of its expressions.
+  (define self-loaded-eagerly! (ensure-self-loaded!))
+
   (define strerror
     (let ((func (foreign-procedure "strerror" (int) string)))
       (lambda (code)
         (func code))))
-
-  (ensure-self-loaded!)
   )
