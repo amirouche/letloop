@@ -2507,3 +2507,20 @@
     (flow-log-stop!)
     (assert (flow2-check-substring? "explicit-line" (get-output-string explicit))))
   #t)
+
+;; A negative COMPUTE-COUNT is not zero, so a pool was created, and the
+;; forking loop stopped on (fx=? i compute-count) -- never, for i >= 0.
+;; It forked until fork-thread failed with EAGAIN (351 threads under a
+;; test limit). The argument is validated before anything is touched.
+(define (~check-flow2-005/compute-count-is-validated)
+  (define (refused? count)
+    (guard (ex (#t (not (flow-error? ex))))
+      (flow-run (lambda (workers) (flow-stop)) count)
+      #f))
+  (assert (refused? -1))
+  (assert (refused? 1.5))
+  (assert (refused? 'two))
+  ;; zero and a positive count are still fine
+  (flow-run (lambda (workers) (assert (null? workers)) (flow-stop)) 0)
+  (flow-run (lambda (workers) (assert (= 1 (length workers))) (flow-stop)) 1)
+  #t)
