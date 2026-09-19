@@ -586,8 +586,20 @@
 ;; returned at the straggler's exit, before its own task finished;
 ;; with per-run pools it waits the full 1.0s. Slow by check standards
 ;; (~3s), and deliberately so -- the whole scenario IS the timing.
+;; Fifth pass: the pool record isolates the straggler's OWN state, not
+;; the objects it shares with the next run. A channel is a plain object;
+;; a straggler holding one the next run also uses (a global, as here)
+;; popped the new run's parked getter, consed its continuation into the
+;; dead run's mailbox, and returned normally -- the fiber was stranded
+;; past its own timeout, since the dead resume had already won the state
+;; CAS, and the value was gone. A straggler is now refused at every entry
+;; point like a stray thread, because from the live run's point of view
+;; that is what it is.
 (define (~check-flow2-005/straggler-does-not-corrupt-the-next-run)
   (define straggler-done? #f)
+  (define straggler-put 'not-yet)
+  (define shared (make-flow-channel 'shared-across-runs 4))
+  (define live-fiber 'never-resumed)
   (define second-task-done? #f)
   (flow-log-drain!)
   ;; run 1: the task outlives the 2s join -> logged straggler
@@ -596,6 +608,12 @@
      (flow-submit! (car workers)
                    (lambda ()
                      (sleep (make-time 'time-duration 600000000 2))
+                     ;; ~0.6s into run 2, whose fiber is parked on SHARED
+                     (set! straggler-put
+                           (guard (ex (#t (and (flow-error? ex)
+                                               (flow-error-symbol ex))))
+                             (flow-put! shared 'from-the-dead-run)
+                             'returned))
                      (set! straggler-done? #t))
                    (make-flow-channel 'resp))
      (flow-sleep 0.05)   ;; the worker has certainly dequeued by now
@@ -611,19 +629,37 @@
   ;; run 2, while the straggler is still alive and exits mid-run
   (flow-run
    (lambda (workers)
+     (flow-spawn
+      (lambda ()
+        (set! live-fiber
+              (flow-perform
+               (flow-choice (flow-get shared)
+                            (flow-wrap (flow-timeout 0.8)
+                                       (lambda (_) 'timed-out)))))))
      (flow-submit! (car workers)
                    (lambda ()
                      (sleep (make-time 'time-duration 0 1))
                      (set! second-task-done? #t))
                    (make-flow-channel 'resp))
-     (flow-sleep 0.05)
-     (flow-stop))
+     ;; keep the loop running until the parked fiber has resolved one
+     ;; way or the other -- its deadline needs a tick to fire on
+     (let wait ((n 0))
+       (flow-sleep 0.01)
+       (if (or (not (eq? live-fiber 'never-resumed)) (fx>? n 150))
+           (flow-stop)
+           (wait (fx+ n 1)))))
    1)
   ;; run 2's shutdown joined ITS worker, not whatever count the
   ;; straggler's exit left behind
   (assert second-task-done?)
   ;; and by now the straggler has finished on its own leaked pool
   (assert straggler-done?)
+  ;; its put into the live run was refused, and the live fiber was
+  ;; neither handed a value it could not receive nor stranded: its own
+  ;; deadline still reached it
+  (assert (eq? straggler-put 'wrong-thread))
+  (assert (eq? live-fiber 'timed-out))
+  (assert (eqv? 0 (flow-channel-queue-length shared)))
   #t)
 
 ;; A scope owns the compute tasks submitted inside it, so its join must

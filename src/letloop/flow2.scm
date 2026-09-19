@@ -611,15 +611,38 @@
   ;; check this and raise wrong-thread instead.
   (define %flow-loop-thread (box #f))
 
+  ;; The pool of the run in progress, #f outside one. A worker is
+  ;; recognised by holding THIS pool, not by holding any pool: a
+  ;; straggler from a previous run still holds its own, and everything
+  ;; it does with it lands on a dead run -- which is exactly right for
+  ;; the straggler's own state and exactly wrong for an object it shares
+  ;; with the live run. A straggler that put to a channel the next run's
+  ;; fiber was parked on popped that getter, consed its continuation
+  ;; into the dead mailbox, and returned normally: the fiber was
+  ;; stranded past its own deadline (the dead resume had already won the
+  ;; state CAS) and the value was gone. From the live run's point of
+  ;; view a straggler is a thread flow2 does not own, so it is refused
+  ;; like one.
+  (define %flow-pool-current (box #f))
+
+  (define (%flow-stale-worker?)
+    (let ((pool (%worker-current?)))
+      (and pool
+           (unbox %flow-loop-thread)
+           (not (eq? pool (unbox %flow-pool-current))))))
+
   ;; Outside a run there is no loop to corrupt and nothing to check:
   ;; flow-put! on a channel before flow-run is a legitimate way to
   ;; prime one, and it either queues or raises overflow on its own.
   (define (%flow-check-caller-thread! who)
-    (let ((owner (unbox %flow-loop-thread)))
-      (when (and owner
-                 (not (%worker-current?))
-                 (not (eqv? owner (get-thread-id))))
-        (%flow-wrong-thread who))))
+    (let ((owner (unbox %flow-loop-thread))
+          (pool (%worker-current?)))
+      (when owner
+        (if pool
+            (unless (eq? pool (unbox %flow-pool-current))
+              (%flow-wrong-thread who))
+            (unless (eqv? owner (get-thread-id))
+              (%flow-wrong-thread who))))))
 
   ;; loop-spawn from the loop thread (the hot path, untouched); from
   ;; a compute thread, queue the thunk on the worker's OWN run's pool
@@ -1126,6 +1149,15 @@
   (define flow-perform
     (lambda (event)
       (%flow-check-caller-thread! 'flow-perform)
+      (%flow-perform event)))
+
+  ;; Without the caller check: %worker-body fetches its next task
+  ;; through this, so a straggler -- refused everywhere else once the
+  ;; next run starts -- can still dequeue the stop sentinel its own run
+  ;; left it and exit, instead of dying on a raise in the framework
+  ;; loop.
+  (define %flow-perform
+    (lambda (event)
       (if (%worker-current?)
           (%flow-perform-off-loop event)
           (let ((scope %scope-current))
@@ -2298,7 +2330,7 @@
   (define (%worker-body pool channel)
     (%worker-current? pool)
     (let loop ()
-      (let ((task (flow-get! channel)))
+      (let ((task (%flow-perform (flow-get channel))))
         (unless (eq? task %flow-worker-stop)
           (let ((scope (flow-task-scope task)))
             ;; The decrement pairs with flow-submit!'s increment and has
@@ -2321,12 +2353,20 @@
                               ;; channel still says WHERE it failed,
                               ;; the always-a-reply design's original
                               ;; "original + worker id" promise.
-                              (%channel-put! (flow-task-response task)
-                                             (make-flow-error
-                                              'compute "flow2: worker task raised"
-                                              (list (flow-channel-name channel))
-                                              ex)
-                                             #t)))
+                              ;;
+                              ;; Not from a straggler: nobody in its
+                              ;; dead run is listening, and a response
+                              ;; channel shared with the live run would
+                              ;; be reached through the dead pool --
+                              ;; the strand %flow-stale-worker? exists
+                              ;; to prevent.
+                              (unless (%flow-stale-worker?)
+                                (%channel-put! (flow-task-response task)
+                                               (make-flow-error
+                                                'compute "flow2: worker task raised"
+                                                (list (flow-channel-name channel))
+                                                ex)
+                                               #t))))
                     ((flow-task-thunk task)))
                   (%task-scope #f)))
               (lambda ()
@@ -2353,7 +2393,8 @@
        ;; The pool is created per run and handed to the workers and the
        ;; collector as a closure, never through a global — a straggler
        ;; from a previous run therefore cannot touch this run's eventfd,
-       ;; mailbox, or live count (see <flow2-pool>).
+       ;; mailbox, or live count (see <flow2-pool>) -- and is refused at
+       ;; every entry point, because it does not hold %flow-pool-current.
        (let* ((pool
                (and (not (fxzero? compute-count))
                     ;; two cells: the signal value, and the read target
@@ -2366,6 +2407,7 @@
               (channels
                (if pool
                    (begin
+                     (set-box! %flow-pool-current pool)
                      (loop-spawn (lambda () (%collector pool)))
                      (let start ((i 0) (channels '()))
                        (if (fx=? i compute-count)
@@ -2385,9 +2427,11 @@
          (loop-run)
          (when pool
            (%flow-shutdown-pool! pool channels))
-         ;; Cleared after the pool is joined, so a straggler that puts
-         ;; on its way out is still recognised as a worker rather than
-         ;; as a stray thread.
+         ;; Cleared after the pool is joined, so a worker that puts on
+         ;; its way out is still recognised as this run's rather than
+         ;; as a stray thread. A straggler that outlives the join is
+         ;; recognised as nobody's from the next run on.
+         (set-box! %flow-pool-current #f)
          (set-box! %flow-loop-thread #f)
          (void)))))
 
