@@ -266,14 +266,14 @@
     (flow-box-cons! (%flow-log-ensure-box!) (cons (%flow-log-now) sexp)))
 
   ;; Every pending entry: oldest-first within each thread's own box,
-  ;; boxes in registry order rather than globally sorted — a caller
-  ;; wanting strict cross-thread order can sort on the timestamps.
-  ;; Draining the registry empties it, so every box is pushed straight
-  ;; back: registration is once per thread for that thread's life, not
-  ;; a one-shot queue.
+  ;; boxes in registration order rather than globally sorted — a caller
+  ;; wanting strict cross-thread order can sort on the timestamps. The
+  ;; registry is read, not drained: it is a cons list, newest first, so
+  ;; reversing a snapshot IS registration order. It used to be drained
+  ;; and re-consed, which flipped the order on every call and made the
+  ;; documented order true only on alternate drains.
   (define (flow-log-drain!)
-    (let ((boxes (flow-box-drain! %flow-log-registry)))
-      (for-each (lambda (b) (flow-box-cons! %flow-log-registry b)) boxes)
+    (let ((boxes (reverse (unbox %flow-log-registry))))
       (apply append (map (lambda (b) (reverse (flow-box-drain! b))) boxes))))
 
   (define (%flow-log-write! entries)
