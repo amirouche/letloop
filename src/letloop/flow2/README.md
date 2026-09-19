@@ -344,7 +344,11 @@ The number of compute threads is fixed for the run. `flow-run` returns
 once the loop has stopped *and* the compute pool has been joined, which
 is bounded at two seconds — past that it logs
 `(flow2 shutdown-workers-still-running N)` and leaks the eventfd rather
-than hand a live writer a descriptor number about to be reused.
+than hand a live writer a descriptor number about to be reused. A
+worker still out after that is a *straggler*: it keeps its own run's
+pool, so what it does with its own state lands on the dead run, and
+every flow2 operation it attempts once a later `flow-run` is in
+progress raises `wrong-thread` (see Threads).
 
 Note what does **not** stop the loop: a raise out of fiber zero. It is
 a fiber like any other, so an unguarded raise kills it, prints one line
@@ -775,6 +779,12 @@ earlier version of this page named three procedures, and the three
 were the only three that had the check; the version after that named
 four, and `flow-channel-buffer-size!` — which wakes parked putters, a
 resume like any other — was the fifth.
+
+A compute thread that outlived its run's shutdown join — a
+*straggler*, see `flow-run` — is treated the same way by every later
+`flow-run`: from the live run's point of view it is a thread flow2 does
+not own, so its operations raise `wrong-thread` rather than reach a
+channel the live run is parked on through a pool nobody drains.
 
 Outside a `flow-run` there is nothing to corrupt and no check: priming
 a channel before the loop starts is legitimate.
