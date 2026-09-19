@@ -9,12 +9,12 @@ Amirouche A. BOUBEKKI
 ## Status
 
 `(letloop flow2)` is **implemented**, in `src/letloop/flow2.scm`, with
-69 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
+75 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
 `(letloop flow)` stays untouched and keeps serving its current ones.
 
 This document began as a draft specification and is now the library's
 reference, so where the two ever disagree the source wins. It was last
-reconciled against the implementation on 2026-08-27, after the fourth
+reconciled against the implementation on 2026-09-18, after the fifth
 adverse review. Two earlier reconciliations changed documented
 behaviour: channels became bounded by default with a full put parking
 (2026-08-17), which is the one change that would break code written
@@ -117,6 +117,25 @@ check; the guard lives in `flow-perform` now and the section states a
 rule. The reproducers are in `checks/repro-flow2-fourth-pass.scm`, and
 the two for the examples run the page's code as printed — which is the
 third pass's own lesson, applied to the pass that stated it.
+
+A fifth pass on 2026-09-03 went after what the earlier four had
+*certified* rather than what they had fixed — the pool, the CML core,
+the log — and found six defects and five drifts, all closed. Its
+pattern: **a property proven for the value was assumed for the
+vehicle.** The eventfd wake was a write of 1 in the source and, to the
+kernel, a write of whatever the last read had left in the shared cell,
+so coalesced wakes multiplied it to 2^64 and workers then blocked in
+`write(2)` one per loop tick. `flow-wrap`'s procedure ran on whichever
+thread delivered the value, before the commit, so a raising wrap
+killed the putter and stranded the getter, and a worker delivering to
+a loop fiber ran loop-side code on the compute thread — the one thing
+the Rationale says cannot be written. A straggler's isolation covered
+its own pool and not the channels it shares with the next run. The
+flush thread read `current-error-port` on its own thread, where a
+later `parameterize` never arrives. And `flow-channel-buffer-size!`
+was the fifth guarded-by-name entry point, one past the fourth pass's
+list of four. The reproducers are in
+`checks/repro-flow2-fifth-pass.scm`; each defect has a regression check.
 
 The lesson for this document specifically: **reconciling docs against
 code is only right when the code is the part that is right.** The
