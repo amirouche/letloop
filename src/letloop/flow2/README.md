@@ -340,9 +340,11 @@ channels as its single argument (the empty list when
 zero is the program's business: whoever holds a worker's channel may
 submit to it.
 
-The number of compute threads is fixed for the run. `flow-run` returns
-once the loop has stopped *and* the compute pool has been joined, which
-is bounded at two seconds — past that it logs
+`COMPUTE-COUNT` must be a non-negative fixnum; anything else is an
+error at the call, before a loop or a thread exists. The number of
+compute threads is fixed for the run. `flow-run` returns once the loop
+has stopped *and* the compute pool has been joined, which is bounded
+at two seconds — past that it logs
 `(flow2 shutdown-workers-still-running N)` and leaks the eventfd rather
 than hand a live writer a descriptor number about to be reused. A
 worker still out after that is a *straggler*: it keeps its own run's

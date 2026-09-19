@@ -153,7 +153,8 @@
    ~check-flow2-001/wrap-runs-on-the-performer-after-commit
    ~check-flow2-005/wrap-runs-on-the-loop-when-a-worker-delivers
    ~check-flow2-005/coalesced-wakes-do-not-inflate-the-eventfd
-   ~check-flow2-000/log-flush-writes-to-the-port-current-at-start)
+   ~check-flow2-000/log-flush-writes-to-the-port-current-at-start
+   ~check-flow2-005/compute-count-is-validated)
 
   (import (chezscheme)
           (letloop r999)
@@ -2392,6 +2393,13 @@
     (case-lambda
       ((proc) (flow-run proc 0))
       ((proc compute-count)
+       ;; Before anything is touched. A negative count is not zero, so
+       ;; a pool was created, and the forking loop below terminates on
+       ;; (fx=? i compute-count) -- never, for i >= 0: it forked until
+       ;; fork-thread failed with EAGAIN.
+       (unless (and (fixnum? compute-count) (fx>=? compute-count 0))
+         (error 'flow-run "compute-count must be a non-negative fixnum"
+                compute-count))
        (loop-new)
        (set! %scope-current %root-scope)
        ;; Whoever calls flow-run owns the loop for this run; see
