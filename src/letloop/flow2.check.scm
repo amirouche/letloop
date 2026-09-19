@@ -2364,3 +2364,84 @@
   (assert (eqv? wrap-tid loop-tid))
   (assert spawned?)
   #t)
+
+;; The pool's eventfd wake cell used to be the collector's read target
+;; too, and an eventfd read stores the counter into its buffer. After
+;; the first wake the cell held the count that read returned, every
+;; later signal added THAT instead of 1, and whenever several wakes
+;; coalesced inside one busy tick the cell was multiplied -- it reached
+;; 2^64 in about twenty windows, after which a second signal per read
+;; cycle blocked the worker in write(2) until the loop's next tick.
+;; Observed through /proc/self/fdinfo, which reports the live counter:
+;; at the end of a busy window it must be the number of signals in the
+;; window, never their product with the previous window's.
+(define (flow2-check-eventfd-counts)
+  (define (count-after info i)
+    ;; the hex value following "eventfd-count:" at I, whitespace-trimmed
+    (let skip ((j (fx+ i 14)))
+      (if (and (fx<? j (string-length info))
+               (char-whitespace? (string-ref info j)))
+          (skip (fx+ j 1))
+          (let end ((k j))
+            (if (or (fx=? k (string-length info))
+                    (char-whitespace? (string-ref info k)))
+                (string->number (substring info j k) 16)
+                (end (fx+ k 1)))))))
+  (let loop ((names (directory-list "/proc/self/fd")) (out '()))
+    (if (null? names)
+        out
+        (let ((info (guard (ex (#t #f))
+                      (call-with-input-file
+                          (string-append "/proc/self/fdinfo/" (car names))
+                        get-string-all))))
+          (loop (cdr names)
+                (let find ((i 0))
+                  (cond
+                   ((or (not info) (fx>? (fx+ i 14) (string-length info))) out)
+                   ((string=? "eventfd-count:" (substring info i (fx+ i 14)))
+                    (cons (count-after info i) out))
+                   (else (find (fx+ i 1))))))))))
+
+(define (~check-flow2-005/coalesced-wakes-do-not-inflate-the-eventfd)
+  (define workers 4)
+  (define rounds 8)
+  (define peak 0)
+  (flow-run
+   (lambda (ws)
+     (let round ((r 0))
+       (when (fx<? r rounds)
+         (let ((channels (map (lambda (i) (make-flow-channel (cons 'wake i) 4))
+                              (iota workers)))
+               (arrived (box 0)))
+           ;; one fiber parked per channel, so every worker put has to
+           ;; RESUME a fiber -- a put that merely enqueues sends no wake
+           (for-each (lambda (ch)
+                       (flow-spawn
+                        (lambda ()
+                          (flow-get! ch)
+                          (set-box! arrived (fx+ 1 (unbox arrived))))))
+                     channels)
+           (flow-sleep 0.01)
+           (for-each (lambda (w ch)
+                       (flow-submit! w
+                                     (lambda ()
+                                       (sleep (make-time 'time-duration 10000000 0))
+                                       (flow-put! ch 'x))
+                                     (make-flow-channel 'resp)))
+                     ws channels)
+           ;; hold the loop busy so the wakes coalesce, then read the
+           ;; live counter before the loop can drain it
+           (let ((until (+ (real-time) 60)))
+             (let spin () (when (< (real-time) until) (spin))))
+           (set! peak (apply max peak (flow2-check-eventfd-counts)))
+           (let settle ((n 0))
+             (when (and (fx<? (unbox arrived) workers) (fx<? n 200))
+               (flow-sleep 0.01)
+               (settle (fx+ n 1))))
+           (round (fx+ r 1)))))
+     (flow-stop))
+   workers)
+  ;; a handful of resumes' worth of unit signals, not their product:
+  ;; the multiplied cell read 589824 by round six
+  (assert (fx<=? peak 64))
+  #t)
