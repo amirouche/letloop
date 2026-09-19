@@ -1970,13 +1970,16 @@
   ;; 'flow2-close so that %bases-cancel-exempt? can let it run under a
   ;; dead scope, where the dead-scope test used to raise before the SQE
   ;; was ever prepped — the fd then leaked on the one path whose whole
-  ;; job is to release it. Everything else about cancellation still
-  ;; applies to a close that was already in flight: the scope's
-  ;; cancellation wins whatever perform was parked, the fiber unwinds,
-  ;; and this handler's resume reports #f and is discarded — the kernel
-  ;; released the descriptor either way. A close also always completes
-  ;; on its own, so unlike an accept or a read it can never hold a
-  ;; cancelled parent in %scope-finish's drain.
+  ;; job is to release it. The same exemption means a perform whose
+  ;; only base is a close gets NO cancel base: the fiber is not woken
+  ;; by its scope's cancellation, it waits for the close CQE, and the
+  ;; wait is bounded because a close always completes on its own. That
+  ;; bounded wait is what a cancelled parent pays in %scope-finish's
+  ;; drain for a child mid-close. Composed with other bases the perform
+  ;; is cancellable as a whole; a close already in flight when the
+  ;; cancellation wins still completes, and this handler's resume then
+  ;; reports #f and is discarded — the kernel released the descriptor
+  ;; either way.
   (define flow-close
     (lambda (fd)
       (make-flow% 'base 'flow2-close
