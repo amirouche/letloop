@@ -152,7 +152,8 @@
    ~check-flow2-003/nursery-body-raise-drains-children
    ~check-flow2-001/wrap-runs-on-the-performer-after-commit
    ~check-flow2-005/wrap-runs-on-the-loop-when-a-worker-delivers
-   ~check-flow2-005/coalesced-wakes-do-not-inflate-the-eventfd)
+   ~check-flow2-005/coalesced-wakes-do-not-inflate-the-eventfd
+   ~check-flow2-000/log-flush-writes-to-the-port-current-at-start)
 
   (import (chezscheme)
           (letloop r999)
@@ -282,18 +283,21 @@
     (let ((boxes (reverse (unbox %flow-log-registry))))
       (apply append (map (lambda (b) (reverse (flow-box-drain! b))) boxes))))
 
-  (define (%flow-log-write! entries)
+  (define (%flow-log-write! entries port)
     (unless (null? entries)
-      (let ((port (current-error-port)))
-        (for-each (lambda (entry) (write entry port) (newline port))
-                  entries)
-        (flush-output-port port))))
+      (for-each (lambda (entry) (write entry port) (newline port))
+                entries)
+      (flush-output-port port)))
 
-  ;; (current-error-port) is read at flush time rather than captured at
-  ;; start, so a caller that reparameterizes it — a check capturing
-  ;; output, a supervisor redirecting it — is honored on the next cycle.
-  ;; Plain synchronous port I/O: this thread is not on the loop's
-  ;; critical path and does not run a ring at all, so routing it
+  ;; The port is captured on the CALLING thread when the flusher
+  ;; starts, or passed explicitly. It used to be read at flush time on
+  ;; the flush thread, documented as "reparameterizing it is honored on
+  ;; the next cycle" -- but current-error-port is a thread parameter,
+  ;; and a thread forked before a parameterize keeps the value it
+  ;; inherited at fork time, so the documented shape (start the flusher
+  ;; at program start, redirect stderr later) wrote to the old port
+  ;; forever. Plain synchronous port I/O: this thread is not on the
+  ;; loop's critical path and does not run a ring at all, so routing it
   ;; through io_uring would buy nothing and cost it a loop of its own.
   (define %flow-log-poll-interval 0.01)
   (define %flow-log-stop-requested? (box #f))
@@ -304,29 +308,32 @@
   ;; way — flow-box-drain! never double-delivers — but two threads
   ;; interleaving writes to the same port produce shuffled output at
   ;; exactly the moment someone is reading it to diagnose something.
-  (define (flow-log-start! period-seconds)
-    (when (box-cas! %flow-log-stopped? #t #f)
-      (set-box! %flow-log-stop-requested? #f)
-      (let ((ticks (fxmax 1 (exact (round (/ period-seconds
-                                             %flow-log-poll-interval))))))
-        (fork-thread
-         (lambda ()
-           (let lp ()
-             ;; Re-check the stop flag at the poll interval rather than
-             ;; only at a period boundary, so flow-log-stop! is prompt
-             ;; even when the period is long.
-             (let wait ((n 0))
-               (unless (or (unbox %flow-log-stop-requested?) (fx>=? n ticks))
-                 (sleep (make-time 'time-duration
-                                   (exact (round (* %flow-log-poll-interval
-                                                    1000000000)))
-                                   0))
-                 (wait (fx+ n 1))))
-             (%flow-log-write! (flow-log-drain!))
-             (if (unbox %flow-log-stop-requested?)
-                 (set-box! %flow-log-stopped? #t)
-                 (lp)))))))
-    (void))
+  (define flow-log-start!
+    (case-lambda
+      ((period-seconds) (flow-log-start! period-seconds (current-error-port)))
+      ((period-seconds port)
+       (when (box-cas! %flow-log-stopped? #t #f)
+         (set-box! %flow-log-stop-requested? #f)
+         (let ((ticks (fxmax 1 (exact (round (/ period-seconds
+                                                %flow-log-poll-interval))))))
+           (fork-thread
+            (lambda ()
+              (let lp ()
+                ;; Re-check the stop flag at the poll interval rather
+                ;; than only at a period boundary, so flow-log-stop! is
+                ;; prompt even when the period is long.
+                (let wait ((n 0))
+                  (unless (or (unbox %flow-log-stop-requested?) (fx>=? n ticks))
+                    (sleep (make-time 'time-duration
+                                      (exact (round (* %flow-log-poll-interval
+                                                       1000000000)))
+                                      0))
+                    (wait (fx+ n 1))))
+                (%flow-log-write! (flow-log-drain!) port)
+                (if (unbox %flow-log-stop-requested?)
+                    (set-box! %flow-log-stopped? #t)
+                    (lp)))))))
+       (void))))
 
   ;; Blocks the caller until the flush thread has done one final
   ;; drain-and-write and exited, so nothing logged before the stop
