@@ -589,8 +589,11 @@ The backlog is discarded with the fd, on close.
 #### `(flow-write fd bytevector [start])`
 
 Event: one `send` of `BYTEVECTOR` from `START` (default `0`). Result is
-the count actually written — a positive fixnum — or `#f` on failure.
-`START` lets a caller resume a partial write without copying anything.
+the count actually written, or `#f` on failure. The count is a positive
+fixnum for a real send, and `0` when `START` equals the length — nothing
+is left to send, so no syscall is issued and the event is immediately
+ready. `START` lets a caller resume a partial write without copying
+anything.
 
 It does **not** loop internally, and that is deliberate. Resubmitting
 the remainder from inside the completion handler runs on the
@@ -650,11 +653,15 @@ loop, so a caller wanting all of it writes the loop.
 The one ring event that is deliberately **not** cancellable, for the
 opposite reason to all the others: cancelling a close would leak the
 fd, which is exactly what the cancelling scope is trying to clean up.
-The close is left to complete — the fiber unwinds on the scope's
-cancellation and the completion is discarded, but the kernel releases
-the descriptor either way. A close also always completes on its own, so
-unlike an accept or a read it can never hold a cancelled parent in the
-drain described under Nurseries.
+So a perform whose only base is a close carries no cancel base at all:
+the fiber is *not* woken by its scope's cancellation, it waits for the
+close to complete, and that wait is bounded because a close always
+completes on its own. This bounded wait is the cost a cancelled parent
+pays for a child in the middle of a close, the one named under
+Nurseries. Composed with other bases — `(flow-choice (flow-close fd)
+(flow-read fd))` — the perform is cancellable as a whole; a close
+already in flight when cancellation wins still completes, and its
+result is discarded.
 
 For the same reason a close **also runs under a scope that is already
 dead**, where every other event raises `cancelled` before it reaches
@@ -846,7 +853,7 @@ What the library itself logs:
 | entry | when |
 |---|---|
 | `(flow2 channel-full NAME BOUND)` | a put parked on a full channel, once per saturation episode |
-| `(flow2 cancel-raised BASE CONDITION)` | a losing base's cancel thunk raised; the rest of the batch still ran. `BASE` is the base's tag (`(flow2-get NAME)` for a channel get, `#f` for a ring event or a base built with `make-flow`), `CONDITION` the raised object, rendered |
+| `(flow2 cancel-raised BASE CONDITION)` | a losing base's cancel thunk raised; the rest of the batch still ran. `BASE` is the base's tag (`(flow2-get NAME)` for a channel get, `(flow2-space NAME)` for a parked put, `flow2-scope` for a scope base, `flow2-close` for a close, `#f` for any other ring event or a base built with `make-flow`), `CONDITION` the raised object, rendered |
 | `(flow2 collector-wait-raised)` | the collector could not re-arm its eventfd read; it retries next tick |
 | `(flow2 shutdown-workers-still-running N)` | `flow-run` gave up joining `N` workers and leaked the eventfd rather than reuse its number |
 
@@ -983,7 +990,7 @@ created for itself.
        ((flow-error? msg) (raise msg))          ; framework error reply
        (else
         (case (car msg)
-          ((read-at)                            ; (read-at fd offset size)
+          ((read-at)                            ; (read-at path offset size)
            (flow-spawn                          ; concurrent, not serial:
             (lambda ()                          ; N read-ats overlap on the ring
               (flow-put! down (apply do-read-at (cdr msg)))))
