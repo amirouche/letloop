@@ -151,7 +151,8 @@
    ;; fifth adverse pass, 2026-09-03
    ~check-flow2-003/nursery-body-raise-drains-children
    ~check-flow2-001/wrap-runs-on-the-performer-after-commit
-   ~check-flow2-005/wrap-runs-on-the-loop-when-a-worker-delivers)
+   ~check-flow2-005/wrap-runs-on-the-loop-when-a-worker-delivers
+   ~check-flow2-005/coalesced-wakes-do-not-inflate-the-eventfd)
 
   (import (chezscheme)
           (letloop r999)
@@ -517,12 +518,22 @@
   ;; nobody drains (a dead run's resumes SHOULD be dropped), and its
   ;; exit wakes a join that has already given up on it.
   ;;
-  ;; The buffer is one 8-byte cell holding the value 1, allocated with
-  ;; the eventfd and never written from Scheme again, so every
-  ;; cross-thread wake-up is a bare write(2) instead of a
-  ;; foreign-alloc / foreign-free pair on the hottest path the pool
-  ;; has. The live count is guarded by the mutex rather than CAS'd
-  ;; because the shutdown join needs a condition variable anyway.
+  ;; The buffer is TWO 8-byte cells, allocated with the eventfd. The
+  ;; first holds the value 1 and is what every %eventfd-signal! writes,
+  ;; so a cross-thread wake-up is a bare write(2) instead of a
+  ;; foreign-alloc / foreign-free pair on the hottest path the pool has.
+  ;; The second is the collector's read target. They used to be one
+  ;; cell, on the theory that Scheme never wrote it again -- but an
+  ;; eventfd READ stores the counter into its buffer, so after the first
+  ;; wake the cell held whatever count that read returned, and every
+  ;; later signal added THAT instead of 1. Whenever several wakes
+  ;; coalesced inside one busy tick the cell was multiplied, it never
+  ;; shrank, and it reached 2^64 in about twenty windows; past 2^63 the
+  ;; kernel refuses a second addition per read cycle, and the fd is
+  ;; blocking, so the worker sat in write(2) until the loop's next tick
+  ;; -- one cross-thread wake per tick, every other worker stalled. The
+  ;; live count is guarded by the mutex rather than CAS'd because the
+  ;; shutdown join needs a condition variable anyway.
   (define-record-type* <flow2-pool>
     (make-flow-pool% eventfd buffer spawns mutex gone live running?)
     %flow-pool?
@@ -571,16 +582,19 @@
       (lambda (fd) (call-with-values (lambda () (func fd)) (lambda (r e) r)))))
 
   ;; Park the collector fiber on the pool's eventfd until a worker
-  ;; signals it. Reads into the buffer owned by the pool rather than
-  ;; one allocated per wait. The collector parks here and, at shutdown,
-  ;; is simply never resumed -- the loop has stopped -- so a per-wait
-  ;; allocation was freed on every path except the one that always
-  ;; happens, and leaked eight bytes plus its header per flow-run.
+  ;; signals it. Reads into the pool's SECOND cell rather than one
+  ;; allocated per wait -- and not into the first, which is the value
+  ;; the signal writes (see <flow2-pool>). The collector parks here and,
+  ;; at shutdown, is simply never resumed -- the loop has stopped -- so
+  ;; a per-wait allocation was freed on every path except the one that
+  ;; always happens, and leaked eight bytes plus its header per
+  ;; flow-run.
   (define %eventfd-wait
     (lambda (pool)
       (let* ((sqe (loop-get-sqe (loop-ring (loop-current))))
              (id (loop-alloc-id!)))
-        (io-uring-prep-read sqe (%pool-eventfd pool) (%pool-buffer pool) 8 0)
+        (io-uring-prep-read sqe (%pool-eventfd pool)
+                            (+ (%pool-buffer pool) 8) 8 0)
         (io-uring-sqe-set-data64 sqe id)
         (loop-abort
          (lambda (k)
@@ -2336,8 +2350,10 @@
        ;; mailbox, or live count (see <flow2-pool>).
        (let* ((pool
                (and (not (fxzero? compute-count))
-                    (let ((buffer (foreign-alloc 8)))
+                    ;; two cells: the signal value, and the read target
+                    (let ((buffer (foreign-alloc 16)))
                       (foreign-set! 'unsigned-64 buffer 0 1)
+                      (foreign-set! 'unsigned-64 buffer 8 0)
                       (make-flow-pool% (%eventfd-create) buffer (box '())
                                        (make-mutex) (make-condition)
                                        compute-count #t))))
