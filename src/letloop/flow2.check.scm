@@ -2486,3 +2486,24 @@
   ;; the multiplied cell read 589824 by round six
   (assert (fx<=? peak 64))
   #t)
+
+;; current-error-port is a thread parameter: a flush thread forked
+;; before a parameterize keeps the port it inherited, so "reparameterize
+;; and it is honored on the next cycle" was never true of a thread
+;; started earlier. The port is now captured on the CALLING thread when
+;; the flusher starts, or passed explicitly; this pins the former.
+(define (~check-flow2-000/log-flush-writes-to-the-port-current-at-start)
+  (define captured (open-output-string))
+  (flow-log-drain!)
+  (parameterize ((current-error-port captured))
+    (flow-log-start! 0.01)
+    (flow-log '(flow2-check captured-line))
+    (flow-log-stop!))
+  (assert (flow2-check-substring? "captured-line" (get-output-string captured)))
+  ;; and an explicit port wins over the current one
+  (let ((explicit (open-output-string)))
+    (flow-log-start! 0.01 explicit)
+    (flow-log '(flow2-check explicit-line))
+    (flow-log-stop!)
+    (assert (flow2-check-substring? "explicit-line" (get-output-string explicit))))
+  #t)

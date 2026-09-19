@@ -856,14 +856,18 @@ within each thread's own accumulator, threads concatenated in
 registration order rather than globally sorted — sort on the
 timestamps if you need strict cross-thread order. Draining empties.
 
-#### `(flow-log-start! period-seconds)` / `(flow-log-stop!)`
+#### `(flow-log-start! period-seconds [port])` / `(flow-log-stop!)`
 
-Start a single dedicated OS thread that drains and writes to
-`(current-error-port)` every `PERIOD-SECONDS`, and stop it. Calling
-`flow-log-start!` twice does not fork a second flush thread. The port
-is read at flush time, not captured at start, so reparameterizing it
-is honored on the next cycle. `flow-log-stop!` blocks until the thread
-has done a final drain, so nothing logged before the request is lost.
+Start a single dedicated OS thread that drains and writes to `PORT`
+every `PERIOD-SECONDS`, and stop it. `PORT` defaults to the caller's
+`(current-error-port)` **at the moment of the call**, captured on the
+calling thread: `current-error-port` is a thread parameter, so a
+`parameterize` established later, on another thread, is invisible to
+a flusher already running. To redirect, pass the port, or stop and
+start inside the `parameterize`. Calling `flow-log-start!` twice does
+not fork a second flush thread. `flow-log-stop!` blocks until the
+thread has done a final drain, so nothing logged before the request
+is lost.
 
 What the library itself logs:
 
