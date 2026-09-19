@@ -2288,3 +2288,79 @@
   (assert (eq? outcome 'body-boom))
   (assert (eq? at-raise #t))
   #t)
+
+;; A flow-wrap's PROC used to run inside the base's resume -- on the
+;; stack of whoever completed the rendezvous, BEFORE resume-from's CAS.
+;; A PROC that raised therefore raised in the fiber calling flow-put!,
+;; the getter was never resumed, and the value was gone; the identical
+;; program with the value already queued (the try path) raised in the
+;; getter, as CML says. The wrap now travels with the raw value and is
+;; applied by %flow-settle on the performing fiber's own stack, after
+;; the commit, inside its own guards.
+(define (~check-flow2-001/wrap-runs-on-the-performer-after-commit)
+  (define ch (make-flow-channel 'wrapped))
+  (define getter-outcome 'never-resumed)
+  (define putter-outcome 'not-set)
+  (define (bad-wrap v) (error 'wrap "boom"))
+  (flow-run
+   (lambda (workers)
+     ;; try path, for contrast: the value is already there
+     (flow-put! ch 'queued)
+     (assert (equal? '(getter-raised wrap)
+                     (guard (ex (#t (list 'getter-raised (condition-who ex))))
+                       (flow-perform (flow-wrap (flow-get ch) bad-wrap)))))
+     ;; block path: the getter parks, then a sibling puts
+     (flow-spawn
+      (lambda ()
+        (set! getter-outcome
+              (guard (ex (#t (list 'getter-raised (condition-who ex))))
+                (flow-perform (flow-wrap (flow-get ch) bad-wrap))))))
+     (flow-sleep 0.01)
+     (set! putter-outcome
+           (guard (ex (#t (list 'putter-raised (condition-who ex))))
+             (flow-put! ch 'delivered)
+             'put-returned))
+     (flow-sleep 0.02)
+     (flow-stop)))
+  (assert (eq? putter-outcome 'put-returned))
+  (assert (equal? getter-outcome '(getter-raised wrap)))
+  ;; nothing left behind by either side
+  (assert (eqv? 0 (flow-channel-queue-length ch)))
+  (assert (eqv? 0 (flow-channel-getters-length ch)))
+  #t)
+
+;; The cross-thread half of the same finding, and the one that broke the
+;; Rationale's promise that "there is no API through which a compute
+;; thread can reach the loop's state": when the deliverer was a worker,
+;; the wrap ran on the worker. Here the wrap reports its thread and
+;; spawns a fiber; both must be the loop's.
+(define (~check-flow2-005/wrap-runs-on-the-loop-when-a-worker-delivers)
+  (define ch (make-flow-channel 'tid))
+  (define loop-tid (get-thread-id))
+  (define wrap-tid 'not-set)
+  (define spawned? #f)
+  (flow-run
+   (lambda (workers)
+     (flow-spawn
+      (lambda ()
+        (set! wrap-tid
+              (flow-perform
+               (flow-wrap (flow-get ch)
+                          (lambda (v)
+                            (flow-spawn (lambda () (set! spawned? #t)))
+                            (get-thread-id)))))))
+     (flow-sleep 0.01)                 ;; the getter is parked
+     (flow-submit! (car workers)
+                   (lambda ()
+                     (sleep (make-time 'time-duration 20000000 0))
+                     (flow-put! ch 'x))
+                   (make-flow-channel 'resp))
+     (let wait ((n 0))
+       (flow-sleep 0.01)
+       (if (or spawned? (fx>? n 100))
+           (flow-stop)
+           (wait (fx+ n 1)))))
+   1)
+  (assert (eqv? wrap-tid loop-tid))
+  (assert spawned?)
+  #t)

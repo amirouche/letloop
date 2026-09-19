@@ -388,7 +388,12 @@ Returns `#t` if `OBJ` is an event, otherwise `#f`.
 #### `(flow-wrap event proc)`
 
 Returns an event that synchronizes as `EVENT` does and applies `PROC`
-to the result.
+to the result. `PROC` runs on the **performing** fiber or thread, after
+the synchronization has committed, inside whatever `guard` surrounds
+the `flow-perform` — never on the thread that delivered the value. A
+`PROC` that raises therefore raises out of `flow-perform`, whichever
+path won, and a `PROC` that itself performs is an ordinary nested
+perform.
 
 #### `(flow-guard thunk)`
 
