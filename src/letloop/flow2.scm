@@ -146,7 +146,10 @@
    ~check-flow2-009/open-loses-choice-no-fd-leak
    ~check-flow2-009/close-under-choice-fd-actually-closed
    ~check-flow2-009/close-while-read-in-flight
-   ~check-flow2-009/close-in-a-dead-scope-still-closes)
+   ~check-flow2-009/close-in-a-dead-scope-still-closes
+
+   ;; fifth adverse pass, 2026-09-03
+   ~check-flow2-003/nursery-body-raise-drains-children)
 
   (import (chezscheme)
           (letloop r999)
