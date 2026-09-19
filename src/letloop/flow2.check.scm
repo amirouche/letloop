@@ -2257,3 +2257,34 @@
   (assert (or (eq? race 'timeout) (pair? race)))
   (assert (not stash))
   #t)
+
+;;------------------------------------------------------------
+;; Fifth adverse pass, 2026-09-03
+;;------------------------------------------------------------
+
+;; README, flow-nursery: "A raise from PROC itself -- not from a child --
+;; is treated exactly like a child's: it fails the scope, so the
+;; children are cancelled and drained before it propagates." Stated
+;; since the first draft, never executed. The child is parked on a long
+;; sleep and records its own unwinding; the caller must see that record
+;; already made when the body's raise reaches it.
+(define (~check-flow2-003/nursery-body-raise-drains-children)
+  (define child-unwound? #f)
+  (define at-raise 'unset)
+  (define outcome 'unset)
+  (flow-run
+   (lambda (workers)
+     (guard (ex (#t (set! outcome ex) (set! at-raise child-unwound?)))
+       (flow-nursery
+        (lambda (scope)
+          (flow-spawn
+           (lambda ()
+             (guard (ex ((flow-error-cancelled? ex)
+                         (set! child-unwound? #t)
+                         (raise ex)))
+               (flow-sleep 5.0))))
+          (raise 'body-boom))))
+     (flow-stop)))
+  (assert (eq? outcome 'body-boom))
+  (assert (eq? at-raise #t))
+  #t)
