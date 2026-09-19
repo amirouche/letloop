@@ -765,14 +765,16 @@ continuation that does not exist in that thread.
 
 **Every flow2 operation raises `wrong-thread` when called from one.**
 Not a list of them: `flow-perform` carries the check, so every
-suspending operation inherits it, and the four that reach a channel or
+suspending operation inherits it, and the five that reach a channel or
 the scheduler without suspending — `flow-put!`, `flow-get-try`,
-`flow-submit!`, `flow-spawn` — plus the scope and lifecycle entry
-points (`flow-nursery`, `flow-monitor`, `flow-scope-cancel!`,
-`flow-stop`) check on their own. Read the rule as universal; do not
-read the parenthetical as the boundary. An earlier version of this
-page named three procedures, and the three were the only three that
-had the check.
+`flow-submit!`, `flow-spawn`, `flow-channel-buffer-size!` — plus the
+scope and lifecycle entry points (`flow-nursery`, `flow-monitor`,
+`flow-scope-cancel!`, `flow-stop`) check on their own. Read the rule
+as universal; do not read the parenthetical as the boundary. An
+earlier version of this page named three procedures, and the three
+were the only three that had the check; the version after that named
+four, and `flow-channel-buffer-size!` — which wakes parked putters, a
+resume like any other — was the fifth.
 
 Outside a `flow-run` there is nothing to corrupt and no check: priming
 a channel before the loop starts is legitimate.

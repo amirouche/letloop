@@ -1625,6 +1625,12 @@
   ;; bounded channel could never be made unbounded even though the
   ;; constructor allows creating one.
   (define (flow-channel-buffer-size! channel n)
+    ;; Growing a bound wakes the putters it admits, and a wake is a
+    ;; resume -- on a stray thread, the unsynchronized loop-spawn the
+    ;; guard exists to prevent. This was the one entry point that
+    ;; reaches the scheduler and had no guard after the fourth pass
+    ;; moved it to the choke point.
+    (%flow-check-caller-thread! 'flow-channel-buffer-size!)
     (unless (or (not n) (and (fixnum? n) (fx>? n 0)))
       (error 'flow-channel-buffer-size!
              "bound must be a positive fixnum, or #f for unbounded" n))
