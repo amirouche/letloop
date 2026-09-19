@@ -149,7 +149,9 @@
    ~check-flow2-009/close-in-a-dead-scope-still-closes
 
    ;; fifth adverse pass, 2026-09-03
-   ~check-flow2-003/nursery-body-raise-drains-children)
+   ~check-flow2-003/nursery-body-raise-drains-children
+   ~check-flow2-001/wrap-runs-on-the-performer-after-commit
+   ~check-flow2-005/wrap-runs-on-the-loop-when-a-worker-delivers)
 
   (import (chezscheme)
           (letloop r999)
@@ -428,14 +430,41 @@
     %flow-raise?
     (object %flow-raise-object))
 
+  ;; A base's raw completion value, with the base whose wrap still has
+  ;; to be applied to it. The block path used to apply the wrap inside
+  ;; the base's resume -- on the stack of whoever completed the
+  ;; rendezvous, and BEFORE resume-from's CAS. That is the wrong stack
+  ;; twice over: a wrap that raised did so in the fiber calling
+  ;; flow-put! (or in a completion handler, where loop-apply's guard ate
+  ;; it), the getter was never resumed, and the value was gone; and when
+  ;; the deliverer was a compute thread the wrap RAN ON THE WORKER, so a
+  ;; wrap that touched the loop -- a flow-spawn, a ring event -- either
+  ;; raised wrong-thread into the worker's put or, if it touched loop
+  ;; state without going through a guarded entry point, corrupted it.
+  ;; The Rationale's "no API through which a compute thread can reach
+  ;; the loop's state" was false by exactly this much. The try path
+  ;; never had the problem: flow-poll applies the wrap on the
+  ;; performer. Now so does the block path, in %flow-settle.
+  (define-record-type* <flow2-deferred>
+    (%make-flow-deferred base raw)
+    %flow-deferred?
+    (base %flow-deferred-base)
+    (raw  %flow-deferred-raw))
+
   ;; What a parked fiber sees when it wakes: a block-proc raise and a
   ;; scope cancellation both come back as values and are converted into
-  ;; raises HERE, on the fiber's own stack, where its guards are.
+  ;; raises HERE, on the fiber's own stack, where its guards are -- and
+  ;; the winning base's wrap is applied here too, after the commit, for
+  ;; the same reason.
   (define (%flow-settle result)
-    (cond
-     ((%flow-raise? result) (raise (%flow-raise-object result)))
-     ((eq? result %flow-cancel-sentinel) (raise (%flow-cancelled-error)))
-     (else result)))
+    (let ((result (if (%flow-deferred? result)
+                      ((flow-wrap-proc (%flow-deferred-base result))
+                       (%flow-deferred-raw result))
+                      result)))
+      (cond
+       ((%flow-raise? result) (raise (%flow-raise-object result)))
+       ((eq? result %flow-cancel-sentinel) (raise (%flow-cancelled-error)))
+       (else result))))
 
   (define flow-poll
     (lambda (bases)
@@ -919,7 +948,7 @@
                            (let ((tag (cons #f #f)))
                              ((flow-block-proc base) state
                               (lambda (raw)
-                                (resume-from tag ((flow-wrap-proc base) raw)))
+                                (resume-from tag (%make-flow-deferred base raw)))
                               (lambda (thunk)
                                 (set-box! cancels
                                           (cons (cons tag
@@ -991,7 +1020,7 @@
                              (let ((tag (cons #f #f)))
                                ((flow-block-proc base) state
                                 (lambda (raw)
-                                  (resume-from tag ((flow-wrap-proc base) raw)))
+                                  (resume-from tag (%make-flow-deferred base raw)))
                                 (lambda (thunk)
                                   (set-box! cancels
                                             (cons (cons tag
