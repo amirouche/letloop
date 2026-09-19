@@ -2169,6 +2169,11 @@
               (attempt 'scope-cancel
                        (lambda () (flow-scope-cancel! (unbox scope-box))))
               (attempt 'stop (lambda () (flow-stop)))
+              ;; fifth pass: growing a bound WAKES parked putters, and
+              ;; a wake on a stray thread is the unsynchronized
+              ;; loop-spawn the guard exists to prevent
+              (attempt 'buffer-size
+                       (lambda () (flow-channel-buffer-size! channel 8)))
               (set-box! done #t)))
            (begin (flow-sleep 0.01) (settle (fx+ n 1)))))
      (let wait ((n 0))
@@ -2184,9 +2189,9 @@
                 (flow-log (list 'flow2-check 'not-refused outcome)))
               (assert (eq? 'wrong-thread (cdr outcome))))
             (unbox outcomes))
-  ;; eight entry points tried, and the stocked channel still holds the
+  ;; nine entry points tried, and the stocked channel still holds the
   ;; value the off-loop get used to walk away with
-  (assert (eqv? 8 (length (unbox outcomes))))
+  (assert (eqv? 9 (length (unbox outcomes))))
   (assert (eqv? 1 (flow-channel-queue-length channel)))
   #t)
 
