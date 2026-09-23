@@ -11,6 +11,8 @@
           ~check-letloop-json
           ~check-json-invalid-literal
           ~check-json-write-default-port
+          ~check-json-lone-surrogate
+          ~check-json-carriage-return-form-feed
           )
 
   (import (chezscheme))
@@ -50,6 +52,44 @@
         (parameterize ((current-output-port port))
           (json-write 42))
         (equal? "42" (get-output-string port)))))
+
+  (define ~check-json-lone-surrogate
+    (lambda ()
+      ;; \uD800-\uDFFF is syntactically valid JSON even unpaired --
+      ;; real scraped text hits this (e.g. Python's surrogateescape
+      ;; error handler). A lone surrogate must decode to U+FFFD, not
+      ;; crash the whole read (json-safe-integer->char in
+      ;; letloop/json/body.scm).
+      (define (decodes-to-replacement? json-text)
+        (let ((s (json-read (open-input-string json-text))))
+          (and (string? s) (char=? (string-ref s 0) #\xfffd))))
+      (and
+        ;; lone high surrogate, nothing after
+        (decodes-to-replacement? "\"\\ud83d\"")
+        ;; lone low surrogate, nothing before
+        (decodes-to-replacement? "\"\\udc00\"")
+        ;; high surrogate followed by an ordinary character, not \u
+        (decodes-to-replacement? "\"\\ud83dx\"")
+        ;; a REAL pair must still decode to one proper character, not
+        ;; two replacement characters
+        (let ((s (json-read (open-input-string "\"\\ud83d\\ude00\""))))
+          (and (string? s) (= (string-length s) 1)
+               (= (char->integer (string-ref s 0)) #x1f600))))))
+
+  (define ~check-json-carriage-return-form-feed
+    (lambda ()
+      ;; \r and \n both appear in real crawled text with Windows-style
+      ;; CRLF line endings, and JSON encoders escape both -- \r must
+      ;; not be treated as an unknown escape sequence (it, and \f,
+      ;; used to be commented out entirely in letloop/json/body.scm).
+      (define (one-char? json-text expected-codepoint)
+        (let ((s (json-read (open-input-string json-text))))
+          (and (string? s) (= (string-length s) 1)
+               (= (char->integer (string-ref s 0)) expected-codepoint))))
+      (and (one-char? "\"\\r\"" #x0d)
+           (one-char? "\"\\f\"" #x0c)
+           (equal? (json-read (open-input-string "\"a\\r\\nb\""))
+                   (string #\a #\return #\newline #\b)))))
 
   (define ~check-letloop-json
     (lambda ()
