@@ -59,7 +59,35 @@
 
 (define ~check-dns-002
   (lambda ()
-    (check '(93 184 216 34) (%dns-parse-response %dns-check-response 42))))
+    ;; Address AND the record's own TTL -- the fixture's answer carries
+    ;; 0 0 1 44 = 300s, which the cache now honours instead of assuming
+    ;; a flat 60.
+    (check '(93 184 216 34 300) (%dns-parse-response %dns-check-response 42))))
+
+(define ~check-dns-005
+  (lambda ()
+    ;; %dns-cache-expiry bounds the record's TTL before trusting it.
+    ;; A TTL of 0 is legal on the wire and would otherwise mean "never
+    ;; cache", i.e. one DNS round trip per connection -- the stampede
+    ;; that fills the io_uring submission queue. Clamped up to the
+    ;; floor. An absurd TTL is clamped down so a stale address cannot
+    ;; be pinned for days.
+    (let* ((second (expt 10 9))
+           (floor-ns (* %dns-cache-ttl-minimum-seconds second))
+           (ceil-ns (* %dns-cache-ttl-maximum-seconds second))
+           (near (lambda (expiry want-ns)
+                   ;; expiry is now + bounded; allow a generous slack
+                   ;; so a slow check host cannot make this flaky.
+                   (let ((delta (- expiry (jiffy-current))))
+                     (and (> delta (- want-ns second))
+                          (<= delta (+ want-ns second)))))))
+      (check #t (and (near (%dns-cache-expiry 0) floor-ns)
+                     (near (%dns-cache-expiry 1) floor-ns)
+                     (near (%dns-cache-expiry 300) (* 300 second))
+                     (near (%dns-cache-expiry 999999) ceil-ns)
+                     ;; a malformed TTL degrades to the floor rather
+                     ;; than raising or caching forever
+                     (near (%dns-cache-expiry #f) floor-ns))))))
 
 (define ~check-dns-003
   (lambda ()
