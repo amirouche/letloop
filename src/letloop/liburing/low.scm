@@ -336,7 +336,7 @@
    SYNC-FILE-RANGE-WRITE-AND-WAIT
 
    ;; C stdlib + FFI helpers
-   stdlib bytevector-pointer with-lock strerror pointer->string memcpy
+   bytevector-pointer with-lock strerror pointer->string memcpy
 
    ;; socket constants
    AF-INET SOCK-STREAM F-GETFL F-SETFL O-NONBLOCK POLLIN POLLOUT
@@ -391,6 +391,17 @@
    ;; race accept against other events instead of always suspending
    ;; the caller until a client arrives
    loop-accept-try loop-accept-block
+
+   ;; the same backlog, for the recv side: a payload whose waiter lost
+   ;; its choice cannot be handed back to the kernel, so it is stashed
+   ;; per fd and purged with the fd
+   loop-recv-backlog-put! loop-recv-backlog-take!
+
+   ;; the per-fd operation index loop-close-prep! tears down, for
+   ;; libraries that build their own SQEs instead of calling loop-read
+   ;; and loop-write -- a socket operation NOT in this index outlives
+   ;; the close of its fd
+   loop-fd-op-add! loop-fd-op-remove!
 
    ;; close split the same way, for libraries that need close to be an
    ;; event they can compose rather than an unconditional suspension
@@ -1729,11 +1740,26 @@
   ;; C stdlib + FFI helpers
   ;;------------------------------------------------------------
 
-  (define stdlib (load-shared-object #f))
-
   ;; with-lock, bytevector-pointer, strerror are imported from
   ;; (letloop cffi) and re-exported, so importing both libraries
   ;; unrestricted stays legal (same binding, no collision).
+  ;;
+  ;; This file's own eager `(foreign-procedure "name" ...)` calls
+  ;; below (%strlen, memcpy, fcntl, socket, ...) rely on the process
+  ;; already having dlopen'd itself (or having every symbol they need
+  ;; pre-registered) by the time this library's body runs -- exactly
+  ;; the "one eager call unlocks everything else" side effect
+  ;; cffi.scm's ensure-self-loaded! documents. Importing with-lock /
+  ;; bytevector-pointer / strerror above as values (not just syntax)
+  ;; already forces (letloop cffi)'s own body -- and its
+  ;; ensure-self-loaded! call -- to run first, per R6RS import
+  ;; ordering. An earlier version of this file additionally called
+  ;; (load-shared-object #f) directly here, unconditionally: that
+  ;; bypassed the probe entirely and crashed immediately on library
+  ;; instantiation under static musl, where dlopen(NULL) is unsafe --
+  ;; the exact bug ensure-self-loaded! exists to avoid. The resulting
+  ;; binding (`stdlib`) was never even used elsewhere in this file;
+  ;; removed rather than reharnessed.
 
   (define %strlen (foreign-procedure "strlen" (void*) size_t))
 
@@ -1963,6 +1989,15 @@
   ;; while no loop-accept waiter was parked; loop-accept pops from
   ;; here before parking, so already-accepted clients are not leaked.
   (define %accept-backlog (make-eqv-hashtable))
+  ;; fd → FIFO list of payloads a recv completed for a waiter that had
+  ;; already lost its choice. The accept side has had %accept-backlog
+  ;; from the start for exactly this reason; recv needs it more, because
+  ;; a dropped payload is data the kernel has already taken off the
+  ;; socket and nobody can ask for again. Kept here rather than in the
+  ;; caller so loop-close-prep! purges it with everything else the fd
+  ;; owns — a stash keyed by an fd number that outlives the fd would
+  ;; hand a stale payload to whatever reopens that number.
+  (define %recv-backlog (make-eqv-hashtable))
   (define ECANCELED 125)
   (define %read-timeout-seconds 5)
   (define %read-timeout-ts #f)
@@ -2242,7 +2277,7 @@
       (let ((ring     (make-io-uring))
             (cqe-ptr  (make-cqe-pointer))
             (handlers (make-eqv-hashtable)))
-        (let ((ret (io-uring-queue-init 256 ring 0)))
+        (let ((ret (io-uring-queue-init 512 ring 0)))
           (unless (fxzero? ret)
             (error 'loop-new
                    (format #f "io_uring_queue_init failed: ~a"
@@ -2250,13 +2285,21 @@
         (set! %loop
           (loop-base-new (jiffy-current) '() #t ring cqe-ptr handlers 0 '()))
         (set! %read-timeout-ts  (make-timespec %read-timeout-seconds 0))
-        (set! %wait-timeout     (make-timespec 0 100000000))
+        ;; LETLOOP_WAIT_TIMEOUT_MS: the loop's idle CQE-wait tick.
+        ;; Default 100ms, the historical constant; env-tunable so an
+        ;; A/B benchmark (e.g. atlas-stoa 0x0042's serve runs) can try
+        ;; a shorter tick without a source edit.
+        (set! %wait-timeout
+          (let* ((env (getenv "LETLOOP_WAIT_TIMEOUT_MS"))
+                 (ms (or (and env (string->number env)) 100)))
+            (make-timespec (div ms 1000) (* (mod ms 1000) 1000000))))
         (set! %multishots       (make-eqv-hashtable))
         (set! %multishot-ids    (make-eqv-hashtable))
         (set! %buf-data         (make-eqv-hashtable))
         (set! %fd-handlers      (make-eqv-hashtable))
         (set! %active-connections (make-eqv-hashtable))
         (set! %accept-backlog   (make-eqv-hashtable))
+        (set! %recv-backlog     (make-eqv-hashtable))
         (let ((err-ptr (foreign-alloc 4)))
           (foreign-set! 'integer-32 err-ptr 0 0)
           (let ((br (io-uring-setup-buf-ring ring %buf-ring-nentries
@@ -2350,6 +2393,12 @@
                     (io-uring-sqe-set-data64 sqe id)))
                 (hashtable-ref %accept-backlog fd '()))
       (hashtable-delete! %accept-backlog fd)
+      ;; Payloads nobody claimed: dropping them here is correct and is
+      ;; the whole reason the stash lives at this level. The fd is going
+      ;; away, so there is no one left to deliver them to, and leaving
+      ;; them keyed by a number the kernel is about to reissue is how a
+      ;; stash becomes a cross-connection data leak.
+      (hashtable-delete! %recv-backlog fd)
       (hashtable-delete! %active-connections fd)
       (let* ((cancel-sqe (loop-get-sqe (loop-ring %loop)))
              (cancel-id  (loop-alloc-id!)))
@@ -2396,6 +2445,69 @@
                    (hashtable-set! %accept-backlog fd (cdr backlog)))
                (loop-accept-client-setup! (car backlog)))))))
 
+  ;; The recv counterpart of the accept backlog, for a caller whose
+  ;; recv handler completed with data that its own waiter can no longer
+  ;; take — it lost a flow-choice, or its scope was cancelled, in the
+  ;; same tick the CQE arrived. Both CQEs sit in the completion queue
+  ;; together whenever the loop is late draining, which is under load,
+  ;; which is exactly when an idle timeout races a read.
+  ;;
+  ;; Unlike a declined accept there is no way to put a payload back:
+  ;; the kernel has already taken those bytes off the socket, so
+  ;; dropping them is silent data loss for the connection. Push it here
+  ;; instead and the next recv on the fd finds it.
+  ;;
+  ;; Nothing here can tell a live fd from one loop-close-prep! has
+  ;; already purged, and a put after that purge is a cross-connection
+  ;; data leak once the kernel reissues the number. What keeps that
+  ;; from happening is upstream: a recv registered through
+  ;; loop-fd-op-add! has its handler deleted by the purge, so the late
+  ;; CQE never reaches the code that would call this. A caller that
+  ;; skips that registration reopens the leak.
+  (define loop-recv-backlog-put!
+    (lambda (fd payload)
+      (hashtable-set! %recv-backlog fd
+                      (append (hashtable-ref %recv-backlog fd '())
+                              (list payload)))))
+
+  ;; Register/unregister ID as an operation in flight on FD, so
+  ;; loop-close-prep! can resume it with a synthetic -ECANCELED and
+  ;; take its handler out of loop-handlers. Two things follow from
+  ;; being in this index, and both matter for a socket:
+  ;;
+  ;; - the parked fiber wakes on the close instead of on the CQE, and
+  ;; - the operation's REAL completion then finds no handler and is
+  ;;   dropped by the drain -- which is the only thing that stops a
+  ;;   recv that completed with data just before the cancel landed
+  ;;   from running its handler after the fd is gone.
+  ;;
+  ;; Every registration must be undone on every completion path, or
+  ;; the list grows for the life of the connection.
+  (define loop-fd-op-add!
+    (lambda (fd id)
+      (hashtable-set! %fd-handlers fd
+                      (cons id (hashtable-ref %fd-handlers fd '())))))
+
+  ;; Deletes the key when the last operation goes, rather than leaving
+  ;; an empty list behind under an fd number the kernel will reissue.
+  (define loop-fd-op-remove!
+    (lambda (fd id)
+      (let ((ids (remq id (hashtable-ref %fd-handlers fd '()))))
+        (if (null? ids)
+            (hashtable-delete! %fd-handlers fd)
+            (hashtable-set! %fd-handlers fd ids)))))
+
+  ;; Non-blocking: pop the oldest stashed payload for FD, or #f.
+  (define loop-recv-backlog-take!
+    (lambda (fd)
+      (let ((backlog (hashtable-ref %recv-backlog fd '())))
+        (and (pair? backlog)
+             (begin
+               (if (null? (cdr backlog))
+                   (hashtable-delete! %recv-backlog fd)
+                   (hashtable-set! %recv-backlog fd (cdr backlog)))
+               (car backlog))))))
+
   ;; Arms fd's multishot accept if it isn't already running, then
   ;; registers HANDLER against its next completion. HANDLER is called
   ;; with a set-up client fd, or #f on an error (which always tears
@@ -2404,6 +2516,17 @@
   ;; a race to a sibling event); a declined client is pushed onto the
   ;; backlog exactly like a multishot completion nobody was waiting
   ;; for, rather than being leaked.
+  ;;
+  ;; Returns the id HANDLER was registered under, so a caller that must
+  ;; UNregister it can — a composed accept whose sibling event wins, or
+  ;; whose scope is cancelled, has to take its handler back out of
+  ;; loop-handlers or the slot stays occupied and the very next
+  ;; loop-accept-block on that fd hits the concurrent-accept error
+  ;; below, permanently poisoning the listener. Deleting the handler is
+  ;; enough and loses nothing: a client the multishot accepts with no
+  ;; handler registered lands on %accept-backlog, exactly as it does
+  ;; for any other unwaited-for completion. (Previously the return
+  ;; value was hashtable-set!'s, which no caller used.)
   (define loop-accept-block
     (lambda (fd handler)
       (let ((active-id (hashtable-ref %multishots fd #f)))
@@ -2433,7 +2556,8 @@
                   (unless (handler client)
                     (hashtable-set! %accept-backlog fd
                       (append (hashtable-ref %accept-backlog fd '())
-                              (list client)))))))))))
+                              (list client))))))))
+        active-id)))
 
   (define loop-accept
     (lambda (fd)
@@ -2450,13 +2574,11 @@
         (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
         (io-uring-sqe-set-buf-group sqe %buf-ring-bgid)
         (io-uring-sqe-set-data64 sqe id)
-        (hashtable-set! %fd-handlers fd
-                        (cons id (hashtable-ref %fd-handlers fd '())))
+        (loop-fd-op-add! fd id)
         (let ((res (loop-abort
                      (lambda (k)
                        (hashtable-set! (loop-handlers %loop) id k)))))
-          (hashtable-set! %fd-handlers fd
-                          (remq id (hashtable-ref %fd-handlers fd '())))
+          (loop-fd-op-remove! fd id)
           (cond
            ((fx<? res 0)
             (hashtable-delete! %buf-data id)
@@ -2479,13 +2601,11 @@
           (io-uring-prep-send sqe fd (bytevector-pointer bv)
                               (bytevector-length bv) 0)
           (io-uring-sqe-set-data64 sqe id)
-          (hashtable-set! %fd-handlers fd
-                          (cons id (hashtable-ref %fd-handlers fd '())))
+          (loop-fd-op-add! fd id)
           (let ((res (loop-abort
                        (lambda (k)
                          (hashtable-set! (loop-handlers %loop) id k)))))
-            (hashtable-set! %fd-handlers fd
-                            (remq id (hashtable-ref %fd-handlers fd '())))
+            (loop-fd-op-remove! fd id)
             (unlock-object bv)
             (cond
              ((fx<=? res 0) #f)

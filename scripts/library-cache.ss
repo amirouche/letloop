@@ -24,6 +24,17 @@
 ;; recompiled, so no .wpo would be written for it.
 (import (chezscheme))
 
+;; Chez names its gensyms with a per-process random session key, and
+;; that name is written into every .so and .wpo -- so this cache comes
+;; out different on each run even from identical sources, and the boot
+;; image that folds it differs in turn. Pinning the key makes the whole
+;; cache reproducible. $LETLOOP_SESSION_KEY carries it, the same
+;; variable `letloop compile` reads; unset, Chez keeps its random key
+;; and nothing changes.
+(let ((key (getenv "LETLOOP_SESSION_KEY")))
+  (when key
+    (#%$set-top-level-value! '$session-key (string-append key "-cache-"))))
+
 (define ftw
   (lambda (directory)
     (let loop ((paths (map (lambda (x) (string-append directory "/" x))

@@ -230,7 +230,6 @@ Run `/letloop-install` to build and install the binary.
 
 This project also has 9 global skills for working with the **installed** letloop binary (not covered here):
 
-- `/letloop-exec` - Execute Scheme procedures
 - `/letloop-repl` - Start interactive REPL
 - `/letloop-check` - Run tests in Scheme libraries
 - `/letloop-compile` - Compile libraries to executables

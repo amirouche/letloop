@@ -8,13 +8,21 @@
           tls-shutdown
           url-parse
           https-request
+          embedded-ca-bundle
 
           ~check-tls-url-parse-000
           ~check-tls-url-parse-001
           ~check-tls-url-parse-002
           ~check-tls-handshake-timeout
           ~check-tls-connect-timeout
-          ~check-tls-request-000)
+          ~check-tls-request-000
+          ~check-tls-bundled-ca-file-found
+          ~check-tls-bundled-ca-file-absent
+          ~check-tls-ca-actions-env-file-wins
+          ~check-tls-ca-actions-env-dir-wins
+          ~check-tls-ca-actions-bundled-over-embedded
+          ~check-tls-ca-actions-embedded-last-resort
+          ~check-tls-ca-actions-none)
 
   (import (chezscheme)
           (letloop cffi)
@@ -31,6 +39,117 @@
           (unless (zero? rc)
             (error 'tls-open "tls_init failed" rc))
           (set! %tls-initialized #t)))))
+
+  ;; The directory holding the running binary, with a trailing slash,
+  ;; or #f. Not a Chez builtin -- (letloop base) defines the identical
+  ;; helper for the same reason (letloop-library-directory needs it),
+  ;; but that library is folded into the amalgamated letloop program
+  ;; and must import nothing of letloop's own, so it cannot be shared
+  ;; by import; small enough to duplicate rather than restructure.
+  (define executable-directory
+    (let ((cached 'unknown))
+      (lambda ()
+        (when (eq? cached 'unknown)
+          (set! cached
+                (guard (ex (else #f))
+                  (let* ((readlink (foreign-procedure "readlink" (string u8* uptr) iptr))
+                         (buffer (make-bytevector 4096))
+                         (count (readlink "/proc/self/exe" buffer (bytevector-length buffer))))
+                    (and (fx> count 0)
+                         (let* ((out (make-bytevector count)))
+                           (bytevector-copy! buffer 0 out 0 count)
+                           (let* ((path (utf8->string out))
+                                  (slash (let loop ((index (fx- (string-length path) 1)))
+                                           (cond
+                                            ((fx<? index 0) #f)
+                                            ((char=? (string-ref path index) #\/) index)
+                                            (else (loop (fx- index 1)))))))
+                             (and slash (substring path 0 (fx+ slash 1))))))))))
+        cached)))
+
+  ;; A CA bundle shipped beside letloop's own installed tree, at
+  ;; $PREFIX/lib/letloop/cert.pem -- for a statically linked letloop,
+  ;; whose libtls was built against a compile-time CA path that only
+  ;; ever existed inside the sandbox that built it (see
+  ;; src/letloop/store/README.md's cold-start section). Resolved the
+  ;; same way (letloop base)'s letloop-library-directory resolves
+  ;; $PREFIX/lib/letloop itself -- not imported from there, since
+  ;; (letloop base) is folded into the amalgamated letloop program and
+  ;; must import nothing of letloop's own -- $LETLOOP_PREFIX first,
+  ;; then walked up from the running executable, since a relocated
+  ;; binary carries no absolute install path of its own.
+  ;;
+  ;; #f when none is found, which is the ordinary case on a dynamic
+  ;; build: the host's own libtls.so already has a working default (a
+  ;; real, distro-maintained /etc/ssl/... path), and this must not
+  ;; override that with a bundle that may not even be present.
+  ;;
+  ;; Not memoized: tls-open is not a hot path (it does a TCP connect
+  ;; and a TLS handshake right after this), and a cached result would
+  ;; be wrong the moment $LETLOOP_PREFIX changes within one process --
+  ;; exactly what the checks below do to exercise both branches.
+  (define (bundled-ca-file)
+    (define candidates
+      (let ((exe (or (executable-directory) "")))
+        (append (let ((prefix (getenv "LETLOOP_PREFIX")))
+                  (if prefix (list (string-append prefix "/lib/letloop/cert.pem")) '()))
+                (map (lambda (up) (string-append exe up "lib/letloop/cert.pem"))
+                     (list "" "../" "../../" "../../../")))))
+    (let loop ((candidates candidates))
+      (cond
+       ((null? candidates) #f)
+       ((file-exists? (car candidates)) (car candidates))
+       (else (loop (cdr candidates))))))
+
+  ;; A CA bundle's bytes, baked into program.scm at compile time by
+  ;; (letloop compile) -- see infer-archives! in src/letloop/base.scm
+  ;; -- when a program links libtls statically and the store has a
+  ;; ca-certificates package built. #f for every other build,
+  ;; including the ordinary dynamic one: its dlopen'd libtls.so
+  ;; already has a real, distro-maintained default, and a compile-time
+  ;; snapshot would only be a worse answer to a question that build
+  ;; does not have.
+  ;;
+  ;; A parameter, not a plain variable, so a generated program.scm can
+  ;; set it with a direct call -- (embedded-ca-bundle #vu8(...)) --
+  ;; the same idiom already used there for suppress-greeting and
+  ;; collect-request-handler.
+  (define embedded-ca-bundle (make-parameter #f))
+
+  ;; Which CA source(s) to hand libtls, and in what order to try them.
+  ;; Returns a list of (tag . value) actions for tls-open to apply, in
+  ;; libtls call order, or '() to configure nothing at all and defer
+  ;; entirely to libtls's own compiled-in default -- today's only
+  ;; behaviour, kept as the last rung for a program compiled without a
+  ;; ca-certificates package to embed from.
+  ;;
+  ;; Ranked so that whoever has the most immediate say wins: an
+  ;; operator's own SSL_CERT_FILE/SSL_CERT_DIR (the same convention
+  ;; curl, git and OpenSSL/LibreSSL itself already honour) outranks
+  ;; anything this program carries on its own, a file a deployer chose
+  ;; to place beside the binary outranks a snapshot baked in when
+  ;; nobody who runs the binary had any say in it, and the embedded
+  ;; snapshot -- last, not first -- exists only so a relocated static
+  ;; binary still works with zero configuration when nobody supplied
+  ;; anything at all, never so it can override someone who did.
+  (define (resolve-ca-actions)
+    ;; An empty value counts as unset, the same as a missing one --
+    ;; there is no putenv-based unsetenv in this codebase (see
+    ;; %with-env below, which relies on exactly this), and a real
+    ;; SSL_CERT_FILE="" left over from some other tool's environment
+    ;; should not resolve to "use the path ''" any more than a
+    ;; genuinely absent one would.
+    (define (set? value) (and value (not (string=? value "")) value))
+    (define from-environment
+      (let ((file (set? (getenv "SSL_CERT_FILE")))
+            (dir (set? (getenv "SSL_CERT_DIR"))))
+        (append (if file (list (cons 'file file)) '())
+                (if dir (list (cons 'path dir)) '()))))
+    (cond
+     ((pair? from-environment) from-environment)
+     ((bundled-ca-file) => (lambda (path) (list (cons 'file path))))
+     ((embedded-ca-bundle) => (lambda (bytes) (list (cons 'mem bytes))))
+     (else '())))
 
   ;; ---- Owned socket, with timeouts ----
   ;;
@@ -175,6 +294,23 @@
         (when (zero? config)
           (%close fd)
           (error 'tls-open "tls_config_new failed"))
+        (for-each
+         (lambda (action)
+           (let ((rc (case (car action)
+                       ((file) (tls-config-set-ca-file config (cdr action)))
+                       ((path) (tls-config-set-ca-path config (cdr action)))
+                       ((mem)
+                        (let ((bytes (cdr action)))
+                          (with-lock (list bytes)
+                            (tls-config-set-ca-mem config
+                                                    (bytevector-pointer bytes)
+                                                    (bytevector-length bytes))))))))
+             (unless (zero? rc)
+               (let ((msg (tls-config-error config)))
+                 (tls-config-free config)
+                 (%close fd)
+                 (error 'tls-open "tls_config_set_ca failed" action msg)))))
+         (resolve-ca-actions))
         (let ((rc (tls-config-set-protocols config TLS_PROTOCOLS_DEFAULT)))
           (unless (zero? rc)
             (let ((msg (tls-config-error config)))

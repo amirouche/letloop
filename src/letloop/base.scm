@@ -1,12 +1,45 @@
 #!chezscheme
 (library (letloop base)
-  (export letloop-main letloop-compile letloop-exec letloop-repl letloop-check letloop-review)
+  (export letloop-main letloop-compile letloop-repl letloop-check letloop-review)
   ;; Nothing from letloop is imported here on purpose -- see
   ;; letloop-library-path!. An imported library would be folded into the
   ;; letloop program, and a folded library is invisible: its name would
   ;; then block user programs from importing it, and loading it at
   ;; startup costs 36ms nobody asked for.
   (import (chezscheme))
+
+  ;; (load-shared-object #f) -- dlopen(NULL, ...) -- is how bare
+  ;; foreign-procedure calls in this file (mkdtemp, readlink) and,
+  ;; transitively, in most of the rest of this codebase, reach ordinary
+  ;; libc functions. It cannot work on a statically-linked letloop (see
+  ;; src/letloop/store/README.md's Issues section: no dynamic linker to
+  ;; service it, and Chez's own error path for that failure crashes).
+  ;; letloop-main.c's CUSTOM_INIT hook always registers
+  ;; letloop_self_dlopen_safe (via Sforeign_symbol, independent of
+  ;; dlopen) reporting whether dlopen(NULL, ...) actually works here,
+  ;; probed once in C before any Scheme runs. Not found at all (guard
+  ;; below) means a plain `scheme`/`petite` with no letloop-main.c
+  ;; registration -- e.g. this very library, compiled under a stock
+  ;; Chez during letloop's own bootstrap build -- which is always
+  ;; dynamically linked, hence safe. Duplicated from cffi.scm's
+  ;; identical helper: this library imports nothing from letloop, on
+  ;; purpose (see the note above).
+  (define ensure-self-loaded!
+    (let ((done #f))
+      (lambda ()
+        (unless done
+          (set! done #t)
+          (let ((unsafe? (guard (ex (#t #f))
+                            (fx=? ((foreign-procedure "letloop_self_dlopen_safe" () int)) 0))))
+            (unless unsafe?
+              (load-shared-object #f)))))))
+
+  ;; A definition, not a bare expression: library bodies require every
+  ;; internal define to precede any expression, and this file has many
+  ;; more defines below. Nothing here is actually CALLED until after
+  ;; the whole library finishes loading, so running the self-load once
+  ;; more is fine wherever this sits in the define sequence.
+  (define self-loaded-eagerly! (ensure-self-loaded!))
 
   (define pk
     (lambda args
@@ -45,62 +78,6 @@
      ((string=? filepath ".") (current-directory))
      ((char=? (string-ref filepath 0) #\/) filepath)
      (else (string-append (current-directory) "/" filepath))))
-
-  (meta define basename
-        (lambda (string)
-          (let loop ((index (string-length string)))
-            (if (char=? (string-ref string (- index 1)) #\/)
-                (substring string index (string-length string))
-                (loop (- index 1))))))
-
-  (meta define dirname
-        (lambda (out)
-          (substring out 0 (- (string-length out)
-                              (string-length (basename out))))))
-
-  (meta define scheme-binarypath
-        (lambda ()
-          (let* ((out (if (getenv "SCHEME")
-                          (string-append (dirname (getenv "SCHEME"))
-                                         "/"
-                                         (run/output (format #f "readlink -n ~a" (getenv "SCHEME"))))
-                          (run/output "readlink -n /proc/self/exe"))))
-            (dirname out))))
-
-  (meta define binarypath->scheme-home
-        (lambda (scheme what)
-          (format #f "~a/~a" scheme what)))
-
-  #;(meta define binarypath->scheme-home
-        (lambda (scheme what)
-          (call/cc
-           (lambda (k)
-             (for-each
-              (lambda (path)
-                (call-with-values (lambda () (scheme-version-number))
-                  (lambda args
-                    (let* ((version (let loop ((args args)
-                                               (out '()))
-                                      (if (null? args)
-                                          (apply string-append (reverse (cdr out)))
-                                          (loop (cdr args)
-                                                (cons* "."
-                                                       (number->string (car args))
-                                                       out)))))
-                           (prefix (run/output (format #f "realpath $(ls -d ~a/../lib/csv~a*) | tr -d '\n'" path version))))
-                      (let ((out (format #f "~a/~a/~a" prefix (machine-type) what)))
-                        (when (file-exists? out)
-                          (k out)))))))
-              (list scheme "/usr/local/bin/" "/usr/bin/"))))))
-
-  (define-syntax include-chez-file
-    (lambda (x)
-      (syntax-case x ()
-        [(k filename)
-         (let* ([fn (datum filename)]
-                [fn (binarypath->scheme-home (scheme-binarypath) fn)])
-           (with-syntax ([exp (get-bytevector-all (open-file-input-port fn))])
-             #'exp))])))
 
   (define filepath->bytevector
     (lambda (filepath)
@@ -178,61 +155,25 @@
                                            "-"
                                            (substring describe 0 (fx- (string-length describe) 1))))))
 
+  ;; The build date, baked in at expand time -- and the one thing that
+  ;; makes letloop's own build irreproducible no matter what else is
+  ;; pinned. Chez compiles are otherwise reproducible modulo gensym
+  ;; names, which $session-key handles; a literal timestamp is the case
+  ;; that defeats it outright, and it is ours, not Chez's.
+  ;;
+  ;; SOURCE_DATE_EPOCH is the reproducible-builds convention for
+  ;; exactly this: when set, it replaces the wall clock, so two builds
+  ;; of the same commit agree. Unset, nothing changes.
   (define-syntax include-date
     (lambda (x)
       (syntax-case x ()
         [(k)
          (let ([fn (datum filename)])
-           (with-syntax ([exp (run/output "date +\"%Y-%m-%dT%H:%M:%S%z\"")])
+           (with-syntax ([exp (run/output
+                               (if (getenv "SOURCE_DATE_EPOCH")
+                                   "date -u -d \"@$SOURCE_DATE_EPOCH\" +\"%Y-%m-%dT%H:%M:%S%z\""
+                                   "date +\"%Y-%m-%dT%H:%M:%S%z\""))])
              #'exp))])))
-
-  (define scheme-binarypath*
-    ;; it is redefined to avoid the scary:
-    ;;
-    ;;   Exception: attempt to reference out-of-phase identifier
-    ;;   scheme-binarypath.
-    ;;
-    ;; It is only used when preparing a letloop release, when
-    ;; letloop-compile is executed with upstream scheme, hence no
-    ;; petite.boot, scheme.boot, letloop.boot symbols were
-    ;; registred. See the procedure petite.boot-fallback, the file
-    ;; letloop-main.c
-    (lambda ()
-
-      (define read-string
-        (lambda (p)
-          (let loop ([x (read-char p)]
-                     [out '()])
-            (if (eof-object? x)
-                (begin (close-input-port p)
-                       (list->string (reverse out)))
-                (loop (read-char p)
-                      (cons x out))))))
-
-      (define basename
-        (lambda (string)
-          (let loop ((index (string-length string)))
-            (if (char=? (string-ref string (- index 1)) #\/)
-                (substring string index (string-length string))
-                (loop (- index 1))))))
-
-      (define dirname
-        (lambda (out)
-          (substring out 0 (- (string-length out)
-                              (string-length (basename out))))))
-
-      (define (run/output command)
-        (call-with-values (lambda ()
-                            (open-process-ports command 'line (current-transcoder)))
-          (lambda (stdin stdout stderr pid)
-            (read-string stdout))))
-
-      (let* ((out (if (getenv "SCHEME")
-                      (string-append (dirname (getenv "SCHEME"))
-                                     "/"
-                                     (run/output (format #f "readlink -n ~a" (getenv "SCHEME"))))
-                      (run/output "readlink -n /proc/self/exe"))))
-        (dirname out))))
 
   (define LETLOOP_DEBUG (getenv "LETLOOP_DEBUG"))
 
@@ -396,6 +337,66 @@
                         (filter pair? (map extract-library-name (cdr imports)))
                         '())))))))))
 
+  (define library-name->path
+    ;; The file a library name resolves to, by the R6RS/Chez
+    ;; convention every component but the last is a directory:
+    ;; (letloop tls low) is letloop/tls/low.scm under some library
+    ;; directory. Purely a path lookup -- nothing is read or
+    ;; instantiated, unlike maybe-library-name, which resolves a name
+    ;; by importing it.
+    (lambda (name)
+      (and (list? name)
+           (let ((relative (fold-left (lambda (accumulator component)
+                                        (string-append accumulator "/" (symbol->string component)))
+                                      ""
+                                      name)))
+             (let loop ((directories (library-directories)))
+               (and (pair? directories)
+                    (let ((root (let ((directory (car directories)))
+                                  (if (pair? directory) (car directory) directory))))
+                      (let extension-loop ((extensions (library-extensions)))
+                        (if (null? extensions)
+                            (loop (cdr directories))
+                            (let ((candidate (string-append root relative (caar extensions))))
+                              (if (file-exists? candidate)
+                                  candidate
+                                  (extension-loop (cdr extensions)))))))))))))
+
+  (define import-closure
+    ;; Every library name reachable from FILENAME's own imports.
+    ;;
+    ;; Walked syntactically, through library-imports, rather than by
+    ;; importing anything: the amalgamating compile path deliberately
+    ;; keeps every library out of this process so the child can compile
+    ;; them, so instantiating them here to ask what they import would
+    ;; defeat the thing this runs inside of.
+    (lambda (filename)
+      (let loop ((pending (library-imports filename)) (seen '()))
+        (cond
+         ((null? pending) (reverse seen))
+         ((member (car pending) seen) (loop (cdr pending) seen))
+         (else
+          (let* ((name (car pending))
+                 (path (library-name->path name)))
+            (loop (append (cdr pending) (if path (library-imports path) '()))
+                  (cons name seen))))))))
+
+  (define library-package-components
+    ;; The package names to try for a library, longest first:
+    ;; (letloop tls low) asks about `tls low`, then `tls` -- so a
+    ;; package named for the exact library wins over one named for the
+    ;; subsystem it belongs to, and (letloop tls low) finds
+    ;; (letloop package tls) without either having to know about the
+    ;; other. A leading `letloop` is dropped so the store's own
+    ;; resolver sees the same shape a caller types on the command line.
+    (lambda (name)
+      (and (pair? name)
+           (let ((tail (if (eq? (car name) 'letloop) (cdr name) name)))
+             (let loop ((tail tail) (out '()))
+               (if (null? tail)
+                   (reverse out)
+                   (loop (reverse (cdr (reverse tail))) (cons tail out))))))))
+
   (define topological-sort-libraries
     (lambda (discovered)
       ;; discovered: list of (root . filepath) pairs
@@ -453,6 +454,11 @@
   (define (guess string)
     (cond
      ((file-directory? string) (values 'directory (make-filepath string)))
+     ;; Before the file case, deliberately: a static library is a file,
+     ;; and the file case claims the argument as the library to
+     ;; compile. Sniffing the suffix first is also what lets archives
+     ;; be given in any position, like every other standalone argument.
+     ((string-suffix? ".a" string) (values 'archive (make-filepath string)))
      ((file-exists? string)
       (values 'file (make-filepath string)))
      ;; the first char is a dot, the associated path is neither a file
@@ -463,8 +469,6 @@
      (else (values 'unknown string))))
 
   (define (make-temporary-directory prefix)
-
-    (define stdlib (load-shared-object #f))
 
     (define mkdtemp
       (foreign-procedure "mkdtemp" (string) string))
@@ -526,8 +530,7 @@
       (string-append (basename-without-extension x) ".wpo")))
 
   ;; Runtime counterparts of the meta helpers near the top of this
-  ;; library: those only exist at expand time, and scheme-binarypath*
-  ;; keeps private copies to stay clear of out-of-phase identifiers.
+  ;; library: those only exist at expand time.
 
   (define basename*
     (lambda (filepath)
@@ -568,8 +571,7 @@
         (unless cached
           (set! cached
                 (guard (ex (else #f))
-                  (let* ((stdlib (load-shared-object #f))
-                         (readlink (foreign-procedure "readlink" (string u8* uptr) iptr))
+                  (let* ((readlink (foreign-procedure "readlink" (string u8* uptr) iptr))
                          (buffer (make-bytevector 4096))
                          (count (readlink "/proc/self/exe" buffer (bytevector-length buffer))))
                     (and (fx> count 0)
@@ -597,12 +599,11 @@
                (filter (lambda (x) (string-prefix? "csv" x))
                        (directory-list* lib)))))
       (define candidates
-        (let ((exe (or (executable-directory) ""))
-              (scheme (guard (ex (else "")) (scheme-binarypath*))))
+        (let ((exe (or (executable-directory) "")))
           (filter (lambda (x) (not (fxzero? (string-length x))))
                   (append (let ((given (getenv "LETLOOP_BOOT_DIRECTORY")))
                             (if given (list (string-append given "/")) '()))
-                          (list exe scheme)
+                          (list exe)
                           (csv (string-append exe "../lib/"))
                           (csv (string-append exe "../../lib/"))
                           (list (string-append exe "../../boot/" machine "/"))))))
@@ -613,6 +614,22 @@
                (file-exists? (string-append (car candidates) "scheme.boot")))
           (car candidates))
          (else (loop (cdr candidates)))))))
+
+  (define boot-directory!
+    ;; boot-directory, or a message and exit. There is no other place
+    ;; to look: the boot files sit beside the running binary or in the
+    ;; Chez layout above it, and both are walked from /proc/self/exe.
+    ;; A fallback through $SCHEME used to sit here, from the days when
+    ;; letloop was the scheme binary renamed; a compiled letloop is the
+    ;; only letloop, and it knows where it is.
+    (lambda ()
+      (or (boot-directory)
+          (begin
+            (format (current-error-port)
+                    "* Ooops :|\n** Cannot find petite.boot and scheme.boot near ~a.\n"
+                    (or (executable-path) "this binary"))
+            (format (current-error-port) "** Set LETLOOP_BOOT_DIRECTORY.\n")
+            (exit 1)))))
 
   (define letloop-library-directory
     ;; Where letloop's own sources are installed, $LETLOOP_PREFIX/lib/letloop,
@@ -691,7 +708,10 @@
 
   (define cli-read (lazy '(letloop cli base) 'cli-read))
   (define transparent (lazy '(letloop http server) 'transparent))
-  (define letloop-root (lazy '(letloop root) 'letloop-root))
+  (define letloop-store (lazy '(letloop store) 'letloop-store))
+  (define store-package-archives (lazy '(letloop store) 'store-package-archives))
+  (define store-package-unbuilt? (lazy '(letloop store) 'store-package-unbuilt?))
+  (define store-package-path (lazy '(letloop store) 'store-package-path))
   (define letloop-review (lazy '(letloop review) 'letloop-review))
 
   (define letloop-compile
@@ -722,9 +742,7 @@
         ;; they are folded into the output boot file by name, so nothing
         ;; here reads several megabytes into the heap.
         (lambda (name)
-          (string-append (or (boot-directory)
-                             (string-append (scheme-binarypath*) "/"))
-                         name)))
+          (string-append (boot-directory!) name)))
 
       (define petite.boot (lambda () (boot-path "petite.boot")))
 
@@ -740,6 +758,11 @@
 
       (define extensions '())
       (define directories '())
+      (define archives '())
+      ;; The CA bundle's bytes to embed in program.scm, or #f -- set
+      ;; by ca-bundle-to-embed, below, before either build-boot-file
+      ;; branch runs, since both need it while generating program.scm.
+      (define ca-bundle #f)
       (define main #f)
       (define library.scm #f)
       (define dev? #f)
@@ -765,6 +788,7 @@
                 (case type
                   (directory (set! directories (cons string* directories)))
                   (extension (set! extensions (cons string* extensions)))
+                  (archive (set! archives (cons string* archives)))
                   (file (set! library.scm string*))
                   (unknown (set! main string*)))))
             (massage-standalone! (cdr standalone)))))
@@ -831,9 +855,13 @@
           (call-with-output-file program.scm
             (lambda (port)
               (write '(suppress-greeting #t) port)
-              (write `(import ,(pk library.scm (maybe-library-name library.scm))) port)
+              (write `(import ,(pk library.scm (maybe-library-name library.scm))
+                               ,@(if ca-bundle '((letloop tls base)) '()))
+                     port)
               (when disable-garbage-collector?
                 (write '(collect-request-handler void) port))
+              (when ca-bundle
+                (write `(embedded-ca-bundle ,ca-bundle) port))
               (write `(scheme-start ,(string->symbol main)) port)) 'truncate)
           (maybe-compile-file program.scm)
 
@@ -861,8 +889,10 @@
         ;; compile-whole-program then has nothing to fold, and it does not
         ;; complain: it reports the libraries it gave up on through its
         ;; return value and carries on. That is what silently produced an
-        ;; unamalgamated binary before. So: re-exec ourselves with only
-        ;; petite.boot and scheme.boot registered, and make the child
+        ;; unamalgamated binary before. So: re-exec ourselves as a fresh
+        ;; process, in which nothing but the folded (letloop base) is
+        ;; defined and every (letloop ...) library compiles from the
+        ;; sources and .wpo files letloop ships, and make the child
         ;; treat a non-empty return value as fatal.
         (lambda ()
 
@@ -888,37 +918,62 @@
                           "** Set LETLOOP_BOOT_DIRECTORY, or compile with --visible-libraries.\n")
                   (exit 1))))
 
-          (define scheme-executable
-            ;; The child has to be a Chez that still parses -b and
-            ;; --script. letloop's own binary is no use for it: its main
-            ;; hands argv straight to scheme-start without reading a
-            ;; single flag, which is the whole point of that main.
+          (define shell-quote
+            (lambda (str)
+              (let loop ((chars (string->list str)) (out '()))
+                (cond
+                 ((null? chars) (list->string (append '(#\') (reverse out) '(#\'))))
+                 ((char=? (car chars) #\')
+                  (loop (cdr chars) (append (reverse (string->list "'\\''")) out)))
+                 (else (loop (cdr chars) (cons (car chars) out)))))))
+
+          (define letloop-host?
+            ;; Whether EXE is a letloop host with its payload appended,
+            ;; told by the magic that ends the trailer -- the same check
+            ;; emit-program! makes, on the last 8 bytes only. Under
+            ;; upstream scheme, which is how `make letloop` bootstraps,
+            ;; there is no trailer.
             (lambda ()
-              (define split
-                (lambda (str sep)
-                  (let loop ((chars (string->list str)) (current '()) (out '()))
-                    (cond
-                     ((null? chars)
-                      (reverse (cons (list->string (reverse current)) out)))
-                     ((char=? (car chars) sep)
-                      (loop (cdr chars) '() (cons (list->string (reverse current)) out)))
-                     (else (loop (cdr chars) (cons (car chars) current) out))))))
-              (define usable
-                (lambda (path) (and path (file-exists? path) path)))
-              (or (usable (getenv "LETLOOP_SCHEME"))
-                  (usable (string-append boot-directory* "scheme"))
-                  (let loop ((rest (split (or (getenv "PATH") "") #\:)))
-                    (cond
-                     ((null? rest) #f)
-                     ((usable (string-append (car rest) "/scheme")))
-                     (else (loop (cdr rest)))))
-                  (begin
-                    (format (current-error-port)
-                            "* Ooops :|\n** Cannot find a scheme binary to compile with.\n")
-                    (format (current-error-port)
-                            "** Tried $LETLOOP_SCHEME, ~ascheme, and scheme on $PATH.\n"
-                            boot-directory*)
-                    (exit 1)))))
+              (guard (ex (else #f))
+                (call-with-port (open-file-input-port exe)
+                  (lambda (port)
+                    (let ((size (port-length port)))
+                      (and (> size 16)
+                           (begin (set-port-position! port (- size 8))
+                                  (equal? (get-bytevector-n port 8)
+                                          #vu8(76 69 84 76 79 79 80 1))))))))))
+
+          (define compiler-command
+            ;; The child is this very binary, re-executed with
+            ;; LETLOOP_BUILD_SCRIPT set; letloop-main runs the script
+            ;; before it reads a single argument. It used to be a real
+            ;; `scheme`, found beside the boot files or on $PATH, because
+            ;; the host parses no -b and no --script. That left a
+            ;; relocated letloop unable to compile wherever that scheme
+            ;; could not run -- a statically linked letloop beside a
+            ;; musl-linked scheme, copied onto a glibc host, ran its
+            ;; programs but could not build one. Now nothing beyond the
+            ;; boot files is needed, and those are only read.
+            ;;
+            ;; When the running binary is not a letloop host, it is
+            ;; upstream scheme running letloop-compile from source --
+            ;; `make letloop`'s own bootstrap -- and that scheme is the
+            ;; child, with -b and --script, since it has no letloop-main
+            ;; to honour the variable. $LETLOOP_SCHEME names a stock Chez
+            ;; to use instead in either case, to compare against one.
+            (lambda ()
+              (define stock
+                (lambda (scheme)
+                  (format #f "~a -b ~apetite.boot -b ~ascheme.boot --quiet --script ~a"
+                          (shell-quote scheme) boot-directory* boot-directory*
+                          (shell-quote build.scm))))
+              (let ((scheme (getenv "LETLOOP_SCHEME")))
+                (cond
+                 ((and scheme (file-exists? scheme)) (stock scheme))
+                 ((letloop-host?)
+                  (format #f "LETLOOP_BUILD_SCRIPT=~a ~a"
+                          (shell-quote build.scm) (shell-quote exe)))
+                 (else (stock exe))))))
 
           (define letloop-src
             (and=> (letloop-library-directory)
@@ -943,6 +998,22 @@
                            (let ((out (string-append temporary-directory "/obj")))
                              (system* (format #f "mkdir -p ~a" out))
                              out))))))
+
+          ;; Chez names every gensym it generates with a session key,
+          ;; drawn at random per process, and that name is written into
+          ;; the fasl -- so two compiles of the same source differ byte
+          ;; for byte while remaining $fasl-file-equal?. Pinning the key
+          ;; makes them byte-identical, which is what lets a build be
+          ;; addressed by its inputs and verified by anyone.
+          ;;
+          ;; $LETLOOP_SESSION_KEY carries it, rather than a flag: the
+          ;; caller that knows what identifies this build is the store,
+          ;; which already computes exactly that as its cache key.
+          ;; Unset, nothing changes and Chez keeps its random key.
+          ;;
+          ;; Reproducibility needs one more thing this cannot give: no
+          ;; macro may bake in a timestamp. See include-date.
+          (define session-key (getenv "LETLOOP_SESSION_KEY"))
 
           (define forms
             `(,@(if (null? directories)
@@ -1003,10 +1074,14 @@
               ;; compile-whole-program rejects loose top-level forms.
               (display "#!chezscheme\n" port)
               (for-each (lambda (form) (pretty-print form port))
-                        `((import (chezscheme) ,library-name)
+                        `((import (chezscheme) ,library-name
+                                  ,@(if ca-bundle '((letloop tls base)) '()))
                           (suppress-greeting #t)
                           ,@(if disable-garbage-collector?
                                 '((collect-request-handler void))
+                                '())
+                          ,@(if ca-bundle
+                                `((embedded-ca-bundle ,ca-bundle))
                                 '())
                           (scheme-start ,(string->symbol main)))))
             'truncate)
@@ -1014,6 +1089,14 @@
           (call-with-output-file build.scm
             (lambda (port)
               (display "#!chezscheme\n" port)
+              ;; Written as text, not pretty-printed: the reader needs
+              ;; #%$set-top-level-value! to name the system primitive,
+              ;; and pretty-print escapes the # into \x23; which reads
+              ;; back as an ordinary, unbound identifier.
+              (when session-key
+                (display "(#%$set-top-level-value! '$session-key \"" port)
+                (display session-key port)
+                (display "-\")\n" port))
               (pretty-print
                `(guard (ex (else (display "* Ooops :|\n" (current-error-port))
                                  (display "** " (current-error-port))
@@ -1032,25 +1115,344 @@
               (pretty-print '(exit 0) port))
             'truncate)
 
-          (system*
-           (pk (format #f "~a -b ~apetite.boot -b ~ascheme.boot --quiet --script ~a"
-                       (scheme-executable) boot-directory* boot-directory* build.scm)))))
+          (system* (pk (compiler-command)))))
+
+      ;; The lines a command wrote to stdout. Read with get-line rather
+      ;; than read-string, which this library only has at expand time.
+      (define run/lines
+        (lambda (command)
+          (call-with-values (lambda ()
+                              (open-process-ports command 'line (current-transcoder)))
+            (lambda (stdin stdout stderr pid)
+              (let loop ((out '()))
+                (let ((line (get-line stdout)))
+                  (if (eof-object? line)
+                      (reverse out)
+                      (loop (cons line out)))))))))
+
+      (define split-on
+        (lambda (string char)
+          (let loop ((chars (string->list string)) (current '()) (out '()))
+            (cond
+             ((null? chars) (reverse (cons (list->string (reverse current)) out)))
+             ((char=? (car chars) char)
+              (loop (cdr chars) '() (cons (list->string (reverse current)) out)))
+             (else (loop (cdr chars) (cons (car chars) current) out))))))
+
+      (define string-contains?
+        (lambda (needle haystack)
+          (let ((n (string-length needle)) (h (string-length haystack)))
+            (let loop ((index 0))
+              (cond
+               ((fx> (fx+ index n) h) #f)
+               ((string=? (substring haystack index (fx+ index n)) needle) #t)
+               (else (loop (fx+ index 1))))))))
+
+      ;; The Chez boot directory and letloop's installed sources, both
+      ;; needed to relink the host against a program's archives. Named
+      ;; here rather than reused from build-boot-file/whole-program,
+      ;; whose copies are local to it.
+      (define boot-directory-path
+        (lambda ()
+          (boot-directory!)))
+
+      (define letloop-source-directory
+        (lambda ()
+          (and=> (letloop-library-directory)
+                 (lambda (x) (string-append x "/src")))))
+
+      (define c-compiler
+        ;; Only ever consulted when a program brought archives of its
+        ;; own; the ordinary path copies the running host and needs no
+        ;; compiler at all.
+        (lambda ()
+          (define usable
+            (lambda (path)
+              (and path
+                   (positive? (string-length path))
+                   ;; plain system, not system*: a missing compiler is
+                   ;; the question being asked here, not an error
+                   (fxzero? (system (format #f "command -v ~a >/dev/null 2>&1" path)))
+                   path)))
+          (or (usable (getenv "CC"))
+              (usable "cc")
+              (usable "gcc")
+              (begin
+                (format (current-error-port)
+                        "* Ooops :|\n** Linking a static library needs a C compiler, and none was found.\n")
+                (format (current-error-port)
+                        "** Tried $CC, cc, and gcc on $PATH.\n")
+                (exit 1)))))
+
+      (define archive-symbols
+        ;; Every defined, global symbol an archive exports -- what
+        ;; dlsym would find, had dlopen been an option. nm prints
+        ;; blank lines and "member.o:" headers between members; a
+        ;; symbol line is "ADDRESS TYPE NAME", so three fields.
+        (lambda (archive)
+          (let loop ((lines (run/lines
+                             (format #f "nm --defined-only -g ~a 2>/dev/null" archive)))
+                     (out '()))
+            (if (null? lines)
+                (reverse out)
+                (let ((fields (remove "" (split-on (car lines) #\space))))
+                  (loop (cdr lines)
+                        (if (= (length fields) 3)
+                            (cons (caddr fields) out)
+                            out)))))))
+
+      (define write-extra-symbols!
+        ;; The companion for letloop-main.c's weak
+        ;; letloop_register_extra_symbols. Each symbol is referenced
+        ;; under a local name aliased to the real one via GCC's
+        ;; asm-label extension, so this file never declares a
+        ;; prototype it cannot know -- an archive's symbols have types
+        ;; only its headers describe, and the address is all
+        ;; Sforeign_symbol wants.
+        (lambda (path symbols)
+          (call-with-output-file path
+            (lambda (port)
+              (display "/* Generated by `letloop compile`. Do not edit. */\n" port)
+              (display "#include \"scheme.h\"\n\n" port)
+              (display "void letloop_register_extra_symbols(void);\n\n" port)
+              (display "void letloop_register_extra_symbols(void) {\n" port)
+              (for-each
+               (lambda (symbol)
+                 (format port "  { extern void ~a_letloop_alias(void) __asm__(\"~a\");\n" symbol symbol)
+                 (format port "    Sforeign_symbol(\"~a\", (void *)~a_letloop_alias); }\n" symbol symbol))
+               symbols)
+              (display "}\n" port)))))
+
+      (define link-host-with-archives!
+        ;; The one path that needs a C compiler: archives have to be
+        ;; linked, and linking is not something bytes can be copied
+        ;; into. Recompiles letloop-main.c -- shipped beside the
+        ;; libraries for exactly this -- against kernel.o and the
+        ;; archives, plus the generated symbol table.
+        (lambda (destination)
+          (define compiler (c-compiler))
+          (define boot* (boot-directory-path))
+          (define source
+            (let* ((src (letloop-source-directory))
+                   (path (and src (string-append src "/letloop-main.c"))))
+              (if (and path (file-exists? path))
+                  path
+                  (begin
+                    (format (current-error-port)
+                            "* Ooops :|\n** Linking a static library needs letloop's own letloop-main.c.\n")
+                    (format (current-error-port)
+                            "** Looked for it at ~a.\n"
+                            (or path "<letloop's sources are not installed>"))
+                    (exit 1)))))
+          (define kernel.o (string-append boot* "kernel.o"))
+          (unless (file-exists? kernel.o)
+            (format (current-error-port)
+                    "* Ooops :|\n** Linking a static library needs ~a, from the Chez installation.\n"
+                    kernel.o)
+            (exit 1))
+          (for-each
+           (lambda (archive)
+             (unless (file-exists? archive)
+               (format (current-error-port)
+                       "* Ooops :|\n** No such static library: ~a\n" archive)
+               (exit 1)))
+           archives)
+          (let ((extra.c (string-append temporary-directory "/letloop-extra-symbols.c"))
+                (symbols (apply append (map archive-symbols archives))))
+            (write-extra-symbols! extra.c symbols)
+            ;; -static on musl, matching how letloop builds itself
+            ;; there: musl makes it routine, and a program linking
+            ;; archives rather than dlopening them is usually after
+            ;; exactly that.
+            (let* ((triple (let ((lines (run/lines (format #f "~a -dumpmachine" compiler))))
+                             (if (null? lines) "" (car lines))))
+                   (static-flag (if (string-contains? "musl" triple) "-static" ""))
+                   ;; --start-group, so the linker resolves the order
+                   ;; itself. Static archives are order-sensitive --
+                   ;; libopaque must precede liboprf must precede
+                   ;; libsodium -- and emitting a correct order from a
+                   ;; dependency graph is its own problem, one an
+                   ;; inferred archive set would have to solve before
+                   ;; it could be trusted. A group makes the linker
+                   ;; re-scan until nothing new resolves, which is the
+                   ;; answer it already has for exactly this.
+                   (grouped
+                    (if (null? archives)
+                        ""
+                        (fold-left (lambda (out archive) (string-append out " " archive))
+                                   " -Wl,--start-group" archives)))
+                   (command
+                    (format #f "~a -I~a -I~a ~a ~a ~a~a~a -o ~a ~a -ldl -lm -lpthread"
+                            compiler boot* temporary-directory
+                            source extra.c kernel.o
+                            grouped
+                            (if (null? archives) "" " -Wl,--end-group")
+                            destination static-flag)))
+              (when LETLOOP_DEBUG (pk 'link command))
+              (unless (fxzero? (system command))
+                (format (current-error-port)
+                        "* Ooops :|\n** Linking the static libraries failed:\n** ~a\n" command)
+                (exit 1))))))
+
+      (define library-declares-shared-object?
+        ;; Whether a library names a shared object of its own. This is
+        ;; the statement that it has C behind it, and it was already
+        ;; written years before anything inferred anything: importing
+        ;; (letloop sodium) is what says libsodium is wanted, and
+        ;; define-shared-object is where it says so.
+        ;;
+        ;; Restricting inference to these libraries is also what keeps
+        ;; it from ever building something that is not an archive.
+        ;; Several packages under (letloop package ...) are test
+        ;; fixtures whose output is a compiled program -- flow2,
+        ;; review, hello -- and matching on name alone would cheerfully
+        ;; build one, minutes of sandboxed work, only to find no .a
+        ;; inside it. A library that declares no shared object is
+        ;; never asked about, so a fixture is never reached by name.
+        (lambda (filename)
+          (guard (ex (else #f))
+            (call-with-input-file filename
+              (lambda (port)
+                (let ((text (get-string-all port)))
+                  (and (string? text)
+                       (string-contains? "define-shared-object" text))))))))
+
+      (define archives-for-library
+        ;; The archives one library needs, or '() -- its longest
+        ;; matching package wins, so (letloop tls low) takes
+        ;; (letloop package tls) only because no (letloop package tls
+        ;; low) exists.
+        (lambda (name)
+          (let loop ((candidates (or (library-package-components name) '())))
+            (if (null? candidates)
+                '()
+                (let ((found (store-package-archives (car candidates))))
+                  (if (pair? found) found (loop (cdr candidates))))))))
+
+      (define infer-archives!
+        ;; Which static archives a program needs, worked out from what
+        ;; it imports rather than from what someone remembered to type
+        ;; on the command line.
+        ;;
+        ;; Both halves of this already existed and only needed
+        ;; joining: a binding library names its package by its own name
+        ;; -- (letloop sodium) means (letloop package sodium) -- so a
+        ;; program's import closure is already the list of packages it
+        ;; wants, and each package's own derivation already carries the
+        ;; C-level dependencies underneath it, which is the part no
+        ;; import can express (libopaque needs liboprf and libsodium,
+        ;; and only opaque's derivation says so).
+        ;;
+        ;; A library with no package behind it contributes nothing, so
+        ;; most of a closure is simply skipped -- and (letloop desktop
+        ;; vulkan low) skips for a reason worth keeping: libvulkan is a
+        ;; loader that dlopens drivers itself, so there is no archive
+        ;; that would make it static, and inference correctly declines
+        ;; to invent one.
+        ;;
+        ;; Reported, never silent. This repository has been bitten more
+        ;; than once by a link-time probe that failed quietly and left
+        ;; a binary that looked healthy until something reached the
+        ;; part needing the symbols; an inferred link has exactly that
+        ;; shape unless it says what it did.
+        (lambda ()
+          (let loop ((names (filter (lambda (name)
+                                      (let ((path (library-name->path name)))
+                                        (and path (library-declares-shared-object? path))))
+                                    (import-closure library.scm)))
+                     (found '())
+                     (unbuilt-candidates '()))
+            (if (pair? names)
+                (let ((archives-here (archives-for-library (car names))))
+                  (loop (cdr names)
+                        (fold-left (lambda (out archive)
+                                     (if (member archive out) out (append out (list archive))))
+                                   found
+                                   archives-here)
+                        (if (null? archives-here)
+                            (append unbuilt-candidates (list (car names)))
+                            unbuilt-candidates)))
+                (let ((new (filter (lambda (archive) (not (member archive archives))) found)))
+                  (unless (null? new)
+                    (display "* Linking static libraries found in the store:\n")
+                    (for-each (lambda (archive) (format #t "** ~a\n" archive)) new))
+                  (set! archives (append archives new))
+                  ;; Silent when there is nothing to say -- this runs on
+                  ;; every compile now, and most programs have no C
+                  ;; under them at all. The one thing worth interrupting
+                  ;; for is a package that exists and simply has not
+                  ;; been built: that program is about to dlopen a
+                  ;; library it could have linked, and the fix is one
+                  ;; command. Compiling never runs that command itself;
+                  ;; a build is minutes, sometimes the whole chain, and
+                  ;; is not something to start because an import
+                  ;; mentioned it.
+                  (for-each
+                   (lambda (name)
+                     (let loop ((candidates (or (library-package-components name) '())))
+                       (unless (null? candidates)
+                         (if (store-package-unbuilt? (car candidates))
+                             (format #t "* ~a has a package that is not built; it will dlopen at run time.\n** Build it to link it in: letloop store build ~a\n"
+                                     name
+                                     (fold-left (lambda (out component)
+                                                  (if (string=? out "")
+                                                      (symbol->string component)
+                                                      (string-append out " " (symbol->string component))))
+                                                ""
+                                                (car candidates)))
+                             (loop (cdr candidates))))))
+                   unbuilt-candidates))))))
+
+      (define ca-bundle-to-embed
+        ;; The bytes to bake into program.scm as (letloop tls base)'s
+        ;; last-resort CA source, or #f. Asks the same question
+        ;; infer-archives! asks of every shared-object-declaring
+        ;; library, scoped to tls alone, and run before either
+        ;; build-boot-file branch so the answer is ready while
+        ;; program.scm is generated -- infer-archives! itself runs
+        ;; too late for that, called only for emit-program!'s linking
+        ;; step, after program.scm is already compiled.
+        ;;
+        ;; A dynamically-linked program needs none of this: its
+        ;; dlopen'd libtls.so already has a real, distro-maintained
+        ;; default, and embedding a compile-time snapshot into every
+        ;; TLS-using program regardless would be an unasked-for change
+        ;; of trust source for the common case, not a fix for one.
+        (lambda ()
+          (and (member '(letloop tls low) (import-closure library.scm))
+               (pair? (archives-for-library '(letloop tls low)))
+               (let ((directory (store-package-path '(ca-certificates))))
+                 (if (not directory)
+                     (begin
+                       (display "* tls is linked statically but no ca-certificates package is built; libtls will fall back to its own compile-time default, which exists only inside the sandbox that built it.\n** Build one: letloop store build ca-certificates\n")
+                       #f)
+                     (let ((path (string-append directory "/cert.pem")))
+                       (and (file-exists? path)
+                            (call-with-port (open-file-input-port path)
+                              get-bytevector-all))))))))
 
       (define emit-program!
-        ;; One self-contained file, and no C compiler: the host binary,
-        ;; then the standalone boot image, then a trailer giving its
-        ;; length. src/letloop-main.c finds that trailer by reading
+        ;; One self-contained file: the host binary, then the
+        ;; standalone boot image, then a trailer giving its length.
+        ;; src/letloop-main.c finds that trailer by reading
         ;; /proc/self/exe and registers the boot from memory. Bytes past
         ;; the end of an ELF image are ignored by the loader, so the
         ;; result is still an executable.
+        ;;
+        ;; No C compiler is involved unless the program named archives
+        ;; to link: the host is otherwise this very binary, copied.
         (lambda ()
 
           (define host
-            (or (executable-path)
-                (begin
-                  (format (current-error-port)
-                          "* Ooops :|\n** Cannot read /proc/self/exe, needed to copy the host binary.\n")
-                  (exit 1))))
+            (if (null? archives)
+                (or (executable-path)
+                    (begin
+                      (format (current-error-port)
+                              "* Ooops :|\n** Cannot read /proc/self/exe, needed to copy the host binary.\n")
+                      (exit 1)))
+                (let ((linked (string-append temporary-directory "/letloop-host")))
+                  (link-host-with-archives! linked)
+                  linked)))
 
           (define read-file
             (lambda (path)
@@ -1134,95 +1536,17 @@
 
       (maybe-display-errors-then-exit errors)
 
+      (set! ca-bundle (ca-bundle-to-embed))
+
       (if visible-libraries?
           (build-boot-file/visible-libraries)
           (build-boot-file/whole-program))
 
+      (infer-archives!)
+
       (emit-program!)))
 
   (define letloop-compile* (lambda () (letloop-compile (command-line-arguments))))
-
-  (define (letloop-exec arguments)
-
-    ;; parse ARGUMENTS, and set the following variables:
-
-    (define extensions '())
-    (define directories '())
-    (define dev? #f)
-    (define disable-garbage-collector? #f)
-    (define optimize-level* 0)
-    (define extra '())
-    (define program.scm #f)
-    (define library.scm #f)
-    (define main #f)
-
-    (define errors (make-accumulator))
-
-    (define massage-standalone!
-      (lambda (standalone)
-        (unless (null? standalone)
-          (call-with-values (lambda () (guess (car standalone)))
-            (lambda (type string*)
-              (case type
-                (directory (set! directories (cons string* directories)))
-                (extension (set! extensions (cons string* extensions)))
-                (file (if library.scm
-                          (errors (format #f "Already registred a library to execute, maybe remove: ~a" (car standalone)))
-                          (set! library.scm string*)))
-                (unknown (if main
-                             (errors (format #f "Already registred a main procedure, maybe remove: ~a" (car standalone)))
-                             (set! main string*))))))
-          (massage-standalone! (cdr standalone)))))
-
-    (define massage-keywords!
-      (lambda (keywords)
-        (unless (null? keywords)
-          (let ((keyword (car keywords)))
-            (cond
-             ((and (eq? (car keyword) '--dev) (not (string? (cdr keyword))))
-              (set! dev? #t))
-             ((and (eq? (car keyword) '--disable-garbage-collector) (not (string? (cdr keyword))))
-              (set! disable-garbage-collector? #t))
-             ((and (eq? (car keyword) '--optimize-level)
-                   (string->number (cdr keyword))
-                   (<= 0 (string->number (cdr keyword)) 3))
-              (set! optimize-level* (string->number (cdr keyword))))
-             (else (errors (format #f "Dubious keyword: ~a" (car keyword))))))
-          (massage-keywords! (cdr keywords)))))
-
-    (call-with-values (lambda () (cli-read arguments))
-      (lambda (keywords standalone extra*)
-        (massage-standalone! standalone)
-        (massage-keywords! keywords)
-        (set! extra extra*)))
-
-    (maybe-display-errors-then-exit errors)
-
-    (unless (null? directories)
-      (library-directories directories)
-      (source-directories directories))
-
-    ;; the override above drops letloop's own libraries off the path
-    (letloop-library-path!)
-
-    (when optimize-level*
-      (optimize-level optimize-level*))
-
-    (unless (null? extensions)
-      (library-extensions (append extensions (library-extensions))))
-
-    (dev! dev?)
-    (disable-garbage-collector! disable-garbage-collector?)
-
-    (dynamic-wind
-        (lambda () (void))
-        (lambda () (let ((exp (cons (string->symbol main) extra))
-                         (env (environment (maybe-library-name library.scm))))
-                     (pk 'to 'exec exp env)
-                     (eval exp env)))
-        (lambda ()
-          (when dev?
-            (profile-dump-html)))))
 
   (define (letloop-http-serve arguments)
 
@@ -1409,12 +1733,82 @@
                     (loop (cdr objects)
                           (cons (cons (car objects) #t) out)))))))
 
-      (define build-check-program
-        (lambda (spec fail-fast?)
-          ;; TODO: add prefix to import, and rename procedures
-          (define libraries (pk 'libraries (reverse (uniquify (map car spec)))))
-          (define procedures (map cdr spec))
+      (define run-check-driver!
+        ;; Compile one library's checks and run them, returning whether
+        ;; they passed.
+        ;;
+        ;; A child `letloop compile`, rather than calling the compile
+        ;; path in this process, because that path replaces the library
+        ;; directories, the optimize level and the object cache
+        ;; wholesale -- doing that once per library inside the process
+        ;; running the checks would leave each library's run depending
+        ;; on the ones before it. A child starts clean every time.
+        ;;
+        ;; It compiles in its own directory, so ./a.out lands there
+        ;; rather than on top of whatever the invoker happens to have
+        ;; in the directory they ran this from. The paths handed to it
+        ;; are absolute already -- guess makes them so -- which is what
+        ;; makes moving the child's cwd safe.
+        (lambda (temporary-directory library-name procedures fail-fast?)
+          (let* ((directory (string-append temporary-directory "/"
+                                            (number->string (length procedures))
+                                            "-" (symbol->string (car (reverse library-name)))))
+                 (driver (string-append directory "/letloop-check-driver.scm"))
+                 (output (string-append directory "/compile.log")))
+            (system* (format #f "mkdir -p ~a" directory))
+            (call-with-output-file driver
+              (lambda (port)
+                (write (build-check-driver library-name procedures fail-fast?) port)))
+            (format #t "* ~a\n" library-name)
+            (flush-output-port (current-output-port))
+            (let ((compiled
+                   (fxzero?
+                    (system (format #f "cd ~a && ~a compile~a ~a ~a main > ~a 2>&1"
+                                     directory
+                                     (or (executable-path) "letloop")
+                                     (fold-left (lambda (out d) (string-append out " " d))
+                                                "" directories)
+                                     directory driver output)))))
+              (if (not compiled)
+                  (begin
+                    ;; Never silent: a library whose checks could not be
+                    ;; built is not a library whose checks passed, and
+                    ;; the compiler already said why.
+                    (format #t "** Could not compile the checks for ~a:\n" library-name)
+                    (guard (ex (else (void)))
+                      (call-with-input-file output
+                        (lambda (port) (display (get-string-all port)))))
+                    #f)
+                  (fxzero? (system (format #f "cd ~a && ./a.out" directory))))))))
 
+      (define build-check-driver
+        ;; One library's checks, as a program `letloop compile` can
+        ;; take, rather than as a form to eval in this process.
+        ;;
+        ;; Compiling is what makes a check test the thing that ships. A
+        ;; check run through eval reaches its C libraries by dlopen; a
+        ;; compiled program links them as static archives. Those are
+        ;; not the same program, and the one being tested was the one
+        ;; nobody deploys -- most sharply on a statically linked
+        ;; letloop, where dlopen does not work at all, so the
+        ;; interpreted path could not even reach the code it claimed to
+        ;; be checking.
+        ;;
+        ;; One driver per library, not one for the whole tree, and this
+        ;; is forced rather than chosen: a single program importing
+        ;; everything would have to link every archive at once, and
+        ;; libsodium and libargon2 both define argon2id_hash_raw, so
+        ;; such a binary cannot be linked at all. Per library the
+        ;; conflict cannot arise, since no library imports both.
+        (lambda (library-name procedures fail-fast?)
+          `(library (letloop-check-driver)
+             (export main)
+             (import (chezscheme) ,library-name)
+             (define (main . arguments)
+               ,(build-check-body procedures fail-fast?)))))
+
+      (define build-check-body
+        (lambda (procedures fail-fast?)
           (pk 'program
               `(begin
                  (define errored? #f)
@@ -1425,12 +1819,6 @@
                      (display-condition ex)
                      (newline (current-error-port))))
                  
-                 (display "* Will run tests from the following libraries:\n")
-                 (for-each
-                  (lambda (x)
-                    (format #t "** ~a\n" x)) ',libraries)
-
-                 (newline)
                  (let loop ((thunks (list ,@procedures)))
                    (unless (null? thunks)
                      (format #t "* Checking `~a`:\n" (car thunks))
@@ -1492,7 +1880,7 @@
                                              (map maybe-read-library
                                                   files))))
                          (discover directories)))
-             (program (build-check-program checks fail-fast?)))
+             (ignore (void)))
 
         (when (null? checks)
           (format #t "* Error, no checks found!\n")
@@ -1512,31 +1900,44 @@
                  (format #t "** Dry checking `~a`:\n" (car thunks)))
                thunks))
 
-            (begin
-              ;; Do NOT change the current directory here: checks run
-              ;; in the directory letloop was invoked from, like exec.
-              ;; A chdir before EVAL used to break every relative path
-              ;; the invoker relied on -- most notably a relative
-              ;; LD_LIBRARY_PATH entry, because glibc resolves relative
-              ;; entries against the cwd at each dlopen, so every
-              ;; lazy-foreign-procedure whose shared object lives only
-              ;; on such an entry failed with "cannot dlopen shared
-              ;; object" once the first foreign call happened after the
-              ;; chdir. The profile dump lands in TEMPORARY-DIRECTORY
-              ;; via profile-dump-html's path-prefix argument instead.
-              (dynamic-wind
-                  (lambda () (void))
-                  (lambda () (eval program (copy-environment (apply environment '(chezscheme)
-                                                                    (reverse (uniquify (map car checks))))
-                                                             #t)))
-                  (lambda ()
-                    ;; profile-dump-html may fail if there is no temporary directory
-                    (guard (ex (else (void)))
-                      (profile-dump-html (string-append temporary-directory "/"))
-                      (format (current-output-port) "* Coverage profile can be found at: ~a/profile.html\n" temporary-directory)))))))))
+            (let* ((libraries (reverse (uniquify (map car checks))))
+                   (failed
+                    (fold-left
+                     (lambda (failed library-name)
+                       (let ((procedures (map cdr (filter (lambda (check)
+                                                            (equal? (car check) library-name))
+                                                          checks))))
+                         (if (run-check-driver! temporary-directory library-name
+                                                procedures fail-fast?)
+                             failed
+                             (begin
+                               (when fail-fast? (newline) (exit 1))
+                               (cons library-name failed)))))
+                     '()
+                     libraries)))
+              (newline)
+              (unless (null? failed)
+                (display "* Libraries with failing checks:\n")
+                (for-each (lambda (name) (format #t "** ~a\n" name)) (reverse failed))
+                (exit 1)))))))
 
   (define letloop-main
     (lambda args
+
+      ;; The compiler child. `letloop compile` re-executes this very
+      ;; binary with LETLOOP_BUILD_SCRIPT naming the build script it
+      ;; wrote, and nothing else on the command line: the host parses
+      ;; no flags, so the environment is the one channel that cannot
+      ;; collide with a program's own arguments. Checked before a
+      ;; single argument is read, so the child is as pristine as a
+      ;; bare scheme -- the only library defined here is (letloop
+      ;; base), folded and invisible, which no program can import
+      ;; anyway. See build-boot-file/whole-program for why the
+      ;; compile cannot happen in the parent.
+      (let ((script (getenv "LETLOOP_BUILD_SCRIPT")))
+        (when script
+          (load script)
+          (exit 0)))
 
       (pk 'args args)
 
@@ -1552,10 +1953,9 @@
         ((version --version) (letloop-version) (exit 0))
         ((check) (letloop-check (cdr args)))
         ((compile) (letloop-compile (cdr args)))
-        ((exec) (letloop-exec (cdr args)))
         ((http) (letloop-http (cdr args)))
         ((repl) (letloop-repl (cdr args)))
-        ((root) (letloop-root (cdr args)))
+        ((store) (letloop-store (cdr args)))
         ;; ((desktop) (letloop-desktop (cdr args)))
         ((review) (letloop-review (cdr args)))
         (else (letloop-usage) (exit 1)))))

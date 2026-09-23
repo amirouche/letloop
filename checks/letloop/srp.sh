@@ -30,9 +30,10 @@ fi
 
 # --- Scheme side ---
 echo "Running letloop/srp..."
-$LETLOOP exec "$ROOT/src/" "$ROOT/checks/letloop/" \
+$LETLOOP compile "$ROOT/src/" "$ROOT/checks/letloop/" \
     "$ROOT/checks/letloop/srp-interop.scm" main \
-    > "$TMPDIR/scheme.txt" 2>"$TMPDIR/scheme_err.txt"
+    > "$TMPDIR/compile.txt" 2>&1 \
+    && ./a.out > "$TMPDIR/scheme.txt" 2>"$TMPDIR/scheme_err.txt"
 
 if [ $? -ne 0 ]; then
     echo "Scheme script failed:"
