@@ -7,7 +7,8 @@
           ~check-dns-001
           ~check-dns-002
           ~check-dns-003
-          ~check-dns-004)
+          ~check-dns-004
+          ~check-dns-005)
 
   (import (chezscheme)
           (letloop aql shims)
