@@ -31,7 +31,7 @@ FFI binding libraries (`tls`, `liburing`, `vulkan`, `sodium`, `argon2`, `blake3`
 **First-time setup** (builds ChezScheme from source, ~5–15 min):
 ```bash
 ./venv               # enters a shell with SCHEME, LETLOOP_ROOT, LD_LIBRARY_PATH set
-make chezscheme      # ChezScheme $(CHEZ_REF), currently main = 10.5.0-pre-release.1
+make chezscheme      # ChezScheme $(CHEZ_REF), currently v10.4.1
 make letloop         # installs itself, no `mv a.out` step
 make check
 ```

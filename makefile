@@ -1,15 +1,17 @@
 .PHONY: help letloop letloop-libraries argon2 blake3 sodium oprf opaque liburing picohttpparser dependencies check shaders font-bundle
 
-SCHEME=$(shell which scheme)
+# Prefer the Chez built into $(PREFIX): the system scheme on $$PATH is
+# usually another version, and one built without --kernelobj, so letloop
+# would be assembled against the wrong tree. Recursively expanded, so
+# `make chezscheme letloop` picks the fresh build up in the same run.
+SCHEME=$(if $(wildcard $(PREFIX)/bin/scheme),$(PREFIX)/bin/scheme,$(shell which scheme))
 PWD=$(shell pwd)
 LETLOOP=$(shell which letloop)
 SHELL=/bin/bash
 PREFIX=$(PWD)/local
 
-# Which ChezScheme to build. There is no v10.5.0 tag upstream: main carries
-# scheme-version #x0a050001, i.e. 10.5.0-pre-release.1, while the latest
-# release tag is v10.4.1. Pin this to a tag when one lands.
-CHEZ_REF=main
+# Which ChezScheme to build: the latest release tag.
+CHEZ_REF=v10.4.1
 
 help: ## Help!...
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "\033[36m%-30s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST) | sort
@@ -52,7 +54,9 @@ letloop: clean src/letloop-main.c src/letloop-usage.md src/letloop/base.scm ## P
 	@#
 	@# The same shape is what `letloop compile` produces, by copying its
 	@# own host and appending a different boot. No C compiler runs there.
-	BOOT=$$(dirname $$(readlink -f $(SCHEME))); \
+	set -e; BOOT=$$(dirname $$(readlink -f $(SCHEME))); \
+	  test -f "$$BOOT/kernel.o" || { \
+	    echo "error: $$BOOT/kernel.o not found: $(SCHEME) is not a Chez built with --kernelobj (run make chezscheme)" >&2; exit 1; }; \
 	  cc -I"$$BOOT" src/letloop-main.c "$$BOOT/kernel.o" \
 	     -o "$$BOOT/letloop-host" -ldl -lm -luuid -lpthread; \
 	  install -m 644 a.out.boot "$$BOOT/letloop.boot"; \
