@@ -71,6 +71,24 @@
             out
             (raise (make-json-error "Invalid code point."))))))
 
+  ;; \uD800-\uDFFF is syntactically valid JSON (four hex digits after
+  ;; \u, nothing more) even when it does not pair up into a real
+  ;; Unicode scalar value -- real crawled/scraped text hits this
+  ;; often, e.g. Python's surrogateescape error handler round-tripping
+  ;; bytes that were never valid UTF-8 to begin with. Chez's
+  ;; integer->char raises on a lone surrogate, and since json-read
+  ;; wraps parsing in a catch-all guard (below) that turns ANY
+  ;; exception into an uninformative "Invalid JSON", an unguarded call
+  ;; here silently dropped every such line instead of parsing the rest
+  ;; of the (otherwise well-formed) document. U+FFFD (the standard
+  ;; Unicode replacement character) is what a lone surrogate becomes
+  ;; instead, same as decoding lone surrogates in UTF-8/UTF-16 text
+  ;; generally does.
+  (define (json-safe-integer->char code)
+    (if (<= #xd800 code #xdfff)
+        #\xfffd
+        (integer->char code)))
+
   (define (read-json-string generator)
     (let loop ((char (generator))
                (out '()))
@@ -95,17 +113,15 @@
               ((#\b) (loop (generator) (cons #\backspace
                                            (append chars-unescaped
                                                    out))))
-              ;; racket does not support chars as hex
-              ;; ((#\f) (loop (generator) (cons #\x0c
-              ;;                              (append chars-unescaped
-              ;;                                      out))))
+              ((#\f) (loop (generator) (cons #\page
+                                           (append chars-unescaped
+                                                   out))))
               ((#\n) (loop (generator) (cons #\newline
                                            (append chars-unescaped
                                                    out))))
-              ;; racket does not support chars as hex
-              ;; ((#\r) (loop (generator) (cons #\x0D
-              ;;                              (append chars-unescaped
-              ;;                                      out))))
+              ((#\r) (loop (generator) (cons #\return
+                                           (append chars-unescaped
+                                                   out))))
               ((#\t) (loop (generator) (cons #\tab
                                            (append chars-unescaped
                                                    out))))
@@ -130,17 +146,17 @@
                                                            out))))
                                      ;; This is another unicode char
                                      (loop-unicode (read-unicode-escape generator)
-                                                   (cons (integer->char code1) chars))))
+                                                   (cons (json-safe-integer->char code1) chars))))
                                ;; The escaped unicode char is
                                ;; parsed, need to parse another
                                ;; escape that is not a unicode
                                ;; escape sequence
-                               (loop-unescape char (cons (integer->char code1)
+                               (loop-unescape char (cons (json-safe-integer->char code1)
                                                          chars)))
                            ;; This is not a big-ish unicode char and
                            ;; the next thing is some other char.
                            (loop next-char
-                                 (cons (integer->char code1) (append chars out)))))))
+                                 (cons (json-safe-integer->char code1) (append chars out)))))))
               (else (raise (make-json-error "Unexpected escaped sequence.")))))))
        ((char=? char #\")
         (list->string (reverse out)))
