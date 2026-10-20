@@ -721,6 +721,14 @@
             (lambda (port) (display-condition ex port))))
           (else ex)))
 
+  ;; A block proc raised after an earlier base of the same perform had
+  ;; already won during registration: the fiber is committed to that
+  ;; value, so the raise has nowhere to go but here. It used to be
+  ;; written to stderr directly, the one library event that bypassed
+  ;; the logger.
+  (define (%flow-log-raise-after-win ex)
+    (flow-log (list 'flow2 'block-raised-after-win (%flow-condition-sexp ex))))
+
   ;; An entry is (TAG DATA . THUNK). DATA is the base's own, carried
   ;; only so that a raise here can say which base it came from: a bare
   ;; (flow2 cancel-raised) is what an operator reaches after an
@@ -785,13 +793,7 @@
                          ;; undebuggable-hang shape loop-apply's own
                          ;; guard comment warns about.
                          (unless (resume-from error-tag (%make-flow-raise ex))
-                           (display "flow2: block registration raised after another base won: "
-                                    (current-error-port))
-                           (if (condition? ex)
-                               (display-condition ex (current-error-port))
-                               (display ex (current-error-port)))
-                           (newline (current-error-port))
-                           (flush-output-port (current-error-port)))))
+                           (%flow-log-raise-after-win ex))))
                (for-each (lambda (base)
                            (let ((tag (cons #f #f)))
                              ((flow-block-proc base) state
@@ -842,7 +844,7 @@
         ;; registration, the caller is committed to that value — a
         ;; channel get may already have DEQUEUED it — and re-raising
         ;; would destroy it, the lost-value shape finding 7 was about.
-        ;; Report on stderr exactly as the on-loop path does, and fall
+        ;; Report it exactly as the on-loop path does, and fall
         ;; through to the wait, which the winner has already (or is
         ;; about to) satisfy.
         (let ((raised
@@ -856,13 +858,7 @@
                                         (%flow-run-cancels! pending #f)))))
                                  (list ex))
                                (begin
-                                 (display "flow2: block registration raised after another base won: "
-                                          (current-error-port))
-                                 (if (condition? ex)
-                                     (display-condition ex (current-error-port))
-                                     (display ex (current-error-port)))
-                                 (newline (current-error-port))
-                                 (flush-output-port (current-error-port))
+                                 (%flow-log-raise-after-win ex)
                                  #f))))
                  (for-each (lambda (base)
                              (let ((tag (cons #f #f)))

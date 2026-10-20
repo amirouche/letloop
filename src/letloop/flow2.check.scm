@@ -852,7 +852,7 @@
 ;; fix introduced. An earlier base wins synchronously during
 ;; registration, and a LATER base's block proc then raises. The fiber is
 ;; already committed to the winner's value, so the raise has nowhere to
-;; go: the fix reports it on stderr rather than swallowing it, and must
+;; go: the fix reports it through flow-log rather than swallowing it, and must
 ;; not disturb the winner. Asserted here: the fiber still gets 'sync,
 ;; the later base's own cancel still fires, and nothing hangs.
 (define (~check-flow2-011/raise-after-sync-win-keeps-winner)
@@ -868,6 +868,7 @@
                                (register-cancel!
                                 (lambda () (set! cancelled #t)))
                                (error 'raising-block "boom"))))
+  (flow-log-drain!)
   (loop-new)
   (loop-spawn
    (lambda ()
@@ -876,7 +877,14 @@
     (when (fx<? n 6)
       (loop-run-once)
       (tick (fx+ n 1))))
-  (and (eq? result 'sync) cancelled))
+  (and (eq? result 'sync)
+       cancelled
+       ;; the raise that had nowhere to go is a log entry, not stderr
+       (exists (lambda (sexp)
+                 (and (pair? sexp) (pair? (cdr sexp))
+                      (eq? 'block-raised-after-win (cadr sexp))
+                      (flow2-check-substring? "boom" (caddr sexp))))
+               (map cdr (flow-log-drain!)))))
 
 ;;------------------------------------------------------------
 ;; Network and file I/O
