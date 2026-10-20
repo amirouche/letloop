@@ -941,10 +941,12 @@
   ;;------------------------------------------------------------
 
   ;; One channel type for every role — fiber↔fiber, worker request
-  ;; channels, response channels. Unbounded by default; a bound turns
-  ;; an over-capacity put into a raised overflow. The mutex guards
-  ;; the value queue (two-stack FIFO), the parked getters and the
-  ;; bound; it is held only for list surgery, never across a resume.
+  ;; channels, the channels tasks reply on. Bounded by default (see
+  ;; %flow-channel-default-bound); a put over the bound parks until
+  ;; there is room, and raises overflow only with no scheduler to park
+  ;; on. The mutex guards the value queue (two-stack FIFO), the parked
+  ;; getters and putters and the bound; it is held only for list
+  ;; surgery, never across a resume.
   (define-record-type* <flow2-channel>
     (make-flow-channel% name mutex in out length bound getters
                         space saturated?)
