@@ -134,6 +134,7 @@
    ~check-flow2-005/wrap-runs-on-the-loop-when-a-worker-delivers
    ~check-flow2-005/coalesced-wakes-do-not-inflate-the-eventfd
    ~check-flow2-000/log-flush-writes-to-the-port-current-at-start
+   ~check-flow2-000/a-failing-flush-stops-cleanly-and-keeps-its-batch
    ~check-flow2-005/compute-count-is-validated
 
    ;; uncaught errors are log entries
@@ -310,11 +311,30 @@
                                                        1000000000)))
                                       0))
                     (wait (fx+ n 1))))
-                (%flow-log-write! (flow-log-drain!) port)
-                (if (unbox %flow-log-stop-requested?)
-                    (set-box! %flow-log-stopped? #t)
-                    (lp)))))))
+                (if (and (%flow-log-flush! (lambda (entries)
+                                             (%flow-log-write! entries port)))
+                         (not (unbox %flow-log-stop-requested?)))
+                    (lp)
+                    (set-box! %flow-log-stopped? #t)))))))
        (void))))
+
+  ;; One drain-and-write, #f when the write raised. A port that fails
+  ;; (a full disk, a closed pipe) used to kill the flush thread before
+  ;; it set %flow-log-stopped?, so flow-log-stop! spun forever and
+  ;; flow-log-start! refused to start another. Now the thread marks
+  ;; itself stopped and exits; the batch it could not write goes back
+  ;; into the log, followed by a (flow2 log-flush-raised CONDITION)
+  ;; entry, so a drain or the next flusher still sees all of it.
+  (define (%flow-log-flush! write!)
+    (let ((entries (flow-log-drain!)))
+      (guard (ex (#t (let ((b (%flow-log-ensure-box!)))
+                       (for-each (lambda (entry) (flow-box-cons! b entry))
+                                 entries)
+                       (flow-log (list 'flow2 'log-flush-raised
+                                       (%flow-condition-sexp ex))))
+                     #f))
+        (write! entries)
+        #t)))
 
   ;; Blocks the caller until the flush thread has done one final
   ;; drain-and-write and exited, so nothing logged before the stop

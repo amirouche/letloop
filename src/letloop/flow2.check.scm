@@ -2140,3 +2140,39 @@
   (assert (equal? '(1 2 3) (list-sort < (map car reasons))))
   (assert (for-all (lambda (r) (eq? 'stopped (cadr r))) reasons))
   #t)
+
+;; Sixth adverse pass. A flush that raised killed the flush thread
+;; before it marked itself stopped, so flow-log-stop! spun forever and
+;; flow-log-start! would not start another. The stop is run on its own
+;; thread with a bounded wait, so a regression FAILS here instead of
+;; hanging the suite.
+(define (~check-flow2-000/a-failing-flush-stops-cleanly-and-keeps-its-batch)
+  (define bad (make-custom-textual-output-port
+               "bad" (lambda (str start count) (error 'bad-port "disk full"))
+               #f #f #f))
+  (define stopped (box #f))
+  (flow-log-drain!)
+  (flow-log-start! 0.01 bad)
+  (flow-log '(flow2-check kept))
+  (sleep (make-time 'time-duration 50000000 0))
+  (fork-thread (lambda () (flow-log-stop!) (set-box! stopped #t)))
+  (let wait ((n 0))
+    (when (and (not (unbox stopped)) (fx<? n 200))
+      (sleep (make-time 'time-duration 10000000 0))
+      (wait (fx+ n 1))))
+  (assert (unbox stopped))
+  ;; the batch the port refused is still in the log, with the reason
+  (let ((sexps (map cdr (flow-log-drain!))))
+    (assert (member '(flow2-check kept) sexps))
+    (assert (exists (lambda (x)
+                      (and (pair? x) (pair? (cdr x))
+                           (eq? 'log-flush-raised (cadr x))
+                           (flow2-check-substring? "disk full" (caddr x))))
+                    sexps)))
+  ;; and a new flusher starts
+  (let ((good (open-output-string)))
+    (flow-log-start! 0.01 good)
+    (flow-log '(flow2-check after-restart))
+    (flow-log-stop!)
+    (assert (flow2-check-substring? "after-restart" (get-output-string good))))
+  #t)
