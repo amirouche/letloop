@@ -2416,3 +2416,35 @@
        (flow-stop))))
   (assert (equal? '(timeout "one" "two") (reverse results)))
   #t)
+
+;; A flow-get that dequeued during registration and then lost to an
+;; earlier base puts the value back -- and must not wake a putter for
+;; room it never made. It did: the wake came before the resume, and on
+;; a compute thread the woken putter could fill the slot before the
+;; unget, leaving the channel one past its bound.
+;;
+;; Made deterministic the way losing-get-does-not-eat-a-value is: the
+;; winning base's block runs after the poll, fills the channel to its
+;; bound, parks a probe on the space list, and wins -- so the get that
+;; registers after it takes the immediate path and loses. The probe
+;; records whether it was woken.
+(define (~check-flow2-002/a-losing-get-wakes-no-putter)
+  (define ch (make-flow-channel 'full 1))
+  (define woken #f)
+  (define probe (cons (box 'waiting) (lambda (v) (set! woken #t) #t)))
+  (define result #f)
+  (define winner (make-flow (lambda (x) x)
+                            (lambda () #f)
+                            (lambda (state resume register-cancel!)
+                              (flow-put! ch 'the-value)          ;; at the bound
+                              (flow-channel-space! ch (list probe))
+                              (resume 'winner))))
+  (flow-run
+   (lambda (workers)
+     (set! result (flow-perform (flow-choice winner (flow-get ch))))
+     (flow-stop)))
+  (assert (eq? result 'winner))
+  (assert (not woken))
+  (assert (eq? probe (car (flow-channel-space ch))))
+  (assert (eqv? 1 (flow-channel-queue-length ch)))
+  #t)

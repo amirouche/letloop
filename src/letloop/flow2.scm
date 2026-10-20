@@ -144,6 +144,7 @@
    ~check-flow2-005/a-thread-forked-in-a-task-is-refused
    ~check-flow2-000/a-forked-thread-logs-to-its-own-box
    ~check-flow2-006/reads-after-a-lost-race-keep-stream-order
+   ~check-flow2-002/a-losing-get-wakes-no-putter
 
    ;; uncaught errors are log entries
    ~check-flow2-012/uncaught-raise-in-a-fiber-is-logged
@@ -1232,9 +1233,11 @@
   ;; if there is one, exactly as a put would; otherwise push it back at
   ;; the HEAD of the queue, because that is where it was taken from and
   ;; appending it would reorder a FIFO. The bound is not consulted: the
-  ;; value was already inside it a moment ago, so re-admitting it
-  ;; cannot violate it, and raising overflow here would destroy the
-  ;; value this procedure exists to preserve.
+  ;; value was already inside it a moment ago, and raising overflow here
+  ;; would destroy the value this procedure exists to preserve. That
+  ;; holds only because the dequeue that took it woke no putter -- see
+  ;; flow-get, which wakes them after a successful resume and not
+  ;; before.
   (define (%channel-unget! channel obj)
     (let try ()
       (let ((entry
@@ -1307,7 +1310,6 @@
                                     (append (flow-channel-getters channel)
                                             (list entry)))
                                    #f)))))
-                      (when immediate (%channel-wake-space! channel))
                       (if immediate
                           ;; resume reports #f when an earlier base of
                           ;; this same perform already won — registration
@@ -1317,8 +1319,16 @@
                           ;; of the queue at that point, so put it back
                           ;; rather than drop it. %channel-put! has made
                           ;; the same test since day one.
-                          (unless (resume (cdr immediate))
-                            (%channel-unget! channel (cdr immediate)))
+                          ;;
+                          ;; Putters are woken only once the value is
+                          ;; really taken. Waking them first, as this
+                          ;; did, let a putter on another compute thread
+                          ;; fill the slot before the unget, which then
+                          ;; left the channel one past its bound --
+                          ;; %channel-unget! does not consult it.
+                          (if (resume (cdr immediate))
+                              (%channel-wake-space! channel)
+                              (%channel-unget! channel (cdr immediate)))
                           ;; The entry only became reachable just now, so
                           ;; a winner that fired the cancels before this
                           ;; point missed it — off-loop, resume-from
