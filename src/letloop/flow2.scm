@@ -141,6 +141,8 @@
    ;; sixth adverse pass
    ~check-flow2-005/flow-run-refuses-to-nest
    ~check-flow2-005/a-failed-start-releases-the-loop
+   ~check-flow2-005/a-thread-forked-in-a-task-is-refused
+   ~check-flow2-000/a-forked-thread-logs-to-its-own-box
 
    ;; uncaught errors are log entries
    ~check-flow2-012/uncaught-raise-in-a-fiber-is-logged
@@ -231,18 +233,42 @@
   ;; writing happen on a separate flush thread that nothing waits for.
   (define %flow-log-registry (box '()))
 
-  ;; A thread-parameter, not a global: two OS threads logging
-  ;; concurrently would otherwise clobber each other's accumulator.
-  (define %flow-log-box (make-thread-parameter #f))
+  ;; A value that belongs to the thread that set it. Chez's fork-thread
+  ;; copies the parent's thread parameters into the child, so a plain
+  ;; thread parameter is inherited, and both per-thread identities here
+  ;; were: a thread the user forked inside a compute task held the
+  ;; worker's pool, passed every wrong-thread check as that worker, and
+  ;; -- after the run had closed the eventfd and freed its buffer --
+  ;; signalled the closed descriptor, writing eight bytes of freed heap
+  ;; into whatever file had since been given that number. A forked
+  ;; thread also shared its parent's log box, so its entries interleaved
+  ;; with the parent's and two threads CASed one box -- the contention
+  ;; the per-thread boxes exist to avoid.
+  ;;
+  ;; The cell records the owner's thread id, and a reader on any other
+  ;; thread sees #f. The parent is alive when it forks, so the child's
+  ;; id always differs from the one it inherited.
+  (define (%make-thread-own) (make-thread-parameter #f))
+
+  (define (%thread-own-ref param)
+    (let ((cell (param)))
+      (and cell (eqv? (car cell) (get-thread-id)) (cdr cell))))
+
+  (define (%thread-own-set! param value)
+    (param (cons (get-thread-id) value)))
+
+  ;; Per thread, not a global: two OS threads logging concurrently would
+  ;; otherwise clobber each other's accumulator.
+  (define %flow-log-box (%make-thread-own))
 
   ;; Created and registered on first use, so logging needs no setup
   ;; step on any thread. Only this thread writes its own parameter, so
   ;; the check-then-set needs no CAS; flow-box-cons! is what makes the
   ;; registry push safe against concurrent registration.
   (define (%flow-log-ensure-box!)
-    (or (%flow-log-box)
+    (or (%thread-own-ref %flow-log-box)
         (let ((b (box '())))
-          (%flow-log-box b)
+          (%thread-own-set! %flow-log-box b)
           (flow-box-cons! %flow-log-registry b)
           b)))
 
@@ -548,7 +574,9 @@
 
   ;; This run's pool on threads forked by flow-run's compute pool, #f
   ;; on the loop thread — so it doubles as the am-I-on-a-worker test.
-  (define %worker-current? (make-thread-parameter #f))
+  (define %worker-pool (%make-thread-own))
+
+  (define (%worker-current?) (%thread-own-ref %worker-pool))
 
   (define (%flow-worker-exited! pool)
     (with-mutex (%pool-mutex pool)
@@ -1925,7 +1953,7 @@
   ;; reply channel, force past its bound, and stay out of a straggler's
   ;; way -- for a guarantee a task gets from one guard of its own.
   (define (%worker-body pool channel)
-    (%worker-current? pool)
+    (%thread-own-set! %worker-pool pool)
     (let loop ()
       (let ((task (%flow-perform (flow-get channel))))
         (unless (eq? task %flow-worker-stop)

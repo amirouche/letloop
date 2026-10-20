@@ -2314,3 +2314,59 @@
   (assert (eq? (unbox stray) 'accepted))
   (assert (eqv? again 1))
   #t)
+
+;; fork-thread copies thread parameters, so a thread the user forked
+;; inside a compute task held the worker's pool: its flow-put! was
+;; accepted as the worker's instead of refused, and once the run had
+;; closed the eventfd it signalled the closed number -- eight bytes of
+;; the freed pool buffer written into whatever file reused it. The
+;; worker itself must still be recognised.
+(define (~check-flow2-005/a-thread-forked-in-a-task-is-refused)
+  (define ch (make-flow-channel 'shared))
+  (define forked (box 'not-set))
+  (define worker-put 'not-set)
+  (flow-run
+   (lambda (workers)
+     (let ((reply (make-flow-channel 'reply)))
+       (flow-submit! (car workers)
+                     (lambda ()
+                       (fork-thread
+                        (lambda ()
+                          (set-box! forked
+                                    (guard (ex ((flow-error? ex) (flow-error-symbol ex)))
+                                      (flow-put! ch 'from-a-user-thread)
+                                      'accepted))))
+                       (flow-put! reply 'worker-put-ok)))
+       (set! worker-put (flow-get! reply)))
+     (let wait ((n 0))
+       (flow-sleep 0.01)
+       (if (or (not (eq? (unbox forked) 'not-set)) (fx>? n 100))
+           (flow-stop)
+           (wait (fx+ n 1)))))
+   1)
+  (assert (eq? worker-put 'worker-put-ok))
+  (assert (eq? (unbox forked) 'wrong-thread))
+  (assert (eqv? 0 (flow-channel-queue-length ch)))
+  #t)
+
+;; Per-thread log boxes were inherited across fork-thread, so a forked
+;; thread logged into its parent's box: two threads CASing one box, and
+;; entries interleaved where the drain order promises per-thread runs.
+(define (~check-flow2-000/a-forked-thread-logs-to-its-own-box)
+  (define done (box #f))
+  (flow-log-drain!)
+  (flow-log '(flow2-check parent-before))
+  (fork-thread (lambda () (flow-log '(flow2-check child)) (set-box! done #t)))
+  (let wait ((n 0))
+    (when (and (not (unbox done)) (fx<? n 200))
+      (sleep (make-time 'time-duration 5000000 0))
+      (wait (fx+ n 1))))
+  (flow-log '(flow2-check parent-after))
+  ;; the parent's box was registered first, so its two entries come
+  ;; first and together; a shared box gave (before child after)
+  (assert (equal? '((flow2-check parent-before)
+                    (flow2-check parent-after)
+                    (flow2-check child))
+                  (filter (lambda (x) (and (pair? x) (eq? 'flow2-check (car x))))
+                          (map cdr (flow-log-drain!)))))
+  #t)
