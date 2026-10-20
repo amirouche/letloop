@@ -42,6 +42,10 @@
    flow-channel-buffer-size!
    flow-put! flow-get flow-get! flow-get-try
 
+   ;; latches: fire once, wake every waiter
+   make-flow-latch flow-latch? flow-latch-fire! flow-latch-fired?
+   flow-latch-wait flow-latch-wait!
+
    ;; timers
    flow-timeout flow-sleep
 
@@ -135,7 +139,13 @@
    ;; uncaught errors are log entries
    ~check-flow2-012/uncaught-raise-in-a-fiber-is-logged
    ~check-flow2-012/uncaught-raise-in-a-task-is-logged
-   ~check-flow2-012/fan-out-gather-until-a-deadline-then-hand-off)
+   ~check-flow2-012/fan-out-gather-until-a-deadline-then-hand-off
+
+   ;; latches
+   ~check-flow2-013/latch-wakes-every-waiter-once
+   ~check-flow2-013/losing-latch-wait-leaves-no-waiter
+   ~check-flow2-013/latch-crosses-threads
+   ~check-flow2-013/latch-as-a-stop-event)
 
   (import (chezscheme)
           (letloop r999)
@@ -760,7 +770,7 @@
 
   ;; A compute thread is not a fiber: it parks on a condition
   ;; variable, and its resume fills a slot and broadcasts. Only
-  ;; channel bases reach here — %flow-perform-off-loop
+  ;; channel and latch bases reach here — %flow-perform-off-loop
   ;; rejects ring events before registration — and their block procs
   ;; touch only mutex- or CAS-protected state, so registration runs
   ;; inline on this thread with no marshalling.
@@ -840,12 +850,12 @@
 
   ;; A base is safe to synchronize on from a compute thread only when
   ;; its try/block touch nothing but mutex- or CAS-protected state:
-  ;; channel bases qualify, anything that preps an SQE
+  ;; channel and latch bases qualify, anything that preps an SQE
   ;; or reads loop tables does not.
   (define (%base-off-loop-safe? base)
     (let ((tag (flow-data base)))
       (and (pair? tag)
-           (memq (car tag) '(flow2-get flow2-space))
+           (memq (car tag) '(flow2-get flow2-space flow2-latch))
            #t)))
 
   (define (%flow-perform-off-loop event)
@@ -1264,7 +1274,98 @@
         (car value))
        (else default))))
 
+;;------------------------------------------------------------
+  ;; Latches: fire once, wake every waiter
   ;;------------------------------------------------------------
+  ;;
+  ;; A channel hands each value to ONE getter, so it cannot tell
+  ;; everyone who cares that something happened: a stop request to
+  ;; every producer of a fan-out, or "the result for this key is
+  ;; complete" to every query parked on it. A latch fires at most once,
+  ;; with a value, and from then on every wait -- parked or later --
+  ;; completes with that value. It is never reset; a new episode is a
+  ;; new latch.
+  ;;
+  ;; The channel's locking discipline: the mutex guards the value and
+  ;; the waiter list and is held only for list surgery, never across a
+  ;; resume. Waiting is an event, so it composes: a producer that
+  ;; should be stoppable puts (flow-latch-wait stop) in its own choices.
+  (define %flow-latch-unfired (list 'unfired))
+
+  (define-record-type* <flow2-latch>
+    (make-flow-latch% mutex value waiters)
+    flow-latch?
+    (mutex   flow-latch-mutex)
+    (value   flow-latch-value   flow-latch-value!)
+    (waiters flow-latch-waiters flow-latch-waiters!))
+
+  (define (make-flow-latch)
+    (make-flow-latch% (make-mutex) %flow-latch-unfired '()))
+
+  (define (flow-latch-fired? latch)
+    (with-mutex (flow-latch-mutex latch)
+      (not (eq? (flow-latch-value latch) %flow-latch-unfired))))
+
+  ;; #t when this call fired LATCH, #f when it had already fired, in
+  ;; which case the first value stays. Like flow-put!, callable from the
+  ;; loop thread and from a compute thread.
+  (define (flow-latch-fire! latch value)
+    (%flow-check-caller-thread! 'flow-latch-fire!)
+    (let ((waiters
+           (with-mutex (flow-latch-mutex latch)
+             (and (eq? (flow-latch-value latch) %flow-latch-unfired)
+                  (let ((waiters (flow-latch-waiters latch)))
+                    (flow-latch-value! latch value)
+                    (flow-latch-waiters! latch '())
+                    waiters)))))
+      (and waiters
+           (begin
+             ;; Outside the mutex: a resume runs continuation code. A
+             ;; resume that reports #f lost to another base of its own
+             ;; choice, and since a latch wait consumes nothing there is
+             ;; nothing to put back.
+             (for-each (lambda (resume) (resume value)) waiters)
+             #t))))
+
+  (define (%latch-remove-waiter! latch resume)
+    (with-mutex (flow-latch-mutex latch)
+      (flow-latch-waiters! latch (remq resume (flow-latch-waiters latch)))))
+
+  (define (flow-latch-wait latch)
+    (make-flow% 'base (cons 'flow2-latch latch)
+                (lambda (x) x)
+                (lambda ()
+                  (let ((value (with-mutex (flow-latch-mutex latch)
+                                 (flow-latch-value latch))))
+                    (and (not (eq? value %flow-latch-unfired))
+                         (lambda () value))))
+                (lambda (state resume register-cancel!)
+                  ;; Armed before the waiter is reachable, with the
+                  ;; recheck below closing the rest of the window --
+                  ;; flow-get's discipline, for flow-get's reason: a
+                  ;; wait that loses a choice must not stay on the list
+                  ;; pinning its continuation until the latch fires,
+                  ;; which for a stop latch may be never.
+                  (register-cancel!
+                   (lambda () (%latch-remove-waiter! latch resume)))
+                  (let ((value
+                         (with-mutex (flow-latch-mutex latch)
+                           (let ((value (flow-latch-value latch)))
+                             (when (eq? value %flow-latch-unfired)
+                               (flow-latch-waiters!
+                                latch
+                                (append (flow-latch-waiters latch)
+                                        (list resume))))
+                             value))))
+                    (if (eq? value %flow-latch-unfired)
+                        (unless (eq? (unbox state) 'waiting)
+                          (%latch-remove-waiter! latch resume))
+                        (resume value))))))
+
+  (define (flow-latch-wait! latch)
+    (flow-perform (flow-latch-wait latch)))
+
+    ;;------------------------------------------------------------
   ;; Diagnostics: raw internal lengths
   ;;------------------------------------------------------------
   ;;

@@ -1582,6 +1582,7 @@
 (define (~check-flow2-005/every-entry-point-refuses-a-stray-thread)
   (define channel (make-flow-channel 'stocked))
   (define empty (make-flow-channel 'empty))
+  (define latch (make-flow-latch))
   (define outcomes (box '()))
   (define done (box #f))
   (define (attempt name thunk)
@@ -1605,6 +1606,7 @@
                  (lambda ()
                    (flow-submit! (car workers) (lambda () 42))))
         (attempt 'spawn (lambda () (flow-spawn (lambda () (void)))))
+        (attempt 'latch-fire (lambda () (flow-latch-fire! latch 'x)))
         (attempt 'stop (lambda () (flow-stop)))
         ;; fifth pass: growing a bound WAKES parked putters, and
         ;; a wake on a stray thread is the unsynchronized
@@ -1624,9 +1626,10 @@
                 (flow-log (list 'flow2-check 'not-refused outcome)))
               (assert (eq? 'wrong-thread (cdr outcome))))
             (unbox outcomes))
-  ;; seven entry points tried, and the stocked channel still holds the
+  ;; eight entry points tried, and the stocked channel still holds the
   ;; value the off-loop get used to walk away with
-  (assert (eqv? 7 (length (unbox outcomes))))
+  (assert (eqv? 8 (length (unbox outcomes))))
+  (assert (not (flow-latch-fired? latch)))
   (assert (eqv? 1 (flow-channel-queue-length channel)))
   #t)
 
@@ -2038,4 +2041,102 @@
   (assert (eq? 'complete (car completed)))
   (assert (= 7 (length (caddr completed))))
   (assert (equal? '(broken) (cadddr completed)))
+  #t)
+
+;;------------------------------------------------------------
+;; Latches
+;;------------------------------------------------------------
+
+;; One fire reaches every parked waiter, a later wait completes at
+;; once with the same value, and a second fire changes nothing.
+(define (~check-flow2-013/latch-wakes-every-waiter-once)
+  (define latch (make-flow-latch))
+  (define seen '())
+  (define late 'not-set)
+  (define second-fire 'not-set)
+  (flow-run
+   (lambda (workers)
+     (for-each (lambda (i)
+                 (flow-spawn
+                  (lambda ()
+                    (set! seen (cons (cons i (flow-latch-wait! latch)) seen)))))
+               '(1 2 3))
+     (flow-sleep 0.01)
+     (assert (null? seen))
+     (assert (not (flow-latch-fired? latch)))
+     (assert (eq? #t (flow-latch-fire! latch 'complete)))
+     (flow-sleep 0.01)
+     (set! late (flow-latch-wait! latch))
+     (set! second-fire (flow-latch-fire! latch 'again))
+     (flow-stop)))
+  (assert (= 3 (length seen)))
+  (assert (for-all (lambda (entry) (eq? 'complete (cdr entry))) seen))
+  (assert (eq? late 'complete))
+  (assert (eq? second-fire #f))
+  (assert (flow-latch-fired? latch))
+  (assert (null? (flow-latch-waiters latch)))
+  #t)
+
+;; flow-get's lesson, for the latch: a wait that loses a choice takes
+;; its entry with it. A stop latch may never fire, so a leftover waiter
+;; would pin its continuation forever.
+(define (~check-flow2-013/losing-latch-wait-leaves-no-waiter)
+  (define latch (make-flow-latch))
+  (flow-run
+   (lambda (workers)
+     (let round ((i 0))
+       (when (fx<? i 50)
+         (flow-perform (flow-choice (flow-latch-wait latch)
+                                    (flow-wrap (flow-timeout 0.0005)
+                                               (lambda (_) 'late))))
+         (round (fx+ i 1))))
+     (flow-stop)))
+  (assert (null? (flow-latch-waiters latch)))
+  (assert (eq? #t (flow-latch-fire! latch 'fine)))
+  #t)
+
+;; A worker parks on a latch the loop fires, and fires one a fiber is
+;; parked on.
+(define (~check-flow2-013/latch-crosses-threads)
+  (define go (make-flow-latch))
+  (define done (make-flow-latch))
+  (define fiber-saw 'not-set)
+  (flow-run
+   (lambda (workers)
+     (flow-submit! (car workers)
+                   (lambda ()
+                     (flow-latch-fire! done (list 'worker-saw (flow-latch-wait! go)))))
+     (flow-sleep 0.02)                  ;; the worker is parked by now
+     (flow-latch-fire! go 'go)
+     (set! fiber-saw (flow-latch-wait! done))
+     (flow-stop))
+   1)
+  (assert (equal? fiber-saw '(worker-saw go)))
+  #t)
+
+;; Stopping without cancellation: producers include the stop latch in
+;; their own choices, so they stop where they chose to be stoppable,
+;; and they say so on a channel.
+(define (~check-flow2-013/latch-as-a-stop-event)
+  (define stop (make-flow-latch))
+  (define exits (make-flow-channel 'exits))
+  (define reasons 'not-set)
+  (flow-run
+   (lambda (workers)
+     (for-each (lambda (i)
+                 (flow-spawn
+                  (lambda ()
+                    (let loop ((n 0))
+                      (if (flow-perform
+                           (flow-choice (flow-wrap (flow-latch-wait stop) (lambda (_) #t))
+                                        (flow-wrap (flow-timeout 0.005) (lambda (_) #f))))
+                          (flow-put! exits (list i 'stopped))
+                          (loop (+ n 1)))))))
+               '(1 2 3))
+     (flow-sleep 0.03)
+     (flow-latch-fire! stop 'please)
+     (set! reasons (list (flow-get! exits) (flow-get! exits) (flow-get! exits)))
+     (flow-stop)))
+  (assert (equal? '(1 2 3) (list-sort < (map car reasons))))
+  (assert (for-all (lambda (r) (eq? 'stopped (cadr r))) reasons))
   #t)
