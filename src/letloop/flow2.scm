@@ -1,6 +1,6 @@
 ;; Copyright © 2026 Amirouche A. BOUBEKKI <amirouche at hyper dev>
 ;;
-;; (letloop flow2) — fibers, channels, and nurseries over io_uring.
+;; (letloop flow2) — fibers and channels over io_uring.
 ;; A fork of (letloop flow); see src/letloop/flow2/README.md for the
 ;; full design document. The two architectural changes from flow:
 ;;
@@ -13,17 +13,16 @@
 ;;   no put EVENT is exported, and that, not the absence of parking, is
 ;;   what keeps flow's same-channel-choice hazard inexpressible here.
 ;;
-;; - Every fiber belongs to a scope (nursery). A scope join waits for
-;;   all children; the first child error cancels the siblings' parked
-;;   events and in-flight ring operations and re-raises at the join.
-;;   flow-monitor is a nursery with a deadline. Cancellation reuses
-;;   the choice machinery: each perform inside a cancellable scope
-;;   carries one extra base event that the scope's cancellation
-;;   resumes, so the losing bases' register-cancel! thunks — the same
-;;   ones a losing flow-choice member fires — tear down the ring ops.
+;; - flow2 owns delivery and choice cleanup, and nothing about
+;;   lifetimes. A fiber or a task runs until it returns. Fan-out
+;;   policy — wait for all, for the first, for a quorum, or until a
+;;   deadline, and what to do with the stragglers — is the program's,
+;;   written with channels, flow-choice and flow-timeout. The only
+;;   cancellation is a choice's: the losing members' register-cancel!
+;;   thunks tear down their ring operations.
 ;;
 ;; Errors are plain <flow-error> records dispatched by symbol —
-;; cancelled, timeout, overflow, wrong-thread — not R6RS conditions.
+;; overflow, wrong-thread — not R6RS conditions.
 ;; An error nobody handles, in a fiber or a compute task, ends that
 ;; fiber or task and becomes a flow-log entry; what to do about it is
 ;; the program's business, not the library's.
@@ -33,8 +32,7 @@
    ;; errors
    make-flow-error flow-error? flow-error-symbol flow-error-message
    flow-error-irritants flow-error-cause
-   flow-error-cancelled? flow-error-timeout? flow-error-overflow?
-   flow-error-wrong-thread?
+   flow-error-overflow? flow-error-wrong-thread?
 
    ;; events (Concurrent ML core)
    make-flow flow? flow-wrap flow-guard flow-choice flow-perform
@@ -52,9 +50,8 @@
    flow-open flow-read-at flow-write-at flow-close
    O-RDONLY O-WRONLY O-RDWR O-CREAT O-TRUNC O-APPEND
 
-   ;; fibers and nurseries
-   flow-spawn flow-nursery flow-scope? flow-scope-cancel!
-   flow-monitor flow-cancelled?
+   ;; fibers
+   flow-spawn
 
    ;; lifecycle and compute threads
    flow-run flow-stop flow-submit!
@@ -68,8 +65,6 @@
    ;; between the raw number and the logical one.
    flow-channel-queue-length flow-channel-getters-length
    flow-channel-space-length flow-channel-bound
-   flow-scope-children-count flow-scope-waiters-length
-   flow-scope-join-waiters-length
 
    ;; checks
    ~check-flow2-000/error-symbol-dispatch
@@ -91,31 +86,14 @@
    ~check-flow2-002/diagnostics-see-what-leaks
    ~check-flow2-002/default-bound-is-finite
    ~check-flow2-002/put-parks-when-full
-   ~check-flow2-002/put-parked-on-full-is-cancellable
    ~check-flow2-002/channel-full-warns-once
    ~check-flow2-002/losing-get-does-not-eat-a-value
    ~check-flow2-002/losing-get-leaves-no-getter
-   ~check-flow2-003/nursery-join-waits-children
-   ~check-flow2-003/nursery-child-raise-cancels-siblings
-   ~check-flow2-003/nursery-scope-cancel
-   ~check-flow2-003/nursery-perform-after-cancel-raises
-   ~check-flow2-003/nursery-in-dead-scope-raises
-   ~check-flow2-003/block-raise-reaches-the-scope
-   ~check-flow2-003/waiter-on-dead-scope-is-woken
-   ~check-flow2-003/gather-after-join-scales-past-the-default-bound
-   ~check-flow2-003/a-dead-scope-does-not-eat-a-queued-value
-   ~check-flow2-004/monitor-in-time
-   ~check-flow2-004/monitor-deadline
-   ~check-flow2-004/monitor-interrupted-by-parent-drains-children
+   ~check-flow2-003/block-raise-reaches-the-fiber
    ~check-flow2-005/shutdown-joins-the-worker-pool
    ~check-flow2-005/straggler-does-not-corrupt-the-next-run
-   ~check-flow2-005/submit-in-dead-scope-raises
-   ~check-flow2-005/nursery-waits-for-its-compute-task
-   ~check-flow2-003/cancel-is-visible-to-non-suspending-ops
-   ~check-flow2-003/cancelled-parent-drains-grandchildren
    ~check-flow2-005/worker-task-replies
    ~check-flow2-005/worker-ring-event-raises-wrong-thread
-   ~check-flow2-005/worker-cancelled-along-monitor
    ~check-flow2-005/worker-io-protocol-roundtrip
    ~check-flow2-005/worker-resume-runs-cancels-first
    ~check-flow2-005/a-thread-the-user-forked-is-refused
@@ -146,10 +124,8 @@
    ~check-flow2-009/open-loses-choice-no-fd-leak
    ~check-flow2-009/close-under-choice-fd-actually-closed
    ~check-flow2-009/close-while-read-in-flight
-   ~check-flow2-009/close-in-a-dead-scope-still-closes
 
    ;; fifth adverse pass, 2026-09-03
-   ~check-flow2-003/nursery-body-raise-drains-children
    ~check-flow2-001/wrap-runs-on-the-performer-after-commit
    ~check-flow2-005/wrap-runs-on-the-loop-when-a-worker-delivers
    ~check-flow2-005/coalesced-wakes-do-not-inflate-the-eventfd
@@ -158,7 +134,8 @@
 
    ;; uncaught errors are log entries
    ~check-flow2-012/uncaught-raise-in-a-fiber-is-logged
-   ~check-flow2-012/uncaught-raise-in-a-task-is-logged)
+   ~check-flow2-012/uncaught-raise-in-a-task-is-logged
+   ~check-flow2-012/fan-out-gather-until-a-deadline-then-hand-off)
 
   (import (chezscheme)
           (letloop r999)
@@ -169,7 +146,7 @@
   ;; Errors: one record type, dispatched by symbol
   ;;------------------------------------------------------------
 
-  ;; The taxonomy: cancelled, timeout, overflow, wrong-thread. A plain
+  ;; The taxonomy: overflow, wrong-thread. A plain
   ;; record rather than an R6RS condition, so a program can put one on
   ;; a channel as easily as raise it.
   (define-record-type* <flow-error>
@@ -180,17 +157,10 @@
     (irritants flow-error-irritants)
     (cause     flow-error-cause))
 
-  (define (flow-error-cancelled? obj)
-    (and (flow-error? obj) (eq? (flow-error-symbol obj) 'cancelled)))
-  (define (flow-error-timeout? obj)
-    (and (flow-error? obj) (eq? (flow-error-symbol obj) 'timeout)))
   (define (flow-error-overflow? obj)
     (and (flow-error? obj) (eq? (flow-error-symbol obj) 'overflow)))
   (define (flow-error-wrong-thread? obj)
     (and (flow-error? obj) (eq? (flow-error-symbol obj) 'wrong-thread)))
-
-  (define (%flow-cancelled-error)
-    (make-flow-error 'cancelled "flow2: scope cancelled" '() #f))
 
   ;; Two callers, one symbol: an operation the loop thread reserves
   ;; called on a compute thread, and any flow2 operation called on a
@@ -409,22 +379,15 @@
 
   (define %flow-not-ready (list 'not-ready))
 
-  ;; Distinguished value a scope's cancellation resumes parked fibers
-  ;; with; flow-perform converts it into a raised cancelled
-  ;; <flow-error> on the parked fiber's own stack — a raise from the
-  ;; canceller's stack would unwind the wrong context entirely.
-  (define %flow-cancel-sentinel (list 'cancelled))
-
   ;; A raise from a base's block procedure, on its way back to the
-  ;; fiber. Same device as %flow-cancel-sentinel, for the same reason.
+  ;; fiber as a value, converted into a raise on the fiber's own stack.
   ;;
   ;; block procs run inside loop-abort's thunk — on the SCHEDULER's
-  ;; stack, after the prompt was already unwound — so the guard
-  ;; %scope-spawn! installs around the fiber body is no longer in the
-  ;; dynamic extent. A raise there used to reach loop-apply's catch-all
-  ;; instead: the fiber died, %scope-fail! never ran,
-  ;; %scope-child-done! never decremented the scope's child count, and
-  ;; %scope-finish parked on the join forever. Not a synthetic worry —
+  ;; stack, after the prompt was already unwound — so the fiber's own
+  ;; guards are no longer in the dynamic extent. A raise there used to
+  ;; reach loop-apply's catch-all instead: the fiber died without its
+  ;; handlers ever seeing the error, and anything waiting on it waited
+  ;; forever. Not a synthetic worry —
   ;; loop-get-sqe raises "submission queue full" once more than 256 ops
   ;; are queued in a tick (flow-timeout, flow-read, flow-write,
   ;; flow-open, flow-read-at, flow-write-at all reach it) and
@@ -460,9 +423,9 @@
     (base %flow-deferred-base)
     (raw  %flow-deferred-raw))
 
-  ;; What a parked fiber sees when it wakes: a block-proc raise and a
-  ;; scope cancellation both come back as values and are converted into
-  ;; raises HERE, on the fiber's own stack, where its guards are -- and
+  ;; What a parked fiber sees when it wakes: a block-proc raise comes
+  ;; back as a value and is converted into a raise HERE, on the fiber's
+  ;; own stack, where its guards are -- and
   ;; the winning base's wrap is applied here too, after the commit, for
   ;; the same reason.
   (define (%flow-settle result)
@@ -472,7 +435,6 @@
                       result)))
       (cond
        ((%flow-raise? result) (raise (%flow-raise-object result)))
-       ((eq? result %flow-cancel-sentinel) (raise (%flow-cancelled-error)))
        (else result))))
 
   (define flow-poll
@@ -485,26 +447,6 @@
                 (if thunk
                     ((flow-wrap-proc (car bs)) (thunk))
                     (loop (cdr bs)))))))))
-
-  ;; Poll FIRST before the rest, without the rotation. Cancellation is
-  ;; a precondition, not a fairness participant: flow-poll picks a
-  ;; random starting point among the bases, so a scope that was already
-  ;; dead could still lose to a channel get tried before it — the get
-  ;; DEQUEUES, hands the value to a task that raises at its very next
-  ;; operation, and the value goes with it. That is the lost-value shape
-  ;; the redeposit machinery exists to prevent, arrived at from the
-  ;; other end.
-  ;;
-  ;; FIRST is in BASES too, so it is retried in the walk; that costs one
-  ;; extra try call and is the right answer if it became ready in
-  ;; between. What remains is the genuine tie — the scope dying after
-  ;; this try and before a get's — which is unavoidable and identical on
-  ;; both threads.
-  (define (%flow-poll-first first bases)
-    (let ((thunk ((flow-try-proc first))))
-      (if thunk
-          ((flow-wrap-proc first) (thunk))
-          (flow-poll bases))))
 
   ;;------------------------------------------------------------
   ;; Cross-thread spawn: the loop's mailbox
@@ -556,10 +498,6 @@
   ;; This run's pool on threads forked by flow-run's compute pool, #f
   ;; on the loop thread — so it doubles as the am-I-on-a-worker test.
   (define %worker-current? (make-thread-parameter #f))
-
-  ;; The scope of the task currently running on THIS compute thread;
-  ;; #f while the worker idles on its request channel.
-  (define %task-scope (make-thread-parameter #f))
 
   (define (%flow-worker-exited! pool)
     (with-mutex (%pool-mutex pool)
@@ -704,177 +642,6 @@
               (loop-spawn (lambda () (%collector pool))))))))
 
   ;;------------------------------------------------------------
-  ;; Scopes (nurseries)
-  ;;------------------------------------------------------------
-
-  ;; state box holds 'open, or the reason the scope died:
-  ;;   (failed . obj)  — a child (or the nursery body) raised OBJ
-  ;;   cancelled       — flow-scope-cancel!
-  ;;   timeout         — flow-monitor's deadline
-  ;; The box-cas! from 'open is what makes "first error wins" and
-  ;; idempotent cancellation fall out with no further bookkeeping.
-  ;;
-  ;; waiters is a CAS list — a compute-thread task parked on a
-  ;; channel registers its scope waiter from its own thread — of
-  ;; (state . resume) pairs. children is a CAS box for the same reason:
-  ;; a scope owns the compute tasks submitted inside it, and a worker
-  ;; finishing one has to decrement from its own thread. join-waiters
-  ;; and subscopes stay loop-thread-only, which is why waking the
-  ;; joiners is marshalled back onto the loop.
-  (define-record-type* <flow2-scope>
-    (make-flow-scope% parent state waiters waiter-count
-                      children join-waiters subscopes)
-    flow-scope?
-    (parent       flow-scope-parent)
-    (state        flow-scope-state)
-    (waiters      flow-scope-waiters)
-    (waiter-count flow-scope-waiter-count)
-    (children     flow-scope-children     flow-scope-children!)
-    (join-waiters flow-scope-join-waiters flow-scope-join-waiters!)
-    (subscopes    flow-scope-subscopes    flow-scope-subscopes!))
-
-  (define (%make-scope parent)
-    (make-flow-scope% parent (box 'open) (box '()) (box 0) (box 0) '() '()))
-
-  ;; The root scope: never cancelled, and the flag flow-perform tests
-  ;; to keep the hot path — every fiber outside any nursery — free of
-  ;; scope bookkeeping.
-  (define %root-scope (%make-scope #f))
-
-  ;; The current scope of the running fiber. A plain global, not a
-  ;; parameter: it travels with the fiber by being reinstalled at
-  ;; every entry point — flow-spawn's wrapper, and the resume path in
-  ;; flow-block-and-wait-on-loop — rather than through dynamic-wind,
-  ;; which this suspend/resume model rejects (see flow-open in flow).
-  (define %scope-current %root-scope)
-
-  (define (%scope-dead? scope)
-    (not (eq? (unbox (flow-scope-state scope)) 'open)))
-
-  (define (flow-cancelled?)
-    (if (%worker-current?)
-        (let ((scope (%task-scope)))
-          (and scope (%scope-dead? scope)))
-        (and (not (eq? %scope-current %root-scope))
-             (%scope-dead? %scope-current))))
-
-  ;; Every 64 registrations, drop the waiters whose perform already
-  ;; synched on another base — their state box is no longer 'waiting.
-  (define %scope-waiter-gc-threshold 64)
-
-  (define (%scope-waiter-compact! scope)
-    (let ((b (flow-scope-waiters scope)))
-      (let ((lst (unbox b)))
-        (unless (box-cas! b lst
-                          (filter (lambda (entry)
-                                    (eq? (unbox (car entry)) 'waiting))
-                                  lst))
-          (%scope-waiter-compact! scope)))))
-
-  (define (%scope-add-waiter! scope state resume)
-    (flow-box-cons! (flow-scope-waiters scope) (cons state resume))
-    ;; Recheck AFTER publishing, and wake ourselves if the scope died
-    ;; in between. %scope-fail! CASes the state and then drains this
-    ;; list, so a registration that lands after that drain is attached
-    ;; to a corpse and nothing will ever resume it. On the loop thread
-    ;; the window does not exist — nothing yields between the caller's
-    ;; liveness check and this cons — but a compute thread registers
-    ;; its own waiter from its own thread (see the record comment
-    ;; above), and losing that race parks the worker on its condition
-    ;; variable forever: the pool shrinks by one, silently, while the
-    ;; main program keeps working. Resuming twice is harmless because
-    ;; resume CASes the shared state box, so the loser is a no-op.
-    (when (%scope-dead? scope)
-      (resume %flow-cancel-sentinel))
-    (let ((n (let ((b (flow-scope-waiter-count scope)))
-               (let bump ()
-                 (let ((n (unbox b)))
-                   (if (box-cas! b n (fx+ n 1)) (fx+ n 1) (bump)))))))
-      (when (fx>=? n %scope-waiter-gc-threshold)
-        (set-box! (flow-scope-waiter-count scope) 0)
-        (%scope-waiter-compact! scope))))
-
-  ;; Kill SCOPE with REASON — loop thread only. Idempotent: only the
-  ;; first reason wins the CAS; a later child raise inside an
-  ;; already-cancelled scope changes nothing. Resuming a waiter with
-  ;; the sentinel is what fires the losing siblings' register-cancel!
-  ;; thunks (flow-block-and-wait's resume-from), i.e. what cancels
-  ;; the subtree's in-flight ring operations. Subscopes die
-  ;; transitively, as 'cancelled.
-  (define (%scope-fail! scope reason)
-    (when (box-cas! (flow-scope-state scope) 'open reason)
-      (for-each (lambda (entry)
-                  ((cdr entry) %flow-cancel-sentinel))
-                (flow-box-drain! (flow-scope-waiters scope)))
-      (for-each (lambda (sub) (%scope-fail! sub 'cancelled))
-                (flow-scope-subscopes scope))))
-
-  (define (flow-scope-cancel! scope)
-    (when (%worker-current?) (%flow-wrong-thread 'flow-scope-cancel!))
-    (%flow-check-caller-thread! 'flow-scope-cancel!)
-    (%scope-fail! scope 'cancelled))
-
-  (define (%scope-children scope)
-    (unbox (flow-scope-children scope)))
-
-  ;; Both directions CAS, because flow-submit! may be called from a
-  ;; worker and %worker-body always decrements from one.
-  (define (%scope-child-add! scope)
-    (let bump ()
-      (let ((n (unbox (flow-scope-children scope))))
-        (unless (box-cas! (flow-scope-children scope) n (fx+ n 1))
-          (bump)))))
-
-  ;; One child returned or raised; at zero, resume the join. The
-  ;; decrement is safe from any thread; waking the joiners is not --
-  ;; join-waiters is a plain loop-thread-only list -- so a worker
-  ;; marshals that half back onto the loop.
-  (define (%scope-child-done! scope)
-    (let ((n (let drop ()
-               (let ((n (unbox (flow-scope-children scope))))
-                 (if (box-cas! (flow-scope-children scope) n (fx- n 1))
-                     (fx- n 1)
-                     (drop))))))
-      (when (fxzero? n)
-        (if (%worker-current?)
-            (%flow-spawn-safe (lambda () (%scope-wake-joiners! scope)))
-            (%scope-wake-joiners! scope)))))
-
-  ;; Loop thread only. Rechecks the count rather than trusting the
-  ;; caller's: a marshalled wake-up runs a tick later, by which time
-  ;; another task may have been submitted into the same scope.
-  (define (%scope-wake-joiners! scope)
-    (when (fxzero? (%scope-children scope))
-      (let ((waiters (flow-scope-join-waiters scope)))
-        (flow-scope-join-waiters! scope '())
-        (for-each (lambda (resume) (resume #t)) waiters))))
-
-  ;; The scope's own cancellation, as a base event: the implicit
-  ;; extra member flow-perform adds to every synchronization inside a
-  ;; cancellable scope. try is ready exactly when the scope is dead;
-  ;; block registers this perform's shared state/resume as a waiter.
-  (define (%scope-cancel-base scope)
-    (make-flow% 'base (cons 'flow2-scope scope)
-                (lambda (x) x)
-                (lambda ()
-                  (and (%scope-dead? scope)
-                       (lambda () %flow-cancel-sentinel)))
-                (lambda (state resume register-cancel!)
-                  (%scope-add-waiter! scope state resume))))
-
-  ;; Ready when the scope has no live children. Internal — the
-  ;; nursery join and flow-monitor's deadline race use it.
-  (define (%scope-join-event scope)
-    (make-flow% 'base (cons 'flow2-scope scope)
-                (lambda (x) x)
-                (lambda ()
-                  (and (fxzero? (%scope-children scope))
-                       (lambda () #t)))
-                (lambda (state resume register-cancel!)
-                  (flow-scope-join-waiters!
-                   scope (cons resume (flow-scope-join-waiters scope))))))
-
-  ;;------------------------------------------------------------
   ;; Synchronization: poll, then park
   ;;------------------------------------------------------------
 
@@ -891,7 +658,7 @@
   ;; TAG is the winner's; pass #f to fire all of them, since every real
   ;; tag is a fresh pair.
   ;; Both reduce an object to something a log line can hold. A base's
-  ;; data is (TAG . RECORD) for channel and scope bases, so writing it
+  ;; data is (TAG . RECORD) for channel bases, so writing it
   ;; raw would dump a whole channel -- queue included -- into the log;
   ;; a condition writes as #<condition> and says nothing at all.
   (define (%flow-base-name data)
@@ -921,16 +688,14 @@
                     ((cddr entry)))))
               pending))
 
-  ;; SCOPE is the fiber's scope at perform time, reinstalled around
-  ;; the parked continuation so the fiber wakes up where it went to
-  ;; sleep. Everything else is flow's design unchanged: one shared
+  ;; flow's design unchanged: one shared
   ;; state box CAS-elects a single winner, each base gets its own
   ;; wrap-applying resume, the losers' register-cancel! thunks fire
   ;; the instant any base wins, and both the cancels and the
   ;; continuation defer through %flow-spawn-safe because the party
   ;; completing the rendezvous may be a compute thread.
   (define flow-block-and-wait-on-loop
-    (lambda (bases scope)
+    (lambda (bases)
       (let ((state (box 'waiting))
             (cancels (box '())))
         (loop-abort
@@ -951,10 +716,7 @@
                       ;; "concurrent accept on fd" instead. Still two
                       ;; separate thunks, so a raising cancel is
                       ;; confined by loop-apply's guard and k survives.
-                      (%flow-spawn-safe
-                       (lambda ()
-                         (set! %scope-current scope)
-                         (k value)))
+                      (%flow-spawn-safe (lambda () (k value)))
                       (%flow-spawn-safe
                        (lambda () (%flow-run-cancels! (unbox cancels) tag)))
                       #t))))
@@ -998,7 +760,7 @@
 
   ;; A compute thread is not a fiber: it parks on a condition
   ;; variable, and its resume fills a slot and broadcasts. Only
-  ;; channel and scope bases reach here — %flow-perform-off-loop
+  ;; channel bases reach here — %flow-perform-off-loop
   ;; rejects ring events before registration — and their block procs
   ;; touch only mutex- or CAS-protected state, so registration runs
   ;; inline on this thread with no marshalling.
@@ -1078,70 +840,31 @@
 
   ;; A base is safe to synchronize on from a compute thread only when
   ;; its try/block touch nothing but mutex- or CAS-protected state:
-  ;; channel gets and scope bases qualify, anything that preps an SQE
+  ;; channel bases qualify, anything that preps an SQE
   ;; or reads loop tables does not.
   (define (%base-off-loop-safe? base)
     (let ((tag (flow-data base)))
       (and (pair? tag)
-           (memq (car tag) '(flow2-get flow2-space flow2-scope))
+           (memq (car tag) '(flow2-get flow2-space))
            #t)))
 
-  ;; A perform whose every base is a close runs even under a scope that
-  ;; is already dead, and gets no cancel base appended.
-  ;;
-  ;; Cancellation is delivered by raising at suspension points, so the
-  ;; handler that releases an fd is reached by the very raise it exists
-  ;; to clean up after. If that cleanup's own flow-close then raises
-  ;; cancelled before touching the ring — which is what the dead-scope
-  ;; test below did — the fd is never closed at all, on precisely the
-  ;; path the design points at as the one that closes it. Measured: the
-  ;; descriptor was still open 100ms after the scope died, and with it
-  ;; unclosed, loop-close-prep!'s cancel-fd never runs either, so any
-  ;; operation still in flight on that fd stays in flight.
-  ;;
-  ;; Exempting it is safe for the same reason flow-close registers no
-  ;; cancel in the first place: a close always completes on its own, so
-  ;; it can never hold a cancelled parent in %scope-finish's drain. It
-  ;; is the move that drain already makes for itself when it re-waits
-  ;; under %root-scope.
-  ;;
-  ;; EVERY base, not any: (flow-choice (flow-close fd) (flow-read fd))
-  ;; is a real operation and stays cancellable. flow-wrap carries the
-  ;; tag through, so a wrapped close is still exempt.
-  (define (%bases-cancel-exempt? bases)
-    (and (pair? bases)
-         (let lp ((bases bases))
-           (or (null? bases)
-               (and (eq? (flow-data (car bases)) 'flow2-close)
-                    (lp (cdr bases)))))))
-
   (define (%flow-perform-off-loop event)
-    (let ((scope (%task-scope)))
-      (when (and scope (%scope-dead? scope))
-        (raise (%flow-cancelled-error)))
-      (let ((bases (flow-flatten event)))
-        (for-each (lambda (base)
-                    (unless (%base-off-loop-safe? base)
-                      (%flow-wrong-thread 'flow-perform)))
-                  bases)
-        (if (and scope (not (eq? scope %root-scope)))
-            (let* ((cancel-base (%scope-cancel-base scope))
-                   (bases (append bases (list cancel-base))))
-              (let ((result (%flow-poll-first cancel-base bases)))
-                (%flow-settle (if (eq? result %flow-not-ready)
-                                  (flow-block-and-wait-off-loop bases)
-                                  result))))
-            (let ((result (flow-poll bases)))
-              (%flow-settle (if (eq? result %flow-not-ready)
-                                (flow-block-and-wait-off-loop bases)
-                                result)))))))
+    (let ((bases (flow-flatten event)))
+      (for-each (lambda (base)
+                  (unless (%base-off-loop-safe? base)
+                    (%flow-wrong-thread 'flow-perform)))
+                bases)
+      (let ((result (flow-poll bases)))
+        (%flow-settle (if (eq? result %flow-not-ready)
+                          (flow-block-and-wait-off-loop bases)
+                          result)))))
 
   ;; The guard belongs HERE, not at the handful of entry points that
   ;; happened to be named when it was written. Every suspending
   ;; operation funnels through flow-perform, and on a user-forked
   ;; thread %worker-current? is #f, so the on-loop branch below is the
-  ;; one taken: it reads the LOOP thread's %scope-current, dequeues
-  ;; under the channel mutex, resumes a parked putter through
+  ;; one taken: it dequeues under the channel mutex, resumes a parked
+  ;; putter through
   ;; %flow-spawn-safe -> loop-spawn with no eventfd wake, and parks on
   ;; a loop-abort that is #f in that thread. flow-get! on a non-empty
   ;; channel therefore SUCCEEDED off-loop and stranded the putter,
@@ -1162,39 +885,13 @@
     (lambda (event)
       (if (%worker-current?)
           (%flow-perform-off-loop event)
-          (let ((scope %scope-current))
-            (if (eq? scope %root-scope)
-                ;; Hot path: no scope test, no extra base, exactly
-                ;; flow's perform.
-                (let ((bases (flow-flatten event)))
-                  (let ((result (flow-poll bases)))
-                    (if (eq? result %flow-not-ready)
-                        ;; %flow-settle, not a bare return: the cancel
-                        ;; sentinel cannot reach here (no scope base
-                        ;; under the root scope) but a block-proc raise
-                        ;; can, and a root-scope fiber must see it too.
-                        (%flow-settle
-                         (flow-block-and-wait-on-loop bases scope))
-                        result)))
-                (let ((bases (flow-flatten event)))
-                  (if (%bases-cancel-exempt? bases)
-                      ;; Cleanup, not work — no dead-scope test, no
-                      ;; cancel base. See %bases-cancel-exempt?.
-                      (let ((result (flow-poll bases)))
-                        (%flow-settle
-                         (if (eq? result %flow-not-ready)
-                             (flow-block-and-wait-on-loop bases scope)
-                             result)))
-                      (begin
-                        (when (%scope-dead? scope)
-                          (raise (%flow-cancelled-error)))
-                        (let* ((cancel-base (%scope-cancel-base scope))
-                               (bases (append bases (list cancel-base))))
-                          (let ((result (%flow-poll-first cancel-base bases)))
-                            (%flow-settle
-                             (if (eq? result %flow-not-ready)
-                                 (flow-block-and-wait-on-loop bases scope)
-                                 result))))))))))))
+          (let* ((bases (flow-flatten event))
+                 (result (flow-poll bases)))
+            (if (eq? result %flow-not-ready)
+                ;; %flow-settle, not a bare return: a block-proc raise
+                ;; comes back as a value and must raise on this stack.
+                (%flow-settle (flow-block-and-wait-on-loop bases))
+                result)))))
 
   ;;------------------------------------------------------------
   ;; Channels: buffered, mutex-protected, cross-thread
@@ -1263,9 +960,9 @@
   ;; A parked getter: the perform's shared state box and this base's
   ;; own wrap-applying resume, plus the claimed box that gives one
   ;; deliverer exclusivity before it calls resume (the same
-  ;; discipline flow's rendezvous used; scope cancellation may still
-  ;; win the underlying state CAS, which is why %channel-deliver!
-  ;; rechecks resume's own return value).
+  ;; discipline flow's rendezvous used; another base of the same
+  ;; perform may still win the underlying state CAS, which is why
+  ;; %channel-put! rechecks resume's own return value).
   (define-record-type* <flow2-getter>
     (make-flow-getter state resume claimed)
     flow-getter?
@@ -1320,9 +1017,9 @@
       value))
 
   ;; Wake putters parked on a full channel, now that there is room.
-  ;; Called outside the mutex. A waiter whose resume reports #f synched
-  ;; on another base — a scope cancellation, say — so move to the next;
-  ;; nothing is lost either way, since a space waiter carries no value.
+  ;; Called outside the mutex. A waiter whose resume reports #f has
+  ;; already synched, so move to the next; nothing is lost either way,
+  ;; since a space waiter carries no value.
   (define (%channel-wake-space! channel)
     (let again ()
       (let ((waiter
@@ -1362,7 +1059,8 @@
   ;; bound — the shutdown's stop sentinel uses it, so a worker channel
   ;; that is full still delivers it. The resume call happens
   ;; outside the mutex; if it reports the getter already synched
-  ;; elsewhere (a scope cancellation won the race), try the next one.
+  ;; elsewhere (another base of its choice won the race), try the next
+  ;; one.
   (define (%channel-put! channel obj force?)
     (let try ()
       (let ((entry
@@ -1484,20 +1182,8 @@
        channel
        (remq entry (flow-channel-getters channel)))))
 
-  ;; A cancelled sender's sends are dropped — the raise is how it
-  ;; observes its own death at the next channel operation.
-  ;;
-  ;; flow-cancelled?, not a compute-thread test. This used to check only
-  ;; when running on a worker, so the guarantee held on one side of the
-  ;; thread boundary and not the other: a main-thread fiber in a
-  ;; cancelled scope could keep putting indefinitely as long as it never
-  ;; performed a suspending event, while the identical code on a worker
-  ;; raised at once. The README's "channel operations check it
-  ;; implicitly" reads as universal, and now is.
   (define (flow-put! channel obj)
     (%flow-check-caller-thread! 'flow-put!)
-    (when (flow-cancelled?)
-      (raise (%flow-cancelled-error)))
     (%channel-put! channel obj #f))
 
   ;; try and block both hold the mutex, so there is no try/park gap
@@ -1559,22 +1245,14 @@
                           ;; a winner that fired the cancels before this
                           ;; point missed it — off-loop, resume-from
                           ;; snapshots the cancel list at resume time.
-                          ;; Same recheck-after-publish as
-                          ;; %scope-add-waiter!.
                           (unless (eq? (unbox state) 'waiting)
                             (%channel-remove-getter! channel entry))))))))
 
   (define (flow-get! channel)
     (flow-perform (flow-get channel)))
 
-  ;; Same symmetry as flow-put!: a non-suspending get is still a channel
-  ;; operation, and a cancelled scope must be observable through it on
-  ;; either thread. Without this a main-thread fiber could drain a
-  ;; channel for as long as it liked after its scope died.
   (define (flow-get-try channel default)
     (%flow-check-caller-thread! 'flow-get-try)
-    (when (flow-cancelled?)
-      (raise (%flow-cancelled-error)))
     (let ((value
            (with-mutex (flow-channel-mutex channel)
              (and (fx>? (flow-channel-length channel) 0)
@@ -1606,11 +1284,8 @@
   ;; the gap between the two. Without a way to read both numbers you
   ;; are reduced to guessing from RSS.
   ;;
-  ;; flow2 has three such structures, so all three are readable:
-  ;; a channel's parked getters, its parked putters, and a scope's
-  ;; waiter lists — flow-scope-join-waiters in particular has neither
-  ;; compaction nor removal, only the implicit filter of a resume
-  ;; returning #f.
+  ;; flow2 has two such structures, so both are readable: a channel's
+  ;; parked getters and its parked putters.
 
   ;; Values currently queued. The logical number: what a getter would
   ;; find.
@@ -1631,19 +1306,6 @@
   (define (flow-channel-space-length channel)
     (with-mutex (flow-channel-mutex channel)
       (length (flow-channel-space channel))))
-
-  ;; A scope's own bookkeeping: children still running, fibers parked
-  ;; on its cancellation, and fibers parked on its join.
-  (define (flow-scope-children-count scope)
-    (%scope-children scope))
-
-  (define (flow-scope-waiters-length scope)
-    (length (unbox (flow-scope-waiters scope))))
-
-  ;; A plain list field, unlike flow-scope-waiters, which is a CAS box:
-  ;; the join list is only ever touched from the loop thread.
-  (define (flow-scope-join-waiters-length scope)
-    (length (flow-scope-join-waiters scope)))
 
   ;; Raises overflow right here when the channel already holds more
   ;; than N values: the bound is never observably violated, and the
@@ -1820,8 +1482,8 @@
   ;; scheduler's stack with the fiber parked across every round trip,
   ;; and that one decision caused three separate problems:
   ;;
-  ;; - Uncancellable. The chain belonged to no fiber, so a cancelled
-  ;;   scope could not stop it: it kept issuing ring operations against
+  ;; - Uncancellable. The chain belonged to no fiber, so nothing could
+  ;;   stop it: it kept issuing ring operations against
   ;;   an fd the cleanup path had very likely already closed, which on a
   ;;   recycled descriptor is a write into someone else's file.
   ;; - Unraceable. (flow-choice (flow-write ...) (flow-timeout ...))
@@ -1906,8 +1568,8 @@
   ;; behind therefore poisons the listening fd, and every later
   ;; flow-accept on it raises "concurrent accept on fd" for as long as
   ;; no client happens to arrive to clear the slot — i.e. exactly when
-  ;; the server is idle. Any flow-accept under a flow-monitor or a
-  ;; cancellable scope hit this on the first cancellation.
+  ;; the server is idle. Any flow-accept that lost a choice to a
+  ;; timeout hit this on the first loss.
   ;;
   ;; Deleting the handler is the whole fix: a client the multishot
   ;; accepts afterwards lands on %accept-backlog and the next
@@ -2036,8 +1698,8 @@
                                         ;; always released
                                         (unlock-object bv)
                                         (resume (and (fx>=? res 0) res))))
-                      ;; A cancelled scope must not leave a write in the
-                      ;; ring: io_uring resolves the fd when it processes
+                      ;; A losing write must not stay in the ring:
+                      ;; io_uring resolves the fd when it processes
                       ;; the SQE, so a write still queued after the
                       ;; cleanup path closed that fd can land on whatever
                       ;; reopened the number.
@@ -2047,25 +1709,12 @@
                            (io-uring-prep-cancel64 csqe id 0)
                            (io-uring-sqe-set-data64 csqe (loop-alloc-id!))))))))))
 
-  ;; The one ring event here that deliberately registers NO cancel, and
-  ;; the reason is the opposite of the others': cancelling a close would
-  ;; leak the fd, which is precisely what the cancelling scope is trying
-  ;; to clean up. So the close is left to complete.
-  ;;
-  ;; That argument only holds if the close is ISSUED. It is tagged
-  ;; 'flow2-close so that %bases-cancel-exempt? can let it run under a
-  ;; dead scope, where the dead-scope test used to raise before the SQE
-  ;; was ever prepped — the fd then leaked on the one path whose whole
-  ;; job is to release it. The same exemption means a perform whose
-  ;; only base is a close gets NO cancel base: the fiber is not woken
-  ;; by its scope's cancellation, it waits for the close CQE, and the
-  ;; wait is bounded because a close always completes on its own. That
-  ;; bounded wait is what a cancelled parent pays in %scope-finish's
-  ;; drain for a child mid-close. Composed with other bases the perform
-  ;; is cancellable as a whole; a close already in flight when the
-  ;; cancellation wins still completes, and this handler's resume then
-  ;; reports #f and is discarded — the kernel released the descriptor
-  ;; either way.
+  ;; The one ring event here that deliberately registers NO cancel:
+  ;; cancelling a close would leak the fd, so the close is left to
+  ;; complete. Composed with other bases the perform is decided as a
+  ;; whole; a close already in flight when another base wins still
+  ;; completes, and this handler's resume then reports #f and is
+  ;; discarded — the kernel released the descriptor either way.
   (define flow-close
     (lambda (fd)
       (make-flow% 'base 'flow2-close
@@ -2077,7 +1726,7 @@
                                         (resume (and (fx>=? res 0) res))))))))
 
   ;;------------------------------------------------------------
-  ;; Fibers, nurseries, monitor
+  ;; Fibers
   ;;------------------------------------------------------------
 
   ;; An error nobody handled ends the fiber and becomes a log entry,
@@ -2093,249 +1742,42 @@
                                    (%flow-condition-sexp ex)))))
       (thunk)))
 
-  ;; Spawn THUNK under SCOPE. Inside a nursery the child is counted
-  ;; and its raise fails the scope — first error wins — before the
-  ;; count drops; under the root scope this is a bare loop-spawn plus
-  ;; the scope reinstall, the hot path.
-  (define (%scope-spawn! scope thunk)
-    (if (eq? scope %root-scope)
-        (loop-spawn (lambda ()
-                      (set! %scope-current %root-scope)
-                      (%fiber-run thunk)))
-        (begin
-          (%scope-child-add! scope)
-          (loop-spawn
-           (lambda ()
-             (set! %scope-current scope)
-             (guard (ex (#t (%scope-fail! scope (cons 'failed ex))))
-               (thunk))
-             (%scope-child-done! scope))))))
-
+  ;; Fire and forget: flow2 keeps no record of the fiber, so nothing
+  ;; waits for it and nothing can stop it but its own code. A spawner
+  ;; that wants to know how it ended says so in the thunk -- put a
+  ;; result, or a failure, on a channel it reads.
+  ;;
   ;; A worker is refused because there is deliberately no cross-thread
   ;; spawn; a thread the user forked is refused for the blunter reason
-  ;; that %scope-spawn! ends in loop-spawn, which is not synchronized
-  ;; against the loop's own take-and-clear of that list.
+  ;; that loop-spawn is not synchronized against the loop's own
+  ;; take-and-clear of that list.
   (define (flow-spawn thunk)
     (when (%worker-current?) (%flow-wrong-thread 'flow-spawn))
     (%flow-check-caller-thread! 'flow-spawn)
-    (%scope-spawn! %scope-current thunk))
-
-  ;; Run BODY with SCOPE current, restoring PARENT on normal return
-  ;; or raise. Suspensions inside BODY reinstall SCOPE through the
-  ;; resume path, so no dynamic-wind is involved.
-  (define (%call-with-scope scope parent body)
-    (set! %scope-current scope)
-    (let ((outcome (guard (ex (#t (cons 'raised ex)))
-                     (cons 'ok (body)))))
-      (set! %scope-current parent)
-      outcome))
-
-  ;; Wait until SCOPE's children are all done, then translate its
-  ;; final state: the recorded first error re-raises; explicit
-  ;; cancellation and the monitor's deadline raise their symbol; an
-  ;; open scope yields OUTCOME.
-  (define (%scope-finish scope parent outcome)
-    ;; The join runs under the PARENT scope on purpose, so an enclosing
-    ;; cancellation reaches it rather than being blocked by a child that
-    ;; will not finish. But when it did reach it, this raised on the
-    ;; spot with this scope's own children still running — they were
-    ;; cancelled transitively by %scope-fail!, yet nobody waited for
-    ;; them to finish unwinding, so fibers outlived the scope that owned
-    ;; them and the parent's own join could complete while they were
-    ;; still on their way out. That is the single thing a nursery exists
-    ;; to prevent.
-    ;;
-    ;; So: catch the interruption, make sure this scope really is dead
-    ;; so its children are told to stop, and drain them to zero with the
-    ;; cancellation OFF before propagating. The second wait runs at the
-    ;; root scope, where flow-perform adds no cancel base and therefore
-    ;; nothing can abandon it a second time.
-    ;;
-    ;; The cost is honest and worth stating: a child parked in an
-    ;; operation that cannot be cancelled will hold its parent here.
-    ;; Cancellation is prompt for everything that registers a cancel
-    ;; thunk, which is now every ring event but flow-close — and a
-    ;; close always completes on its own, so it bounds the wait rather
-    ;; than removing it.
-    (let ((interrupted
-           (and (not (fxzero? (%scope-children scope)))
-                (guard (ex (#t ex))
-                  (flow-perform (%scope-join-event scope))
-                  #f))))
-      (when interrupted
-        ;; Idempotent: if the scope already died for a better reason —
-        ;; a child's failure, a monitor's deadline — that reason wins
-        ;; and this changes nothing.
-        (%scope-fail! scope 'cancelled)
-        (let ((saved %scope-current))
-          (set! %scope-current %root-scope)
-          (let drain ()
-            (unless (fxzero? (%scope-children scope))
-              (flow-perform (%scope-join-event scope))
-              (drain)))
-          (set! %scope-current saved)))
-      ;; Unconditionally, on every path. The old code unlinked only
-      ;; after a join that returned normally, so a parent whose
-      ;; cancellation interrupted the join kept the dead subscope on its
-      ;; list for the rest of its life — and %scope-fail! walks that
-      ;; list on every later cancellation.
-      (when (flow-scope? parent)
-        (flow-scope-subscopes!
-         parent (remq scope (flow-scope-subscopes parent))))
-      (let ((reason (unbox (flow-scope-state scope))))
-        (cond
-         ((pair? reason) (raise (cdr reason)))
-         ((eq? reason 'timeout)
-          (raise (make-flow-error 'timeout "flow2: deadline expired" '() #f)))
-         ;; Before the bare 'cancelled: when the join was cut short we
-         ;; re-raise what actually cut it, which is normally the
-         ;; parent's cancellation but must not mask a block-proc raise
-         ;; behind a generic cancelled error.
-         (interrupted (raise interrupted))
-         ((eq? reason 'cancelled)
-          (raise (%flow-cancelled-error)))
-         ((eq? (car outcome) 'raised) (raise (cdr outcome)))
-         (else (cdr outcome))))))
-
-  ;; PROC runs on the calling fiber with the fresh scope current;
-  ;; fibers it spawns are the scope's children. The join — waiting
-  ;; for every child — happens under the PARENT scope, so an
-  ;; enclosing nursery's cancellation still reaches a parent parked
-  ;; here. PROC raising fails the scope exactly like a child raising:
-  ;; siblings are cancelled, and the first recorded error re-raises
-  ;; after the children have drained.
-  (define (flow-nursery proc)
-    (when (%worker-current?) (%flow-wrong-thread 'flow-nursery))
-    (%flow-check-caller-thread! 'flow-nursery)
-    ;; A dead scope must not open a live subscope. The link below lands
-    ;; AFTER %scope-fail!'s subscope walk, and the walk is CAS-guarded
-    ;; so it never reruns: a scope created past that point would be
-    ;; invisible to the cancellation forever — its body runs SHIELDED
-    ;; under a permanently-open scope, parks on whatever it likes, and
-    ;; nothing can ever reach it. On the loop thread nothing yields
-    ;; between this check and the link (and %scope-fail! is loop-only),
-    ;; so checking at entry closes the hole completely; it also matches
-    ;; flow-perform, which raises rather than starting work in a scope
-    ;; that is already dead.
-    (when (flow-cancelled?) (raise (%flow-cancelled-error)))
-    (let* ((parent %scope-current)
-           (scope (%make-scope parent)))
-      (unless (eq? parent %root-scope)
-        (flow-scope-subscopes! parent (cons scope (flow-scope-subscopes parent))))
-      (let ((outcome (%call-with-scope scope parent
-                                       (lambda () (proc scope)))))
-        (when (eq? (car outcome) 'raised)
-          (%scope-fail! scope (cons 'failed (cdr outcome))))
-        (%scope-finish scope parent outcome))))
-
-  ;; A nursery with a deadline. THUNK runs as a child fiber — not on
-  ;; the calling fiber — so the deadline is armed before any of the
-  ;; monitored work starts, and bounds the thunk itself, not only
-  ;; what it spawns. The calling fiber races the scope's join against
-  ;; a ring timeout under the PARENT scope; whichever loses is
-  ;; cancelled by the ordinary choice machinery (a won join removes
-  ;; the timeout from the ring). On deadline the whole subtree is
-  ;; cancelled, drained, and a timeout <flow-error> raises.
-  (define (flow-monitor seconds thunk)
-    (when (%worker-current?) (%flow-wrong-thread 'flow-monitor))
-    (%flow-check-caller-thread! 'flow-monitor)
-    ;; Same entry check as flow-nursery, and with more at stake: the
-    ;; child fiber is spawned BEFORE the join/deadline race, and the
-    ;; race's perform raises on the dead parent before the deadline is
-    ;; armed — the child would be orphaned under a scope nothing can
-    ;; cancel, with no deadline and no join.
-    (when (flow-cancelled?) (raise (%flow-cancelled-error)))
-    (let* ((parent %scope-current)
-           (scope (%make-scope parent))
-           (result (box #f)))
-      (unless (eq? parent %root-scope)
-        (flow-scope-subscopes! parent (cons scope (flow-scope-subscopes parent))))
-      (%scope-spawn! scope
-                     (lambda ()
-                       (set-box! result (cons 'ok (thunk)))))
-      ;; The race runs under the PARENT scope so an enclosing
-      ;; cancellation reaches it — the same reason the nursery's join
-      ;; does. But when it did, the raise used to propagate straight
-      ;; out of flow-monitor: no %scope-fail!, no %scope-finish, no
-      ;; drain. The monitor's children were cancelled transitively
-      ;; through the subscope link, yet nobody waited for them to
-      ;; finish unwinding — they outlived the monitor call, which is
-      ;; the single thing a scope exists to prevent, and the exact
-      ;; invariant %scope-finish's interrupted path enforces for
-      ;; flow-nursery. Catch the interruption, fail the scope with it
-      ;; — idempotently, so a child failure or the deadline that
-      ;; already killed the scope keeps its better reason — and let
-      ;; %scope-finish drain and re-raise it like any first error.
-      (let ((race (guard (ex (#t (cons 'interrupted ex)))
-                    (flow-perform
-                     (flow-choice
-                      (flow-wrap (%scope-join-event scope)
-                                 (lambda (_) 'joined))
-                      (flow-wrap (flow-timeout seconds)
-                                 (lambda (_) 'deadline)))))))
-        (cond
-         ((eq? race 'deadline) (%scope-fail! scope 'timeout))
-         ((pair? race) (%scope-fail! scope (cons 'failed (cdr race)))))
-        (%scope-finish scope parent
-                       (or (unbox result) (cons 'ok (void)))))))
+    (loop-spawn (lambda () (%fiber-run thunk))))
 
   ;;------------------------------------------------------------
   ;; Lifecycle and compute threads
   ;;------------------------------------------------------------
 
-  ;; A task, as the framework sees it: the thunk, and the scope current
-  ;; at submission — what a nursery's cancellation flags.
-  (define-record-type* <flow2-task>
-    (make-flow-task thunk scope)
-    flow-task?
-    (thunk    flow-task-thunk)
-    (scope    flow-task-scope))
-
   (define %flow-worker-stop (list 'stop))
 
-  ;; The task is counted as a child of the submitting scope, so the
-  ;; nursery's join waits for it. Tagging alone -- which is all this did
-  ;; -- meant cancellation reached a task but ownership did not: a join
-  ;; could return while a scope-tagged task was still running on a
-  ;; worker, and that task could still put to a channel afterwards. The
-  ;; README promised a scope owns "the compute tasks they submit"; only
-  ;; the flagging half was implemented.
-  ;;
-  ;; The increment happens BEFORE the put and is undone if the put does
-  ;; not complete. Since channels became bounded, a put to a full worker
-  ;; channel parks and can therefore be cancelled, and a count bumped
-  ;; for a task that was never submitted is a join that never finishes.
-  ;; Doing it after the put instead would be worse: the worker can pick
-  ;; the task up and decrement before the increment lands.
+  ;; Queue THUNK on a worker's request channel. Like flow-spawn, fire
+  ;; and forget: the task's results, and its failures if anyone needs
+  ;; them, travel over channels the task itself writes to. A submit
+  ;; parks when the request channel is full, which is the pool's
+  ;; backpressure.
   (define (flow-submit! worker-channel thunk)
     ;; A submit reaches %channel-put! directly whenever the worker
     ;; channel has room, so it never touches flow-perform's guard and
     ;; needs its own.
     (%flow-check-caller-thread! 'flow-submit!)
-    ;; Same boundary as flow-put! and flow-get-try: a submit is a
-    ;; channel operation, and a cancelled scope must be observable
-    ;; through it — the raise is how the sender learns of its own
-    ;; death. Silently enqueueing was doubly useless: the worker skips
-    ;; a dead scope's task at dequeue anyway, so the caller paid the
-    ;; put and the count for work guaranteed never to run.
-    (when (flow-cancelled?)
-      (raise (%flow-cancelled-error)))
-    (let ((scope (if (%worker-current?)
-                     (or (%task-scope) %root-scope)
-                     %scope-current)))
-      (if (eq? scope %root-scope)
-          (%channel-put! worker-channel (make-flow-task thunk scope) #f)
-          (begin
-            (%scope-child-add! scope)
-            (guard (ex (#t (%scope-child-done! scope) (raise ex)))
-              (%channel-put! worker-channel (make-flow-task thunk scope) #f))))))
+    (%channel-put! worker-channel thunk #f))
 
-  ;; The per-worker framework loop: dequeue, skip tasks whose scope
-  ;; died in the queue, run the rest. A cancelled raise out of a task
-  ;; whose scope is dead is the task unwinding, not a failure. Any
-  ;; other raise the task did not handle itself is logged as
-  ;; (flow2 uncaught task WORKER CONDITION) and the worker takes its
-  ;; next task: the pool must not shrink because one task failed.
+  ;; The per-worker framework loop: dequeue, run. A raise the task did
+  ;; not handle itself is logged as (flow2 uncaught task WORKER
+  ;; CONDITION) and the worker takes its next task: the pool must not
+  ;; shrink because one task failed.
   ;;
   ;; There used to be an always-a-reply rule here: the framework put a
   ;; compute <flow-error> on the task's response channel for it. That
@@ -2347,31 +1789,13 @@
     (let loop ()
       (let ((task (%flow-perform (flow-get channel))))
         (unless (eq? task %flow-worker-stop)
-          (let ((scope (flow-task-scope task)))
-            ;; The decrement pairs with flow-submit!'s increment and has
-            ;; to happen on EVERY path out, including the one where the
-            ;; task is skipped because its scope died in the queue --
-            ;; otherwise a cancelled scope's join waits for a task that
-            ;; will never run.
-            (dynamic-wind
-              void
-              (lambda ()
-                (unless (%scope-dead? scope)
-                  (%task-scope scope)
-                  (guard (ex ((and (flow-error-cancelled? ex)
-                                   (%scope-dead? scope))
-                              (void))
-                             (#t
-                              ;; Named by its request channel's
-                              ;; (worker . i), so the entry says WHERE.
-                              (flow-log (list 'flow2 'uncaught 'task
-                                              (flow-channel-name channel)
-                                              (%flow-condition-sexp ex)))))
-                    ((flow-task-thunk task)))
-                  (%task-scope #f)))
-              (lambda ()
-                (unless (eq? scope %root-scope)
-                  (%scope-child-done! scope)))))
+          (guard (ex (#t
+                      ;; Named by its request channel's (worker . i), so
+                      ;; the entry says WHERE.
+                      (flow-log (list 'flow2 'uncaught 'task
+                                      (flow-channel-name channel)
+                                      (%flow-condition-sexp ex)))))
+            (task))
           (loop)))))
 
   ;; Start the loop on the calling thread — the main thread — and
@@ -2379,8 +1803,8 @@
   ;; channels (empty when COMPUTE-COUNT is zero, the default). The
   ;; count is fixed for the run; flow-run returns when the loop
   ;; stops. Parked fibers are then simply never resumed — flow-stop
-  ;; is a shutdown, not a cancellation; cancel your own top-level
-  ;; nursery first when cleanup must run.
+  ;; is a shutdown, not a cancellation; tell your own fibers to finish
+  ;; first when cleanup must run.
   (define flow-run
     (case-lambda
       ((proc) (flow-run proc 0))
@@ -2393,7 +1817,6 @@
          (error 'flow-run "compute-count must be a non-negative fixnum"
                 compute-count))
        (loop-new)
-       (set! %scope-current %root-scope)
        ;; Whoever calls flow-run owns the loop for this run; see
        ;; %flow-check-caller-thread!.
        (set-box! %flow-loop-thread (get-thread-id))
@@ -2428,9 +1851,7 @@
                                   (lambda () (%flow-worker-exited! pool)))))
                              (start (fx+ i 1) (cons channel channels))))))
                    '())))
-         (loop-spawn (lambda ()
-                       (set! %scope-current %root-scope)
-                       (%fiber-run (lambda () (proc channels)))))
+         (loop-spawn (lambda () (%fiber-run (lambda () (proc channels)))))
          (loop-run)
          (when pool
            (%flow-shutdown-pool! pool channels))

@@ -22,12 +22,12 @@
   #t)
 
 (define (~check-flow2-000/error-predicates)
-  (define cancelled (make-flow-error 'cancelled "" '() #f))
+  (define wrong (make-flow-error 'wrong-thread "" '() #f))
   (define overflow (make-flow-error 'overflow "" '() 'boom))
-  (assert (flow-error-cancelled? cancelled))
-  (assert (not (flow-error-timeout? cancelled)))
-  (assert (not (flow-error-overflow? cancelled)))
+  (assert (flow-error-wrong-thread? wrong))
+  (assert (not (flow-error-overflow? wrong)))
   (assert (flow-error-overflow? overflow))
+  (assert (not (flow-error-wrong-thread? overflow)))
   (assert (eq? 'boom (flow-error-cause overflow)))
   (assert (not (flow-error? 'overflow)))
   (assert (not (flow-error-wrong-thread? 42)))
@@ -357,13 +357,6 @@
        (flow-sleep 0.01)
        (assert (eq? 'served parked-getter))
        (assert (eqv? 0 (flow-channel-getters-length empty))))
-     ;; scope bookkeeping: a nursery with a child in flight
-     (flow-nursery
-      (lambda (scope)
-        (assert (eqv? 0 (flow-scope-children-count scope)))
-        (flow-spawn (lambda () (flow-sleep 0.02)))
-        (assert (eqv? 1 (flow-scope-children-count scope)))
-        (assert (eqv? 0 (flow-scope-join-waiters-length scope)))))
      (flow-stop)))
   #t)
 
@@ -408,25 +401,6 @@
   (assert (eqv? 2 (flow-get-try ch 'EMPTY)))
   (assert (eqv? 3 (flow-get-try ch 'EMPTY)))
   (assert (eq? 'EMPTY (flow-get-try ch 'EMPTY)))
-  #t)
-
-;; Parking makes flow-put! a suspension point, so it must also be a
-;; cancellation point: a fiber parked on a full channel inside a
-;; monitor has to be woken by the deadline like any other parked fiber,
-;; and its space waiter has to be unregistered on the way out.
-(define (~check-flow2-002/put-parked-on-full-is-cancellable)
-  (define ch (make-flow-channel 'full-forever 1))
-  (define outcome 'not-set)
-  (flow-run
-   (lambda (workers)
-     (flow-put! ch 'fills-it)
-     (guard (ex ((flow-error-timeout? ex) (set! outcome 'timeout)))
-       (flow-monitor 0.02 (lambda () (flow-put! ch 'never))))
-     (flow-stop)))
-  (assert (eq? outcome 'timeout))
-  ;; the cancelled putter left nothing behind
-  (assert (null? (flow-channel-space ch)))
-  (assert (eq? 'fills-it (flow-get-try ch 'EMPTY)))
   #t)
 
 ;; The saturation warning is edge-triggered: one line per episode, not
@@ -520,9 +494,9 @@
 ;; whatever the next loop-new or socket call had since been given that
 ;; fd number.
 ;;
-;; The task here deliberately outlives flow-stop: it is submitted at the
-;; root scope, so no nursery join waits for it, and the only thing that
-;; can wait for it is the shutdown itself. FINISHED set at all is the
+;; The task here deliberately outlives flow-stop: nothing in the
+;; program waits for it, so the only thing that can is the shutdown
+;; itself. FINISHED set at all is the
 ;; evidence: without the join, flow-run returns while the worker is
 ;; still asleep. The pool state itself is per-run now and unreachable
 ;; once flow-run returns, which is the point -- there is no global left
@@ -540,33 +514,6 @@
        (flow-stop)))
    1)
   (assert finished)
-  #t)
-
-;; flow-submit! is a channel operation like flow-put!, so a dead scope
-;; is observable through it too — the raise is how the sender learns of
-;; its own death. It used to enqueue silently, which was doubly
-;; useless: the worker skips a dead scope's task at dequeue anyway, so
-;; the caller paid the put and the child count for work guaranteed
-;; never to run. No worker is needed to prove the boundary: the
-;; request channel is an ordinary channel.
-(define (~check-flow2-005/submit-in-dead-scope-raises)
-  (define outcome 'unset)
-  (define requests (make-flow-channel 'requests))
-  (flow-run
-   (lambda (workers)
-     (guard (ex ((flow-error-cancelled? ex) (void)))
-       (flow-nursery
-        (lambda (scope)
-          (flow-scope-cancel! scope)
-          (set! outcome
-                (guard (ex ((flow-error-cancelled? ex) 'cancelled))
-                  (flow-submit! requests
-                                (lambda () 'never))
-                  'submitted)))))
-     (flow-stop)))
-  (assert (eq? outcome 'cancelled))
-  ;; nothing was enqueued for the raise to strand
-  (assert (= 0 (flow-channel-queue-length requests)))
   #t)
 
 ;; A straggler worker -- one that outlived its run's bounded shutdown
@@ -658,384 +605,46 @@
   (assert (eqv? 0 (flow-channel-queue-length shared)))
   #t)
 
-;; A scope owns the compute tasks submitted inside it, so its join must
-;; wait for them. flow-submit! used to only TAG a task with the scope:
-;; cancellation reached it, ownership did not, and a join could return
-;; while a scope-tagged task was still running on a worker -- and that
-;; task could still put to a channel afterwards.
-;;
-;; The worker sleeps on its own OS thread, so "did the join wait" is
-;; decided by real elapsed time and not by loop scheduling order.
-(define (~check-flow2-005/nursery-waits-for-its-compute-task)
-  (define finished #f)
-  (define at-join #f)
-  (flow-run
-   (lambda (workers)
-     (let ((worker (car workers))
-           (reply (make-flow-channel 'reply 4)))
-       (flow-nursery
-        (lambda (scope)
-          (flow-submit! worker
-                        (lambda ()
-                          (sleep (make-time 'time-duration 50000000 0))
-                          (set! finished #t)))))
-       ;; sampled the instant the nursery returned
-       (set! at-join finished)
-       (flow-stop)))
-   1)
-  (assert at-join)
-  #t)
-
-;; Cancellation must be observable through a channel operation on
-;; EITHER thread. Both checks used to test only %worker-current?, so a
-;; main-thread fiber in a cancelled scope could keep putting and
-;; draining indefinitely as long as it never performed a suspending
-;; event -- while the identical code on a worker raised at once. The
-;; README's "channel operations check it implicitly" claimed the
-;; universal version of this.
-;;
-;; Driven through flow-scope-cancel! rather than a deadline so the
-;; scope is dead at a known point with nothing else in flight.
-(define (~check-flow2-003/cancel-is-visible-to-non-suspending-ops)
-  (define ch (make-flow-channel 'sym 8))
-  (define put-raised #f)
-  (define get-raised #f)
-  (define before-cancel #f)
-  (flow-run
-   (lambda (workers)
-     (guard (ex ((flow-error-cancelled? ex) (void)))
-       (flow-nursery
-        (lambda (scope)
-          ;; while the scope is alive both work normally
-          (flow-put! ch 'first)
-          (set! before-cancel (flow-get-try ch 'EMPTY))
-          (flow-scope-cancel! scope)
-          ;; and once it is dead, neither may pretend otherwise
-          (set! put-raised
-                (guard (ex ((flow-error-cancelled? ex) #t)) (flow-put! ch 'second) #f))
-          (set! get-raised
-                (guard (ex ((flow-error-cancelled? ex) #t)) (flow-get-try ch 'EMPTY) #f)))))
-     (flow-stop)))
-  (assert (eq? 'first before-cancel))
-  (assert put-raised)
-  (assert get-raised)
-  ;; the put that raised must not have enqueued anything
-  (assert (eq? 'EMPTY (flow-get-try ch 'EMPTY)))
-  #t)
-
-;; A cancelled parent must not abandon its grandchildren. %scope-finish
-;; performs the join under the PARENT scope on purpose, so an enclosing
-;; cancellation reaches it -- but it used to raise on the spot with this
-;; scope's own children still running. They were cancelled transitively,
-;; yet nobody waited for them to finish, so fibers outlived the scope
-;; that owned them, which is the one thing a nursery exists to prevent.
-;;
-;; The inner scope owns a compute task that outlasts the monitor's
-;; deadline, so the two failures are separable: without the ownership
-;; fix the task is not counted and the join does not happen at all;
-;; without the drain fix it is counted but the join is abandoned
-;; mid-flight. Either way the task is still running when the timeout
-;; escapes, and at-raise is #f.
-(define (~check-flow2-003/cancelled-parent-drains-grandchildren)
-  (define finished #f)
-  (define at-raise 'not-set)
-  (define outcome 'not-set)
-  (flow-run
-   (lambda (workers)
-     (let ((worker (car workers))
-           (reply (make-flow-channel 'reply 4)))
-       (guard (ex ((flow-error-timeout? ex)
-                   (set! outcome 'timeout)
-                   (set! at-raise finished)))
-         (flow-monitor
-          0.02
-          (lambda ()
-            (flow-nursery
-             (lambda (inner)
-               (flow-submit! worker
-                             (lambda ()
-                               (sleep (make-time 'time-duration 60000000 0))
-                               (set! finished #t))))))))
-       (flow-stop)))
-   1)
-  (assert (eq? outcome 'timeout))
-  (assert at-raise)
-  #t)
-
-;;------------------------------------------------------------
-;; Nurseries
-;;------------------------------------------------------------
-
-(define (~check-flow2-003/nursery-join-waits-children)
-  (define done '())
-  (define after-nursery #f)
-  (flow-run
-   (lambda (workers)
-     (flow-nursery
-      (lambda (scope)
-        (for-each (lambda (i)
-                    (flow-spawn
-                     (lambda ()
-                       (flow-sleep 0.005)
-                       (set! done (cons i done)))))
-                  '(1 2 3))))
-     ;; the join guarantees all three ran before the nursery returned
-     (set! after-nursery (length done))
-     (flow-stop)))
-  (eqv? after-nursery 3))
-
-(define (~check-flow2-003/nursery-child-raise-cancels-siblings)
-  (define never (make-flow-channel))
-  (define sibling-cancelled? #f)
-  (define reraised #f)
-  (flow-run
-   (lambda (workers)
-     (guard (ex ((eq? ex 'boom) (set! reraised #t)))
-       (flow-nursery
-        (lambda (scope)
-          ;; sibling parked forever on an empty channel: only the
-          ;; scope's cancellation can resume it
-          (flow-spawn
-           (lambda ()
-             (guard (ex ((flow-error-cancelled? ex)
-                         (set! sibling-cancelled? #t)
-                         (raise ex)))
-               (flow-get! never))))
-          (flow-spawn
-           (lambda ()
-             (flow-sleep 0.005)
-             (raise 'boom))))))
-     (flow-stop)))
-  (and sibling-cancelled? reraised))
-
-(define (~check-flow2-003/nursery-scope-cancel)
-  (define never (make-flow-channel))
-  (define outcome #f)
-  (flow-run
-   (lambda (workers)
-     (guard (ex ((flow-error-cancelled? ex) (set! outcome 'cancelled)))
-       (flow-nursery
-        (lambda (scope)
-          (flow-spawn (lambda () (flow-get! never)))
-          (flow-spawn
-           (lambda ()
-             (flow-sleep 0.005)
-             (flow-scope-cancel! scope))))))
-     (flow-stop)))
-  (eq? outcome 'cancelled))
-
-;; Once the scope is dead, the next synchronization raises before
-;; even polling — the fast-path check at flow-perform's entry.
-(define (~check-flow2-003/nursery-perform-after-cancel-raises)
-  (define ch (make-flow-channel))
-  (define raised-inside? #f)
-  (flow-run
-   (lambda (workers)
-     (flow-put! ch 'ready)  ;; even a ready value must not mask cancellation
-     (guard (ex ((flow-error-cancelled? ex) (void)))
-       (flow-nursery
-        (lambda (scope)
-          (flow-scope-cancel! scope)
-          (guard (ex ((flow-error-cancelled? ex) (set! raised-inside? #t)))
-            (flow-get! ch)))))
-     (flow-stop)))
-  raised-inside?)
-
-;; Opening a nursery -- or a monitor -- inside a scope that is already
-;; dead must raise, exactly as flow-perform does. The subscope link
-;; lands AFTER %scope-fail!'s subscope walk, and the walk is
-;; CAS-guarded so it never reruns: a scope created past that point was
-;; invisible to the cancellation forever, and its body ran SHIELDED
-;; under a permanently-open scope -- it could park on a channel nobody
-;; writes and nothing could ever reach it. flow-monitor was worse
-;; still: its child fiber spawned first, then the join/deadline race
-;; raised on the dead parent BEFORE the deadline was armed, orphaning
-;; the child with no deadline and no join.
-(define (~check-flow2-003/nursery-in-dead-scope-raises)
-  (define body-ran? #f)
-  (define nursery-outcome 'unset)
-  (define monitor-outcome 'unset)
-  (define outer-raised? #f)
-  (flow-run
-   (lambda (workers)
-     (guard (ex ((flow-error-cancelled? ex) (set! outer-raised? #t)))
-       (flow-nursery
-        (lambda (scope)
-          (flow-scope-cancel! scope)
-          (set! nursery-outcome
-                (guard (ex ((flow-error-cancelled? ex) 'cancelled))
-                  (flow-nursery
-                   (lambda (sub)
-                     (set! body-ran? #t)
-                     (flow-sleep 0.01)))
-                  'returned))
-          (set! monitor-outcome
-                (guard (ex ((flow-error-cancelled? ex) 'cancelled))
-                  (flow-monitor 1.0 (lambda () (set! body-ran? #t)))
-                  'returned)))))
-     (flow-stop)))
-  (assert (eq? nursery-outcome 'cancelled))
-  (assert (eq? monitor-outcome 'cancelled))
-  (assert (not body-ran?))
-  ;; and the outer join still reports the cancellation as usual
-  (assert outer-raised?)
-  #t)
-
-;; A raise from a base event's BLOCK procedure must reach the fiber,
-;; and through it the scope -- exactly as a raise from the fiber's body
-;; does. Before the fix, block procs ran inside loop-abort's thunk, on
-;; the scheduler's stack with the prompt already unwound, so the raise
-;; escaped to loop-apply's catch-all: the fiber died without
-;; %scope-child-done!, the scope's child count never reached zero, and
-;; the nursery's join parked forever. Case B below HUNG.
+;; A raise from a base event's BLOCK procedure must reach the fiber --
+;; exactly as a raise from the fiber's body does. Before the fix, block
+;; procs ran inside loop-abort's thunk, on the scheduler's stack with
+;; the prompt already unwound, so the raise escaped to loop-apply's
+;; catch-all: the fiber's own guards never saw it (in a nursery, as
+;; flow2 had then, the join parked forever).
 ;;
 ;; Not synthetic. loop-get-sqe raises "submission queue full" past 256
 ;; queued ops in one tick, reachable from flow-timeout / flow-read /
 ;; flow-write / flow-open / flow-read-at / flow-write-at; and
 ;; loop-accept-block raises "concurrent accept on fd". Standalone
 ;; reproducer: checks/repro-flow2-block-raise.scm.
-(define (~check-flow2-003/block-raise-reaches-the-scope)
+(define (~check-flow2-003/block-raise-reaches-the-fiber)
   ;; never ready, so flow-perform must call block -- and block raises
   (define (bad-event)
     (make-flow (lambda (x) x)
                (lambda () #f)
                (lambda (state resume register-cancel!)
                  (error 'bad-event "raised from block"))))
-  (define root-saw #f)
-  (define nursery-saw #f)
+  (define caught #f)
+  (flow-log-drain!)
   (flow-run
    (lambda (workers)
-     ;; A: root scope -- flow-perform raises on the performing fiber
-     (guard (ex (#t (set! root-saw #t)))
+     ;; A: flow-perform raises on the performing fiber, inside its guard
+     (guard (ex (#t (set! caught (condition-who ex))))
        (flow-perform (bad-event)))
-     ;; B: inside a nursery -- the child's raise fails the scope and
-     ;; re-raises at the join, instead of hanging it
-     (guard (ex (#t (set! nursery-saw #t)))
-       (flow-nursery
-        (lambda (scope)
-          (flow-spawn (lambda () (flow-perform (bad-event)))))))
+     ;; B: unhandled, it ends the fiber as an uncaught entry rather
+     ;; than vanishing into the scheduler's catch-all
+     (flow-spawn (lambda () (flow-perform (bad-event))))
+     (flow-sleep 0.01)
      (flow-stop)))
-  (assert root-saw)
-  (assert nursery-saw)
+  (assert (eq? caught 'bad-event))
+  (let ((uncaught (flow2-check-uncaught (flow-log-drain!))))
+    (assert (= 1 (length uncaught)))
+    (assert (flow2-check-substring? "raised from block" (cadddr (car uncaught)))))
   #t)
-
-;; A waiter registered on a scope that is ALREADY dead must be woken
-;; by the registration itself. %scope-fail! CASes the state and then
-;; drains the waiters list, so anything consed on after that drain is
-;; attached to a corpse -- and on a compute thread, which registers its
-;; own waiter from its own thread, losing that race parks the worker
-;; forever and shrinks the pool by one with no other symptom.
-;;
-;; Asserted deterministically against the internals rather than by
-;; racing: the real interleaving needs the loop thread's CAS to land
-;; inside a ~1us window on the worker, which took a 6000-round deadline
-;; sweep to hit even once (checks/repro-flow2-scope-waiter-race.scm
-;; does exactly that, and is kept for the end-to-end proof). What
-;; belongs in `make check` is the invariant the fix establishes, and
-;; that is checkable in microseconds.
-(define (~check-flow2-003/waiter-on-dead-scope-is-woken)
-  (define scope (%make-scope %root-scope))
-  (define woken 'not-woken)
-  ;; kill it first: the waiters list has already been drained
-  (%scope-fail! scope 'cancelled)
-  (%scope-add-waiter! scope (box 'waiting)
-                      (lambda (value) (set! woken value) #t))
-  (assert (eq? woken %flow-cancel-sentinel))
-  ;; and the ordinary order still works: register, then cancel
-  (let ((live (%make-scope %root-scope))
-        (seen 'not-woken))
-    (%scope-add-waiter! live (box 'waiting)
-                        (lambda (value) (set! seen value) #t))
-    (assert (eq? seen 'not-woken))
-    (%scope-fail! live 'cancelled)
-    (assert (eq? seen %flow-cancel-sentinel)))
-  #t)
-
-;;------------------------------------------------------------
-;; Monitor
-;;------------------------------------------------------------
-
-(define (~check-flow2-004/monitor-in-time)
-  (define result #f)
-  (flow-run
-   (lambda (workers)
-     (set! result (flow-monitor 5.0
-                                (lambda ()
-                                  (flow-sleep 0.005)
-                                  'done)))
-     (flow-stop)))
-  (eq? result 'done))
-
-(define (~check-flow2-004/monitor-deadline)
-  (define never (make-flow-channel))
-  (define outcome #f)
-  (define child-cancelled? #f)
-  (flow-run
-   (lambda (workers)
-     (guard (ex ((flow-error-timeout? ex) (set! outcome 'timeout)))
-       (flow-monitor 0.01
-                     (lambda ()
-                       ;; a nested spawn, cancelled transitively
-                       (flow-spawn
-                        (lambda ()
-                          (guard (ex ((flow-error-cancelled? ex)
-                                      (set! child-cancelled? #t)
-                                      (raise ex)))
-                            (flow-get! never))))
-                       (flow-get! never))))
-     (flow-stop)))
-  (and (eq? outcome 'timeout) child-cancelled?))
 
 ;;------------------------------------------------------------
 ;; Compute threads
 ;;------------------------------------------------------------
-
-;; The monitor-side twin of cancelled-parent-drains-grandchildren: the
-;; join/deadline race runs under the PARENT scope so an enclosing
-;; cancellation reaches it, but when it did, the raise used to
-;; propagate straight out of flow-monitor — no %scope-fail!, no
-;; %scope-finish, no drain — so the monitor's children were cancelled
-;; transitively yet nobody waited for them, and they outlived the
-;; monitor call. The child here is a compute task whose completion is
-;; timestamped by a flag: the fiber that called flow-monitor must
-;; observe that flag already set at the moment the interruption passes
-;; through it.
-(define (~check-flow2-004/monitor-interrupted-by-parent-drains-children)
-  (define task-finished? #f)
-  (define seen-at-monitor-exit 'unset)
-  (define outer-raised? #f)
-  (flow-run
-   (lambda (workers)
-     (guard (ex (#t (set! outer-raised? #t)))
-       (flow-nursery
-        (lambda (outer)
-          (flow-spawn
-           (lambda ()
-             (guard (ex (#t (set! seen-at-monitor-exit task-finished?)
-                            (raise ex)))
-               (flow-monitor
-                5.0
-                (lambda ()
-                  ;; owned by the monitor's scope; the worker sleeps
-                  ;; past the sibling's raise, so the drain has
-                  ;; something real to wait for
-                  (flow-submit! (car workers)
-                                (lambda ()
-                                  (sleep (make-time 'time-duration
-                                                    80000000 0))
-                                  (set! task-finished? #t)))
-                  ;; park the monitor's own fiber too, so the join
-                  ;; cannot win before the interruption arrives
-                  (flow-sleep 5.0))))))
-          (flow-spawn
-           (lambda ()
-             (flow-sleep 0.02)
-             (error 'sibling "boom"))))))
-     (flow-stop))
-   1)
-  (assert outer-raised?)
-  (assert (eq? seen-at-monitor-exit #t))
-  #t)
 
 (define (~check-flow2-005/worker-task-replies)
   (define result #f)
@@ -1066,32 +675,6 @@
        (flow-stop)))
    1)
   (eq? result 'wrong-thread))
-
-;; A monitor's deadline reaches a task parked on a channel: the get
-;; raises cancelled on the compute thread, the framework drops the
-;; unwound task without a reply, and the worker survives to serve
-;; the next submission.
-(define (~check-flow2-005/worker-cancelled-along-monitor)
-  (define timed-out? #f)
-  (define alive #f)
-  (flow-run
-   (lambda (workers)
-     (guard (ex ((flow-error-timeout? ex) (set! timed-out? #t)))
-       (flow-monitor 0.01
-                     (lambda ()
-                       (let ((up (make-flow-channel))
-                             (down (make-flow-channel)))
-                         (flow-submit! (car workers)
-                                       (lambda () (flow-get! down)))
-                         (flow-get! up)))))
-     ;; same worker, fresh scope: still serving
-     (let ((response (make-flow-channel)))
-       (flow-submit! (car workers)
-                     (lambda () (flow-put! response 'alive)))
-       (set! alive (flow-get! response)))
-     (flow-stop))
-   1)
-  (and timed-out? (eq? alive 'alive)))
 
 ;; The verb-less I/O protocol from the design document, in miniature:
 ;; the task requests work over its response channel, the submitting
@@ -1176,11 +759,7 @@
 ;;
 ;; They deliberately drive the loop with BOUNDED loop-run-once ticks
 ;; rather than flow-run, keeping flow's rationale verbatim: a buggy
-;; build must FAIL these rather than hang `make check`. That also means
-;; they run outside flow-run, which never gets to reset %scope-current
-;; -- so each sets it explicitly, the way flow-run does, rather than
-;; inheriting whatever scope the previous check happened to leave in
-;; that global.
+;; build must FAIL these rather than hang `make check`.
 
 ;; A base that resumes INLINE, during the registration for-each, wins
 ;; before the bases after it have registered their cancels. The cancel
@@ -1200,7 +779,6 @@
                               (register-cancel!
                                (lambda () (set! cancelled #t))))))
   (loop-new)
-  (set! %scope-current %root-scope)
   (loop-spawn
    (lambda ()
      (set! result (flow-perform (flow-choice sync parked)))))
@@ -1229,7 +807,6 @@
                                 (lambda ()
                                   (error 'raising-cancel "boom"))))))
   (loop-new)
-  (set! %scope-current %root-scope)
   (loop-spawn
    (lambda ()
      (set! result (flow-perform (flow-choice winner raising)))))
@@ -1260,7 +837,6 @@
                              (register-cancel!
                               (lambda () (set! loser-cancelled #t))))))
   (loop-new)
-  (set! %scope-current %root-scope)
   (loop-spawn
    (lambda ()
      (set! result (flow-perform (flow-choice winner loser)))))
@@ -1293,7 +869,6 @@
                                 (lambda () (set! cancelled #t)))
                                (error 'raising-block "boom"))))
   (loop-new)
-  (set! %scope-current %root-scope)
   (loop-spawn
    (lambda ()
      (set! result (flow-perform (flow-choice sync raising)))))
@@ -1481,14 +1056,14 @@
           ;; would kill the fiber before it reaches flow-stop, and
           ;; flow-run would never return.
           (guard (ex (#t (set! accepted 'raised)))
-            ;; nothing is connecting yet, so the monitor's deadline
-            ;; cancels this accept
+            ;; nothing is connecting yet, so the timeout wins and the
+            ;; losing accept is cancelled
             (set! timed-out
-                  (guard (ex ((flow-error-timeout? ex) #t))
-                    (flow-monitor 0.05
-                                  (lambda ()
-                                    (flow-perform (flow-accept listen-fd))))
-                    #f))
+                  (eq? 'timeout
+                       (flow-perform
+                        (flow-choice (flow-accept listen-fd)
+                                     (flow-wrap (flow-timeout 0.05)
+                                                (lambda (_) 'timeout))))))
             ;; the listener must still be usable
             (let ((client (flow-perform (flow-accept listen-fd))))
               (set! accepted (fixnum? client))
@@ -1820,101 +1395,6 @@
 (define %flow2-check-fcntl (foreign-procedure "fcntl" (int int) int))
 (define (flow2-check-fd-open? fd) (fx>=? (%flow2-check-fcntl fd 1) 0))
 
-;; Cancellation is delivered by RAISING at a suspension point, so the
-;; handler that releases an fd is reached by the very raise it exists
-;; to clean up after -- that is the shape the design points at as the
-;; one that closes descriptors. But flow-perform's dead-scope test used
-;; to raise cancelled a second time, before the close SQE was ever
-;; prepped, so the cleanup never touched the ring and the fd leaked on
-;; exactly that path. Verified to fail before %bases-cancel-exempt?:
-;; the close raised cancelled and F_GETFD still succeeded afterwards.
-(define (~check-flow2-009/close-in-a-dead-scope-still-closes)
-  (define path (flow2-check-path "flow2-009-close-dead-scope.bin"))
-  (define fd #f)
-  (define close-outcome 'never-ran)
-  (define still-open 'unknown)
-  (flow2-check-remove! path)
-  (flow-run
-   (lambda (workers)
-     ;; the nursery re-raises the sibling's boom; this check is about
-     ;; what the cancelled child managed to do on its way out
-     (guard (ex (#t (void)))
-       (flow-nursery
-        (lambda (scope)
-          (flow-spawn
-           (lambda ()
-             (set! fd (flow-perform
-                       (flow-open path
-                                  (fxior O-WRONLY O-CREAT O-TRUNC)
-                                  #o600)))
-             (guard (ex ((flow-error-cancelled? ex)
-                         (set! close-outcome
-                               (guard (ex2 (#t (list 'raised
-                                                     (and (flow-error? ex2)
-                                                          (flow-error-symbol ex2)))))
-                                 (flow-perform (flow-close fd))))
-                         (raise ex)))
-               (flow-sleep 10))))
-          (flow-spawn (lambda () (flow-sleep 0.05) (raise 'boom))))))
-     ;; the close was issued by a fiber that is unwinding, so give its
-     ;; completion a few ticks to land before probing the descriptor
-     (flow-sleep 0.1)
-     (set! still-open (flow2-check-fd-open? fd))
-     (flow-stop)))
-  (flow2-check-remove! path)
-  (assert (fixnum? fd))
-  ;; the cleanup reached the ring rather than being cancelled again
-  (assert (eqv? 0 close-outcome))
-  ;; and the descriptor really is gone
-  (assert (not still-open))
-  #t)
-
-;; The README's "Fan out, gather, and never hang" pattern, transcribed.
-;; BOUND #f is the naive spelling that leaves the channel at the
-;; default; anything else sizes it to the fan-out, which is what the
-;; pattern now shows.
-(define (flow2-check-fan-out n bound)
-  (let ((replies (if bound
-                     (make-flow-channel 'replies bound)
-                     (make-flow-channel 'replies))))
-    (flow-nursery
-     (lambda (scope)
-       (for-each (lambda (i)
-                   (flow-spawn (lambda () (flow-put! replies i))))
-                 (iota n))))
-    (let loop ((out '()))
-      (let ((r (flow-get-try replies #f)))
-        (if r (loop (cons r out)) out)))))
-
-;; Gather-after-join and a bound smaller than the fan-out are
-;; incompatible, and the failure is silent: the put that fills the
-;; channel parks waiting for room, the only drainer runs after the
-;; join, and the join waits for the parked putter. Nothing raises --
-;; only a monitor turns it into something visible.
-;;
-;; Both halves are pinned here, because the rule is only worth its
-;; space in the README if the naive shape really does hang: the sized
-;; channel completes past the default bound, the default-bound one
-;; times out at the same size.
-(define (~check-flow2-003/gather-after-join-scales-past-the-default-bound)
-  (define sized 'not-set)
-  (define naive 'not-set)
-  (assert (fx>? 50 (flow-channel-bound (make-flow-channel))))
-  (flow-run
-   (lambda (workers)
-     (set! sized
-           (guard (ex ((flow-error? ex) (list 'raised (flow-error-symbol ex))))
-             (length (flow-monitor 2.0
-                                   (lambda () (flow2-check-fan-out 50 50))))))
-     (set! naive
-           (guard (ex ((flow-error? ex) (list 'raised (flow-error-symbol ex))))
-             (length (flow-monitor 0.4
-                                   (lambda () (flow2-check-fan-out 50 #f))))))
-     (flow-stop)))
-  (assert (eqv? 50 sized))
-  (assert (equal? '(raised timeout) naive))
-  #t)
-
 ;; Third adverse pass, finding 3. A recv and the base that beat it can
 ;; complete in the same tick -- the loop drains the completion queue in
 ;; CQ order, so the timeout's handler wins the CAS and the recv's
@@ -2083,37 +1563,6 @@
     (assert (not (list-ref entry 3))))
   #t)
 
-;; Third adverse pass, finding 9. A perform inside a dead scope must not
-;; consume anything on its way to raising. flow-poll starts its walk at
-;; a random base, so a ready channel get could be tried before the
-;; scope's own cancellation base and win it: the value is dequeued and
-;; handed to a fiber that raises at its very next operation, and goes
-;; with it. The cancellation base is polled first now, before the
-;; rotation, and the early dead-scope test in flow-perform is the outer
-;; guarantee this pins.
-(define (~check-flow2-003/a-dead-scope-does-not-eat-a-queued-value)
-  (define channel (make-flow-channel 'dead-scope))
-  (define outcome 'not-set)
-  (flow-run
-   (lambda (workers)
-     (guard (ex (#t (void)))
-       (flow-nursery
-        (lambda (scope)
-          (flow-spawn
-           (lambda ()
-             ;; a value IS waiting, so the get's try would succeed
-             (flow-put! channel 'payload)
-             (flow-scope-cancel! scope)
-             (set! outcome
-                   (guard (ex (#t (and (flow-error? ex)
-                                       (flow-error-symbol ex))))
-                     (list 'got (flow-perform (flow-get channel))))))))))
-     (flow-stop)))
-  (assert (eq? 'cancelled outcome))
-  ;; still there for whoever is entitled to it
-  (assert (eqv? 1 (flow-channel-queue-length channel)))
-  #t)
-
 ;; Fourth adverse pass, finding 1. The third pass's own fix, applied at
 ;; three call sites instead of at the choke point they all pass
 ;; through. flow-perform went unguarded, so a stray thread took its
@@ -2123,7 +1572,9 @@
 ;; was still parked a second and a half later), while on an empty
 ;; channel it died with "attempt to apply non-procedure #f" from
 ;; loop-abort. flow-submit! and the four scope/lifecycle entry points
-;; checked only %worker-current?, which a user thread passes.
+;; checked only %worker-current?, which a user thread passes. (The
+;; nursery, monitor and scope-cancel entry points it also covered went
+;; with nurseries.)
 ;;
 ;; One check over every entry point rather than one per procedure: the
 ;; failure mode was an ENUMERATION that fell behind, and a test shaped
@@ -2131,8 +1582,6 @@
 (define (~check-flow2-005/every-entry-point-refuses-a-stray-thread)
   (define channel (make-flow-channel 'stocked))
   (define empty (make-flow-channel 'empty))
-  (define replies (make-flow-channel 'replies))
-  (define scope-box (box #f))
   (define outcomes (box '()))
   (define done (box #f))
   (define (attempt name thunk)
@@ -2147,36 +1596,22 @@
   (flow-put! channel 'primed)
   (flow-run
    (lambda (workers)
-     ;; a live scope for flow-scope-cancel! to be refused on
-     (flow-spawn
+     (fork-thread
       (lambda ()
-        (flow-nursery
-         (lambda (scope)
-           (set-box! scope-box scope)
-           (flow-spawn (lambda () (flow-sleep 5.0)))))))
-     (let settle ((n 0))
-       (if (or (unbox scope-box) (fx>? n 100))
-           (fork-thread
-            (lambda ()
-              (attempt 'get-stocked (lambda () (flow-get! channel)))
-              (attempt 'get-empty (lambda () (flow-get! empty)))
-              (attempt 'sleep (lambda () (flow-sleep 0.01)))
-              (attempt 'submit
-                       (lambda ()
-                         (flow-submit! (car workers) (lambda () 42))))
-              (attempt 'nursery (lambda () (flow-nursery (lambda (scope) (void)))))
-              (attempt 'monitor
-                       (lambda () (flow-monitor 1.0 (lambda () (void)))))
-              (attempt 'scope-cancel
-                       (lambda () (flow-scope-cancel! (unbox scope-box))))
-              (attempt 'stop (lambda () (flow-stop)))
-              ;; fifth pass: growing a bound WAKES parked putters, and
-              ;; a wake on a stray thread is the unsynchronized
-              ;; loop-spawn the guard exists to prevent
-              (attempt 'buffer-size
-                       (lambda () (flow-channel-buffer-size! channel 8)))
-              (set-box! done #t)))
-           (begin (flow-sleep 0.01) (settle (fx+ n 1)))))
+        (attempt 'get-stocked (lambda () (flow-get! channel)))
+        (attempt 'get-empty (lambda () (flow-get! empty)))
+        (attempt 'sleep (lambda () (flow-sleep 0.01)))
+        (attempt 'submit
+                 (lambda ()
+                   (flow-submit! (car workers) (lambda () 42))))
+        (attempt 'spawn (lambda () (flow-spawn (lambda () (void)))))
+        (attempt 'stop (lambda () (flow-stop)))
+        ;; fifth pass: growing a bound WAKES parked putters, and
+        ;; a wake on a stray thread is the unsynchronized
+        ;; loop-spawn the guard exists to prevent
+        (attempt 'buffer-size
+                 (lambda () (flow-channel-buffer-size! channel 8)))
+        (set-box! done #t)))
      (let wait ((n 0))
        (flow-sleep 0.01)
        (if (or (unbox done) (fx>? n 300))
@@ -2184,15 +1619,14 @@
            (wait (fx+ n 1)))))
    1)
   (assert (unbox done))
-  (assert (unbox scope-box))
   (for-each (lambda (outcome)
               (unless (eq? 'wrong-thread (cdr outcome))
                 (flow-log (list 'flow2-check 'not-refused outcome)))
               (assert (eq? 'wrong-thread (cdr outcome))))
             (unbox outcomes))
-  ;; nine entry points tried, and the stocked channel still holds the
+  ;; seven entry points tried, and the stocked channel still holds the
   ;; value the off-loop get used to walk away with
-  (assert (eqv? 9 (length (unbox outcomes))))
+  (assert (eqv? 7 (length (unbox outcomes))))
   (assert (eqv? 1 (flow-channel-queue-length channel)))
   #t)
 
@@ -2267,33 +1701,6 @@
 ;;------------------------------------------------------------
 ;; Fifth adverse pass, 2026-09-03
 ;;------------------------------------------------------------
-
-;; README, flow-nursery: "A raise from PROC itself -- not from a child --
-;; is treated exactly like a child's: it fails the scope, so the
-;; children are cancelled and drained before it propagates." Stated
-;; since the first draft, never executed. The child is parked on a long
-;; sleep and records its own unwinding; the caller must see that record
-;; already made when the body's raise reaches it.
-(define (~check-flow2-003/nursery-body-raise-drains-children)
-  (define child-unwound? #f)
-  (define at-raise 'unset)
-  (define outcome 'unset)
-  (flow-run
-   (lambda (workers)
-     (guard (ex (#t (set! outcome ex) (set! at-raise child-unwound?)))
-       (flow-nursery
-        (lambda (scope)
-          (flow-spawn
-           (lambda ()
-             (guard (ex ((flow-error-cancelled? ex)
-                         (set! child-unwound? #t)
-                         (raise ex)))
-               (flow-sleep 5.0))))
-          (raise 'body-boom))))
-     (flow-stop)))
-  (assert (eq? outcome 'body-boom))
-  (assert (eq? at-raise #t))
-  #t)
 
 ;; A flow-wrap's PROC used to run inside the base's resume -- on the
 ;; stack of whoever completed the rendezvous, BEFORE resume-from's CAS.
@@ -2558,4 +1965,77 @@
   (assert (equal? reported '(failed . reported)))
   (assert (equal? (flow2-check-uncaught (flow-log-drain!))
                   '((flow2 uncaught task (worker . 0) kaboom))))
+  #t)
+
+;; The coordination a nursery could not express, and the reason flow2
+;; no longer has one: a request fans out over producers that stream
+;; results, gathers until a deadline, answers with what it has, and
+;; hands the SAME channels to a completer that outlives the request and
+;; gathers the rest -- a search that ranks approximately now and caches
+;; the full result for the next query. Each producer reports its own
+;; end on EXITS, failure included; that guard is the user-code spelling
+;; of a death notice, and nothing in flow2 had to know about it.
+(define (~check-flow2-012/fan-out-gather-until-a-deadline-then-hand-off)
+  (define answered 'not-set)
+  (define completed 'not-set)
+  (define (producer id count delay pages exits)
+    (lambda ()
+      (flow-put! exits
+                 (guard (ex (#t (list 'failed id)))
+                   (let loop ((n 0))
+                     (when (< n count)
+                       (flow-sleep delay)
+                       (flow-put! pages (cons id n))
+                       (loop (+ n 1))))
+                   (when (eq? id 'broken) (error 'producer "broken"))
+                   (list 'done id)))))
+  ;; Gather until every producer exited or, with a deadline, until it
+  ;; passes; a flow-timeout arms from the perform, so the remaining time
+  ;; is recomputed for each one.
+  (define (gather pages exits live seen failed deadline)
+    (let loop ((live live) (seen seen) (failed failed))
+      (if (zero? live)
+          (list 'complete live seen failed)
+          (let ((ev (flow-perform
+                     (apply flow-choice
+                            (flow-wrap (flow-get pages) (lambda (p) (cons 'page p)))
+                            (flow-wrap (flow-get exits) (lambda (x) (cons 'exit x)))
+                            (if deadline
+                                (list (flow-wrap
+                                       (flow-timeout
+                                        (max 0 (/ (- deadline (real-time)) 1000.0)))
+                                       (lambda (_) '(deadline))))
+                                '())))))
+            (case (car ev)
+              ((page) (loop live (cons (cdr ev) seen) failed))
+              ((exit) (loop (- live 1) seen
+                            (if (eq? (cadr ev) 'failed) (cons (caddr ev) failed) failed)))
+              (else (list 'partial live seen failed)))))))
+  (flow-run
+   (lambda (workers)
+     (let ((pages (make-flow-channel 'pages))
+           (exits (make-flow-channel 'exits)))
+       (flow-spawn (producer 'fast 3 0.005 pages exits))
+       (flow-spawn (producer 'slow 3 0.04 pages exits))
+       (flow-spawn (producer 'broken 1 0.005 pages exits))
+       (let ((now (gather pages exits 3 '() '() (+ (real-time) 30))))
+         (set! answered now)
+         (when (eq? (car now) 'partial)
+           ;; the fork: answer now, and let a completer take over the
+           ;; very channels the producers are still writing to
+           (flow-spawn
+            (lambda ()
+              (set! completed
+                    (apply gather pages exits (append (cdr now) (list #f))))))))
+       (let wait ((n 0))
+         (flow-sleep 0.01)
+         (if (or (not (eq? completed 'not-set)) (fx>? n 100))
+             (flow-stop)
+             (wait (fx+ n 1)))))))
+  ;; the slow producer needs 120ms, the deadline is 30ms
+  (assert (eq? 'partial (car answered)))
+  (assert (< (length (caddr answered)) 7))
+  (assert (eq? 'complete (car completed)))
+  (assert (= 7 (length (caddr completed))))
+  (assert (equal? '(broken) (cadddr completed)))
   #t)

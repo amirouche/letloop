@@ -66,7 +66,10 @@
     (newline)
     (flush-output-port (current-output-port)))
 
-  ;; Park on accept until the monitor's deadline cancels us. On the
+  ;; Park on accept until a timeout wins the choice and the losing
+  ;; accept is cancelled. (Originally a flow-monitor deadline, which
+  ;; went with nurseries; a losing choice member is the same cancel
+  ;; path.) On the
   ;; current dev build the second call's raise never reaches this guard
   ;; at all -- it escapes the fiber via loop-apply (see
   ;; repro-flow2-block-raise.scm), so stdout simply stops after the
@@ -76,14 +79,17 @@
   ;; and this prints "-> RAISED: ... concurrent accept on fd".
   (define (accept-under-deadline fd label)
     (say label)
-    (guard (ex ((flow-error-timeout? ex)
-                (say "  -> timed out, as expected"))
-               (#t
+    (guard (ex (#t
                 (display "  -> RAISED: ")
                 (if (condition? ex) (display-condition ex) (display ex))
                 (newline)
                 (flush-output-port (current-output-port))))
-      (flow-monitor 0.05 (lambda () (flow-perform (flow-accept fd))))))
+      (when (eq? 'timeout
+                 (flow-perform
+                  (flow-choice (flow-accept fd)
+                               (flow-wrap (flow-timeout 0.05)
+                                          (lambda (_) 'timeout)))))
+        (say "  -> timed out, as expected"))))
 
   (define (repro-flow2-accept-cancel)
     (flow-run
@@ -92,6 +98,6 @@
          ;; loop-bind sets SO_REUSEADDR / SO_REUSEPORT itself.
          (loop-bind fd "127.0.0.1" %port)
          (loop-listen fd 128)
-         (accept-under-deadline fd "first accept under a 50ms monitor")
-         (accept-under-deadline fd "second accept under a 50ms monitor")
+         (accept-under-deadline fd "first accept against a 50ms timeout")
+         (accept-under-deadline fd "second accept against a 50ms timeout")
          (flow-stop))))))

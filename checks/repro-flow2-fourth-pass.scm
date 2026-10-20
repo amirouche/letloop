@@ -132,8 +132,17 @@
   ;;    `(if chunk ...)` predated the 'eof -> #t change for
   ;;    flow-read-at, so a clean EOF was truthy: the task looped
   ;;    forever feeding #t to index-chunk and never sent `done`.
-  ;;    Executed here with the monitor that turns that into something
-  ;;    visible.
+  ;;    Executed here under a deadline that turns that into something
+  ;;    visible. (It used flow-monitor, which went with nurseries; the
+  ;;    deadline is now written the way a program writes one.)
+  (define (with-deadline seconds thunk)
+    (let ((result (make-flow-channel 'result 1)))
+      (flow-spawn (lambda () (flow-put! result (thunk))))
+      (flow-perform
+       (flow-choice (flow-get result)
+                    (flow-wrap (flow-timeout seconds)
+                               (lambda (_) 'never-terminated))))))
+
   (define (~check-repro/readme-index-file-example-terminates)
     (define path "/tmp/letloop/repro-flow2-fourth-index.bin")
     (define size 200000)
@@ -146,8 +155,8 @@
      (lambda (workers)
        (let ((fd (flow-perform (flow-open path O-RDONLY 0))))
          (set! result
-               (guard (ex ((flow-error-timeout? ex) 'never-terminated))
-                 (flow-monitor 5.0
+               (begin
+                 (with-deadline 5.0
                    (lambda ()
                      (let ((up (make-flow-channel 'up))
                            (down (make-flow-channel 'down)))
@@ -168,7 +177,6 @@
                        (let serve ()
                          (let ((msg (flow-get! up)))
                            (cond
-                            ((flow-error? msg) (raise msg))
                             (else
                              (case (car msg)
                                ((read-at)
@@ -194,7 +202,8 @@
   ;; 4. The README's fan-out gather, run with a fetch that legitimately
   ;;    returns #f. The gather used #f as both the empty sentinel and a
   ;;    legal value, so it stopped at the first false reply and dropped
-  ;;    every reply queued behind it.
+  ;;    every reply queued behind it. (It gathered after a nursery's
+  ;;    join; it now counts replies with flow-get!, as the page does.)
   (define (~check-repro/readme-gather-keeps-a-false-reply)
     (define ngrams '(a b c d e f g h))
     (define out 'not-set)
@@ -203,17 +212,15 @@
     (flow-run
      (lambda (workers)
        (let ((replies (make-flow-channel 'replies (length ngrams))))
-         (flow-nursery
-          (lambda (scope)
-            (for-each (lambda (ngram)
-                        (flow-spawn
-                         (lambda () (flow-put! replies (fetch-ngram ngram)))))
-                      ngrams)))
+         (for-each (lambda (ngram)
+                     (flow-spawn
+                      (lambda () (flow-put! replies (fetch-ngram ngram)))))
+                   ngrams)
          (set! out
                (let loop ((n (length ngrams)) (acc '()))
                  (if (zero? n)
                      acc
-                     (loop (- n 1) (cons (flow-get-try replies #f) acc)))))
+                     (loop (- n 1) (cons (flow-get! replies) acc)))))
          (flow-stop))))
     ;; the finding: fewer than eight, whatever happened to be queued
     ;; ahead of the #f
