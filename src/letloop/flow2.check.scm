@@ -2524,3 +2524,44 @@
   (flow-run (lambda (workers) (assert (null? workers)) (flow-stop)) 0)
   (flow-run (lambda (workers) (assert (= 1 (length workers))) (flow-stop)) 1)
   #t)
+
+;;------------------------------------------------------------
+;; Uncaught errors
+;;------------------------------------------------------------
+
+;; Entries whose sexp is (flow2 uncaught ...), oldest first.
+(define (flow2-check-uncaught entries)
+  (filter (lambda (sexp)
+            (and (pair? sexp) (eq? (car sexp) 'flow2)
+                 (pair? (cdr sexp)) (eq? (cadr sexp) 'uncaught)))
+          (map cdr entries)))
+
+;; An error nobody handled ends its fiber and becomes a log entry; the
+;; loop and every other fiber carry on. The condition is rendered on the
+;; way in -- written raw it would be #<condition>, which says nothing.
+;; Fiber zero is a fiber like any other.
+(define (~check-flow2-012/uncaught-raise-in-a-fiber-is-logged)
+  (define after 'not-set)
+  (flow-log-drain!)
+  (flow-run
+   (lambda (workers)
+     (flow-spawn (lambda () (flow-sleep 0.005) (error 'child "child boom")))
+     (flow-spawn (lambda () (raise 'plain-object)))
+     (flow-sleep 0.02)
+     (set! after 'loop-still-running)
+     (flow-spawn (lambda () (flow-stop)))
+     (error 'fiber-zero "zero boom")))
+  (assert (eq? after 'loop-still-running))
+  (let ((uncaught (flow2-check-uncaught (flow-log-drain!))))
+    (assert (= 3 (length uncaught)))
+    (for-each (lambda (sexp) (assert (eq? 'fiber (caddr sexp)))) uncaught)
+    (assert (member '(flow2 uncaught fiber plain-object) uncaught))
+    (assert (exists (lambda (sexp)
+                      (let ((x (cadddr sexp)))
+                        (and (string? x) (flow2-check-substring? "child boom" x))))
+                    uncaught))
+    (assert (exists (lambda (sexp)
+                      (let ((x (cadddr sexp)))
+                        (and (string? x) (flow2-check-substring? "zero boom" x))))
+                    uncaught)))
+  #t)

@@ -154,7 +154,10 @@
    ~check-flow2-005/wrap-runs-on-the-loop-when-a-worker-delivers
    ~check-flow2-005/coalesced-wakes-do-not-inflate-the-eventfd
    ~check-flow2-000/log-flush-writes-to-the-port-current-at-start
-   ~check-flow2-005/compute-count-is-validated)
+   ~check-flow2-005/compute-count-is-validated
+
+   ;; uncaught errors are log entries
+   ~check-flow2-012/uncaught-raise-in-a-fiber-is-logged)
 
   (import (chezscheme)
           (letloop r999)
@@ -2086,6 +2089,19 @@
   ;; Fibers, nurseries, monitor
   ;;------------------------------------------------------------
 
+  ;; An error nobody handled ends the fiber and becomes a log entry,
+  ;; (flow2 uncaught fiber CONDITION) -- what happens to it next is the
+  ;; logger's business: flushed to a port, handed to a procedure, or
+  ;; drained and asserted on by a test. It used to reach loop-apply's
+  ;; catch-all, which writes straight to stderr, so the one event most
+  ;; worth routing was the one flow-log never saw. The catch-all stays
+  ;; as the last resort for a fiber started below flow2, through the
+  ;; ring layer directly.
+  (define (%fiber-run thunk)
+    (guard (ex (#t (flow-log (list 'flow2 'uncaught 'fiber
+                                   (%flow-condition-sexp ex)))))
+      (thunk)))
+
   ;; Spawn THUNK under SCOPE. Inside a nursery the child is counted
   ;; and its raise fails the scope — first error wins — before the
   ;; count drops; under the root scope this is a bare loop-spawn plus
@@ -2094,7 +2110,7 @@
     (if (eq? scope %root-scope)
         (loop-spawn (lambda ()
                       (set! %scope-current %root-scope)
-                      (thunk)))
+                      (%fiber-run thunk)))
         (begin
           (%scope-child-add! scope)
           (loop-spawn
@@ -2438,7 +2454,7 @@
                    '())))
          (loop-spawn (lambda ()
                        (set! %scope-current %root-scope)
-                       (proc channels)))
+                       (%fiber-run (lambda () (proc channels)))))
          (loop-run)
          (when pool
            (%flow-shutdown-pool! pool channels))
