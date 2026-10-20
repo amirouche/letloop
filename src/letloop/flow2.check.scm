@@ -2370,3 +2370,49 @@
                   (filter (lambda (x) (and (pair? x) (eq? 'flow2-check (car x))))
                           (map cdr (flow-log-drain!)))))
   #t)
+
+;; A read that lost its choice used to cancel its recv, and the cancel
+;; is asynchronous: the kernel could still complete the old recv with
+;; data after the next flow-read had found the backlog empty and
+;; submitted its own. The new recv took the NEXT bytes, the late one
+;; parked the earlier bytes on the backlog, and the read after that
+;; returned them -- (timeout "two" "one") for a peer that sent "one"
+;; then "two". The bytes "one" are sent the instant the timeout wins,
+;; which is the window the old cancel raced.
+(define (~check-flow2-006/reads-after-a-lost-race-keep-stream-order)
+  (define PORT 18255)
+  (define peer (box #f))
+  (define client #f)
+  (define results '())
+  (define (send! str)
+    (let ((bv (string->utf8 str)))
+      (%flow2-check-write2 (unbox peer) bv (bytevector-length bv))))
+  (define (race seconds)
+    (flow-perform
+     (flow-choice
+      (flow-wrap (flow-read client) (lambda (x) (if (bytevector? x) (utf8->string x) x)))
+      (flow-wrap (flow-timeout seconds) (lambda (_) 'timeout)))))
+  (flow-run
+   (lambda (workers)
+     (let ((listen-fd (loop-socket-new AF-INET SOCK-STREAM 0)))
+       (loop-bind listen-fd "127.0.0.1" PORT)
+       (loop-listen listen-fd 128)
+       (flow-spawn
+        (lambda ()
+          (call-with-values (lambda () (make-sockaddr-in 127 0 0 1 PORT))
+            (lambda (addr addrlen)
+              (set-box! peer (loop-connect addr addrlen))
+              (foreign-free addr)))))
+       (set! client (flow-perform (flow-accept listen-fd)))
+       (let wait () (unless (unbox peer) (flow-sleep 0.005) (wait)))
+       (set! results (cons (race 0.05) results))
+       (send! "one")
+       (flow-spawn (lambda () (flow-sleep 0.1) (send! "two")))
+       (set! results (cons (race 0.5) results))
+       (set! results (cons (race 0.5) results))
+       (loop-close client)
+       (loop-close (unbox peer))
+       (loop-close listen-fd)
+       (flow-stop))))
+  (assert (equal? '(timeout "one" "two") (reverse results)))
+  #t)

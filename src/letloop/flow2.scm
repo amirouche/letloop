@@ -143,6 +143,7 @@
    ~check-flow2-005/a-failed-start-releases-the-loop
    ~check-flow2-005/a-thread-forked-in-a-task-is-refused
    ~check-flow2-000/a-forked-thread-logs-to-its-own-box
+   ~check-flow2-006/reads-after-a-lost-race-keep-stream-order
 
    ;; uncaught errors are log entries
    ~check-flow2-012/uncaught-raise-in-a-fiber-is-logged
@@ -1580,6 +1581,70 @@
   ;; Only the data case needs it. A clean EOF and a failure are both
   ;; level-triggered: the next recv reports them again, so there is
   ;; nothing to preserve.
+  ;;
+  ;; A loser's recv is NOT cancelled: it is left in flight, ownerless,
+  ;; and the next flow-read on the fd adopts it instead of preparing a
+  ;; second one. Cancelling it reordered the stream. The cancel is
+  ;; asynchronous, so the kernel could still complete the old recv with
+  ;; data -- after the next flow-read had already found the backlog
+  ;; empty and submitted a recv of its own. That second recv then took
+  ;; the NEXT bytes, the late completion parked the earlier ones on the
+  ;; backlog, and the read after returned them: (timeout "two" "one")
+  ;; where the peer sent "one" then "two". With at most one recv in
+  ;; flight per reader, bytes arrive in the order the kernel took them.
+  ;;
+  ;; An orphan nobody adopts completes into the backlog, or is torn
+  ;; down by loop-close-prep! with everything else the fd owns.
+  (define-record-type* <flow2-recv>
+    (%make-flow-recv id owner)
+    %flow-recv?
+    (id    %flow-recv-id)
+    (owner %flow-recv-owner %flow-recv-owner!))
+
+  ;; fd -> the <flow2-recv> left in flight by a reader that lost.
+  ;; Loop thread only, like every ring event.
+  (define %flow-recv-orphans (make-eqv-hashtable))
+
+  (define (%flow-recv-orphans-clear!)
+    (hashtable-clear! %flow-recv-orphans))
+
+  ;; Still in flight means its handler is still registered. A close
+  ;; deletes the handler at once, before its synthetic completion runs
+  ;; a tick later, and the kernel may reissue the number in between --
+  ;; so an orphan whose handler is gone belongs to the old fd and must
+  ;; not be handed to a reader of the new one.
+  (define (%flow-recv-in-flight? r)
+    (hashtable-contains? (loop-handlers (loop-current)) (%flow-recv-id r)))
+
+  (define (%flow-recv-adopt! fd)
+    (let ((r (hashtable-ref %flow-recv-orphans fd #f)))
+      (and r
+           (begin
+             (hashtable-delete! %flow-recv-orphans fd)
+             (and (%flow-recv-in-flight? r) r)))))
+
+  ;; The losing reader's cancel. If its recv has already completed --
+  ;; the same-tick race above -- the completion handled the bytes and
+  ;; there is nothing left to hand over.
+  (define (%flow-recv-orphan! fd r resume)
+    (when (and (eq? (%flow-recv-owner r) resume)
+               (%flow-recv-in-flight? r))
+      (%flow-recv-owner! r #f)
+      (hashtable-set! %flow-recv-orphans fd r)))
+
+  (define (%flow-recv-complete! fd r res)
+    (loop-fd-op-remove! fd (%flow-recv-id r))
+    (when (eq? (hashtable-ref %flow-recv-orphans fd #f) r)
+      (hashtable-delete! %flow-recv-orphans fd))
+    (let ((owner (%flow-recv-owner r))
+          (bv (loop-buf-data-take! (%flow-recv-id r))))
+      (%flow-recv-owner! r #f)
+      (cond
+       ((fx<? res 0) (when owner (owner #f)))
+       ((fxzero? res) (when owner (owner #t)))
+       ((not (and owner (owner bv)))
+        (loop-recv-backlog-put! fd bv)))))
+
   (define flow-read
     (lambda (fd)
       (make-flow% 'base #f
@@ -1588,58 +1653,42 @@
                     (let ((bv (loop-recv-backlog-take! fd)))
                       (and bv (lambda () bv))))
                   (lambda (state resume register-cancel!)
-                    (let* ((ring (loop-ring (loop-current)))
-                           (id   (loop-alloc-id!))
-                           (sqe  (loop-get-sqe ring)))
-                      (io-uring-prep-recv sqe fd 0 (loop-buf-ring-buf-size) 0)
-                      (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
-                      (io-uring-sqe-set-buf-group sqe (loop-buf-ring-bgid))
-                      (io-uring-sqe-set-data64 sqe id)
-                      ;; In the fd's operation index, not just in
-                      ;; loop-handlers. Without it loop-close-prep!'s
-                      ;; teardown pass skipped this recv, so its handler
-                      ;; survived the close -- and a recv that completed
-                      ;; with data in the window between the cancel
-                      ;; submit and the kernel acting on it then ran the
-                      ;; backlog put BELOW, re-creating a stash for an
-                      ;; fd whose stash had just been purged. After the
-                      ;; kernel reissued the number, the next
-                      ;; connection's first flow-read was served the
-                      ;; previous connection's bytes. Registered, the
-                      ;; handler is deleted by the purge and the late
-                      ;; CQE finds nothing (the drain has already
-                      ;; recycled its buffer and drops the orphan).
-                      ;;
-                      ;; flow-write deliberately does NOT register: its
-                      ;; handler is what unlocks the pinned bytevector,
-                      ;; and running it from the synthetic resume would
-                      ;; unlock memory the kernel may not be done
-                      ;; reading. It has no stash to corrupt, and its
-                      ;; real -ECANCELED CQE releases the pin.
-                      (loop-fd-op-add! fd id)
-                      (hashtable-set! (loop-handlers (loop-current)) id
-                                      (lambda (res)
-                                        ;; On every path out, including
-                                        ;; -ECANCELED: the index is
-                                        ;; per-connection and a read
-                                        ;; loop runs for its lifetime.
-                                        (loop-fd-op-remove! fd id)
-                                        (cond
-                                         ((fx<? res 0)
-                                          (loop-buf-data-take! id)
-                                          (resume #f))
-                                         ((fxzero? res)
-                                          (loop-buf-data-take! id)
-                                          (resume #t))
-                                         (else
-                                          (let ((bv (loop-buf-data-take! id)))
-                                            (unless (resume bv)
-                                              (loop-recv-backlog-put! fd bv)))))))
+                    (let ((r (or (%flow-recv-adopt! fd)
+                                 (%flow-recv-submit! fd))))
+                      (%flow-recv-owner! r resume)
                       (register-cancel!
-                       (lambda ()
-                         (let ((csqe (loop-get-sqe ring)))
-                           (io-uring-prep-cancel64 csqe id 0)
-                           (io-uring-sqe-set-data64 csqe (loop-alloc-id!))))))))))
+                       (lambda () (%flow-recv-orphan! fd r resume))))))))
+
+  (define (%flow-recv-submit! fd)
+    (let* ((ring (loop-ring (loop-current)))
+           (id   (loop-alloc-id!))
+           (sqe  (loop-get-sqe ring))
+           (r    (%make-flow-recv id #f)))
+      (io-uring-prep-recv sqe fd 0 (loop-buf-ring-buf-size) 0)
+      (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
+      (io-uring-sqe-set-buf-group sqe (loop-buf-ring-bgid))
+      (io-uring-sqe-set-data64 sqe id)
+      ;; In the fd's operation index, not just in loop-handlers. Without
+      ;; it loop-close-prep!'s teardown pass skipped this recv, so its
+      ;; handler survived the close -- and a recv that completed with
+      ;; data in the window between the cancel submit and the kernel
+      ;; acting on it then ran the backlog put, re-creating a stash for
+      ;; an fd whose stash had just been purged. After the kernel
+      ;; reissued the number, the next connection's first flow-read was
+      ;; served the previous connection's bytes. Registered, the handler
+      ;; is deleted by the purge and the late CQE finds nothing (the
+      ;; drain has already recycled its buffer and drops the orphan).
+      ;; That matters more now that a losing recv stays in flight.
+      ;;
+      ;; flow-write deliberately does NOT register: its handler is what
+      ;; unlocks the pinned bytevector, and running it from the
+      ;; synthetic resume would unlock memory the kernel may not be done
+      ;; reading. It has no stash to corrupt, and its real -ECANCELED
+      ;; CQE releases the pin.
+      (loop-fd-op-add! fd id)
+      (hashtable-set! (loop-handlers (loop-current)) id
+                      (lambda (res) (%flow-recv-complete! fd r res)))
+      r))
 
   ;; One send, reporting what the kernel actually took: a positive
   ;; fixnum, or #f on failure. START defaults to 0 and lets a caller
@@ -2004,6 +2053,8 @@
        (let ((pool #f) (channels '()))
          (guard (ex (#t (%flow-run-release! pool channels) (raise ex)))
            (loop-new)
+           ;; orphaned recvs belong to the previous ring
+           (%flow-recv-orphans-clear!)
            ;; The pool is created per run and handed to the workers and
            ;; the collector as a closure, never through a global — a
            ;; straggler from a previous run therefore cannot touch this

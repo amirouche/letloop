@@ -648,11 +648,14 @@ Distinguishing the last two matters — a loop that treats `#f` as EOF
 silently turns an error into a normal end of stream.
 
 A read that **loses** a `flow-choice` — the idle-timeout idiom below,
-say — does not lose its bytes. The kernel can complete the recv in the
-same tick the winner completes, and by then the data is already off the
-socket and cannot be asked for again; it is kept on a per-fd backlog
-that the next `flow-read` on that fd takes before issuing another recv.
-The backlog is discarded with the fd, on close.
+say — does not lose its bytes, and does not reorder them. Its recv is
+not cancelled: it stays in flight, and the next `flow-read` on that fd
+takes it over rather than submitting a second one, so bytes arrive in
+the order the kernel took them off the socket. A recv that completes
+while nobody is reading — including in the same tick the winner
+completed — keeps its payload on a per-fd backlog that the next
+`flow-read` takes first. The backlog and any recv left in flight are
+discarded with the fd, on close.
 
 #### `(flow-write fd bytevector [start])`
 
