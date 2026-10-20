@@ -23,13 +23,13 @@
 
 (define (~check-flow2-000/error-predicates)
   (define cancelled (make-flow-error 'cancelled "" '() #f))
-  (define compute (make-flow-error 'compute "" '() 'boom))
+  (define overflow (make-flow-error 'overflow "" '() 'boom))
   (assert (flow-error-cancelled? cancelled))
   (assert (not (flow-error-timeout? cancelled)))
   (assert (not (flow-error-overflow? cancelled)))
-  (assert (flow-error-compute? compute))
-  (assert (eq? 'boom (flow-error-cause compute)))
-  (assert (not (flow-error? 'compute)))
+  (assert (flow-error-overflow? overflow))
+  (assert (eq? 'boom (flow-error-cause overflow)))
+  (assert (not (flow-error? 'overflow)))
   (assert (not (flow-error-wrong-thread? 42)))
   #t)
 
@@ -536,8 +536,7 @@
        (flow-submit! worker
                      (lambda ()
                        (sleep (make-time 'time-duration 40000000 0))
-                       (set! finished #t))
-                     reply)
+                       (set! finished #t)))
        (flow-stop)))
    1)
   (assert finished)
@@ -562,8 +561,7 @@
           (set! outcome
                 (guard (ex ((flow-error-cancelled? ex) 'cancelled))
                   (flow-submit! requests
-                                (lambda () 'never)
-                                (make-flow-channel 'resp))
+                                (lambda () 'never))
                   'submitted)))))
      (flow-stop)))
   (assert (eq? outcome 'cancelled))
@@ -614,8 +612,7 @@
                                                (flow-error-symbol ex))))
                              (flow-put! shared 'from-the-dead-run)
                              'returned))
-                     (set! straggler-done? #t))
-                   (make-flow-channel 'resp))
+                     (set! straggler-done? #t)))
      (flow-sleep 0.05)   ;; the worker has certainly dequeued by now
      (flow-stop))
    1)
@@ -639,8 +636,7 @@
      (flow-submit! (car workers)
                    (lambda ()
                      (sleep (make-time 'time-duration 0 1))
-                     (set! second-task-done? #t))
-                   (make-flow-channel 'resp))
+                     (set! second-task-done? #t)))
      ;; keep the loop running until the parked fiber has resolved one
      ;; way or the other -- its deadline needs a tick to fire on
      (let wait ((n 0))
@@ -682,8 +678,7 @@
           (flow-submit! worker
                         (lambda ()
                           (sleep (make-time 'time-duration 50000000 0))
-                          (set! finished #t))
-                        reply)))
+                          (set! finished #t)))))
        ;; sampled the instant the nursery returned
        (set! at-join finished)
        (flow-stop)))
@@ -760,8 +755,7 @@
                (flow-submit! worker
                              (lambda ()
                                (sleep (make-time 'time-duration 60000000 0))
-                               (set! finished #t))
-                             reply))))))
+                               (set! finished #t))))))))
        (flow-stop)))
    1)
   (assert (eq? outcome 'timeout))
@@ -1029,8 +1023,7 @@
                                 (lambda ()
                                   (sleep (make-time 'time-duration
                                                     80000000 0))
-                                  (set! task-finished? #t))
-                                (make-flow-channel 'resp))
+                                  (set! task-finished? #t)))
                   ;; park the monitor's own fiber too, so the join
                   ;; cannot win before the interruption arrives
                   (flow-sleep 5.0))))))
@@ -1050,33 +1043,11 @@
    (lambda (workers)
      (let ((response (make-flow-channel)))
        (flow-submit! (car workers)
-                     (lambda () (flow-put! response 'pong))
-                     response)
+                     (lambda () (flow-put! response 'pong)))
        (set! result (flow-get! response))
        (flow-stop)))
    1)
   (eq? result 'pong))
-
-;; The always-a-reply guarantee: a raising task cannot hang its
-;; submitter — the guard wraps the raise as a compute <flow-error>
-;; carrying the original in its cause.
-(define (~check-flow2-005/worker-raise-becomes-compute-error)
-  (define result #f)
-  (flow-run
-   (lambda (workers)
-     (let ((response (make-flow-channel)))
-       (flow-submit! (car workers)
-                     (lambda () (raise 'kaboom))
-                     response)
-       (set! result (flow-get! response))
-       (flow-stop)))
-   1)
-  (and (flow-error-compute? result)
-       (eq? 'kaboom (flow-error-cause result))
-       ;; the reply names the worker it came from -- its request
-       ;; channel's name -- so a shared response channel still says
-       ;; WHERE the task failed
-       (equal? '((worker . 0)) (flow-error-irritants result))))
 
 ;; Workers have no I/O verbs: performing a ring event raises
 ;; wrong-thread on the compute thread, catchable by the task.
@@ -1090,8 +1061,7 @@
                        (guard (ex ((flow-error-wrong-thread? ex)
                                    (flow-put! response 'wrong-thread)))
                          (flow-sleep 0.01)
-                         (flow-put! response 'slept)))
-                     response)
+                         (flow-put! response 'slept))))
        (set! result (flow-get! response))
        (flow-stop)))
    1)
@@ -1112,14 +1082,12 @@
                        (let ((up (make-flow-channel))
                              (down (make-flow-channel)))
                          (flow-submit! (car workers)
-                                       (lambda () (flow-get! down))
-                                       up)
+                                       (lambda () (flow-get! down)))
                          (flow-get! up)))))
      ;; same worker, fresh scope: still serving
      (let ((response (make-flow-channel)))
        (flow-submit! (car workers)
-                     (lambda () (flow-put! response 'alive))
-                     response)
+                     (lambda () (flow-put! response 'alive)))
        (set! alive (flow-get! response)))
      (flow-stop))
    1)
@@ -1139,12 +1107,10 @@
                      (lambda ()
                        (flow-put! up (list 'double 21))
                        (let ((doubled (flow-get! down)))
-                         (flow-put! up (list 'done doubled))))
-                     up)
+                         (flow-put! up (list 'done doubled)))))
        (let serve ()
          (let ((msg (flow-get! up)))
            (cond
-            ((flow-error? msg) (set! result msg))
             ((eq? (car msg) 'double)
              (flow-spawn
               (lambda () (flow-put! down (* 2 (cadr msg)))))
@@ -1187,8 +1153,7 @@
        (flow-submit! (car workers)
                      (lambda ()
                        (sleep (make-time 'time-duration 50000000 0))
-                       (flow-put! ch 'msg))
-                     resp)
+                       (flow-put! ch 'msg)))
        (let ((v (flow-perform (flow-choice probe (flow-get ch)))))
          (assert (eq? v 'msg))
          ;; first act after the resume: the loser's cancel already ran
@@ -2198,7 +2163,7 @@
               (attempt 'sleep (lambda () (flow-sleep 0.01)))
               (attempt 'submit
                        (lambda ()
-                         (flow-submit! (car workers) (lambda () 42) replies)))
+                         (flow-submit! (car workers) (lambda () 42))))
               (attempt 'nursery (lambda () (flow-nursery (lambda (scope) (void)))))
               (attempt 'monitor
                        (lambda () (flow-monitor 1.0 (lambda () (void)))))
@@ -2394,8 +2359,7 @@
      (flow-submit! (car workers)
                    (lambda ()
                      (sleep (make-time 'time-duration 20000000 0))
-                     (flow-put! ch 'x))
-                   (make-flow-channel 'resp))
+                     (flow-put! ch 'x)))
      (let wait ((n 0))
        (flow-sleep 0.01)
        (if (or spawned? (fx>? n 100))
@@ -2467,8 +2431,7 @@
                        (flow-submit! w
                                      (lambda ()
                                        (sleep (make-time 'time-duration 10000000 0))
-                                       (flow-put! ch 'x))
-                                     (make-flow-channel 'resp)))
+                                       (flow-put! ch 'x))))
                      ws channels)
            ;; hold the loop busy so the wakes coalesce, then read the
            ;; live counter before the loop can drain it
@@ -2564,4 +2527,35 @@
                       (let ((x (cadddr sexp)))
                         (and (string? x) (flow2-check-substring? "zero boom" x))))
                     uncaught)))
+  #t)
+;; A task that raises and does not handle it gets no reply from the
+;; framework -- that is the task's protocol, not flow2's -- but it is
+;; logged, named by the worker it ran on, and the worker survives to
+;; serve the next submission. A task that wants its submitter to hear
+;; about failure says so itself, with one guard.
+(define (~check-flow2-012/uncaught-raise-in-a-task-is-logged)
+  (define alive #f)
+  (define reported #f)
+  (flow-log-drain!)
+  (flow-run
+   (lambda (workers)
+     (flow-submit! (car workers) (lambda () (raise 'kaboom)))
+     ;; same worker, still serving
+     (let ((response (make-flow-channel)))
+       (flow-submit! (car workers) (lambda () (flow-put! response 'alive)))
+       (set! alive (flow-get! response)))
+     ;; the user-code spelling of a failure reply
+     (let ((response (make-flow-channel)))
+       (flow-submit! (car workers)
+                     (lambda ()
+                       (flow-put! response
+                                  (guard (ex (#t (cons 'failed ex)))
+                                    (cons 'done (raise 'reported))))))
+       (set! reported (flow-get! response)))
+     (flow-stop))
+   1)
+  (assert (eq? alive 'alive))
+  (assert (equal? reported '(failed . reported)))
+  (assert (equal? (flow2-check-uncaught (flow-log-drain!))
+                  '((flow2 uncaught task (worker . 0) kaboom))))
   #t)

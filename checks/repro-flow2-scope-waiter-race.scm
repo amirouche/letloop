@@ -89,8 +89,7 @@
                     (flow-submit! worker
                                   (lambda ()
                                     (spin 20000)
-                                    (flow-get! down))
-                                  up)
+                                    (flow-get! down)))
                     (flow-get! up)))))
              (round (fx+ i 1))))
 
@@ -101,8 +100,7 @@
          ;; bound the wait and report it instead.
          (let ((response (make-flow-channel)))
            (flow-submit! worker
-                         (lambda () (flow-put! response 'alive))
-                         response)
+                         (lambda () (flow-put! response 'alive)))
            (guard (ex ((flow-error-timeout? ex)
                        (say "WORKER LOST: no reply in 2s")))
              (flow-monitor 2.0

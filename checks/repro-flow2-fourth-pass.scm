@@ -163,8 +163,7 @@
                                 (loop (+ offset 65536)
                                       (+ total (bytevector-length chunk))))
                                ((eq? chunk #t) (flow-put! up (list 'done total)))
-                               (else (flow-put! up (list 'failed offset)))))))
-                        up)
+                               (else (flow-put! up (list 'failed offset))))))))
                        ;; the page's main side
                        (let serve ()
                          (let ((msg (flow-get! up)))

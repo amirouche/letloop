@@ -23,9 +23,10 @@
 ;;   ones a losing flow-choice member fires — tear down the ring ops.
 ;;
 ;; Errors are plain <flow-error> records dispatched by symbol —
-;; cancelled, timeout, overflow, compute, wrong-thread — not R6RS
-;; conditions, so the same value can be raised at a suspension point
-;; or sent over a response channel as a worker task's failure reply.
+;; cancelled, timeout, overflow, wrong-thread — not R6RS conditions.
+;; An error nobody handles, in a fiber or a compute task, ends that
+;; fiber or task and becomes a flow-log entry; what to do about it is
+;; the program's business, not the library's.
 (library (letloop flow2)
 
   (export
@@ -33,7 +34,7 @@
    make-flow-error flow-error? flow-error-symbol flow-error-message
    flow-error-irritants flow-error-cause
    flow-error-cancelled? flow-error-timeout? flow-error-overflow?
-   flow-error-compute? flow-error-wrong-thread?
+   flow-error-wrong-thread?
 
    ;; events (Concurrent ML core)
    make-flow flow? flow-wrap flow-guard flow-choice flow-perform
@@ -113,7 +114,6 @@
    ~check-flow2-003/cancel-is-visible-to-non-suspending-ops
    ~check-flow2-003/cancelled-parent-drains-grandchildren
    ~check-flow2-005/worker-task-replies
-   ~check-flow2-005/worker-raise-becomes-compute-error
    ~check-flow2-005/worker-ring-event-raises-wrong-thread
    ~check-flow2-005/worker-cancelled-along-monitor
    ~check-flow2-005/worker-io-protocol-roundtrip
@@ -157,7 +157,8 @@
    ~check-flow2-005/compute-count-is-validated
 
    ;; uncaught errors are log entries
-   ~check-flow2-012/uncaught-raise-in-a-fiber-is-logged)
+   ~check-flow2-012/uncaught-raise-in-a-fiber-is-logged
+   ~check-flow2-012/uncaught-raise-in-a-task-is-logged)
 
   (import (chezscheme)
           (letloop r999)
@@ -168,11 +169,9 @@
   ;; Errors: one record type, dispatched by symbol
   ;;------------------------------------------------------------
 
-  ;; The taxonomy: cancelled, timeout, overflow, compute,
-  ;; wrong-thread. A <flow-error> travels two transports — raised at
-  ;; a suspension point, or sent over a response channel as a worker
-  ;; task's failure reply — and is the same object either way, which
-  ;; is why this is a plain record rather than an R6RS condition.
+  ;; The taxonomy: cancelled, timeout, overflow, wrong-thread. A plain
+  ;; record rather than an R6RS condition, so a program can put one on
+  ;; a channel as easily as raise it.
   (define-record-type* <flow-error>
     (make-flow-error symbol message irritants cause)
     flow-error?
@@ -187,8 +186,6 @@
     (and (flow-error? obj) (eq? (flow-error-symbol obj) 'timeout)))
   (define (flow-error-overflow? obj)
     (and (flow-error? obj) (eq? (flow-error-symbol obj) 'overflow)))
-  (define (flow-error-compute? obj)
-    (and (flow-error? obj) (eq? (flow-error-symbol obj) 'compute)))
   (define (flow-error-wrong-thread? obj)
     (and (flow-error? obj) (eq? (flow-error-symbol obj) 'wrong-thread)))
 
@@ -635,12 +632,6 @@
   ;; view a straggler is a thread flow2 does not own, so it is refused
   ;; like one.
   (define %flow-pool-current (box #f))
-
-  (define (%flow-stale-worker?)
-    (let ((pool (%worker-current?)))
-      (and pool
-           (unbox %flow-loop-thread)
-           (not (eq? pool (unbox %flow-pool-current))))))
 
   ;; Outside a run there is no loop to corrupt and nothing to check:
   ;; flow-put! on a channel before flow-run is a legitimate way to
@@ -1368,8 +1359,8 @@
                         (flow-channel-bound channel))))))
 
   ;; Deliver OBJ to a parked getter, or enqueue it. FORCE? skips the
-  ;; bound — the worker guard's error reply uses it, so always-a-reply
-  ;; holds even on a full bounded channel. The resume call happens
+  ;; bound — the shutdown's stop sentinel uses it, so a worker channel
+  ;; that is full still delivers it. The resume call happens
   ;; outside the mutex; if it reports the getter already synched
   ;; elsewhere (a scope cancellation won the race), try the next one.
   (define (%channel-put! channel obj force?)
@@ -2292,14 +2283,12 @@
   ;; Lifecycle and compute threads
   ;;------------------------------------------------------------
 
-  ;; A task, as the framework sees it: the thunk, the response
-  ;; channel the guard's error reply targets, and the scope current
+  ;; A task, as the framework sees it: the thunk, and the scope current
   ;; at submission — what a nursery's cancellation flags.
   (define-record-type* <flow2-task>
-    (make-flow-task thunk response scope)
+    (make-flow-task thunk scope)
     flow-task?
     (thunk    flow-task-thunk)
-    (response flow-task-response)
     (scope    flow-task-scope))
 
   (define %flow-worker-stop (list 'stop))
@@ -2318,7 +2307,7 @@
   ;; for a task that was never submitted is a join that never finishes.
   ;; Doing it after the put instead would be worse: the worker can pick
   ;; the task up and decrement before the increment lands.
-  (define (flow-submit! worker-channel thunk response-channel)
+  (define (flow-submit! worker-channel thunk)
     ;; A submit reaches %channel-put! directly whenever the worker
     ;; channel has room, so it never touches flow-perform's guard and
     ;; needs its own.
@@ -2335,22 +2324,24 @@
                      (or (%task-scope) %root-scope)
                      %scope-current)))
       (if (eq? scope %root-scope)
-          (%channel-put! worker-channel
-                         (make-flow-task thunk response-channel scope)
-                         #f)
+          (%channel-put! worker-channel (make-flow-task thunk scope) #f)
           (begin
             (%scope-child-add! scope)
             (guard (ex (#t (%scope-child-done! scope) (raise ex)))
-              (%channel-put! worker-channel
-                             (make-flow-task thunk response-channel scope)
-                             #f))))))
+              (%channel-put! worker-channel (make-flow-task thunk scope) #f))))))
 
   ;; The per-worker framework loop: dequeue, skip tasks whose scope
-  ;; died in the queue, run under the guard that makes always-a-reply
-  ;; unconditional. A cancelled raise out of a task whose scope is
-  ;; dead is the task unwinding, not a failure — no reply, by design
-  ;; (nobody in that scope is listening). Everything else, wrap and
-  ;; force onto the response channel, past any bound.
+  ;; died in the queue, run the rest. A cancelled raise out of a task
+  ;; whose scope is dead is the task unwinding, not a failure. Any
+  ;; other raise the task did not handle itself is logged as
+  ;; (flow2 uncaught task WORKER CONDITION) and the worker takes its
+  ;; next task: the pool must not shrink because one task failed.
+  ;;
+  ;; There used to be an always-a-reply rule here: the framework put a
+  ;; compute <flow-error> on the task's response channel for it. That
+  ;; made flow2 a party to every task's protocol -- it had to know the
+  ;; reply channel, force past its bound, and stay out of a straggler's
+  ;; way -- for a guarantee a task gets from one guard of its own.
   (define (%worker-body pool channel)
     (%worker-current? pool)
     (let loop ()
@@ -2371,26 +2362,11 @@
                                    (%scope-dead? scope))
                               (void))
                              (#t
-                              ;; The irritants name the worker — its
-                              ;; request channel's (worker . i) — so a
-                              ;; reply fished out of a shared response
-                              ;; channel still says WHERE it failed,
-                              ;; the always-a-reply design's original
-                              ;; "original + worker id" promise.
-                              ;;
-                              ;; Not from a straggler: nobody in its
-                              ;; dead run is listening, and a response
-                              ;; channel shared with the live run would
-                              ;; be reached through the dead pool --
-                              ;; the strand %flow-stale-worker? exists
-                              ;; to prevent.
-                              (unless (%flow-stale-worker?)
-                                (%channel-put! (flow-task-response task)
-                                               (make-flow-error
-                                                'compute "flow2: worker task raised"
-                                                (list (flow-channel-name channel))
-                                                ex)
-                                               #t))))
+                              ;; Named by its request channel's
+                              ;; (worker . i), so the entry says WHERE.
+                              (flow-log (list 'flow2 'uncaught 'task
+                                              (flow-channel-name channel)
+                                              (%flow-condition-sexp ex)))))
                     ((flow-task-thunk task)))
                   (%task-scope #f)))
               (lambda ()
