@@ -2176,3 +2176,35 @@
     (flow-log-stop!)
     (assert (flow2-check-substring? "after-restart" (get-output-string good))))
   #t)
+
+;; The sink is where a program decides what flow2's own events mean to
+;; it. Here it counts uncaught errors from a run -- the policy that
+;; lives at the logger level now that the library has none of its own.
+(define (~check-flow2-000/log-sink-can-be-a-procedure)
+  (define batches (box '()))
+  (define uncaught (box 0))
+  (define (sink entries)
+    (set-box! batches (cons entries (unbox batches)))
+    (for-each (lambda (entry)
+                (let ((sexp (cdr entry)))
+                  (when (and (pair? sexp) (eq? 'flow2 (car sexp))
+                             (pair? (cdr sexp)) (eq? 'uncaught (cadr sexp)))
+                    (set-box! uncaught (+ 1 (unbox uncaught))))))
+              entries))
+  (flow-log-drain!)
+  (flow-log-start! 0.01 sink)
+  (flow-run
+   (lambda (workers)
+     (flow-spawn (lambda () (raise 'one)))
+     (flow-spawn (lambda () (raise 'two)))
+     (flow-log '(flow2-check ordinary))
+     (flow-sleep 0.01)
+     (flow-stop)))
+  (flow-log-stop!)
+  (assert (= 2 (unbox uncaught)))
+  ;; every batch handed over was non-empty, and nothing was lost
+  (assert (for-all pair? (unbox batches)))
+  (assert (= 3 (apply + (map length (unbox batches)))))
+  ;; a sink that is neither is a mistake at the call site
+  (assert (guard (ex (#t #t)) (flow-log-start! 0.01 'stderr) #f))
+  #t)

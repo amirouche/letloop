@@ -135,6 +135,7 @@
    ~check-flow2-005/coalesced-wakes-do-not-inflate-the-eventfd
    ~check-flow2-000/log-flush-writes-to-the-port-current-at-start
    ~check-flow2-000/a-failing-flush-stops-cleanly-and-keeps-its-batch
+   ~check-flow2-000/log-sink-can-be-a-procedure
    ~check-flow2-005/compute-count-is-validated
 
    ;; uncaught errors are log entries
@@ -290,10 +291,22 @@
   ;; way — flow-box-drain! never double-delivers — but two threads
   ;; interleaving writes to the same port produce shuffled output at
   ;; exactly the moment someone is reading it to diagnose something.
+  ;;
+  ;; SINK is a textual output port, written one entry per line, or a
+  ;; procedure, called on the flush thread with each non-empty batch
+  ;; of entries, oldest first per thread. The procedure is where a
+  ;; program decides what the library's own events mean to it --
+  ;; uncaught errors in particular: count them, forward them, filter
+  ;; out the noise. It runs on the flush thread, not the loop, so it
+  ;; cannot stop the run itself; it can fire a latch a fiber waits on.
   (define flow-log-start!
     (case-lambda
       ((period-seconds) (flow-log-start! period-seconds (current-error-port)))
-      ((period-seconds port)
+      ((period-seconds sink)
+       (unless (or (procedure? sink)
+                   (and (output-port? sink) (textual-port? sink)))
+         (error 'flow-log-start!
+                "sink must be a textual output port or a procedure" sink))
        (when (box-cas! %flow-log-stopped? #t #f)
          (set-box! %flow-log-stop-requested? #f)
          (let ((ticks (fxmax 1 (exact (round (/ period-seconds
@@ -311,8 +324,12 @@
                                                        1000000000)))
                                       0))
                     (wait (fx+ n 1))))
-                (if (and (%flow-log-flush! (lambda (entries)
-                                             (%flow-log-write! entries port)))
+                (if (and (%flow-log-flush!
+                          (if (procedure? sink)
+                              (lambda (entries)
+                                (unless (null? entries) (sink entries)))
+                              (lambda (entries)
+                                (%flow-log-write! entries sink))))
                          (not (unbox %flow-log-stop-requested?)))
                     (lp)
                     (set-box! %flow-log-stopped? #t)))))))
