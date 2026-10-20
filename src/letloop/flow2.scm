@@ -138,6 +138,10 @@
    ~check-flow2-000/log-sink-can-be-a-procedure
    ~check-flow2-005/compute-count-is-validated
 
+   ;; sixth adverse pass
+   ~check-flow2-005/flow-run-refuses-to-nest
+   ~check-flow2-005/a-failed-start-releases-the-loop
+
    ;; uncaught errors are log entries
    ~check-flow2-012/uncaught-raise-in-a-fiber-is-logged
    ~check-flow2-012/uncaught-raise-in-a-task-is-logged
@@ -1952,52 +1956,79 @@
        (unless (and (fixnum? compute-count) (fx>=? compute-count 0))
          (error 'flow-run "compute-count must be a non-negative fixnum"
                 compute-count))
-       (loop-new)
-       ;; Whoever calls flow-run owns the loop for this run; see
-       ;; %flow-check-caller-thread!.
-       (set-box! %flow-loop-thread (get-thread-id))
-       ;; The pool is created per run and handed to the workers and the
-       ;; collector as a closure, never through a global — a straggler
-       ;; from a previous run therefore cannot touch this run's eventfd,
-       ;; mailbox, or live count (see <flow2-pool>) -- and is refused at
-       ;; every entry point, because it does not hold %flow-pool-current.
-       (let* ((pool
-               (and (not (fxzero? compute-count))
-                    ;; two cells: the signal value, and the read target
-                    (let ((buffer (foreign-alloc 16)))
-                      (foreign-set! 'unsigned-64 buffer 0 1)
-                      (foreign-set! 'unsigned-64 buffer 8 0)
-                      (make-flow-pool% (%eventfd-create) buffer (box '())
-                                       (make-mutex) (make-condition)
-                                       compute-count #t))))
-              (channels
-               (if pool
-                   (begin
-                     (set-box! %flow-pool-current pool)
-                     (loop-spawn (lambda () (%collector pool)))
-                     (let start ((i 0) (channels '()))
-                       (if (fx=? i compute-count)
-                           (reverse channels)
-                           (let ((channel (make-flow-channel (cons 'worker i))))
-                             (fork-thread
-                              (lambda ()
-                                (dynamic-wind
-                                  void
-                                  (lambda () (%worker-body pool channel))
-                                  (lambda () (%flow-worker-exited! pool)))))
-                             (start (fx+ i 1) (cons channel channels))))))
-                   '())))
-         (loop-spawn (lambda () (%fiber-run (lambda () (proc channels)))))
-         (loop-run)
-         (when pool
-           (%flow-shutdown-pool! pool channels))
-         ;; Cleared after the pool is joined, so a worker that puts on
-         ;; its way out is still recognised as this run's rather than
-         ;; as a stray thread. A straggler that outlives the join is
-         ;; recognised as nobody's from the next run on.
-         (set-box! %flow-pool-current #f)
-         (set-box! %flow-loop-thread #f)
+       ;; A compute thread never runs a loop -- the Rationale's one
+       ;; structural rule -- and there is one loop per process: loop-new
+       ;; frees the ring that is running. Nested in a fiber, a second
+       ;; flow-run tore down its caller's loop and the outer fiber died
+       ;; with "attempt to apply non-procedure #f"; from a compute task it
+       ;; did the same to the main thread's ring and two threads ran one
+       ;; loop until the process hung. The claim is a CAS, so two threads
+       ;; starting at once cannot both win it.
+       (when (%worker-current?) (%flow-wrong-thread 'flow-run))
+       (unless (box-cas! %flow-loop-thread #f (get-thread-id))
+         (error 'flow-run "a flow-run is already in progress"))
+       ;; Whoever claimed the loop owns it for this run; see
+       ;; %flow-check-caller-thread!. Everything from here on releases
+       ;; the claim on its way out, raise included. A start that failed
+       ;; -- eventfd creation refused for want of descriptors, say --
+       ;; used to leave it set, and every flow2 call from another thread
+       ;; then raised wrong-thread against a run that did not exist.
+       (let ((pool #f) (channels '()))
+         (guard (ex (#t (%flow-run-release! pool channels) (raise ex)))
+           (loop-new)
+           ;; The pool is created per run and handed to the workers and
+           ;; the collector as a closure, never through a global — a
+           ;; straggler from a previous run therefore cannot touch this
+           ;; run's eventfd, mailbox, or live count (see <flow2-pool>) --
+           ;; and is refused at every entry point, because it does not
+           ;; hold %flow-pool-current.
+           (unless (fxzero? compute-count)
+             ;; the eventfd first: it is the call that fails in practice,
+             ;; and the buffer then never needs freeing on that path.
+             ;; Two cells: the signal value, and the read target.
+             (let* ((fd (%eventfd-create))
+                    (buffer (foreign-alloc 16)))
+               (foreign-set! 'unsigned-64 buffer 0 1)
+               (foreign-set! 'unsigned-64 buffer 8 0)
+               (set! pool (make-flow-pool% fd buffer (box '())
+                                           (make-mutex) (make-condition)
+                                           0 #t))))
+           (when pool
+             (set-box! %flow-pool-current pool)
+             (loop-spawn (lambda () (%collector pool)))
+             (let start ((i 0))
+               (unless (fx=? i compute-count)
+                 (let ((channel (make-flow-channel (cons 'worker i))))
+                   ;; counted before the fork, so a shutdown that runs
+                   ;; after a failed fork still joins every thread that
+                   ;; did start
+                   (with-mutex (%pool-mutex pool)
+                     (%pool-live! pool (fx+ (%pool-live pool) 1)))
+                   (set! channels (append channels (list channel)))
+                   (guard (ex (#t (%flow-worker-exited! pool) (raise ex)))
+                     (fork-thread
+                      (lambda ()
+                        (dynamic-wind
+                          void
+                          (lambda () (%worker-body pool channel))
+                          (lambda () (%flow-worker-exited! pool))))))
+                   (start (fx+ i 1))))))
+           (let ((channels channels))
+             (loop-spawn (lambda () (%fiber-run (lambda () (proc channels))))))
+           (loop-run))
+         (%flow-run-release! pool channels)
          (void)))))
+
+  ;; The way out of a run, normal or not: join the pool, then give up
+  ;; the claim. Cleared after the pool is joined, so a worker that puts
+  ;; on its way out is still recognised as this run's rather than as a
+  ;; stray thread. A straggler that outlives the join is recognised as
+  ;; nobody's from the next run on.
+  (define (%flow-run-release! pool channels)
+    (when pool
+      (%flow-shutdown-pool! pool channels))
+    (set-box! %flow-pool-current #f)
+    (set-box! %flow-loop-thread #f))
 
   ;; Stop the pool and, crucially, WAIT before dismantling what the
   ;; workers are still using.

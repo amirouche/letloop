@@ -2216,3 +2216,101 @@
   ;; a sink that is neither is a mistake at the call site
   (assert (guard (ex (#t #t)) (flow-log-start! 0.01 'stderr) #f))
   #t)
+
+;;------------------------------------------------------------
+;; Sixth adverse pass
+;;------------------------------------------------------------
+
+;; There is one loop per process and loop-new frees the ring that is
+;; running. A flow-run nested in a fiber tore down its caller's loop --
+;; the outer fiber died with "attempt to apply non-procedure #f" and the
+;; outer run returned early -- and one called from a compute task did
+;; the same to the main thread's ring, after which two threads ran one
+;; loop and the process hung. Both are refused now, and the outer run
+;; carries on.
+(define (~check-flow2-005/flow-run-refuses-to-nest)
+  (define nested 'not-set)
+  (define from-task 'not-set)
+  (define outer-alive #f)
+  (flow-run
+   (lambda (workers)
+     (set! nested
+           (guard (ex ((flow-error? ex) (flow-error-symbol ex))
+                      ((message-condition? ex) (condition-message ex)))
+             (flow-run (lambda (w) (flow-stop)))
+             'returned))
+     (let ((reply (make-flow-channel 'reply)))
+       (flow-submit! (car workers)
+                     (lambda ()
+                       (flow-put! reply
+                                  (guard (ex ((flow-error? ex) (flow-error-symbol ex))
+                                             (#t 'other))
+                                    (flow-run (lambda (w) (flow-stop)))
+                                    'returned))))
+       (set! from-task (flow-get! reply)))
+     (flow-sleep 0.01)
+     (set! outer-alive #t)
+     (flow-stop))
+   1)
+  (assert (equal? nested "a flow-run is already in progress"))
+  (assert (eq? from-task 'wrong-thread))
+  (assert outer-alive)
+  #t)
+
+;; A start that failed -- here eventfd creation, refused for want of a
+;; descriptor -- left %flow-loop-thread set, so flow2 believed a run was
+;; in progress and every call from another thread raised wrong-thread.
+;; The descriptor table is filled under a lowered soft limit so this is
+;; quick; the limit is restored on every path.
+(define (~check-flow2-005/a-failed-start-releases-the-loop)
+  (define getrlimit (foreign-procedure "getrlimit" (int void*) int))
+  (define setrlimit (foreign-procedure "setrlimit" (int void*) int))
+  (define open2 (foreign-procedure "open" (string int int) int))
+  (define close2 (foreign-procedure "close" (int) int))
+  (define RLIMIT-NOFILE 7)
+  (define saved (foreign-alloc 16))
+  (define lowered (foreign-alloc 16))
+  (define start-outcome 'not-set)
+  (define stray (box 'not-set))
+  (define again #f)
+  ;; a ring for loop-new to recycle, so it is the eventfd that fails
+  (flow-run (lambda (workers) (flow-stop)))
+  (getrlimit RLIMIT-NOFILE saved)
+  (dynamic-wind
+    (lambda ()
+      (foreign-set! 'unsigned-64 lowered 0
+                    (+ 16 (apply max (map string->number
+                                          (directory-list "/proc/self/fd")))))
+      (foreign-set! 'unsigned-64 lowered 8 (foreign-ref 'unsigned-64 saved 8))
+      (setrlimit RLIMIT-NOFILE lowered))
+    (lambda ()
+      (let ((held (let fill ((acc '()))
+                    (let ((fd (open2 "/dev/null" 0 0)))
+                      (if (fx<? fd 0) acc (fill (cons fd acc)))))))
+        (set! start-outcome
+              (guard (ex (#t 'raised))
+                (flow-run (lambda (workers) (flow-stop)) 1)
+                'returned))
+        (for-each close2 held)))
+    (lambda () (setrlimit RLIMIT-NOFILE saved)))
+  (foreign-free saved)
+  (foreign-free lowered)
+  ;; no run is in progress, so another thread may prime a channel
+  (let ((ch (make-flow-channel 'prime))
+        (done (box #f)))
+    (fork-thread
+     (lambda ()
+       (set-box! stray (guard (ex ((flow-error? ex) (flow-error-symbol ex)))
+                         (flow-put! ch 'primed)
+                         'accepted))
+       (set-box! done #t)))
+    (let wait ((n 0))
+      (when (and (not (unbox done)) (fx<? n 200))
+        (sleep (make-time 'time-duration 5000000 0))
+        (wait (fx+ n 1)))))
+  ;; and the next run starts
+  (flow-run (lambda (workers) (set! again (length workers)) (flow-stop)) 1)
+  (assert (eq? start-outcome 'raised))
+  (assert (eq? (unbox stray) 'accepted))
+  (assert (eqv? again 1))
+  #t)
