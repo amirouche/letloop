@@ -9,13 +9,14 @@ Amirouche A. BOUBEKKI
 ## Status
 
 `(letloop flow2)` is **implemented**, in `src/letloop/flow2.scm`, with
-64 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
+70 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
 `(letloop flow)` stays untouched and keeps serving its current ones.
 
 This document began as a draft specification and is now the library's
 reference, so where the two ever disagree the source wins. It was last
-reconciled against the implementation on 2026-10-20, when nurseries
-were removed — the largest change to documented behaviour since the
+reconciled against the implementation on 2026-10-21, after the
+sixth pass's findings were fixed. The day before, nurseries were
+removed — the largest change to documented behaviour since the
 draft: `flow-nursery`, `flow-monitor`, scope cancellation and the
 compute-task error reply are gone, and `flow-submit!` takes a thunk
 only (see the last paragraphs of Issues, and Rationale). Two earlier
@@ -161,11 +162,15 @@ checks.
 
 A sixth pass on 2026-10-20 found eight more, and its pattern was
 **identity carried by a thread or a global, inherited or left stale**.
-A thread forked inside a compute task inherited the worker's identity
-and was accepted where it should have been refused; the log's
-per-thread boxes were inherited the same way; a failed start left
-`flow-run` believing a run was in progress; a flush thread that died
-left `flow-log-stop!` waiting forever. And the nursery's own current
+`flow-run` had no guard against a second call, so one made from a
+fiber or a compute task freed the ring that was running. A thread
+forked inside a compute task inherited the worker's identity and was
+accepted where it should have been refused — and, outliving the run,
+wrote freed memory into a reused descriptor; the log's per-thread
+boxes were inherited the same way; a failed start left `flow-run`
+believing a run was in progress; a flush thread that died left
+`flow-log-stop!` waiting forever; and a read after a lost race could
+return the stream's bytes out of order. And the nursery's own current
 scope was a dynamically scoped variable faked with a global and
 reinstalled only on flow2's resume path, so a fiber that suspended
 through the ring layer directly came back in whatever scope ran last,
@@ -182,7 +187,13 @@ scope". On 2026-10-20 nurseries, monitors and scope cancellation were
 removed, with the compute-task error reply that existed to serve them;
 an uncaught error became a log entry; latches were added for
 broadcast; and the flush thread's death no longer hangs its stop. The
-other sixth-pass findings are open.
+remaining findings were fixed on 2026-10-21, each with a regression
+check: `flow-run` claims the loop and releases it on every way out,
+per-thread identity is no longer inherited by `fork-thread`, and a
+losing read hands its in-flight recv to the next reader instead of
+cancelling it. A suspicion from the same pass was confirmed and fixed
+too: a `flow-get` that put a value back could leave a channel one past
+its bound.
 
 ## Rationale
 
@@ -411,6 +422,14 @@ worker still out after that is a *straggler*: it keeps its own run's
 pool, so what it does with its own state lands on the dead run, and
 every flow2 operation it attempts once a later `flow-run` is in
 progress raises `wrong-thread` (see Threads).
+
+There is one loop per process. Calling `flow-run` while a run is in
+progress — from one of its fibers, or from any other thread — raises
+"a flow-run is already in progress", and calling it from a compute
+thread raises `wrong-thread`; the run in progress is unaffected
+either way. A start that fails part-way, for example because no file
+descriptor is left for the eventfd, raises after joining whatever part
+of the pool had started, and leaves flow2 with no run in progress.
 
 Note what does **not** stop the loop: a raise out of fiber zero. It is
 a fiber like any other, so an unguarded raise ends it with a
@@ -787,7 +806,14 @@ called `flow-run`, which owns the ring and runs every fiber, and the
 compute threads that same `flow-run` forked. "Cross-thread" throughout
 this document means between those, and nothing else.
 
-A thread the **user** forked is neither. It holds no worker pool, so
+A thread the **user** forked is neither — including one forked by code
+running *inside* a compute task, directly or through a library that
+starts threads of its own. Such a thread does not inherit the worker's
+identity: it is refused like any other, and hands its results back to
+the task that forked it through ordinary Chez synchronization (a mutex
+and condition, or a joined thread), for the task to put on a channel.
+Without a check it would be worse than refused. It holds no worker
+pool, so
 flow2 mistakes it for the loop thread: an operation from it mutates
 channels and the loop's
 pending-thunk list with no synchronization against the loop's
