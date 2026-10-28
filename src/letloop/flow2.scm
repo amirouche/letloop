@@ -158,7 +158,9 @@
    ~check-flow2-013/latch-as-a-stop-event
 
    ;; the default printer
-   ~check-flow2-000/log-prints-to-stderr-by-default)
+   ~check-flow2-000/log-prints-to-stderr-by-default
+   ~check-flow2-000/a-procedure-sink-runs-on-the-loop
+   ~check-flow2-000/a-raising-procedure-sink-keeps-its-batch)
 
   (import (chezscheme)
           (letloop r999)
@@ -365,19 +367,26 @@
   (define %flow-log-stop-requested? (box #f))
   (define %flow-log-stopped? (box #t))
 
-  ;; Guarded against a second concurrent flush thread, which flow left
+  ;; Guarded against a second concurrent flusher, which flow left
   ;; merely documented as unsupported. Draining stays correct either
-  ;; way — flow-box-drain! never double-delivers — but two threads
+  ;; way — flow-box-drain! never double-delivers — but two flushers
   ;; interleaving writes to the same port produce shuffled output at
   ;; exactly the moment someone is reading it to diagnose something.
   ;;
-  ;; SINK is a textual output port, written one entry per line, or a
-  ;; procedure, called on the flush thread with each non-empty batch
-  ;; of entries, oldest first per thread. The procedure is where a
-  ;; program decides what the library's own events mean to it --
-  ;; uncaught errors in particular: count them, forward them, filter
-  ;; out the noise. It runs on the flush thread, not the loop, so it
-  ;; cannot stop the run itself; it can fire a latch a fiber waits on.
+  ;; SINK is a textual output port, written one entry per line by a
+  ;; dedicated flush thread, or a procedure, called with each non-empty
+  ;; batch of entries, oldest first per thread -- ON THE LOOP THREAD,
+  ;; by a fiber, while a run is in progress. The procedure is where a
+  ;; program decides what the library's own events mean to it, and
+  ;; deciding usually means acting: fire a latch a supervising fiber
+  ;; waits on, put on a channel, stop the run. It used to run on the
+  ;; flush thread, which is neither the loop nor a compute thread, so
+  ;; every one of those raised wrong-thread -- the README's own
+  ;; "fire a latch" pattern killed the flusher on the first uncaught
+  ;; error it saw. Allowing them there was not an option: a resume from
+  ;; a thread flow2 does not own is the unsynchronized loop-spawn that
+  ;; check exists to prevent. The cost is that the sink runs on the
+  ;; loop, so a slow one delays every fiber.
   (define flow-log-start!
     (case-lambda
       ((period-seconds) (flow-log-start! period-seconds (current-error-port)))
@@ -386,10 +395,62 @@
                    (and (output-port? sink) (textual-port? sink)))
          (error 'flow-log-start!
                 "sink must be a textual output port or a procedure" sink))
+       (when (procedure? sink)
+         (%flow-check-loop-thread! 'flow-log-start!))
        ;; An explicit start replaces the default printer rather than
        ;; being refused by it.
        (%flow-log-take-over!)
-       (%flow-log-start-thread! period-seconds sink #f))))
+       (if (procedure? sink)
+           (%flow-log-start-fiber! period-seconds sink)
+           (unless (unbox %flow-log-sink)
+             (%flow-log-start-thread! period-seconds sink #f)))
+       (void))))
+
+  ;; The procedure sink, or #f; its period; and a generation, bumped on
+  ;; every start and stop, so a log fiber from an earlier start -- or an
+  ;; earlier run, parked when its loop stopped -- knows it is stale.
+  (define %flow-log-sink (box #f))
+  (define %flow-log-sink-period (box %flow-log-default-period))
+  (define %flow-log-sink-gen (box 0))
+
+  ;; A no-op while any flusher is active, port or procedure, as a
+  ;; second start always was.
+  (define (%flow-log-start-fiber! period-seconds sink)
+    (when (and (unbox %flow-log-stopped?)
+               (box-cas! %flow-log-sink #f sink))
+      (set-box! %flow-log-sink-period period-seconds)
+      (flow-box-increment! %flow-log-sink-gen)
+      (when (%flow-run-in-progress?)
+        (%flow-log-spawn-fiber!))))
+
+  ;; Called on the loop thread: by flow-log-start! during a run, and by
+  ;; flow-run as it starts when a sink is already registered.
+  (define (%flow-log-spawn-fiber!)
+    (let ((gen (unbox %flow-log-sink-gen)))
+      (loop-spawn
+       (lambda ()
+         (%fiber-run
+          (lambda ()
+            (let lp ()
+              (flow-sleep (unbox %flow-log-sink-period))
+              (when (and (eqv? gen (unbox %flow-log-sink-gen))
+                         (%flow-log-call-sink!))
+                (lp)))))))))
+
+  ;; One drain into the procedure sink, #f when there is no sink or it
+  ;; raised. A raise unregisters the sink -- the procedure counterpart
+  ;; of a flush thread that stops -- and puts the batch back, followed
+  ;; by a (flow2 log-flush-raised CONDITION) entry.
+  (define (%flow-log-call-sink!)
+    (let ((sink (unbox %flow-log-sink)))
+      (and sink
+           (let ((ok (%flow-log-flush!
+                      (lambda (entries)
+                        (unless (null? entries) (sink entries))))))
+             (unless ok
+               (set-box! %flow-log-sink #f)
+               (flow-box-increment! %flow-log-sink-gen))
+             ok))))
 
   ;; DEFAULT? marks the default printer, which a take-over stops.
   (define (%flow-log-start-thread! period-seconds sink default?)
@@ -412,11 +473,8 @@
                                    0))
                  (wait (fx+ n 1))))
              (if (and (%flow-log-flush!
-                       (if (procedure? sink)
-                           (lambda (entries)
-                             (unless (null? entries) (sink entries)))
-                           (lambda (entries)
-                             (%flow-log-write! entries sink))))
+                       (lambda (entries)
+                         (%flow-log-write! entries sink)))
                       (not (unbox %flow-log-stop-requested?)))
                  (lp)
                  (begin
@@ -448,8 +506,17 @@
   ;;
   ;; After it the log is the program's: entries accumulate until it
   ;; drains them or starts a flusher -- see %flow-log-mode.
+  ;;
+  ;; A procedure sink gets its final batch on the calling thread, so
+  ;; during a run that must be the loop thread, where the sink runs.
   (define (flow-log-stop!)
+    (when (unbox %flow-log-sink)
+      (%flow-check-loop-thread! 'flow-log-stop!))
     (set-box! %flow-log-mode 'owned)
+    (when (unbox %flow-log-sink)
+      (%flow-log-call-sink!)
+      (set-box! %flow-log-sink #f)
+      (flow-box-increment! %flow-log-sink-gen))
     (%flow-log-stop-thread!))
 
   (define (%flow-log-stop-thread!)
@@ -728,6 +795,18 @@
               (%flow-wrong-thread who))
             (unless (eqv? owner (get-thread-id))
               (%flow-wrong-thread who))))))
+
+  (define (%flow-run-in-progress?) (and (unbox %flow-loop-thread) #t))
+
+  ;; Loop thread only during a run; anything outside one. For what runs
+  ;; user code that may resume fibers on the loop's behalf -- the
+  ;; procedure log sink.
+  (define (%flow-check-loop-thread! who)
+    (let ((owner (unbox %flow-loop-thread)))
+      (when (and owner
+                 (or (%worker-current?)
+                     (not (eqv? owner (get-thread-id)))))
+        (%flow-wrong-thread who))))
 
   ;; loop-spawn from the loop thread (the hot path, untouched); from
   ;; a compute thread, queue the thunk on the worker's OWN run's pool
@@ -2168,8 +2247,16 @@
                    (start (fx+ i 1))))))
            (let ((channels channels))
              (loop-spawn (lambda () (%fiber-run (lambda () (proc channels))))))
+           ;; spawned last so it runs first: a sink registered before
+           ;; the run sees what fiber zero logs from the first period
+           (when (unbox %flow-log-sink)
+             (%flow-log-spawn-fiber!))
            (loop-run))
          (%flow-run-release! pool channels)
+         ;; What was logged since the last period -- the shutdown's own
+         ;; entries included -- would otherwise wait for the next run.
+         ;; Outside the run now, so on this thread is allowed.
+         (%flow-log-call-sink!)
          (void)))))
 
   ;; The way out of a run, normal or not: join the pool, then give up

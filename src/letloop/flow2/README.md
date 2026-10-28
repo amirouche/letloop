@@ -9,7 +9,7 @@ Amirouche A. BOUBEKKI
 ## Status
 
 `(letloop flow2)` is **implemented**, in `src/letloop/flow2.scm`, with
-71 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
+73 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
 `(letloop flow)` stays untouched and keeps serving its current ones.
 
 This document began as a draft specification and is now the library's
@@ -909,14 +909,26 @@ which stops; what is logged afterwards waits for the next drain.
 
 #### `(flow-log-start! period-seconds [sink])` / `(flow-log-stop!)`
 
-Start a single dedicated OS thread that drains the log every
-`PERIOD-SECONDS` and hands the entries to `SINK`, and stop it. `SINK`
-is a textual output port, written one entry per line, or a procedure,
-called on the flush thread with each non-empty list of entries. The
-procedure is where a program decides what flow2's own events mean to
-it — count uncaught errors, forward them, drop the noise. It runs on
-the flush thread, not the loop, so it cannot stop the run itself; it
-can fire a latch a fiber waits on.
+Start draining the log every `PERIOD-SECONDS` into `SINK`, and stop.
+`SINK` is a textual output port or a procedure, and the two run in
+different places on purpose.
+
+A **port** is written one entry per line by a single dedicated OS
+thread, because a write can block and a blocked loop stops every fiber.
+
+A **procedure** is called with each non-empty list of entries **on the
+loop thread**, by a fiber, while a run is in progress. The procedure is
+where a program decides what flow2's own events mean to it — count
+uncaught errors, forward them, drop the noise — and deciding usually
+means acting, so it may do anything a fiber may: fire a latch, put on a
+channel, call `flow-stop`. The cost is the same as any fiber's: a slow
+sink delays every other fiber, and a sink that parks parks the log.
+Between runs nothing calls it, and entries wait; the end of a run
+hands it whatever was logged since the last period, shutdown entries
+included, on the thread that called `flow-run`. During a run, starting
+or stopping a procedure sink anywhere but the loop thread raises
+`wrong-thread` — `flow-log-stop!` hands the sink its final batch on the
+calling thread.
 
 `SINK` defaults to the caller's `(current-error-port)` **at the moment
 of the call**, captured on the calling thread: `current-error-port` is
@@ -930,10 +942,11 @@ the thread has done a final drain, so nothing logged before the
 request is lost; after it, entries accumulate until the program drains
 them or starts a flusher again.
 
-If writing to the sink raises, the flush thread marks itself stopped
-and exits — `flow-log-stop!` returns and a new `flow-log-start!` works
-— and the batch it could not write goes back into the log, followed by
-a `(flow2 log-flush-raised CONDITION)` entry.
+If the sink raises — a port that fails to write, a procedure that
+raises — the flusher stops: the flush thread exits, or the procedure is
+unregistered. `flow-log-stop!` returns and a new `flow-log-start!`
+works, and the batch the sink refused goes back into the log, followed
+by a `(flow2 log-flush-raised CONDITION)` entry.
 
 **By default the log prints to stderr.** The first `flow-log` in the
 process starts a flusher writing to the calling thread's
@@ -960,7 +973,7 @@ What the library itself logs:
 | `(flow2 block-raised-after-win CONDITION)` | a base's block proc raised after another base of the same perform had already won; the fiber kept the winner's value |
 | `(flow2 collector-wait-raised)` | the collector could not re-arm its eventfd read; it retries next tick |
 | `(flow2 shutdown-workers-still-running N)` | `flow-run` gave up joining `N` workers and leaked the eventfd rather than reuse its number |
-| `(flow2 log-flush-raised CONDITION)` | the flush thread's sink raised; the thread stopped and its batch was put back |
+| `(flow2 log-flush-raised CONDITION)` | the sink raised; the flusher stopped and its batch was put back |
 
 `CONDITION` is the raised object rendered for a log line: a condition
 becomes its message as a string, a `<flow-error>` becomes
@@ -1162,6 +1175,7 @@ can be pipelined. Run by `checks/repro-flow2-fourth-pass.scm`,
     (for-each (lambda (entry)
                 (let ((sexp (cdr entry)))
                   (when (and (pair? sexp) (eq? 'flow2 (car sexp))
+                             (pair? (cdr sexp))
                              (eq? 'uncaught (cadr sexp)))
                     (report! sexp)
                     (flow-latch-fire! failures sexp))))
@@ -1171,8 +1185,13 @@ can be pipelined. Run by `checks/repro-flow2-fourth-pass.scm`,
 The policy for an error nobody handled lives here, at the logger, not
 in the library: print it, count it, page someone, or fire a latch a
 supervising fiber waits on and let *it* decide whether to stop the
-run. The sink runs on the flush thread, so it cannot call `flow-stop`
-itself. Run by `~check-flow2-000/log-sink-can-be-a-procedure`.
+run. A procedure sink runs on the loop, so it could call `flow-stop`
+itself; firing a latch keeps the decision with a fiber that knows what
+is still in flight. Until 2026-10-28 the sink ran on the flush thread,
+which flow2 refuses like any thread it does not own, and this page's
+`flow-latch-fire!` raised `wrong-thread` and stopped the logger on the
+first uncaught error — while the check named here never fired a latch.
+Run as printed by `~check-flow2-000/a-procedure-sink-runs-on-the-loop`.
 
 ## References
 

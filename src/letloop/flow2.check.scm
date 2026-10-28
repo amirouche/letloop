@@ -2501,3 +2501,83 @@
   (assert (not (contains? (captured) "after-take-over")))
   (assert (equal? (map cdr (flow-log-drain!)) '((flow2-check after-take-over))))
   #t)
+
+;; A procedure sink runs on the loop, so the README's "Route uncaught
+;; errors" pattern works as printed: the sink fires a latch and the
+;; supervising fiber wakes. On the flush thread, where the sink used to
+;; run, flow-latch-fire! raised wrong-thread and the flusher died on the
+;; first uncaught error it saw.
+(define (~check-flow2-000/a-procedure-sink-runs-on-the-loop)
+  (define failures (make-flow-latch))
+  (define reported (box '()))
+  (define sink-threads (box '()))
+  (define (report! sexp) (set-box! reported (cons sexp (unbox reported))))
+  (define woke 'not-set)
+  (define off-loop-start 'not-set)
+  (define main (get-thread-id))
+  (flow-log-drain!)
+  ;; the README's code, with a record of the thread it ran on
+  (flow-log-start! 0.01
+    (lambda (entries)
+      (set-box! sink-threads (cons (get-thread-id) (unbox sink-threads)))
+      (for-each (lambda (entry)
+                  (let ((sexp (cdr entry)))
+                    (when (and (pair? sexp) (eq? 'flow2 (car sexp))
+                               (pair? (cdr sexp))
+                               (eq? 'uncaught (cadr sexp)))
+                      (report! sexp)
+                      (flow-latch-fire! failures sexp))))
+                entries)))
+  (flow-run
+   (lambda (workers)
+     (flow-spawn (lambda () (raise 'boom)))
+     (set! woke (flow-perform
+                 (flow-choice (flow-latch-wait failures)
+                              (flow-wrap (flow-timeout 2.0)
+                                         (lambda (_) 'timed-out)))))
+     ;; the sink is the loop's, so starting or stopping one from a
+     ;; compute thread during a run is refused
+     (let ((done (make-flow-channel 'done)))
+       (flow-submit! (car workers)
+                     (lambda ()
+                       (flow-put! done
+                                  (guard (ex ((flow-error-wrong-thread? ex)
+                                              'wrong-thread))
+                                    (flow-log-stop!)
+                                    'not-refused))))
+       (set! off-loop-start (flow-get! done)))
+     (flow-stop))
+   1)
+  (flow-log-stop!)
+  (assert (equal? woke '(flow2 uncaught fiber boom)))
+  (assert (equal? (unbox reported) '((flow2 uncaught fiber boom))))
+  (assert (pair? (unbox sink-threads)))
+  (assert (for-all (lambda (id) (eqv? id main)) (unbox sink-threads)))
+  (assert (eq? off-loop-start 'wrong-thread))
+  #t)
+
+;; A sink that raises is unregistered, and its batch stays in the log
+;; with the reason -- the procedure counterpart of a flush thread whose
+;; port failed.
+(define (~check-flow2-000/a-raising-procedure-sink-keeps-its-batch)
+  (define calls (box 0))
+  (flow-log-drain!)
+  (flow-log-start! 0.01
+    (lambda (entries)
+      (set-box! calls (+ 1 (unbox calls)))
+      (error 'sink "refused")))
+  (flow-run
+   (lambda (workers)
+     (flow-log '(flow2-check kept))
+     (flow-sleep 0.1)
+     (flow-stop)))
+  (flow-log-stop!)
+  (assert (= 1 (unbox calls)))
+  (let ((sexps (map cdr (flow-log-drain!))))
+    (assert (member '(flow2-check kept) sexps))
+    (assert (exists (lambda (x)
+                      (and (pair? x) (pair? (cdr x))
+                           (eq? 'log-flush-raised (cadr x))))
+                    sexps)))
+  #t)
+
