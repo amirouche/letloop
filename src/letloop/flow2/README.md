@@ -9,7 +9,7 @@ Amirouche A. BOUBEKKI
 ## Status
 
 `(letloop flow2)` is **implemented**, in `src/letloop/flow2.scm`, with
-77 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
+78 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
 `(letloop flow)` stays untouched and keeps serving its current ones.
 
 This document began as a draft specification and is now the library's
@@ -865,6 +865,10 @@ purpose:
   **not** reply on the task's behalf: a task whose submitter must hear
   about failure wraps its own body in a `guard` and puts the outcome
   on the channel the submitter reads.
+- **At shutdown, queued tasks are dropped.** When the loop stops, each
+  worker finishes the task it is running and exits; tasks still queued
+  on its channel never start. A program that needs them run waits for
+  their replies before calling `flow-stop`.
 - **Nothing stops a running task but the task.** A Scheme thread cannot
   be preempted, and flow2 has no cancellation; a long task that should
   be stoppable checks a latch — `flow-latch-fired?` between chunks, or

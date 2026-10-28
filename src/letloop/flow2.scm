@@ -166,7 +166,8 @@
    ~check-flow2-002/a-dead-runs-getter-takes-nothing
    ~check-flow2-002/priming-between-runs-is-not-eaten
    ~check-flow2-002/a-dead-runs-putter-pushes-nothing
-   ~check-flow2-013/a-dead-runs-latch-waiter-stays-dead)
+   ~check-flow2-013/a-dead-runs-latch-waiter-stays-dead
+   ~check-flow2-005/flow-stop-does-not-run-queued-tasks)
 
   (import (chezscheme)
           (letloop r999)
@@ -1319,13 +1320,11 @@
                         (flow-channel-name channel)
                         (flow-channel-bound channel))))))
 
-  ;; Deliver OBJ to a parked getter, or enqueue it. FORCE? skips the
-  ;; bound — the shutdown's stop sentinel uses it, so a worker channel
-  ;; that is full still delivers it. The resume call happens
-  ;; outside the mutex; if it reports the getter already synched
+  ;; Deliver OBJ to a parked getter, or enqueue it. The resume call
+  ;; happens outside the mutex; if it reports the getter already synched
   ;; elsewhere (another base of its choice won the race), try the next
   ;; one.
-  (define (%channel-put! channel obj force?)
+  (define (%channel-put! channel obj)
     (let try ()
       (let ((entry
              (with-mutex (flow-channel-mutex channel)
@@ -1334,7 +1333,7 @@
                      ;; Handing a value straight to a parked getter does
                      ;; not grow the queue, so the bound is only
                      ;; consulted once there is nobody waiting for it.
-                     (if (and (not force?) (not (%channel-room? channel)))
+                     (if (not (%channel-room? channel))
                          'full
                          (begin
                            (flow-channel-in!
@@ -1450,7 +1449,7 @@
 
   (define (flow-put! channel obj)
     (%flow-check-caller-thread! 'flow-put!)
-    (%channel-put! channel obj #f))
+    (%channel-put! channel obj))
 
   ;; try and block both hold the mutex, so there is no try/park gap
   ;; for a concurrent put to fall into: either the value is already
@@ -2188,7 +2187,7 @@
     ;; channel has room, so it never touches flow-perform's guard and
     ;; needs its own.
     (%flow-check-caller-thread! 'flow-submit!)
-    (%channel-put! worker-channel thunk #f))
+    (%channel-put! worker-channel thunk))
 
   ;; The per-worker framework loop: dequeue, run. A raise the task did
   ;; not handle itself is logged as (flow2 uncaught task WORKER
@@ -2343,8 +2342,16 @@
 
   (define (%flow-shutdown-pool! pool channels)
     (%pool-running?! pool #f)
+    ;; At the HEAD of each queue, past the bound, the way a value a
+    ;; losing get took is put back. It used to be appended, so a worker
+    ;; ran every task still queued before reaching it: with six
+    ;; one-second tasks queued, flow-run spent its whole 2s join,
+    ;; logged a straggler and leaked the eventfd, and the remaining
+    ;; tasks ran after flow-run had returned, replying to nobody. A
+    ;; worker now finishes the task it is running and exits; tasks that
+    ;; never started are dropped with the channel.
     (for-each (lambda (channel)
-                (%channel-put! channel %flow-worker-stop #t))
+                (%channel-unget! channel %flow-worker-stop))
               channels)
     (%eventfd-signal! pool)
     (let ((deadline (+ (real-time)

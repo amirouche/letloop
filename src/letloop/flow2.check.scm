@@ -2670,3 +2670,36 @@
   (assert (not run1-woke))
   #t)
 
+;; flow-stop with tasks queued on a worker: the stop sentinel used to be
+;; queued behind them, so the worker ran them all first -- past the join
+;; deadline, with the eventfd leaked and the tasks replying to nobody.
+(define (~check-flow2-005/flow-stop-does-not-run-queued-tasks)
+  (define ran (box 0))
+  (define started (make-flow-latch))
+  (flow-log-drain!)
+  (let ((t0 (real-time)))
+    (flow-run
+     (lambda (workers)
+       (do ((i 0 (+ i 1))) ((= i 6))
+         (flow-submit! (car workers)
+                       (lambda ()
+                         (flow-latch-fire! started #t)
+                         (sleep (make-time 'time-duration 300000000 0))
+                         (set-box! ran (+ 1 (unbox ran))))))
+       ;; the first task is running, five are queued behind it
+       (flow-latch-wait! started)
+       (flow-stop))
+     1)
+    (let ((took (- (real-time) t0)))
+      (assert (< took 1500))
+      ;; the running task finished; the queued ones never started
+      (assert (= 1 (unbox ran)))
+      (sleep (make-time 'time-duration 500000000 0))
+      (assert (= 1 (unbox ran)))
+      (assert (not (exists (lambda (e)
+                             (and (pair? (cdr e)) (pair? (cddr e))
+                                  (eq? 'shutdown-workers-still-running
+                                       (caddr e))))
+                           (flow-log-drain!))))))
+  #t)
+
