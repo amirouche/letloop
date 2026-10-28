@@ -14,8 +14,8 @@ Amirouche A. BOUBEKKI
 
 This document began as a draft specification and is now the library's
 reference, so where the two ever disagree the source wins. It was last
-reconciled against the implementation on 2026-10-21, after the
-sixth pass's findings were fixed. The day before, nurseries were
+reconciled against the implementation on 2026-10-28, after the
+seventh pass's findings were fixed. The day before, nurseries were
 removed — the largest change to documented behaviour since the
 draft: `flow-nursery`, `flow-monitor`, scope cancellation and the
 compute-task error reply are gone, and `flow-submit!` takes a thunk
@@ -194,6 +194,26 @@ losing read hands its in-flight recv to the next reader instead of
 cancelling it. A suspicion from the same pass was confirmed and fixed
 too: a `flow-get` that put a value back could leave a channel one past
 its bound.
+
+A seventh pass on 2026-10-21 found five defects, all fixed on
+2026-10-28 with regression checks, and its pattern is the sixth's one
+level out: **what outlives the thing the design counts.** The sixth
+pass found identity carried by a thread or a global; this one found it
+carried by the waits a run leaves behind, and by a thread nobody
+listed. A channel or latch outlives the run that parked a fiber on it,
+and so did the fiber's wait: the next run's put resumed a fiber of the
+finished run, and priming a channel between runs fed the value to a
+continuation already thrown away. The stop sentinel waited behind the
+tasks it was meant to pre-empt. A recv failure that lost its race was
+dropped as level-triggered, and came back as a clean EOF. Waiter lists
+cost O(waiters) per join, so the stop-latch pattern made every read
+cost O(connections). And the log sink ran on the flush thread — a
+third kind of thread the Threads section does not admit — so this
+page's own "fire a latch from the sink" pattern raised `wrong-thread`
+and stopped the logger on the first uncaught error; its check never
+fired a latch. Procedure sinks run on the loop now, and the log prints
+to stderr until the program takes it over, instead of growing unread
+when nobody configured it.
 
 ## Rationale
 
@@ -852,8 +872,11 @@ channel the live run is parked on through a pool nobody drains.
 Outside a `flow-run` there is nothing to corrupt and no check: priming
 a channel before the loop starts is legitimate.
 
-`flow-log` is the one exception, and genuinely takes any thread: it
-appends to a box that the calling thread alone writes.
+`flow-log` genuinely takes any thread: it appends to a box that the
+calling thread alone writes. So do the procedures that only read —
+`flow-latch-fired?` and the channel diagnostics — and constructing
+events and channels. What the rule covers is everything that delivers,
+parks or resumes.
 
 ### Compute threads
 
@@ -1175,7 +1198,11 @@ The main-side handler *spawns a fiber per request*, so a task that
 sends several requests before collecting gets genuinely overlapping
 I/O — the serial version of this exact pattern measured 2× slower on
 cold queries, which is why the protocol is left in user hands where it
-can be pipelined. Run by `checks/repro-flow2-fourth-pass.scm`,
+can be pipelined. The task above sends one request at a time, and it
+has to: the replies come back on `down` in *completion* order, and
+nothing in them says which request each answers. A task that pipelines
+puts the offset in the reply — `(list offset chunk)` — or it indexes
+chunks at the wrong place. Run by `checks/repro-flow2-fourth-pass.scm`,
 `readme-index-file-example-terminates`.
 
 ### Route uncaught errors
