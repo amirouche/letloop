@@ -168,7 +168,8 @@
    ~check-flow2-002/a-dead-runs-putter-pushes-nothing
    ~check-flow2-013/a-dead-runs-latch-waiter-stays-dead
    ~check-flow2-005/flow-stop-does-not-run-queued-tasks
-   ~check-flow2-006/a-failure-losing-a-race-is-not-an-eof)
+   ~check-flow2-006/a-failure-losing-a-race-is-not-an-eof
+   ~check-flow2-002/waiting-costs-the-same-however-many-wait)
 
   (import (chezscheme)
           (letloop r999)
@@ -1152,6 +1153,86 @@
                 result)))))
 
   ;;------------------------------------------------------------
+  ;; Waiter lists: doubly linked, O(1) to join and to leave
+  ;;------------------------------------------------------------
+
+  ;; Parked getters, parked putters and latch waiters used to be plain
+  ;; lists, joined with append and left with remq -- both linear in the
+  ;; number already parked, under the object's mutex. A wait that loses
+  ;; its choice joins and leaves every time, so with 20000 fibers parked
+  ;; on one channel each such get cost about seven times what it did
+  ;; with 100, and the README's own stop-a-fan-out shape -- every
+  ;; connection fiber racing (flow-latch-wait stop) on each read -- made
+  ;; every read cost O(connections).
+  ;;
+  ;; A node is created unlinked when its wait registers its cancel, and
+  ;; linked once the wait is reachable; unlinking is idempotent, so a
+  ;; cancel that runs before the link, or after a deliverer has already
+  ;; taken the node, is a no-op. The caller holds the owner's mutex for
+  ;; every operation here.
+  (define-record-type* <flow2-dnode>
+    (%make-dnode value prev next)
+    %dnode?
+    (value %dnode-value)
+    (prev  %dnode-prev %dnode-prev!)
+    (next  %dnode-next %dnode-next!))
+
+  (define-record-type* <flow2-dlist>
+    (%make-dlist% head size)
+    %dlist?
+    (head %dlist-head)
+    (size %dlist-size %dlist-size!))
+
+  ;; Circular, around a sentinel head; an unlinked node has prev #f.
+  (define (%dlist-new)
+    (let ((head (%make-dnode #f #f #f)))
+      (%dnode-prev! head head)
+      (%dnode-next! head head)
+      (%make-dlist% head 0)))
+
+  (define (%dnode-new value) (%make-dnode value #f #f))
+
+  ;; Append NODE at the tail: waiters are served oldest first.
+  (define (%dlist-link! dl node)
+    (let* ((head (%dlist-head dl))
+           (tail (%dnode-prev head)))
+      (%dnode-prev! node tail)
+      (%dnode-next! node head)
+      (%dnode-next! tail node)
+      (%dnode-prev! head node)
+      (%dlist-size! dl (fx+ (%dlist-size dl) 1))))
+
+  (define (%dlist-unlink! dl node)
+    (let ((prev (%dnode-prev node)))
+      (when prev
+        (let ((next (%dnode-next node)))
+          (%dnode-next! prev next)
+          (%dnode-prev! next prev)
+          (%dnode-prev! node #f)
+          (%dnode-next! node #f)
+          (%dlist-size! dl (fx- (%dlist-size dl) 1))))))
+
+  ;; The oldest node, or #f.
+  (define (%dlist-first dl)
+    (let ((node (%dnode-next (%dlist-head dl))))
+      (and (not (eq? node (%dlist-head dl))) node)))
+
+  ;; The node after NODE, or #f. NODE must still be linked.
+  (define (%dlist-after dl node)
+    (let ((next (%dnode-next node)))
+      (and (not (eq? next (%dlist-head dl))) next)))
+
+  ;; Every value, oldest first, leaving the list empty and every node
+  ;; unlinked -- so a late cancel on one of them stays a no-op.
+  (define (%dlist-take-all! dl)
+    (let loop ((node (%dlist-first dl)) (out '()))
+      (if node
+          (let ((next (%dlist-after dl node)))
+            (%dlist-unlink! dl node)
+            (loop next (cons (%dnode-value node) out)))
+          (reverse out))))
+
+  ;;------------------------------------------------------------
   ;; Channels: buffered, mutex-protected, cross-thread
   ;;------------------------------------------------------------
 
@@ -1172,9 +1253,9 @@
     (out     flow-channel-out     flow-channel-out!)
     (length  flow-channel-length  flow-channel-length!)
     (bound   flow-channel-bound   flow-channel-bound!)
-    (getters flow-channel-getters flow-channel-getters!)
+    (getters flow-channel-getters)
     ;; Putters parked because the channel is full, oldest first.
-    (space   flow-channel-space   flow-channel-space!)
+    (space   flow-channel-space)
     ;; Edge-trigger for the saturation warning; see
     ;; %channel-warn-saturated!.
     (saturated? flow-channel-saturated? flow-channel-saturated?!))
@@ -1215,7 +1296,8 @@
          (error 'make-flow-channel
                 "bound must be a positive fixnum, or #f for unbounded"
                 bound))
-       (make-flow-channel% name (make-mutex) '() '() 0 bound '() '() #f))))
+       (make-flow-channel% name (make-mutex) '() '() 0 bound
+                           (%dlist-new) (%dlist-new) #f))))
 
   ;; A parked getter: the perform's shared state box and this base's
   ;; own wrap-applying resume, plus the claimed box that gives one
@@ -1232,25 +1314,29 @@
     (claimed flow-getter-claimed))
 
   ;; Caller holds the channel mutex. Pop the first claimable waiting
-  ;; getter, dropping dead entries on the way.
+  ;; getter, dropping dead entries on the way -- each dead entry is
+  ;; dropped once, so the walk is O(1) amortized.
   (define (%channel-pop-getter! channel)
-    (let loop ((getters (flow-channel-getters channel)) (kept '()))
-      (cond
-       ((null? getters)
-        (flow-channel-getters! channel (reverse kept))
-        #f)
-       ((not (unbox (flow-getter-token (car getters))))
-        ;; its run is over; see %flow-waiter-token
-        (loop (cdr getters) kept))
-       ((and (eq? (unbox (flow-getter-state (car getters))) 'waiting)
-             (box-cas! (flow-getter-claimed (car getters)) #f #t))
-        (flow-channel-getters! channel
-                               (append (reverse kept) (cdr getters)))
-        (car getters))
-       ((eq? (unbox (flow-getter-state (car getters))) 'waiting)
-        ;; claimed by a concurrent deliverer, keep it
-        (loop (cdr getters) (cons (car getters) kept)))
-       (else (loop (cdr getters) kept)))))
+    (let ((getters (flow-channel-getters channel)))
+      (let loop ((node (%dlist-first getters)))
+        (and node
+             (let ((next (%dlist-after getters node))
+                   (getter (%dnode-value node)))
+               (cond
+                ((not (unbox (flow-getter-token getter)))
+                 ;; its run is over; see %flow-waiter-token
+                 (%dlist-unlink! getters node)
+                 (loop next))
+                ((and (eq? (unbox (flow-getter-state getter)) 'waiting)
+                      (box-cas! (flow-getter-claimed getter) #f #t))
+                 (%dlist-unlink! getters node)
+                 getter)
+                ((eq? (unbox (flow-getter-state getter)) 'waiting)
+                 ;; claimed by a concurrent deliverer, keep it
+                 (loop next))
+                (else
+                 (%dlist-unlink! getters node)
+                 (loop next))))))))
 
   ;; Caller holds the channel mutex.
   (define (%channel-room? channel)
@@ -1289,22 +1375,21 @@
       (let ((waiter
              (with-mutex (flow-channel-mutex channel)
                (and (%channel-room? channel)
-                    (let ((waiters (flow-channel-space channel)))
-                      (and (pair? waiters)
+                    (let* ((waiters (flow-channel-space channel))
+                           (node (%dlist-first waiters)))
+                      (and node
                            (begin
-                             (flow-channel-space! channel (cdr waiters))
-                             (car waiters))))))))
+                             (%dlist-unlink! waiters node)
+                             (%dnode-value node))))))))
         (when waiter
           ;; a dead run's putter is skipped, not woken: woken, it
           ;; would push its stale value into this run's channel
           (unless (and (unbox (cddr waiter)) ((cadr waiter) #t))
             (again))))))
 
-  (define (%channel-remove-space! channel waiter)
+  (define (%channel-remove-space! channel node)
     (with-mutex (flow-channel-mutex channel)
-      (flow-channel-space!
-       channel
-       (remq waiter (flow-channel-space channel)))))
+      (%dlist-unlink! (flow-channel-space channel) node)))
 
   ;; One line per saturation episode, not per blocked put. The flag is
   ;; set here and cleared by %channel-dequeue! at the half-bound
@@ -1386,22 +1471,21 @@
                     (and (%channel-room? channel)
                          (lambda () #t))))
                 (lambda (state resume register-cancel!)
-                  (let ((waiter (cons* state resume (%flow-waiter-token))))
+                  (let ((node (%dnode-new
+                               (cons* state resume (%flow-waiter-token)))))
                     ;; Armed before the waiter is reachable, with the
                     ;; recheck below closing the rest of the window —
                     ;; same discipline as flow-get's getter entry, and
                     ;; for the same reason: off-loop, resume-from
                     ;; snapshots the cancel list at resume time.
                     (register-cancel!
-                     (lambda () (%channel-remove-space! channel waiter)))
+                     (lambda () (%channel-remove-space! channel node)))
                     (let ((room?
                            (with-mutex (flow-channel-mutex channel)
                              (or (%channel-room? channel)
                                  (begin
-                                   (flow-channel-space!
-                                    channel
-                                    (append (flow-channel-space channel)
-                                            (list waiter)))
+                                   (%dlist-link! (flow-channel-space channel)
+                                                 node)
                                    #f)))))
                       (if room?
                           ;; No value rides on this resume, so a #f
@@ -1409,7 +1493,7 @@
                           ;; committed to whichever base did win.
                           (resume #t)
                           (unless (eq? (unbox state) 'waiting)
-                            (%channel-remove-space! channel waiter))))))))
+                            (%channel-remove-space! channel node))))))))
 
   ;; Return OBJ to CHANNEL after a getter that had already claimed and
   ;; dequeued it turned out to have synched on another base — the value
@@ -1442,11 +1526,9 @@
   ;; already have popped it, in which case this is a no-op — that
   ;; deliverer's own resume returns #f and %channel-put! retries, so no
   ;; value rides on the race.
-  (define (%channel-remove-getter! channel entry)
+  (define (%channel-remove-getter! channel node)
     (with-mutex (flow-channel-mutex channel)
-      (flow-channel-getters!
-       channel
-       (remq entry (flow-channel-getters channel)))))
+      (%dlist-unlink! (flow-channel-getters channel) node)))
 
   (define (flow-put! channel obj)
     (%flow-check-caller-thread! 'flow-put!)
@@ -1471,8 +1553,9 @@
                            (%channel-wake-space! channel)
                            (lambda () (car value))))))
                 (lambda (state resume register-cancel!)
-                  (let ((entry (make-flow-getter state resume (box #f)
-                                                 (%flow-waiter-token))))
+                  (let* ((entry (make-flow-getter state resume (box #f)
+                                                  (%flow-waiter-token)))
+                         (node (%dnode-new entry)))
                     ;; Armed BEFORE the entry is reachable, and the
                     ;; recheck below closes the remaining window. Without
                     ;; a cancel at all, a get that loses a choice leaves
@@ -1484,17 +1567,15 @@
                     ;; each dead entry pins a whole captured continuation
                     ;; through its resume.
                     (register-cancel!
-                     (lambda () (%channel-remove-getter! channel entry)))
+                     (lambda () (%channel-remove-getter! channel node)))
                     (let ((immediate
                            (with-mutex (flow-channel-mutex channel)
                              (if (fx>? (flow-channel-length channel) 0)
                                  (and (box-cas! (flow-getter-claimed entry) #f #t)
                                       (cons #t (%channel-dequeue! channel)))
                                  (begin
-                                   (flow-channel-getters!
-                                    channel
-                                    (append (flow-channel-getters channel)
-                                            (list entry)))
+                                   (%dlist-link! (flow-channel-getters channel)
+                                                 node)
                                    #f)))))
                       (if immediate
                           ;; resume reports #f when an earlier base of
@@ -1520,7 +1601,7 @@
                           ;; point missed it — off-loop, resume-from
                           ;; snapshots the cancel list at resume time.
                           (unless (eq? (unbox state) 'waiting)
-                            (%channel-remove-getter! channel entry))))))))
+                            (%channel-remove-getter! channel node))))))))
 
   (define (flow-get! channel)
     (flow-perform (flow-get channel)))
@@ -1561,10 +1642,10 @@
     flow-latch?
     (mutex   flow-latch-mutex)
     (value   flow-latch-value   flow-latch-value!)
-    (waiters flow-latch-waiters flow-latch-waiters!))
+    (waiters flow-latch-waiters))
 
   (define (make-flow-latch)
-    (make-flow-latch% (make-mutex) %flow-latch-unfired '()))
+    (make-flow-latch% (make-mutex) %flow-latch-unfired (%dlist-new)))
 
   (define (flow-latch-fired? latch)
     (with-mutex (flow-latch-mutex latch)
@@ -1578,10 +1659,9 @@
     (let ((waiters
            (with-mutex (flow-latch-mutex latch)
              (and (eq? (flow-latch-value latch) %flow-latch-unfired)
-                  (let ((waiters (flow-latch-waiters latch)))
+                  (begin
                     (flow-latch-value! latch value)
-                    (flow-latch-waiters! latch '())
-                    waiters)))))
+                    (%dlist-take-all! (flow-latch-waiters latch)))))))
       (and waiters
            (begin
              ;; Outside the mutex: a resume runs continuation code. A
@@ -1593,9 +1673,9 @@
                        waiters)
              #t))))
 
-  (define (%latch-remove-waiter! latch waiter)
+  (define (%latch-remove-waiter! latch node)
     (with-mutex (flow-latch-mutex latch)
-      (flow-latch-waiters! latch (remq waiter (flow-latch-waiters latch)))))
+      (%dlist-unlink! (flow-latch-waiters latch) node)))
 
   (define (flow-latch-wait latch)
     (make-flow% 'base (cons 'flow2-latch latch)
@@ -1606,7 +1686,7 @@
                     (and (not (eq? value %flow-latch-unfired))
                          (lambda () value))))
                 (lambda (state resume register-cancel!)
-                  (define waiter (cons resume (%flow-waiter-token)))
+                  (define node (%dnode-new (cons resume (%flow-waiter-token))))
                   ;; Armed before the waiter is reachable, with the
                   ;; recheck below closing the rest of the window --
                   ;; flow-get's discipline, for flow-get's reason: a
@@ -1614,19 +1694,16 @@
                   ;; pinning its continuation until the latch fires,
                   ;; which for a stop latch may be never.
                   (register-cancel!
-                   (lambda () (%latch-remove-waiter! latch waiter)))
+                   (lambda () (%latch-remove-waiter! latch node)))
                   (let ((value
                          (with-mutex (flow-latch-mutex latch)
                            (let ((value (flow-latch-value latch)))
                              (when (eq? value %flow-latch-unfired)
-                               (flow-latch-waiters!
-                                latch
-                                (append (flow-latch-waiters latch)
-                                        (list waiter))))
+                               (%dlist-link! (flow-latch-waiters latch) node))
                              value))))
                     (if (eq? value %flow-latch-unfired)
                         (unless (eq? (unbox state) 'waiting)
-                          (%latch-remove-waiter! latch waiter))
+                          (%latch-remove-waiter! latch node))
                         (resume value))))))
 
   (define (flow-latch-wait! latch)
@@ -1666,14 +1743,14 @@
   ;; channel; a gap that grows is finding 4's shape.
   (define (flow-channel-getters-length channel)
     (with-mutex (flow-channel-mutex channel)
-      (length (flow-channel-getters channel))))
+      (%dlist-size (flow-channel-getters channel))))
 
   ;; Putters parked waiting for room. Persistently non-zero means
   ;; sustained backpressure — pair it with the (flow2 channel-full ...)
   ;; warning, which fires once per saturation episode.
   (define (flow-channel-space-length channel)
     (with-mutex (flow-channel-mutex channel)
-      (length (flow-channel-space channel))))
+      (%dlist-size (flow-channel-space channel))))
 
   ;; Raises overflow right here when the channel already holds more
   ;; than N values: the bound is never observably violated, and the
@@ -1711,7 +1788,7 @@
              ;; parked despite the room until the next get — and a
              ;; consumer that stopped consuming is exactly when an
              ;; operator raises a bound to relieve the producers.
-             (let ((waiting (length (flow-channel-space channel))))
+             (let ((waiting (%dlist-size (flow-channel-space channel))))
                (if n
                    (fxmin waiting
                           (fxmax 0 (fx- n (flow-channel-length channel))))

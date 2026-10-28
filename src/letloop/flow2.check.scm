@@ -312,7 +312,7 @@
      (flow-stop)))
   ;; Not "small": zero. Every one of those gets lost, and a loser must
   ;; take its entry with it.
-  (assert (null? (flow-channel-getters ch)))
+  (assert (eqv? 0 (%dlist-size (flow-channel-getters ch))))
   ;; ... and the channel still works afterwards.
   (flow-put! ch 'still-fine)
   (assert (eq? 'still-fine (flow-get-try ch 'EMPTY)))
@@ -2084,7 +2084,7 @@
   (assert (eq? late 'complete))
   (assert (eq? second-fire #f))
   (assert (flow-latch-fired? latch))
-  (assert (null? (flow-latch-waiters latch)))
+  (assert (eqv? 0 (%dlist-size (flow-latch-waiters latch))))
   #t)
 
 ;; flow-get's lesson, for the latch: a wait that loses a choice takes
@@ -2101,7 +2101,7 @@
                                                (lambda (_) 'late))))
          (round (fx+ i 1))))
      (flow-stop)))
-  (assert (null? (flow-latch-waiters latch)))
+  (assert (eqv? 0 (%dlist-size (flow-latch-waiters latch))))
   (assert (eq? #t (flow-latch-fire! latch 'fine)))
   #t)
 
@@ -2433,13 +2433,15 @@
 (define (~check-flow2-002/a-losing-get-wakes-no-putter)
   (define ch (make-flow-channel 'full 1))
   (define woken #f)
-  (define probe (cons (box 'waiting) (lambda (v) (set! woken #t) #t)))
+  ;; a parked putter's shape: (state resume . token)
+  (define probe (cons* (box 'waiting) (lambda (v) (set! woken #t) #t) (box #t)))
   (define result #f)
   (define winner (make-flow (lambda (x) x)
                             (lambda () #f)
                             (lambda (state resume register-cancel!)
                               (flow-put! ch 'the-value)          ;; at the bound
-                              (flow-channel-space! ch (list probe))
+                              (%dlist-link! (flow-channel-space ch)
+                                            (%dnode-new probe))
                               (resume 'winner))))
   (flow-run
    (lambda (workers)
@@ -2447,7 +2449,7 @@
      (flow-stop)))
   (assert (eq? result 'winner))
   (assert (not woken))
-  (assert (eq? probe (car (flow-channel-space ch))))
+  (assert (eq? probe (%dnode-value (%dlist-first (flow-channel-space ch)))))
   (assert (eqv? 1 (flow-channel-queue-length ch)))
   #t)
 
@@ -2762,5 +2764,36 @@
   (assert (not (equal? first-race '(read #t))))
   (assert (not (equal? second-read '(read #t))))
   (assert (or (equal? first-race '(read #f)) (equal? second-read '(read #f))))
+  #t)
+
+;; Joining and leaving a waiter list used to be append and remq, linear
+;; in the number already parked: 1000 losing waits took ~13ms with 100
+;; fibers parked on the same latch or channel and ~98ms with 20000. The
+;; lists are doubly linked now. The margin is generous on purpose -- the
+;; old code was 7.5x slower, so 3x plus a scheduling allowance still
+;; catches it without flaking on a loaded machine.
+(define (flow2-check-time-losing-waits parked rounds make-wait)
+  (let ((elapsed 0))
+    (flow-run
+     (lambda (_)
+       (do ((i 0 (+ i 1))) ((= i parked))
+         (flow-spawn (lambda () (flow-perform (make-wait)))))
+       (flow-sleep 0.05)
+       (let ((t0 (real-time)))
+         (do ((i 0 (+ i 1))) ((= i rounds))
+           (flow-perform (flow-choice (make-wait) (flow-timeout 0))))
+         (set! elapsed (- (real-time) t0)))
+       (flow-stop)))
+    elapsed))
+
+(define (~check-flow2-002/waiting-costs-the-same-however-many-wait)
+  (define latch (make-flow-latch))
+  (define ch (make-flow-channel 'many #f))
+  (define (flat? make-wait)
+    (let ((few (flow2-check-time-losing-waits 100 1000 make-wait))
+          (many (flow2-check-time-losing-waits 20000 1000 make-wait)))
+      (< many (+ (* 3 few) 20))))
+  (assert (flat? (lambda () (flow-latch-wait latch))))
+  (assert (flat? (lambda () (flow-get ch))))
   #t)
 
