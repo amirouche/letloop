@@ -9,7 +9,7 @@ Amirouche A. BOUBEKKI
 ## Status
 
 `(letloop flow2)` is **implemented**, in `src/letloop/flow2.scm`, with
-70 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
+71 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
 `(letloop flow)` stays untouched and keeps serving its current ones.
 
 This document began as a draft specification and is now the library's
@@ -890,9 +890,12 @@ is: a call conses onto a box the calling thread owns and does nothing
 else — no mutex, no port, no syscall. That is the whole design
 requirement. Logging has to be safe on the loop thread, where a
 syscall costs every fiber, and on a compute thread, where blocking
-wastes the core the pool exists to use. Before there is a loop the
-timestamp is `0` rather than an error, so a library can warn during
-startup without taking the program down.
+wastes the core the pool exists to use. The one exception is the
+first call in a process that has not taken the log over, which also
+forks the default printer (see `flow-log-start!`) — once, not per
+call. Before there is a loop the timestamp is `0` rather than an
+error, so a library can warn during startup without taking the
+program down.
 
 #### `(flow-log-drain!)`
 
@@ -900,6 +903,9 @@ Every pending entry as a list of `(timestamp . sexp)`, oldest first
 within each thread's own accumulator, threads concatenated in
 registration order rather than globally sorted — sort on the
 timestamps if you need strict cross-thread order. Draining empties.
+
+A drain also takes the log over from the default printer (see below),
+which stops; what is logged afterwards waits for the next drain.
 
 #### `(flow-log-start! period-seconds [sink])` / `(flow-log-stop!)`
 
@@ -916,19 +922,32 @@ can fire a latch a fiber waits on.
 of the call**, captured on the calling thread: `current-error-port` is
 a thread parameter, so a `parameterize` established later, on another
 thread, is invisible to a flusher already running. To redirect, pass
-the port, or stop and start inside the `parameterize`. Calling
-`flow-log-start!` twice does not fork a second flush thread.
-`flow-log-stop!` blocks until the thread has done a final drain, so
-nothing logged before the request is lost.
+the port, or stop and start inside the `parameterize`. A
+`flow-log-start!` while the default printer runs replaces it; while a
+flusher the program started runs, a second `flow-log-start!` does not
+fork another and its sink is ignored. `flow-log-stop!` blocks until
+the thread has done a final drain, so nothing logged before the
+request is lost; after it, entries accumulate until the program drains
+them or starts a flusher again.
 
 If writing to the sink raises, the flush thread marks itself stopped
 and exits — `flow-log-stop!` returns and a new `flow-log-start!` works
 — and the batch it could not write goes back into the log, followed by
 a `(flow2 log-flush-raised CONDITION)` entry.
 
-Without a started flusher nothing is written anywhere: entries,
-uncaught errors included, accumulate until something drains them. A
-test drains and asserts; a program starts a flusher.
+**By default the log prints to stderr.** The first `flow-log` in the
+process starts a flusher writing to the calling thread's
+`(current-error-port)` every 0.1 seconds, so a program that never
+mentions the logger still sees its uncaught errors, and its entries do
+not pile up in memory unread — an unbounded queue reached by *not*
+configuring something is the failure channels are bounded to prevent.
+The program takes the log over the first time it calls
+`flow-log-drain!`, `flow-log-start!` or `flow-log-stop!`: the default
+printer stops, printing what it already holds, and never restarts on
+its own. A test drains first and then asserts on what it logs; a
+program that wants the entries elsewhere starts its own flusher. If
+writing to stderr fails, the default printer stops like any flusher
+whose sink raised, and entries then accumulate.
 
 What the library itself logs:
 

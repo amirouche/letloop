@@ -240,6 +240,8 @@
                  (lambda (state resume register-cancel!)
                    (register-cancel! thunk))))
     (define entries '())
+    ;; the log is this check's, not the default printer's
+    (flow-log-drain!)
     (flow-run
      (lambda (workers)
        (flow-perform

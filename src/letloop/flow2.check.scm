@@ -1536,6 +1536,8 @@
                (lambda () #f)
                (lambda (state resume register-cancel!)
                  (register-cancel! thunk))))
+  ;; the log is this check's, not the default printer's
+  (flow-log-drain!)
   (flow-run
    (lambda (workers)
      (set! result
@@ -2447,4 +2449,55 @@
   (assert (not woken))
   (assert (eq? probe (car (flow-channel-space ch))))
   (assert (eqv? 1 (flow-channel-queue-length ch)))
+  #t)
+
+;;------------------------------------------------------------
+;; The default printer
+;;------------------------------------------------------------
+
+;; With no flusher started, entries used to accumulate in memory for the
+;; life of the process and were written nowhere -- uncaught errors
+;; included. The first flow-log now starts a printer to stderr, and a
+;; program that drains the log takes it over: the printer stops and does
+;; not come back by itself.
+(define (~check-flow2-000/log-prints-to-stderr-by-default)
+  (define mutex (make-mutex))
+  (define text "")
+  (define (captured) (with-mutex mutex text))
+  (define port
+    (make-custom-textual-output-port
+     "flow2-check-stderr"
+     (lambda (str start count)
+       (with-mutex mutex
+         (set! text (string-append text (substring str start (+ start count)))))
+       count)
+     #f #f #f))
+  (define (contains? haystack needle)
+    (let ((n (string-length needle)) (h (string-length haystack)))
+      (let loop ((i 0))
+        (and (<= (+ i n) h)
+             (or (string=? needle (substring haystack i (+ i n)))
+                 (loop (+ i 1)))))))
+  (define (nap) (sleep (make-time 'time-duration 10000000 0)))
+  ;; Take the log over, which stops any printer, then put it back in the
+  ;; state a fresh process starts in.
+  (flow-log-drain!)
+  (set-box! %flow-log-mode 'auto)
+  (parameterize ((current-error-port port))
+    (flow-log '(flow2-check by-default)))
+  (let wait ((n 0))
+    (unless (or (contains? (captured) "by-default") (= n 300))
+      (nap)
+      (wait (+ n 1))))
+  (assert (contains? (captured) "flow2-check by-default)"))
+  (assert (unbox %flow-log-default-running?))
+  ;; Draining takes the log over: the printer is gone, and what is
+  ;; logged next is the drainer's, not stderr's.
+  (flow-log-drain!)
+  (assert (not (unbox %flow-log-default-running?)))
+  (assert (unbox %flow-log-stopped?))
+  (flow-log '(flow2-check after-take-over))
+  (do ((i 0 (+ i 1))) ((= i 20)) (nap))
+  (assert (not (contains? (captured) "after-take-over")))
+  (assert (equal? (map cdr (flow-log-drain!)) '((flow2-check after-take-over))))
   #t)

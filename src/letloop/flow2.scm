@@ -155,7 +155,10 @@
    ~check-flow2-013/latch-wakes-every-waiter-once
    ~check-flow2-013/losing-latch-wait-leaves-no-waiter
    ~check-flow2-013/latch-crosses-threads
-   ~check-flow2-013/latch-as-a-stop-event)
+   ~check-flow2-013/latch-as-a-stop-event
+
+   ;; the default printer
+   ~check-flow2-000/log-prints-to-stderr-by-default)
 
   (import (chezscheme)
           (letloop r999)
@@ -284,8 +287,43 @@
   (define (%flow-log-now)
     (if (loop-current) (loop-jiffy) 0))
 
+  ;; Who owns the log. 'auto until the program says anything about it:
+  ;; the first flow-log then starts the default printer, which writes
+  ;; to stderr. Any of flow-log-drain!, flow-log-start! or
+  ;; flow-log-stop! makes it 'owned, and from then on the program alone
+  ;; decides where entries go -- the default never restarts by itself.
+  ;;
+  ;; The default exists because the alternative was an unbounded queue
+  ;; by omission: with no flusher started, entries -- uncaught errors
+  ;; included -- accumulated in memory for the life of the process and
+  ;; were written nowhere. That is the unbounded-mailbox failure the
+  ;; channels are bounded to avoid, reached by NOT configuring
+  ;; something, and the errors it hid were the ones most worth seeing.
+  (define %flow-log-mode (box 'auto))
+
+  ;; #t while the running flush thread is the default printer, so a
+  ;; program that takes the log over can stop it.
+  (define %flow-log-default-running? (box #f))
+
+  (define %flow-log-default-period 0.1)
+
   (define (flow-log sexp)
-    (flow-box-cons! (%flow-log-ensure-box!) (cons (%flow-log-now) sexp)))
+    (flow-box-cons! (%flow-log-ensure-box!) (cons (%flow-log-now) sexp))
+    ;; One unbox on the hot path; the CAS and the fork happen once per
+    ;; process. The entry is consed first, so the printer's first drain
+    ;; sees it.
+    (when (and (eq? (unbox %flow-log-mode) 'auto)
+               (box-cas! %flow-log-mode 'auto 'default))
+      (%flow-log-start-thread! %flow-log-default-period
+                               (current-error-port) #t)))
+
+  ;; The program has said where its entries go, so stop the default
+  ;; printer if it runs. Its stop does a final drain-and-write, so
+  ;; entries logged before this were printed, not dropped.
+  (define (%flow-log-take-over!)
+    (set-box! %flow-log-mode 'owned)
+    (when (unbox %flow-log-default-running?)
+      (%flow-log-stop-thread!)))
 
   ;; Every pending entry: oldest-first within each thread's own box,
   ;; boxes in registration order rather than globally sorted — a caller
@@ -294,7 +332,16 @@
   ;; reversing a snapshot IS registration order. It used to be drained
   ;; and re-consed, which flipped the order on every call and made the
   ;; documented order true only on alternate drains.
+  ;;
+  ;; A program that drains the log has taken it over, so this also
+  ;; stops the default printer -- see %flow-log-mode.
   (define (flow-log-drain!)
+    (%flow-log-take-over!)
+    (%flow-log-drain-all!))
+
+  ;; The drain itself, for the flush thread, which must not take the
+  ;; log over from itself.
+  (define (%flow-log-drain-all!)
     (let ((boxes (reverse (unbox %flow-log-registry))))
       (apply append (map (lambda (b) (reverse (flow-box-drain! b))) boxes))))
 
@@ -339,33 +386,43 @@
                    (and (output-port? sink) (textual-port? sink)))
          (error 'flow-log-start!
                 "sink must be a textual output port or a procedure" sink))
-       (when (box-cas! %flow-log-stopped? #t #f)
-         (set-box! %flow-log-stop-requested? #f)
-         (let ((ticks (fxmax 1 (exact (round (/ period-seconds
-                                                %flow-log-poll-interval))))))
-           (fork-thread
-            (lambda ()
-              (let lp ()
-                ;; Re-check the stop flag at the poll interval rather
-                ;; than only at a period boundary, so flow-log-stop! is
-                ;; prompt even when the period is long.
-                (let wait ((n 0))
-                  (unless (or (unbox %flow-log-stop-requested?) (fx>=? n ticks))
-                    (sleep (make-time 'time-duration
-                                      (exact (round (* %flow-log-poll-interval
-                                                       1000000000)))
-                                      0))
-                    (wait (fx+ n 1))))
-                (if (and (%flow-log-flush!
-                          (if (procedure? sink)
-                              (lambda (entries)
-                                (unless (null? entries) (sink entries)))
-                              (lambda (entries)
-                                (%flow-log-write! entries sink))))
-                         (not (unbox %flow-log-stop-requested?)))
-                    (lp)
-                    (set-box! %flow-log-stopped? #t)))))))
-       (void))))
+       ;; An explicit start replaces the default printer rather than
+       ;; being refused by it.
+       (%flow-log-take-over!)
+       (%flow-log-start-thread! period-seconds sink #f))))
+
+  ;; DEFAULT? marks the default printer, which a take-over stops.
+  (define (%flow-log-start-thread! period-seconds sink default?)
+    (when (box-cas! %flow-log-stopped? #t #f)
+      (set-box! %flow-log-stop-requested? #f)
+      (set-box! %flow-log-default-running? default?)
+      (let ((ticks (fxmax 1 (exact (round (/ period-seconds
+                                             %flow-log-poll-interval))))))
+        (fork-thread
+         (lambda ()
+           (let lp ()
+             ;; Re-check the stop flag at the poll interval rather
+             ;; than only at a period boundary, so flow-log-stop! is
+             ;; prompt even when the period is long.
+             (let wait ((n 0))
+               (unless (or (unbox %flow-log-stop-requested?) (fx>=? n ticks))
+                 (sleep (make-time 'time-duration
+                                   (exact (round (* %flow-log-poll-interval
+                                                    1000000000)))
+                                   0))
+                 (wait (fx+ n 1))))
+             (if (and (%flow-log-flush!
+                       (if (procedure? sink)
+                           (lambda (entries)
+                             (unless (null? entries) (sink entries)))
+                           (lambda (entries)
+                             (%flow-log-write! entries sink))))
+                      (not (unbox %flow-log-stop-requested?)))
+                 (lp)
+                 (begin
+                   (set-box! %flow-log-default-running? #f)
+                   (set-box! %flow-log-stopped? #t))))))))
+    (void))
 
   ;; One drain-and-write, #f when the write raised. A port that fails
   ;; (a full disk, a closed pipe) used to kill the flush thread before
@@ -375,7 +432,7 @@
   ;; into the log, followed by a (flow2 log-flush-raised CONDITION)
   ;; entry, so a drain or the next flusher still sees all of it.
   (define (%flow-log-flush! write!)
-    (let ((entries (flow-log-drain!)))
+    (let ((entries (%flow-log-drain-all!)))
       (guard (ex (#t (let ((b (%flow-log-ensure-box!)))
                        (for-each (lambda (entry) (flow-box-cons! b entry))
                                  entries)
@@ -388,7 +445,14 @@
   ;; Blocks the caller until the flush thread has done one final
   ;; drain-and-write and exited, so nothing logged before the stop
   ;; request is lost on shutdown.
+  ;;
+  ;; After it the log is the program's: entries accumulate until it
+  ;; drains them or starts a flusher -- see %flow-log-mode.
   (define (flow-log-stop!)
+    (set-box! %flow-log-mode 'owned)
+    (%flow-log-stop-thread!))
+
+  (define (%flow-log-stop-thread!)
     (set-box! %flow-log-stop-requested? #t)
     (let wait ()
       (unless (unbox %flow-log-stopped?)
