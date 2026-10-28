@@ -160,7 +160,13 @@
    ;; the default printer
    ~check-flow2-000/log-prints-to-stderr-by-default
    ~check-flow2-000/a-procedure-sink-runs-on-the-loop
-   ~check-flow2-000/a-raising-procedure-sink-keeps-its-batch)
+   ~check-flow2-000/a-raising-procedure-sink-keeps-its-batch
+
+   ;; seventh adverse pass
+   ~check-flow2-002/a-dead-runs-getter-takes-nothing
+   ~check-flow2-002/priming-between-runs-is-not-eaten
+   ~check-flow2-002/a-dead-runs-putter-pushes-nothing
+   ~check-flow2-013/a-dead-runs-latch-waiter-stays-dead)
 
   (import (chezscheme)
           (letloop r999)
@@ -695,7 +701,7 @@
   ;; live count is guarded by the mutex rather than CAS'd because the
   ;; shutdown join needs a condition variable anyway.
   (define-record-type* <flow2-pool>
-    (make-flow-pool% eventfd buffer spawns mutex gone live running?)
+    (make-flow-pool% eventfd buffer spawns mutex gone live running? alive)
     %flow-pool?
     (eventfd  %pool-eventfd)
     (buffer   %pool-buffer)
@@ -703,7 +709,9 @@
     (mutex    %pool-mutex)
     (gone     %pool-gone)
     (live     %pool-live     %pool-live!)
-    (running? %pool-running? %pool-running?!))
+    (running? %pool-running? %pool-running?!)
+    ;; The token a compute thread's waits carry; see %flow-waiter-token.
+    (alive    %pool-alive))
 
   ;; This run's pool on threads forked by flow-run's compute pool, #f
   ;; on the loop thread — so it doubles as the am-I-on-a-worker test.
@@ -782,6 +790,34 @@
   ;; view a straggler is a thread flow2 does not own, so it is refused
   ;; like one.
   (define %flow-pool-current (box #f))
+
+  ;; Which run a parked wait belongs to. A channel or a latch outlives
+  ;; the run that parked a fiber on it, and the wait used to outlive it
+  ;; too: flow-stop leaves parked fibers "never resumed", but their
+  ;; getter, putter and latch entries stayed on the shared object
+  ;; marked waiting. A put in the NEXT run then popped a dead run's
+  ;; getter and resumed that fiber inside the new loop -- the value
+  ;; went to a fiber of a finished run, and the new run's reader waited
+  ;; for it -- and a put between runs, which priming a channel is,
+  ;; handed the value to a continuation the next loop-new threw away.
+  ;; A dead putter, woken by a dequeue, pushed a stale value into the
+  ;; new run's channel.
+  ;;
+  ;; So every wait carries a token, a box that is #t while its run can
+  ;; still resume it, and a deliverer treats a wait whose token is #f
+  ;; as gone. A fiber's token dies when its loop stops. A compute
+  ;; thread's is its pool's, and dies once the pool has been joined --
+  ;; not before, or the shutdown's stop sentinel would skip the very
+  ;; workers it is for -- so a straggler's waits are dead from then on
+  ;; and it cannot take a value meant for the next run.
+  (define %flow-dead-token (box #f))
+
+  ;; The token of the run in progress, the dead token outside one.
+  (define %flow-loop-token (box %flow-dead-token))
+
+  (define (%flow-waiter-token)
+    (let ((pool (%worker-current?)))
+      (if pool (%pool-alive pool) (unbox %flow-loop-token))))
 
   ;; Outside a run there is no loop to corrupt and nothing to check:
   ;; flow-put! on a channel before flow-run is a legitimate way to
@@ -1186,9 +1222,10 @@
   ;; perform may still win the underlying state CAS, which is why
   ;; %channel-put! rechecks resume's own return value).
   (define-record-type* <flow2-getter>
-    (make-flow-getter state resume claimed)
+    (make-flow-getter state resume claimed token)
     flow-getter?
     (state   flow-getter-state)
+    (token   flow-getter-token)
     (resume  flow-getter-resume)
     (claimed flow-getter-claimed))
 
@@ -1200,6 +1237,9 @@
        ((null? getters)
         (flow-channel-getters! channel (reverse kept))
         #f)
+       ((not (unbox (flow-getter-token (car getters))))
+        ;; its run is over; see %flow-waiter-token
+        (loop (cdr getters) kept))
        ((and (eq? (unbox (flow-getter-state (car getters))) 'waiting)
              (box-cas! (flow-getter-claimed (car getters)) #f #t))
         (flow-channel-getters! channel
@@ -1253,7 +1293,9 @@
                              (flow-channel-space! channel (cdr waiters))
                              (car waiters))))))))
         (when waiter
-          (unless ((cdr waiter) #t)
+          ;; a dead run's putter is skipped, not woken: woken, it
+          ;; would push its stale value into this run's channel
+          (unless (and (unbox (cddr waiter)) ((cadr waiter) #t))
             (again))))))
 
   (define (%channel-remove-space! channel waiter)
@@ -1344,7 +1386,7 @@
                     (and (%channel-room? channel)
                          (lambda () #t))))
                 (lambda (state resume register-cancel!)
-                  (let ((waiter (cons state resume)))
+                  (let ((waiter (cons* state resume (%flow-waiter-token))))
                     ;; Armed before the waiter is reachable, with the
                     ;; recheck below closing the rest of the window —
                     ;; same discipline as flow-get's getter entry, and
@@ -1429,7 +1471,8 @@
                            (%channel-wake-space! channel)
                            (lambda () (car value))))))
                 (lambda (state resume register-cancel!)
-                  (let ((entry (make-flow-getter state resume (box #f))))
+                  (let ((entry (make-flow-getter state resume (box #f)
+                                                 (%flow-waiter-token))))
                     ;; Armed BEFORE the entry is reachable, and the
                     ;; recheck below closes the remaining window. Without
                     ;; a cancel at all, a get that loses a choice leaves
@@ -1545,12 +1588,14 @@
              ;; resume that reports #f lost to another base of its own
              ;; choice, and since a latch wait consumes nothing there is
              ;; nothing to put back.
-             (for-each (lambda (resume) (resume value)) waiters)
+             (for-each (lambda (waiter)
+                         (when (unbox (cdr waiter)) ((car waiter) value)))
+                       waiters)
              #t))))
 
-  (define (%latch-remove-waiter! latch resume)
+  (define (%latch-remove-waiter! latch waiter)
     (with-mutex (flow-latch-mutex latch)
-      (flow-latch-waiters! latch (remq resume (flow-latch-waiters latch)))))
+      (flow-latch-waiters! latch (remq waiter (flow-latch-waiters latch)))))
 
   (define (flow-latch-wait latch)
     (make-flow% 'base (cons 'flow2-latch latch)
@@ -1561,6 +1606,7 @@
                     (and (not (eq? value %flow-latch-unfired))
                          (lambda () value))))
                 (lambda (state resume register-cancel!)
+                  (define waiter (cons resume (%flow-waiter-token)))
                   ;; Armed before the waiter is reachable, with the
                   ;; recheck below closing the rest of the window --
                   ;; flow-get's discipline, for flow-get's reason: a
@@ -1568,7 +1614,7 @@
                   ;; pinning its continuation until the latch fires,
                   ;; which for a stop latch may be never.
                   (register-cancel!
-                   (lambda () (%latch-remove-waiter! latch resume)))
+                   (lambda () (%latch-remove-waiter! latch waiter)))
                   (let ((value
                          (with-mutex (flow-latch-mutex latch)
                            (let ((value (flow-latch-value latch)))
@@ -1576,11 +1622,11 @@
                                (flow-latch-waiters!
                                 latch
                                 (append (flow-latch-waiters latch)
-                                        (list resume))))
+                                        (list waiter))))
                              value))))
                     (if (eq? value %flow-latch-unfired)
                         (unless (eq? (unbox state) 'waiting)
-                          (%latch-remove-waiter! latch resume))
+                          (%latch-remove-waiter! latch waiter))
                         (resume value))))))
 
   (define (flow-latch-wait! latch)
@@ -2203,6 +2249,7 @@
        ;; -- eventfd creation refused for want of descriptors, say --
        ;; used to leave it set, and every flow2 call from another thread
        ;; then raised wrong-thread against a run that did not exist.
+       (set-box! %flow-loop-token (box #t))
        (let ((pool #f) (channels '()))
          (guard (ex (#t (%flow-run-release! pool channels) (raise ex)))
            (loop-new)
@@ -2224,7 +2271,7 @@
                (foreign-set! 'unsigned-64 buffer 8 0)
                (set! pool (make-flow-pool% fd buffer (box '())
                                            (make-mutex) (make-condition)
-                                           0 #t))))
+                                           0 #t (box #t)))))
            (when pool
              (set-box! %flow-pool-current pool)
              (loop-spawn (lambda () (%collector pool)))
@@ -2264,9 +2311,17 @@
   ;; on its way out is still recognised as this run's rather than as a
   ;; stray thread. A straggler that outlives the join is recognised as
   ;; nobody's from the next run on.
+  ;;
+  ;; The loop's waits die first: nothing will resume them now, and a
+  ;; worker finishing its task during the join must queue its reply,
+  ;; not hand it to a fiber that is gone. The pool's die after the
+  ;; join, which is why the stop sentinel still reaches the workers.
   (define (%flow-run-release! pool channels)
+    (set-box! (unbox %flow-loop-token) #f)
+    (set-box! %flow-loop-token %flow-dead-token)
     (when pool
-      (%flow-shutdown-pool! pool channels))
+      (%flow-shutdown-pool! pool channels)
+      (set-box! (%pool-alive pool) #f))
     (set-box! %flow-pool-current #f)
     (set-box! %flow-loop-thread #f))
 

@@ -2581,3 +2581,92 @@
                     sexps)))
   #t)
 
+;;------------------------------------------------------------
+;; Seventh adverse pass
+;;------------------------------------------------------------
+
+;; A channel outlives the run that parked a fiber on it. The fiber's
+;; getter used to stay on the channel marked waiting, so a put in the
+;; next run handed the value to it and resumed run 1's fiber inside
+;; run 2, while run 2's reader found the channel empty.
+(define (~check-flow2-002/a-dead-runs-getter-takes-nothing)
+  (define ch (make-flow-channel 'shared))
+  (define run1-got 'never)
+  (define run2-got 'not-set)
+  (flow-run
+   (lambda (_)
+     (flow-spawn (lambda () (set! run1-got (flow-get! ch))))
+     (flow-sleep 0.01)
+     (flow-stop)))
+  (flow-run
+   (lambda (_)
+     (flow-put! ch 'for-run-2)
+     (flow-sleep 0.01)
+     (set! run2-got (flow-get-try ch 'empty))
+     (flow-stop)))
+  (assert (eq? run2-got 'for-run-2))
+  (assert (eq? run1-got 'never))
+  #t)
+
+;; Priming a channel between runs is documented as legitimate, and the
+;; put used to go to the previous run's dead getter instead of the
+;; queue.
+(define (~check-flow2-002/priming-between-runs-is-not-eaten)
+  (define ch (make-flow-channel 'primed))
+  (define got 'not-set)
+  (flow-run
+   (lambda (_)
+     (flow-spawn (lambda () (flow-get! ch)))
+     (flow-sleep 0.01)
+     (flow-stop)))
+  (flow-put! ch 'primed)
+  (assert (= 1 (flow-channel-queue-length ch)))
+  (flow-run
+   (lambda (_)
+     (set! got (flow-get-try ch 'empty))
+     (flow-stop)))
+  (assert (eq? got 'primed))
+  #t)
+
+;; A putter parked on a full channel when its run stopped used to be
+;; woken by the next run's dequeue and push its stale value in.
+(define (~check-flow2-002/a-dead-runs-putter-pushes-nothing)
+  (define ch (make-flow-channel 'full 1))
+  (define seen '())
+  (flow-run
+   (lambda (_)
+     (flow-put! ch 'run-1-first)
+     (flow-spawn (lambda () (flow-put! ch 'run-1-stale)))
+     (flow-sleep 0.01)
+     (flow-stop)))
+  (assert (= 1 (flow-channel-space-length ch)))
+  (flow-run
+   (lambda (_)
+     (set! seen (list (flow-get! ch)))
+     (flow-sleep 0.01)
+     (set! seen (cons (flow-get-try ch 'empty) seen))
+     (flow-stop)))
+  (assert (equal? seen '(empty run-1-first)))
+  #t)
+
+;; Same for a latch: firing it in run 2 used to resume run 1's waiter
+;; inside run 2.
+(define (~check-flow2-013/a-dead-runs-latch-waiter-stays-dead)
+  (define latch (make-flow-latch))
+  (define run1-woke #f)
+  (define run2-got 'not-set)
+  (flow-run
+   (lambda (_)
+     (flow-spawn (lambda () (flow-latch-wait! latch) (set! run1-woke #t)))
+     (flow-sleep 0.01)
+     (flow-stop)))
+  (flow-run
+   (lambda (_)
+     (flow-latch-fire! latch 'go)
+     (set! run2-got (flow-latch-wait! latch))
+     (flow-sleep 0.01)
+     (flow-stop)))
+  (assert (eq? run2-got 'go))
+  (assert (not run1-woke))
+  #t)
+

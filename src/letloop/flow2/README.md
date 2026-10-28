@@ -9,7 +9,7 @@ Amirouche A. BOUBEKKI
 ## Status
 
 `(letloop flow2)` is **implemented**, in `src/letloop/flow2.scm`, with
-73 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
+77 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
 `(letloop flow)` stays untouched and keeps serving its current ones.
 
 This document began as a draft specification and is now the library's
@@ -443,7 +443,12 @@ Stops the loop; `flow-run` then returns. Main thread only.
 
 Fibers still parked when the loop stops are simply never resumed —
 `flow-stop` is a shutdown, not a cancellation, and there is no
-`stopped` error symbol. A program that wants cleanup to run at
+`stopped` error symbol. Their waits die with the run: a channel or
+latch they were parked on may outlive it, and a value put on it later
+— between runs, or in the next one — goes to the queue or to a live
+waiter, never to a fiber of a finished run. A compute thread's waits
+die once the pool is joined, so a straggler cannot take a value meant
+for the next run either. A program that wants cleanup to run at
 shutdown tells its fibers to finish — a stop latch they include in
 their choices — waits for them to say they have, then stops.
 
