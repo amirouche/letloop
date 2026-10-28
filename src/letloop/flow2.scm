@@ -167,7 +167,8 @@
    ~check-flow2-002/priming-between-runs-is-not-eaten
    ~check-flow2-002/a-dead-runs-putter-pushes-nothing
    ~check-flow2-013/a-dead-runs-latch-waiter-stays-dead
-   ~check-flow2-005/flow-stop-does-not-run-queued-tasks)
+   ~check-flow2-005/flow-stop-does-not-run-queued-tasks
+   ~check-flow2-006/a-failure-losing-a-race-is-not-an-eof)
 
   (import (chezscheme)
           (letloop r999)
@@ -1838,10 +1839,27 @@
           (bv (loop-buf-data-take! (%flow-recv-id r))))
       (%flow-recv-owner! r #f)
       (cond
-       ((fx<? res 0) (when owner (owner #f)))
+       ((fx<? res 0)
+        ;; A failure nobody took is kept, like data: it is NOT
+        ;; level-triggered. Linux reports a socket error such as
+        ;; ECONNRESET once and clears it, and the next recv returns 0,
+        ;; so a failure dropped here reached the next reader as a clean
+        ;; EOF -- the confusion flow-read's three results exist to
+        ;; prevent. -ECANCELED is the exception: it means the fd is
+        ;; closing, loop-close-prep! has already purged its backlog,
+        ;; and a marker left now would greet whatever reopens the
+        ;; number.
+        (unless (or (and owner (owner #f))
+                    (fx=? res (fx- 0 %flow-ecanceled)))
+          (loop-recv-backlog-put! fd %flow-recv-failed)))
        ((fxzero? res) (when owner (owner #t)))
        ((not (and owner (owner bv)))
         (loop-recv-backlog-put! fd bv)))))
+
+  (define %flow-ecanceled 125)
+
+  ;; On a backlog, a failed recv nobody took; see %flow-recv-complete!.
+  (define %flow-recv-failed (list 'recv-failed))
 
   (define flow-read
     (lambda (fd)
@@ -1849,7 +1867,10 @@
                   (lambda (x) x)
                   (lambda ()
                     (let ((bv (loop-recv-backlog-take! fd)))
-                      (and bv (lambda () bv))))
+                      (and bv
+                           (if (eq? bv %flow-recv-failed)
+                               (lambda () #f)
+                               (lambda () bv)))))
                   (lambda (state resume register-cancel!)
                     (let ((r (or (%flow-recv-adopt! fd)
                                  (%flow-recv-submit! fd))))

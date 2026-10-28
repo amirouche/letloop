@@ -9,7 +9,7 @@ Amirouche A. BOUBEKKI
 ## Status
 
 `(letloop flow2)` is **implemented**, in `src/letloop/flow2.scm`, with
-78 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
+79 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
 `(letloop flow)` stays untouched and keeps serving its current ones.
 
 This document began as a draft specification and is now the library's
@@ -678,8 +678,12 @@ takes it over rather than submitting a second one, so bytes arrive in
 the order the kernel took them off the socket. A recv that completes
 while nobody is reading — including in the same tick the winner
 completed — keeps its payload on a per-fd backlog that the next
-`flow-read` takes first. The backlog and any recv left in flight are
-discarded with the fd, on close.
+`flow-read` takes first. A recv that *fails* while nobody is reading
+is kept the same way, and the next `flow-read` reports `#f`: a socket
+error such as a reset is reported once by the kernel, and the recv
+after it returns `0`, so dropping it turned the error into a clean EOF.
+The backlog and any recv left in flight are discarded with the fd, on
+close.
 
 #### `(flow-write fd bytevector [start])`
 

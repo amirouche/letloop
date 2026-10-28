@@ -2703,3 +2703,64 @@
                            (flow-log-drain!))))))
   #t)
 
+;; A recv that fails while its read is losing a choice. The failure used
+;; to be dropped on the theory that it is level-triggered like EOF, but
+;; Linux reports ECONNRESET once and the next recv returns 0: the reader
+;; saw a clean EOF (#t) where the peer had reset the connection. Same
+;; forcing as read-losing-a-same-tick-race-keeps-its-bytes: the peer
+;; resets inside the window, with the loop held busy, so the timeout and
+;; the failed recv complete in one tick.
+(define %flow2-check-setsockopt
+  (foreign-procedure "setsockopt" (int int int u8* int) int))
+(define %flow2-check-close (foreign-procedure "close" (int) int))
+
+(define (flow2-check-reset! fd)
+  ;; struct linger { int l_onoff = 1; int l_linger = 0; }: close sends RST
+  (let ((linger (make-bytevector 8 0)))
+    (bytevector-s32-native-set! linger 0 1)
+    (%flow2-check-setsockopt fd 1 13 linger 8)  ; SOL_SOCKET, SO_LINGER
+    (%flow2-check-close fd)))
+
+(define (~check-flow2-006/a-failure-losing-a-race-is-not-an-eof)
+  (define PORT 18252)
+  (define first-race 'not-set)
+  (define second-read 'not-set)
+  (flow-run
+   (lambda (workers)
+     (let ((listen-fd (loop-socket-new AF-INET SOCK-STREAM 0)))
+       (loop-bind listen-fd "127.0.0.1" PORT)
+       (loop-listen listen-fd 128)
+       (flow-spawn
+        (lambda ()
+          (guard (ex (#t (set! second-read 'raised)))
+            (let ((client (flow-perform (flow-accept listen-fd))))
+              (set! first-race
+                    (flow-perform
+                     (flow-choice
+                      (flow-wrap (flow-read client) (lambda (x) (list 'read x)))
+                      (flow-wrap (flow-timeout 0.05) (lambda (x) 'timeout)))))
+              (set! second-read
+                    (flow-perform
+                     (flow-choice
+                      (flow-wrap (flow-read client) (lambda (x) (list 'read x)))
+                      (flow-wrap (flow-timeout 0.5) (lambda (x) 'timeout)))))
+              (loop-close client)))
+          (loop-close listen-fd)
+          (flow-stop)))
+       (flow-spawn
+        (lambda ()
+          (call-with-values (lambda () (make-sockaddr-in 127 0 0 1 PORT))
+            (lambda (addr addrlen)
+              (let ((fd (loop-connect addr addrlen)))
+                (foreign-free addr)
+                (flow-sleep 0.01)
+                (let ((t0 (real-time)))
+                  (flow2-check-spin-until (+ t0 70))
+                  (flow2-check-reset! fd)
+                  (flow2-check-spin-until (+ t0 100)))))))))))
+  ;; the reset is reported as a failure exactly once, and never as EOF
+  (assert (not (equal? first-race '(read #t))))
+  (assert (not (equal? second-read '(read #t))))
+  (assert (or (equal? first-race '(read #f)) (equal? second-read '(read #f))))
+  #t)
+
