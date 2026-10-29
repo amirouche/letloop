@@ -116,12 +116,11 @@
 ;; completion for a response nobody will ever receive.
 ;;
 ;; Backed by a box (box-cas!), not a plain mutable field: a DISPATCH
-;; implementation is free to run its fan-out via flow-worker-call on a
-;; real OS thread (a downstream search handler's query dispatch does
-;; exactly this), so NEEDED? is genuinely read and written across threads --
-;; matching the box/box-cas! discipline this codebase already uses
-;; everywhere else two threads touch shared state (e.g.
-;; flow-channel-entry-claimed).
+;; implementation is free to run its fan-out on another OS thread (a
+;; downstream search handler's query dispatch does exactly this), so
+;; NEEDED? is genuinely read and written across threads -- matching the
+;; box/box-cas! discipline this codebase uses everywhere else two
+;; threads touch shared state.
 (define-record-type request-context
   (fields needed-box))
 
@@ -236,6 +235,50 @@
        (lambda ()
          (if done (eof-object) (begin (set! done #t) body-bv)))))))
 
+;; One request's DISPATCH result, as a flow2 event: written once by the
+;; dispatch fiber, performed by the connection fiber racing it. Both
+;; are fibers on the loop thread, so this needs none of what a flow2
+;; channel pays for crossing threads -- a mutex, taken five or six
+;; times per request, and two waiter lists; a channel here cost ~10% of
+;; throughput against (letloop flow). A vector: delivered?, the value,
+;; and the resume of the perform parked on it.
+(define (%result-new) (vector #f #f #f))
+
+(define (%result-deliver! cell value)
+  (vector-set! cell 0 #t)
+  (vector-set! cell 1 value)
+  (let ((resume (vector-ref cell 2)))
+    (vector-set! cell 2 #f)
+    ;; a resume that reports #f lost its race; nothing else wants this
+    (when resume (resume value))))
+
+(define (%result-event cell)
+  (make-flow (lambda (x) x)
+             (lambda ()
+               (and (vector-ref cell 0)
+                    (let ((value (vector-ref cell 1)))
+                      (lambda () value))))
+             (lambda (state resume register-cancel!)
+               (vector-set! cell 2 resume)
+               (register-cancel!
+                (lambda ()
+                  (when (eq? (vector-ref cell 2) resume)
+                    (vector-set! cell 2 #f)))))))
+
+;; Run THUNK as a fiber, before the calling fiber continues: the caller
+;; parks and both are queued for the next tick, THUNK last so that it
+;; runs first (loop-spawn conses; loop-run-once walks the list front to
+;; back). Ring-layer primitives, as loop-read is: flow2 has no yield,
+;; and a (flow-sleep 0) would arm a timeout to get one. flow-spawn
+;; cannot be used for THUNK, since it would queue THUNK a tick later
+;; still, after the caller; so THUNK must catch its own errors, as the
+;; dispatch thunk does.
+(define (%run-first thunk)
+  (loop-abort
+   (lambda (k)
+     (loop-spawn (lambda () (k #t)))
+     (loop-spawn thunk))))
+
 (define handle-connection
   (lambda (application context dispatch peer-ip read write close fd)
     (define request-state #f)
@@ -244,67 +287,23 @@
 
     (define done? #f)
 
-    ;; The connection's own read event, for the dispatch race below.
-    ;; (letloop flow)'s flow-read cancels a recv that loses its choice,
-    ;; and a recv that completed with data in the same tick its race was
-    ;; lost had nobody to give the bytes to: they were dropped, and the
-    ;; next request's read waited for bytes already taken off the
-    ;; socket until the idle reaper killed the connection. Here a losing
-    ;; read cancels nothing: its recv stays in flight, a result nobody
-    ;; takes is kept, and the connection's next read -- in the race or
-    ;; in handle-loop -- takes the kept result or the recv in flight
-    ;; before it submits another, so bytes come back in the order the
-    ;; kernel took them. The recv is registered with loop-fd-op-add!,
-    ;; so a close resumes it with -ECANCELED like any loop-read.
-    (define recv-id #f)        ; our recv in flight, or #f
-    (define recv-owner #f)     ; the resume waiting on it, or #f
-    (define recv-kept '())     ; results nobody took, oldest first
+    ;; Bytes that arrive through flow-read, in the dispatch race or
+    ;; after it, count as activity for the idle reaper, as loop-read's
+    ;; do on their own.
+    (define (note-activity! data)
+      (when (bytevector? data)
+        (hashtable-set! (loop-active-connections) fd (jiffy-current)))
+      data)
 
-    (define (recv-submit!)
-      (let* ((sqe (loop-get-sqe (loop-ring (loop-current))))
-             (id (loop-alloc-id!)))
-        (io-uring-prep-recv sqe fd 0 (loop-buf-ring-buf-size) 0)
-        (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
-        (io-uring-sqe-set-buf-group sqe (loop-buf-ring-bgid))
-        (io-uring-sqe-set-data64 sqe id)
-        (loop-fd-op-add! fd id)
-        (hashtable-set! (loop-handlers (loop-current)) id
-          (lambda (res)
-            (loop-fd-op-remove! fd id)
-            (set! recv-id #f)
-            (let ((result (cond
-                            ((fx<? res 0) (loop-buf-data-take! id) #f)
-                            ((fxzero? res) (loop-buf-data-take! id) #t)
-                            (else
-                             (hashtable-set! (loop-active-connections) fd
-                                             (jiffy-current))
-                             (loop-buf-data-take! id))))
-                  (owner recv-owner))
-              (set! recv-owner #f)
-              (unless (and owner (owner result))
-                (set! recv-kept (append recv-kept (list result)))))))
-        (set! recv-id id)))
-
-    (define (connection-read-event)
-      (make-flow (lambda (x) x)
-                 (lambda ()
-                   (and (pair? recv-kept)
-                        (let ((result (car recv-kept)))
-                          (set! recv-kept (cdr recv-kept))
-                          (lambda () result))))
-                 (lambda (state resume register-cancel!)
-                   (unless recv-id (recv-submit!))
-                   (set! recv-owner resume)
-                   (register-cancel!
-                    (lambda ()
-                      (when (eq? recv-owner resume)
-                        (set! recv-owner #f)))))))
-
-    ;; handle-loop's read: the plain loop-read, unless the race left a
-    ;; result or a recv behind, which come first.
+    ;; handle-loop's read: the ring layer's plain loop-read, which costs
+    ;; no perform -- a perform per read was measured at 19-45% of
+    ;; throughput (ec70498). The exception is a read the dispatch race
+    ;; lost: flow2 leaves its recv in flight and keeps what it receives,
+    ;; and a plain read issued meanwhile would take the next bytes
+    ;; first. While flow2 says so, read through flow-read.
     (define (connection-read)
-      (if (or (pair? recv-kept) recv-id)
-          (flow-perform (connection-read-event))
+      (if (flow-read-pending? fd)
+          (note-activity! (flow-perform (flow-read fd)))
           (read)))
 
     ;; Idempotent: also called from the guard below when the request
@@ -347,26 +346,26 @@
                   (let-values (((path params) (uri-parse/range (phr-request-buffer req) path-offset path-len)))
                     (let ((params (or params '()))
                           (rctx (request-context-make))
-                          (result-channel (make-flow-channel)))
+                          (result (%result-new)))
                       ;; DISPATCH runs as its own fiber so it can be
                       ;; raced against a timeout and against the
                       ;; connection dying, rather than blocking this
                       ;; fiber (and therefore this connection's own
                       ;; read/write activity) unconditionally until it
-                      ;; returns. flow-put-try, not flow-put!: if
-                      ;; nobody is listening on result-channel anymore
-                      ;; (the race below already resolved via timeout
-                      ;; or a dead connection), a blocking put would
-                      ;; park this fiber forever waiting for a
-                      ;; rendezvous that will never come -- the exact
-                      ;; shape of the leak fixed in flow.scm's
-                      ;; flow-put-try/flow-get-try 2026-08-14. A
-                      ;; dropped-on-the-floor late result is fine: the
-                      ;; response it would have produced has nowhere
-                      ;; left to go.
-                      (flow-spawn
+                      ;; returns. Its one result goes in RESULT; if
+                      ;; the race below has already given up, nobody
+                      ;; reads it and both are garbage.
+                      ;;
+                      ;; It runs FIRST: this fiber yields to it, so a
+                      ;; DISPATCH that answers without suspending --
+                      ;; most of them -- has delivered before the race
+                      ;; starts, the race's poll finds RESULT ready, and
+                      ;; no recv or timeout is armed only to be torn
+                      ;; down again. Armed and torn down on every
+                      ;; request, they cost ~5% of throughput.
+                      (%run-first
                         (lambda ()
-                          (let ((result
+                          (let ((outcome
                                   (guard (exception (#t (cons 'dispatch-raised exception)))
                                     (call-with-values
                                       (lambda ()
@@ -375,7 +374,7 @@
                                       (lambda (status response-pair extra-headers)
                                         (cons 'dispatch-ok
                                               (vector status response-pair extra-headers)))))))
-                            (flow-put-try! result-channel result))))
+                            (%result-deliver! result outcome))))
                       ;; Raced against the deadline and the connection.
                       ;; A read only ends the race when it says the
                       ;; connection is gone. Bytes are the next
@@ -391,12 +390,13 @@
                        (let ((outcome
                               (flow-perform
                                 (apply flow-choice
-                                       (flow-get result-channel)
+                                       (%result-event result)
                                        (flow-timeout
                                         (max 0 (/ (- deadline (real-time)) 1000.0)))
                                        (if reading?
-                                           (list (flow-wrap (connection-read-event)
-                                                            (lambda (x) (cons 'read x))))
+                                           (list (flow-wrap (flow-read fd)
+                                                            (lambda (x)
+                                                              (cons 'read (note-activity! x)))))
                                            '())))))
                         (cond
                           ((and (pair? outcome) (eq? (car outcome) 'read)
@@ -503,75 +503,91 @@
     (let ((dispatch (%dispatch-adapt dispatch)))
       (transparent** port-number bind-address application context dispatch))))
 
+;; Idle connection reaper: closes connections with no read or write
+;; activity for %idle-timeout-seconds, sweeping every
+;; %idle-sweep-interval.
+(define (%idle-reaper)
+  (let reap ()
+    (when (loop-running? (loop-current))
+      (flow-sleep %idle-sweep-interval)
+      (let ((now (jiffy-current))
+            (timeout-ns (* %idle-timeout-seconds (expt 10 9))))
+        (let-values (((fds jiffies) (hashtable-entries (loop-active-connections))))
+          (vector-for-each
+            (lambda (fd last-active)
+              (when (> (- now last-active) timeout-ns)
+                (loop-close fd)))
+            fds jiffies)))
+      (reap))))
+
+;; APPLICATION failing must end the PROCESS, not just the fiber that
+;; called it: a fiber that dies is logged and the loop moves on, and the
+;; idle reaper keeps loop-running? true forever -- a process supervisor
+;; (systemd's Restart=on-failure, for instance) only acts on an actual
+;; exit, so an application that never finishes building would otherwise
+;; sit there indefinitely, reporting healthy while nothing is listening
+;; on PORT-NUMBER at all. Found live: a transient DNS failure right at
+;; boot (systemd started this before resolution was actually usable,
+;; despite ordering after network-online.target) killed application-
+;; build, and the process then "ran" for 18 minutes doing nothing before
+;; anyone noticed.
+(define (%build-application application)
+  (guard (ex (else
+               (let ((port (current-error-port)))
+                 (display "transparent: application failed to build, exiting: " port)
+                 (if (condition? ex) (display-condition ex port) (display ex port))
+                 (newline port)
+                 (flush-output-port port))
+               (exit 1)))
+    (application)))
+
+;; Accept until the loop stops, one fiber per connection.
+(define (%accept-loop bind-address port-number app-state context dispatch)
+  (call-with-values (lambda () (loop-tcp-serve bind-address port-number))
+    (lambda (accept close)
+      (format #t "transparent server at http://~a:~a/\n" bind-address port-number)
+      (flush-output-port)
+      (let loop ()
+        (when (loop-running? (loop-current))
+          (guard (ex (else (void)))
+            (call-with-values accept
+              (lambda (read write close peer-ip fd)
+                (when (and read write close)
+                  (flow-spawn
+                    (lambda ()
+                      (handle-connection app-state context dispatch
+                                         peer-ip read write close fd)))))))
+          (loop))))))
+
 (define transparent**
   (lambda (port-number bind-address application context dispatch)
-    (loop-new)
-    ;; SIGINT/SIGTERM → graceful shutdown
+    ;; SIGINT/SIGTERM → graceful shutdown. Chez runs the handler on the
+    ;; main thread, which is the loop thread for the whole run, so it
+    ;; may call flow-stop; the test keeps a signal that lands before
+    ;; the run or after it from stopping a loop that is not running.
     (register-signal-handler 2  ;; SIGINT
       (lambda (sig)
         (when (and (loop-current) (loop-running? (loop-current)))
           (format #t "\nReceived SIGINT, shutting down...\n")
           (flush-output-port)
-          (loop-stop))))
+          (flow-stop))))
     (register-signal-handler 15 ;; SIGTERM
       (lambda (sig)
         (when (and (loop-current) (loop-running? (loop-current)))
           (format #t "\nReceived SIGTERM, shutting down...\n")
           (flush-output-port)
-          (loop-stop))))
-    ;; Idle connection reaper — closes connections with no activity
-    (loop-spawn
-      (lambda ()
-        (let reap ()
-          (when (loop-running? (loop-current))
-            (loop-sleep %idle-sweep-interval)
-            (let ((now (jiffy-current))
-                  (timeout-ns (* %idle-timeout-seconds (expt 10 9))))
-              (let-values (((fds jiffies) (hashtable-entries (loop-active-connections))))
-                (vector-for-each
-                  (lambda (fd last-active)
-                    (when (> (- now last-active) timeout-ns)
-                      (loop-close fd)))
-                  fds jiffies)))
-            (reap)))))
-    (loop-spawn
-      (lambda ()
-        ;; APPLICATION failing here must end the PROCESS, not just
-        ;; this fiber: the loop's own generic fiber-failure handler
-        ;; prints "fiber died" and moves on, and every other fiber
-        ;; already spawned above (the idle reaper, in particular)
-        ;; keeps loop-running? true forever -- a process supervisor
-        ;; (systemd's Restart=on-failure, for instance) only acts on
-        ;; an actual exit, so an application that never finishes
-        ;; building would otherwise sit there indefinitely, reporting
-        ;; healthy while nothing is listening on PORT-NUMBER at all.
-        ;; Found live: a transient DNS failure right at boot (systemd
-        ;; started this before resolution was actually usable, despite
-        ;; ordering after network-online.target) killed application-
-        ;; build, and the process then "ran" for 18 minutes doing
-        ;; nothing before anyone noticed.
-        (define app-state
-          (guard (ex (else
-                       (let ((port (current-error-port)))
-                         (display "transparent: application failed to build, exiting: " port)
-                         (if (condition? ex) (display-condition ex port) (display ex port))
-                         (newline port)
-                         (flush-output-port port))
-                       (exit 1)))
-            (application)))
-        (call-with-values (lambda () (loop-tcp-serve bind-address port-number))
-          (lambda (accept close)
-            (format #t "transparent server at http://~a:~a/\n" bind-address port-number)
-            (flush-output-port)
-            (let loop ()
-              (when (loop-running? (loop-current))
-                (guard (ex (else (void)))
-                  (call-with-values accept
-                    (lambda (read write close peer-ip fd)
-                      (when (and read write close)
-                        (loop-spawn
-                          (lambda () (handle-connection app-state context dispatch peer-ip read write close fd)))))))
-                (loop)))))))
-    (loop-run)
-    ;; Cleanup after loop exits
-    (io-uring-queue-exit (loop-ring (loop-current)))))
+          (flow-stop))))
+    ;; flow-run owns the loop: it creates the ring, runs fiber zero --
+    ;; the reaper's spawn, then the accept loop -- and returns once a
+    ;; signal stops it. Every fiber here is a flow2 fiber, so one that
+    ;; dies on an error nothing else caught is a (flow2 uncaught fiber
+    ;; ...) log entry, printed to stderr unless the program took the
+    ;; log over. There is no io-uring-queue-exit afterwards: the ring
+    ;; is flow2's, and the next loop-new tears it down -- exiting it
+    ;; here as well freed it twice.
+    (flow-run
+     (lambda (workers)
+       (flow-spawn %idle-reaper)
+       (%accept-loop bind-address port-number
+                     (%build-application application)
+                     context dispatch)))))

@@ -61,13 +61,14 @@
           (rename (only (letloop www) www-percent-decode www-query-read)
                   (www-percent-decode percent-decode))
           (letloop liburing low)
-          ;; Per-request dispatch-timeout race only (flow-choice over
+          ;; flow2 owns the run: flow-run, the reaper and connection
+          ;; fibers, and the per-request dispatch race (flow-choice over
           ;; the dispatch-result channel, a timer, and a read on the
-          ;; connection's own fd) -- NOT the per-byte read loop, which
-          ;; is why this re-import doesn't repeat ec70498/05ab523's
-          ;; ~19-45% throughput cost: it runs once per REQUEST, not
-          ;; once per read.
-          (letloop flow))
+          ;; connection's own fd). NOT the per-byte read loop, which
+          ;; stays on the ring layer's loop-read -- a perform per read
+          ;; is what cost ec70498/05ab523 ~19-45% of throughput; the
+          ;; race runs once per REQUEST, not once per read.
+          (letloop flow2))
 
   (begin
     (include "letloop/http/server.body.scm")
