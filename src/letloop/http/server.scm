@@ -8,8 +8,10 @@
 ;; SIGINT/SIGTERM:
 ;;  - (APPLICATION) → app-wide state, once at startup
 ;;  - (CONTEXT app client req) → per-connection state, first request
-;;  - (DISPATCH app state method path params req)
+;;  - (DISPATCH app state method path params req [rctx])
 ;;      → (values status (body-bytevector . content-type) extra-headers)
+;;    RCTX, the request context below, is passed only to a DISPATCH
+;;    that takes seven arguments; a six-argument one still works.
 ;;    where the response pair usually comes from the json/html/xml/
 ;;    response helpers.
 (library (letloop http server)
@@ -46,7 +48,8 @@
           ~check-http-server-002
           ~check-http-server-003
           ~check-http-server-004
-          ~check-http-server-005)
+          ~check-http-server-005
+          ~check-http-server-006)
 
   (import (chezscheme)
           (letloop aql shims)

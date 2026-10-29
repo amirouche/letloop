@@ -391,7 +391,34 @@
     ((port-number bind-address application context dispatch)
      (transparent* port-number bind-address application context dispatch))))
 
+
+;; DISPATCH takes (app state method path params req rctx) since the
+;; request context was added, and used to take the first six. The
+;; server passed seven unconditionally, so a six-argument dispatch --
+;; benchmarks/scheme/bench-handler.scm, and any library written to the
+;; documented contract -- raised an arity error on every request, which
+;; the dispatch guard turned into a closed connection with no response
+;; and nothing logged. Decided once, at startup, from the procedure's
+;; arity: seven gets the context, six does not need it, anything else
+;; is refused before the server takes a connection.
+(define (%dispatch-adapt dispatch)
+  (let ((mask (procedure-arity-mask dispatch)))
+    (cond
+     ((logbit? 7 mask) dispatch)
+     ((logbit? 6 mask)
+      (lambda (application state method path params req rctx)
+        (dispatch application state method path params req)))
+     (else
+      (error 'transparent
+             "DISPATCH must take (app state method path params req [request-context])"
+             dispatch)))))
+
 (define transparent*
+  (lambda (port-number bind-address application context dispatch)
+    (let ((dispatch (%dispatch-adapt dispatch)))
+      (transparent** port-number bind-address application context dispatch))))
+
+(define transparent**
   (lambda (port-number bind-address application context dispatch)
     (loop-new)
     ;; SIGINT/SIGTERM → graceful shutdown
