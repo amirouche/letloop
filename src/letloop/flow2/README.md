@@ -9,7 +9,7 @@ Amirouche A. BOUBEKKI
 ## Status
 
 `(letloop flow2)` is **implemented**, in `src/letloop/flow2.scm`, with
-80 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
+81 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
 `(letloop flow)` stays untouched and keeps serving its current ones.
 
 This document began as a draft specification and is now the library's
@@ -1075,10 +1075,17 @@ and hands the *same* channels to a completer that outlives the request
 and fills the cache for the next query:
 
 ```scheme
+;; Every page still queued, newest first onto SEEN.
+(define (drain pages seen)
+  (let ((none (list 'none)))
+    (let loop ((seen seen))
+      (let ((p (flow-get-try pages none)))
+        (if (eq? p none) seen (loop (cons p seen)))))))
+
 (define (gather pages exits live seen deadline)
   (let loop ((live live) (seen seen))
     (if (zero? live)
-        (values 'complete seen)
+        (values 'complete (drain pages seen))
         (let ((ev (flow-perform
                    (apply flow-choice
                           (flow-wrap (flow-get pages) (lambda (p) (cons 'page p)))
@@ -1116,10 +1123,22 @@ and fills the cache for the next query:
             (rank-approx seen))))))
 ```
 
+The `drain` is not optional. `flow-choice` takes a *ready* event at
+random, not the one that became ready first, so when both channels
+hold values the gather can take a producer's exit before pages that
+producer put earlier. Without the drain, counting the last exit
+answered `'complete` with pages still queued — and cached a partial
+result as the full one. A producer puts its exit only after its last
+page, so once every exit is in, every page is queued, and taking what
+is left is exact. Do not count on producers yielding between pages:
+they need not.
+
 A `flow-timeout` arms when it is performed, so the remaining time is
 recomputed for every perform rather than reusing one event. Nothing
 here is cancelled: past the deadline the request stops *waiting*, not
-the work. Run by `~check-flow2-012/fan-out-gather-until-a-deadline-then-hand-off`.
+the work. Run by `~check-flow2-012/fan-out-gather-until-a-deadline-then-hand-off`
+and, with producers that put without yielding,
+`~check-flow2-012/gather-counts-every-page-before-the-last-exit`.
 
 ### Stop a fan-out
 

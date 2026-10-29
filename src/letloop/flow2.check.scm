@@ -2008,7 +2008,14 @@
   (define (gather pages exits live seen failed deadline)
     (let loop ((live live) (seen seen) (failed failed))
       (if (zero? live)
-          (list 'complete live seen failed)
+          ;; every page is queued once its producer's exit is; take
+          ;; the ones the random choice left behind
+          (let ((none (list 'none)))
+            (let drain ((seen seen))
+              (let ((p (flow-get-try pages none)))
+                (if (eq? p none)
+                    (list 'complete live seen failed)
+                    (drain (cons p seen))))))
           (let ((ev (flow-perform
                      (apply flow-choice
                             (flow-wrap (flow-get pages) (lambda (p) (cons 'page p)))
@@ -2051,6 +2058,52 @@
   (assert (eq? 'complete (car completed)))
   (assert (= 7 (length (caddr completed))))
   (assert (equal? '(broken) (cadddr completed)))
+  #t)
+
+;; flow-choice takes a READY base at random, not the one that became
+;; ready first, so a gather that counts exits can take a producer's
+;; exit while pages it put earlier are still queued. Counting the last
+;; exit then answered 'complete with pages missing -- 2 runs in 50
+;; returned all twelve with producers that put without yielding, which
+;; the check above, sleeping between pages, never produced. Every page
+;; is queued by the time its producer's exit is, so the gather drains
+;; PAGES once the last exit is in.
+(define (~check-flow2-012/gather-counts-every-page-before-the-last-exit)
+  (define (gather pages exits live seen)
+    (let loop ((live live) (seen seen))
+      (if (zero? live)
+          (let ((none (list 'none)))
+            (let drain ((seen seen))
+              (let ((p (flow-get-try pages none)))
+                (if (eq? p none) seen (drain (cons p seen))))))
+          (let ((ev (flow-perform
+                     (flow-choice
+                      (flow-wrap (flow-get pages) (lambda (p) (cons 'page p)))
+                      (flow-wrap (flow-get exits) (lambda (x) (cons 'exit x)))))))
+            (case (car ev)
+              ((page) (loop live (cons (cdr ev) seen)))
+              (else (loop (- live 1) seen)))))))
+  (define counts '())
+  (flow-run
+   (lambda (workers)
+     (let run ((i 0))
+       (when (< i 50)
+         (let ((pages (make-flow-channel 'pages))
+               (exits (make-flow-channel 'exits)))
+           (for-each (lambda (id)
+                       (flow-spawn
+                        (lambda ()
+                          (let put ((n 0))
+                            (when (< n 4)
+                              (flow-put! pages (cons id n))
+                              (put (+ n 1))))
+                          (flow-put! exits id))))
+                     '(a b c))
+           (set! counts (cons (length (gather pages exits 3 '())) counts)))
+         (run (+ i 1))))
+     (flow-stop)))
+  (assert (= 50 (length counts)))
+  (assert (for-all (lambda (n) (= n 12)) counts))
   #t)
 
 ;;------------------------------------------------------------

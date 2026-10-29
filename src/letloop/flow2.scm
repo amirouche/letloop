@@ -150,6 +150,7 @@
    ~check-flow2-012/uncaught-raise-in-a-fiber-is-logged
    ~check-flow2-012/uncaught-raise-in-a-task-is-logged
    ~check-flow2-012/fan-out-gather-until-a-deadline-then-hand-off
+   ~check-flow2-012/gather-counts-every-page-before-the-last-exit
 
    ;; latches
    ~check-flow2-013/latch-wakes-every-waiter-once
