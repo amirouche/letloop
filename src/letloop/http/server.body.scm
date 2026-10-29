@@ -244,6 +244,69 @@
 
     (define done? #f)
 
+    ;; The connection's own read event, for the dispatch race below.
+    ;; (letloop flow)'s flow-read cancels a recv that loses its choice,
+    ;; and a recv that completed with data in the same tick its race was
+    ;; lost had nobody to give the bytes to: they were dropped, and the
+    ;; next request's read waited for bytes already taken off the
+    ;; socket until the idle reaper killed the connection. Here a losing
+    ;; read cancels nothing: its recv stays in flight, a result nobody
+    ;; takes is kept, and the connection's next read -- in the race or
+    ;; in handle-loop -- takes the kept result or the recv in flight
+    ;; before it submits another, so bytes come back in the order the
+    ;; kernel took them. The recv is registered with loop-fd-op-add!,
+    ;; so a close resumes it with -ECANCELED like any loop-read.
+    (define recv-id #f)        ; our recv in flight, or #f
+    (define recv-owner #f)     ; the resume waiting on it, or #f
+    (define recv-kept '())     ; results nobody took, oldest first
+
+    (define (recv-submit!)
+      (let* ((sqe (loop-get-sqe (loop-ring (loop-current))))
+             (id (loop-alloc-id!)))
+        (io-uring-prep-recv sqe fd 0 (loop-buf-ring-buf-size) 0)
+        (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
+        (io-uring-sqe-set-buf-group sqe (loop-buf-ring-bgid))
+        (io-uring-sqe-set-data64 sqe id)
+        (loop-fd-op-add! fd id)
+        (hashtable-set! (loop-handlers (loop-current)) id
+          (lambda (res)
+            (loop-fd-op-remove! fd id)
+            (set! recv-id #f)
+            (let ((result (cond
+                            ((fx<? res 0) (loop-buf-data-take! id) #f)
+                            ((fxzero? res) (loop-buf-data-take! id) #t)
+                            (else
+                             (hashtable-set! (loop-active-connections) fd
+                                             (jiffy-current))
+                             (loop-buf-data-take! id))))
+                  (owner recv-owner))
+              (set! recv-owner #f)
+              (unless (and owner (owner result))
+                (set! recv-kept (append recv-kept (list result)))))))
+        (set! recv-id id)))
+
+    (define (connection-read-event)
+      (make-flow (lambda (x) x)
+                 (lambda ()
+                   (and (pair? recv-kept)
+                        (let ((result (car recv-kept)))
+                          (set! recv-kept (cdr recv-kept))
+                          (lambda () result))))
+                 (lambda (state resume register-cancel!)
+                   (unless recv-id (recv-submit!))
+                   (set! recv-owner resume)
+                   (register-cancel!
+                    (lambda ()
+                      (when (eq? recv-owner resume)
+                        (set! recv-owner #f)))))))
+
+    ;; handle-loop's read: the plain loop-read, unless the race left a
+    ;; result or a recv behind, which come first.
+    (define (connection-read)
+      (if (or (pair? recv-kept) recv-id)
+          (flow-perform (connection-read-event))
+          (read)))
+
     ;; Idempotent: also called from the guard below when the request
     ;; path raises after the normal-path cleanup already ran.
     (define (cleanup)
@@ -271,7 +334,7 @@
             ;; connection idle here relies on the sweep's loop-close
             ;; to eventually unblock this read, exactly as it always
             ;; has for writes.
-            (let ((data (read)))
+            (let ((data (connection-read)))
               (cond
                 ((not data) (cleanup))            ;; read error
                 ((eq? data #t) (cleanup))          ;; peer EOF
@@ -313,12 +376,35 @@
                                         (cons 'dispatch-ok
                                               (vector status response-pair extra-headers)))))))
                             (flow-put-try! result-channel result))))
-                      (let ((outcome
+                      ;; Raced against the deadline and the connection.
+                      ;; A read only ends the race when it says the
+                      ;; connection is gone. Bytes are the next
+                      ;; pipelined request, and EOF is a peer that
+                      ;; half-closed after sending this one -- both
+                      ;; legal, and both used to abandon a response the
+                      ;; client was owed. Bytes are kept for after the
+                      ;; response, and the read is not raced again
+                      ;; either way: the rest waits in the socket.
+                      (let race ((extra #f) (reading? #t)
+                                 (deadline (+ (real-time)
+                                              (* 1000 %dispatch-timeout-seconds))))
+                       (let ((outcome
                               (flow-perform
-                                (flow-choice (flow-get result-channel)
-                                             (flow-timeout %dispatch-timeout-seconds)
-                                             (flow-read fd)))))
+                                (apply flow-choice
+                                       (flow-get result-channel)
+                                       (flow-timeout
+                                        (max 0 (/ (- deadline (real-time)) 1000.0)))
+                                       (if reading?
+                                           (list (flow-wrap (connection-read-event)
+                                                            (lambda (x) (cons 'read x))))
+                                           '())))))
                         (cond
+                          ((and (pair? outcome) (eq? (car outcome) 'read)
+                                (bytevector? (cdr outcome)))
+                           (race (cdr outcome) #f deadline))
+                          ((and (pair? outcome) (eq? (car outcome) 'read)
+                                (eq? (cdr outcome) #t))
+                           (race extra #f deadline))
                           ((and (pair? outcome) (eq? (car outcome) 'dispatch-ok))
                            (let* ((v (cdr outcome))
                                   (status (vector-ref v 0))
@@ -349,7 +435,9 @@
                              (write response-bv)
                              (if (phr-request-header-value-ci=? req %hdr-connection %val-close)
                                  (cleanup)
-                                 (handle-loop remainder))))
+                                 (handle-loop (if extra
+                                                  (bytevector-append remainder extra)
+                                                  remainder)))))
                           ((and (pair? outcome) (eq? (car outcome) 'dispatch-raised))
                            (request-context-cancel! rctx)
                            (cleanup)
@@ -361,14 +449,11 @@
                            (write %response-504)
                            (cleanup))
                           (else
-                           ;; flow-read won: the peer sent EOF, an
-                           ;; error, or (a misbehaving/pipelining
-                           ;; client) unexpected bytes while DISPATCH
-                           ;; was still running. Either way this
-                           ;; connection is no longer trustworthy --
-                           ;; abandon the response, don't write to it.
+                           ;; the read failed: the connection is gone
+                           ;; (reset, or closed under us) -- abandon
+                           ;; the response, don't write to it
                            (request-context-cancel! rctx)
-                           (cleanup))))))))))))
+                           (cleanup)))))))))))))
 
     ;; No dynamic-wind here: coroutine suspensions (loop-read /
     ;; loop-write) are non-local exits through the wind and would run
