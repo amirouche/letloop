@@ -2850,3 +2850,43 @@
   (assert (flat? (lambda () (flow-get ch))))
   #t)
 
+
+;; A read composed with its own fd's close, (flow-choice (flow-close fd)
+;; (flow-read fd)), used to leave a failure marker under the fd NUMBER:
+;; the close's block purged the fd, then the read's block submitted a
+;; fresh recv on it, which failed with -EBADF after the close had won
+;; and, owned by nobody, was stashed. The next socket the kernel gave
+;; that number read #f before any I/O -- 20 times in 20.
+(define %flow2-check-socketpair
+  (foreign-procedure "socketpair" (int int int u8*) int))
+
+(define (flow2-check-socketpair)
+  (let ((fds (make-bytevector 8 0)))
+    (assert (zero? (%flow2-check-socketpair 1 1 0 fds)))  ; AF_UNIX, SOCK_STREAM
+    (values (bytevector-s32-native-ref fds 0)
+            (bytevector-s32-native-ref fds 4))))
+
+(define (~check-flow2-009/a-read-composed-with-its-close-leaves-nothing-behind)
+  (define outcomes '())
+  (flow-run
+   (lambda (_)
+     (do ((i 0 (+ i 1))) ((= i 20))
+       (let-values (((a b) (flow2-check-socketpair)))
+         (flow-perform (flow-choice (flow-close a) (flow-read a)))
+         (flow-sleep 0.01)
+         (let-values (((c d) (flow2-check-socketpair)))
+           (when (= c a)
+             (set! outcomes
+                   (cons (flow-perform
+                          (flow-choice
+                           (flow-read c)
+                           (flow-wrap (flow-timeout 0.05) (lambda (_) 'timeout))))
+                         outcomes)))
+           (flow-perform (flow-close c))
+           (flow-perform (flow-close d))
+           (flow-perform (flow-close b)))))
+     (flow-stop)))
+  ;; the kernel reissues the lowest free number, so most rounds reuse it
+  (assert (pair? outcomes))
+  (assert (for-all (lambda (x) (eq? x 'timeout)) outcomes))
+  #t)

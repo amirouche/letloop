@@ -128,6 +128,7 @@
    ~check-flow2-009/open-loses-choice-no-fd-leak
    ~check-flow2-009/close-under-choice-fd-actually-closed
    ~check-flow2-009/close-while-read-in-flight
+   ~check-flow2-009/a-read-composed-with-its-close-leaves-nothing-behind
 
    ;; fifth adverse pass, 2026-09-03
    ~check-flow2-001/wrap-runs-on-the-performer-after-commit
@@ -1873,17 +1874,69 @@
   ;; An orphan nobody adopts completes into the backlog, or is torn
   ;; down by loop-close-prep! with everything else the fd owns.
   (define-record-type* <flow2-recv>
-    (%make-flow-recv id owner)
+    (%make-flow-recv id owner closes)
     %flow-recv?
-    (id    %flow-recv-id)
-    (owner %flow-recv-owner %flow-recv-owner!))
+    (id     %flow-recv-id)
+    (owner  %flow-recv-owner %flow-recv-owner!)
+    ;; The fd's close count when this recv was submitted; see
+    ;; %flow-fd-closes.
+    (closes %flow-recv-closes))
+
+  ;; fd -> how many times flow-close has begun closing that number this
+  ;; run; and fd -> the count of a close still in flight. A recv belongs
+  ;; to the fd it was submitted on, and the number alone cannot say
+  ;; which one that was. loop-close-prep! purges what was in flight when
+  ;; the close began, but a recv submitted AFTER it -- by a flow-read
+  ;; composed with the close, (flow-choice (flow-close fd) (flow-read
+  ;; fd)), whose block runs once the close's has -- escaped the purge:
+  ;; it completed with -EBADF after the close had won, nobody owned it,
+  ;; and its failure marker went on the backlog of the NUMBER. The next
+  ;; socket the kernel gave that number then read #f before any I/O, 20
+  ;; times in 20.
+  ;;
+  ;; So a recv records the count it was submitted under, or #f when the
+  ;; fd was closing then, and is current only while that still matches.
+  ;; One that is not may still answer its owner, but it never stashes
+  ;; and is never adopted.
+  ;;
+  ;; Only flow-close counts. A close made below flow2, with loop-close
+  ;; directly, is not seen here.
+  (define %flow-fd-closes (make-eqv-hashtable))
+  (define %flow-fd-closing (make-eqv-hashtable))
+
+  (define (%flow-fd-close-count fd)
+    (hashtable-ref %flow-fd-closes fd 0))
+
+  (define (%flow-fd-submit-count fd)
+    (and (not (hashtable-contains? %flow-fd-closing fd))
+         (%flow-fd-close-count fd)))
+
+  (define (%flow-recv-current? fd r)
+    (eqv? (%flow-recv-closes r) (%flow-fd-submit-count fd)))
+
+  ;; Called by flow-close's block before the prep, so a read registered
+  ;; after it in the same perform already sees the fd as closing.
+  (define (%flow-fd-closing! fd)
+    (let ((n (fx+ (%flow-fd-close-count fd) 1)))
+      (hashtable-set! %flow-fd-closes fd n)
+      (hashtable-set! %flow-fd-closing fd n)
+      n))
+
+  ;; The close completed: the number is free for the kernel to reissue,
+  ;; and a recv submitted from now on belongs to whatever gets it. A
+  ;; later close of the same number, already begun, keeps its own mark.
+  (define (%flow-fd-closed! fd n)
+    (when (eqv? (hashtable-ref %flow-fd-closing fd #f) n)
+      (hashtable-delete! %flow-fd-closing fd)))
 
   ;; fd -> the <flow2-recv> left in flight by a reader that lost.
   ;; Loop thread only, like every ring event.
   (define %flow-recv-orphans (make-eqv-hashtable))
 
   (define (%flow-recv-orphans-clear!)
-    (hashtable-clear! %flow-recv-orphans))
+    (hashtable-clear! %flow-recv-orphans)
+    (hashtable-clear! %flow-fd-closes)
+    (hashtable-clear! %flow-fd-closing))
 
   ;; Still in flight means its handler is still registered. A close
   ;; deletes the handler at once, before its synthetic completion runs
@@ -1898,7 +1951,9 @@
       (and r
            (begin
              (hashtable-delete! %flow-recv-orphans fd)
-             (and (%flow-recv-in-flight? r) r)))))
+             (and (%flow-recv-in-flight? r)
+                  (%flow-recv-current? fd r)
+                  r)))))
 
   ;; The losing reader's cancel. If its recv has already completed --
   ;; the same-tick race above -- the completion handled the bytes and
@@ -1928,11 +1983,14 @@
         ;; and a marker left now would greet whatever reopens the
         ;; number.
         (unless (or (and owner (owner #f))
-                    (fx=? res (fx- 0 %flow-ecanceled)))
+                    (fx=? res (fx- 0 %flow-ecanceled))
+                    (not (%flow-recv-current? fd r)))
           (loop-recv-backlog-put! fd %flow-recv-failed)))
        ((fxzero? res) (when owner (owner #t)))
        ((not (and owner (owner bv)))
-        (loop-recv-backlog-put! fd bv)))))
+        ;; the fd it came from is closed: nobody is left to read it
+        (when (%flow-recv-current? fd r)
+          (loop-recv-backlog-put! fd bv))))))
 
   (define %flow-ecanceled 125)
 
@@ -1960,7 +2018,7 @@
     (let* ((ring (loop-ring (loop-current)))
            (id   (loop-alloc-id!))
            (sqe  (loop-get-sqe ring))
-           (r    (%make-flow-recv id #f)))
+           (r    (%make-flow-recv id #f (%flow-fd-submit-count fd))))
       (io-uring-prep-recv sqe fd 0 (loop-buf-ring-buf-size) 0)
       (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
       (io-uring-sqe-set-buf-group sqe (loop-buf-ring-bgid))
@@ -2235,9 +2293,14 @@
                   (lambda (x) x)
                   (lambda () #f)
                   (lambda (state resume register-cancel!)
-                    (loop-close-block fd
-                                      (lambda (res)
-                                        (resume (and (fx>=? res 0) res))))))))
+                    ;; a prep that raises submitted no close, so the
+                    ;; fd stays open and must not stay marked closing
+                    (let ((n (%flow-fd-closing! fd)))
+                      (guard (ex (#t (%flow-fd-closed! fd n) (raise ex)))
+                        (loop-close-block fd
+                                          (lambda (res)
+                                            (%flow-fd-closed! fd n)
+                                            (resume (and (fx>=? res 0) res))))))))))
 
   ;;------------------------------------------------------------
   ;; Fibers

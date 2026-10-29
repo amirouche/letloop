@@ -9,7 +9,7 @@ Amirouche A. BOUBEKKI
 ## Status
 
 `(letloop flow2)` is **implemented**, in `src/letloop/flow2.scm`, with
-81 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
+82 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
 `(letloop flow)` stays untouched and keeps serving its current ones.
 
 This document began as a draft specification and is now the library's
@@ -772,10 +772,21 @@ loop, so a caller wanting all of it writes the loop.
 
 Event: closes `FD`; result is `0`, or `#f` on failure. The one ring
 event that registers no cancel, because cancelling a close would leak
-the fd. Composed with other bases — `(flow-choice (flow-close fd)
-(flow-read fd))` — the choice is decided as a whole; a close already in
-flight when another base wins still completes, and its result is
-discarded.
+the fd. A close already in flight when another base of its choice
+wins still completes, and its result is discarded.
+
+Perform a close on its own, not in a `flow-choice`. A close has no
+ready state, so a choice that also holds a ready base — a `flow-read`
+with bytes already on the fd's backlog, say — is won by that base at
+poll time, and the close is never issued: the fd stays open. Composing
+a close with an operation on the *same* fd buys nothing either way,
+since the close ends that operation regardless. What such a
+composition can no longer do is poison the fd number: a recv submitted
+while its fd is closing — a `flow-read` registered after the close in
+the same perform — answers its own reader if anyone, and is never left
+on the backlog for whatever socket the kernel gives that number next.
+That holds for closes made with `flow-close`; a close made below flow2,
+with the ring layer's `loop-close`, is not seen.
 
 No `dynamic-wind`: callers close fds explicitly on both the normal and
 the error path.
