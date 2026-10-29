@@ -5,7 +5,8 @@
           (rename (url-parse www-url-read)
                   (percent-decode www-percent-decode))
           ~check-www-000 ~check-www-001 ~check-www-002 ~check-www-002-bis
-          ~check-www-003 ~check-www-url-read-000 ~check-www-url-read-001)
+          ~check-www-003 ~check-www-004
+          ~check-www-url-read-000 ~check-www-url-read-001)
   (import (chezscheme) (letloop http) (letloop tls base) (letloop match))
 
   (define pk
@@ -86,9 +87,19 @@
     ;; byte as its own Latin-1 codepoint instead, which took %C3%A9
     ;; and produced "Ã©" (U+00C3 U+00A9) instead of "é" (U+00E9) --
     ;; found live via a mojibake'd "notre territoire mathématiques"
-    ;; query. Literal (non-percent-escaped) characters in a URL are
-    ;; always ASCII by construction, so folding them into the same
-    ;; byte stream via CHAR->INTEGER is safe.
+    ;; query.
+    ;;
+    ;; Literal characters go into the same byte stream as their UTF-8
+    ;; bytes. They used to go in as CHAR->INTEGER on the theory that a
+    ;; URL's literal characters are ASCII by construction -- but the
+    ;; server builds its strings with utf8->string over the raw request
+    ;; bytes, and a client may send raw UTF-8 (GET /日本). Above 255,
+    ;; u8-list->bytevector raised, which the server's guard turned into
+    ;; a dropped connection; from 128 to 255, "café" decoded as
+    ;; "caf\xFFFD;".
+    ;;
+    ;; An escape is two HEX DIGITS. string->number also accepts a sign,
+    ;; so "%+1" decoded to U+0001 and "%-0" to NUL.
     (lambda (string . plus)
       (let ((plus? (if (pair? plus) (car plus) #t)))
         (let loop ((chars (string->list* string))
@@ -98,13 +109,26 @@
             ((#\+ ,rest ...)
              (loop rest (cons (char->integer (if plus? #\space #\+)) out)))
             ((#\% ,a ,b ,rest ...)
-             (let ((n (string->number (list->string (list a b)) 16)))
-               (if (and n (fixnum? n) (fx<=? 0 n 255))
+             (let ((n (and (hex-digit? a) (hex-digit? b)
+                           (string->number (list->string (list a b)) 16))))
+               (if n
                    (loop rest (cons n out))
                    ;; invalid escape: keep it as literal text
-                   (loop rest (cons* (char->integer b) (char->integer a)
-                                     (char->integer #\%) out)))))
-            ((,char . ,rest) (loop rest (cons (char->integer char) out))))))))
+                   (loop rest (char-bytes-cons b (char-bytes-cons a
+                                                  (cons (char->integer #\%) out)))))))
+            ((,char . ,rest) (loop rest (char-bytes-cons char out))))))))
+
+  (define (hex-digit? char)
+    (or (char<=? #\0 char #\9)
+        (char<=? #\a char #\f)
+        (char<=? #\A char #\F)))
+
+  ;; CHAR's UTF-8 bytes, consed onto the reversed byte list OUT.
+  (define (char-bytes-cons char out)
+    (if (char<? char #\x80)
+        (cons (char->integer char) out)
+        (append (reverse (bytevector->u8-list (string->utf8 (string char))))
+                out)))
 
   (define www-form-urlencoded-read
     ;; content-type: application/x-www-form-urlencoded
@@ -253,6 +277,24 @@
                                  #f
                                  #f)))))))
   
+  ;; Raw UTF-8 in a request reaches percent-decode as characters above
+  ;; 127: it raised above 255 and mangled 128-255. A signed "escape" is
+  ;; not one.
+  (define ~check-www-004
+    (lambda ()
+      (assert (equal? (percent-decode "日本") "日本"))
+      (assert (equal? (percent-decode "café") "café"))
+      (assert (equal? (percent-decode "caf%C3%A9/日") "café/日"))
+      (assert (equal? (percent-decode "%+1%-0") "%+1%-0"))
+      (assert (equal? (percent-decode "a+b") "a b"))
+      (assert (equal? (percent-decode "a+b" #f) "a+b"))
+      (assert (equal? (percent-decode "%zz%4") "%zz%4"))
+      (call-with-values (lambda () (www-uri-read "/日本?q=日"))
+        (lambda (path query fragment)
+          (assert (equal? path '("日本")))
+          (assert (equal? query '((q . "日"))))))
+      #t))
+
   (define ~check-www-003
     (lambda ()
       (assert (equal? (cons '("foo" "bar" "baz" "qux" "example") 9999)
