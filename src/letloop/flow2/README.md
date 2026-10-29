@@ -391,7 +391,9 @@ Returns `#t` if `OBJ` is a `<flow-error>`, otherwise `#f`.
 
 #### `(flow-error-symbol flow-error)`
 
-Returns the error's symbol, for `case` dispatch:
+Returns the error's symbol, for `case` dispatch. Priming a channel
+before `flow-run`, where a full put has nothing to park on and raises
+`overflow` instead:
 
 ```scheme
 (guard (ex ((flow-error? ex)
@@ -401,6 +403,9 @@ Returns the error's symbol, for `case` dispatch:
               (else (raise ex)))))
   (flow-put! jobs job))
 ```
+
+During a run the same put parks until there is room, so the
+`overflow` branch cannot be reached there.
 
 #### `(flow-error-message flow-error)`
 #### `(flow-error-irritants flow-error)`
@@ -476,7 +481,10 @@ their choices — waits for them to say they have, then stops.
 
 #### `(flow-spawn thunk)`
 
-Spawns `THUNK` as a new fiber on the main thread, and returns. Fire
+Spawns `THUNK` as a new fiber on the main thread, and returns. During
+a run only: outside one there is no loop to spawn on, and the thunk is
+either refused with a raw type error (before the first run) or queued
+on the last run's dead loop and never run (between runs). Fire
 and forget: flow2 keeps no record of the fiber, so nothing waits for
 it and nothing but its own code can stop it. A spawner that needs to
 know how the fiber ended says so in the thunk — puts a result, or a
@@ -494,9 +502,24 @@ The Concurrent ML core, unchanged from `(letloop flow)`:
 
 #### `(make-flow wrap try block)`
 
-Returns a base event from its three behaviors: `WRAP` transforms the
-synchronized value, `TRY` polls without blocking, `BLOCK` registers
-for later completion. Library authors only.
+Returns a base event from its three behaviors. Library authors only.
+
+- `WRAP` is applied to the raw result, on the performer, after the
+  commit.
+- `TRY` takes no arguments and returns `#f` when not ready, or a thunk
+  producing the raw result when it is. Running `TRY` may commit — a
+  channel get dequeues — so it must return a thunk only for a value it
+  has taken.
+- `BLOCK` is called with `STATE RESUME REGISTER-CANCEL!`. It arranges
+  for `(RESUME raw)` to be called once the result exists; `RESUME`
+  returns `#t` if this base won the perform, `#f` if another base
+  already had, in which case the caller still owns whatever it was
+  delivering. `(REGISTER-CANCEL! thunk)` registers what to run if
+  another base wins.
+
+A base built here is a ring event as far as a compute thread is
+concerned: performing it there raises `wrong-thread`, whatever its
+procedures touch.
 
 #### `(flow? obj)`
 
@@ -519,8 +542,13 @@ synchronization attempt.
 
 #### `(flow-choice event ...)`
 
-Returns an event that synchronizes on exactly one of `EVENT ...` —
-whichever is ready first. Associative; nested choices flatten.
+Returns an event that synchronizes on exactly one of `EVENT ...`.
+Associative; nested choices flatten. When several are ready at the
+moment of the perform, one is taken **at random**, not the one that
+became ready first: a choice over two channels that both hold values
+says nothing about which value was put first (see the drain in
+*Gather until a deadline*). When none is ready, the first to complete
+wins.
 
 #### `(flow-perform event)`
 
@@ -528,9 +556,15 @@ Synchronizes on `EVENT`: returns immediately if some base is ready,
 otherwise parks — the current *fiber* on the main thread, the
 current *OS thread* (on a condition variable) on a compute thread.
 When one base wins, the losing bases' registrations are withdrawn and
-their in-flight operations (reads, timeouts, accepts, writes) are
-cancelled on the ring, before the performer resumes. That is the only
-cancellation flow2 has.
+their in-flight timeouts, writes, opens and file reads are cancelled
+on the ring, before a performing *fiber* resumes. A losing accept is
+withdrawn rather than cancelled: the listener keeps accepting, and a
+client it takes meanwhile waits for the next `flow-accept`. A losing
+`flow-read` is the exception: its recv is left in flight for the next
+read of that fd to take over (see `flow-read`). On a compute thread
+the withdrawal runs on the loop, so the thread can resume before its
+losing channel and latch waits are unlinked; until then they show in
+the raw diagnostics. That is the only cancellation flow2 has.
 
 ### Channels
 
@@ -546,8 +580,8 @@ this is internal.
 #### `(make-flow-channel [name [bound]])`
 
 Returns a fresh channel bounded at 43 values. `NAME` is any object; it
-appears in the saturation warning and in an `overflow` error's
-irritants, and a worker's request channel is named `(worker . I)`,
+appears in the saturation warning and in the irritants of the
+`overflow` a full put raises outside a run, and a worker's request channel is named `(worker . I)`,
 which is how an uncaught task error says which thread it came from.
 Give it one you will recognise in a log. A channel created without a name still
 gets a process-unique integer, because a diagnostic that cannot say
@@ -655,7 +689,10 @@ is known, or pass a sentinel that cannot collide — a fresh `(list
 
 #### `(flow-timeout seconds)`
 
-Returns an event ready after `SECONDS` (a real number). Backed by a
+Returns an event ready after `SECONDS` (a real number), whose result is
+`(void)` — wrap it to tell it apart in a choice, as in
+`(flow-wrap (flow-timeout 1.0) (lambda (_) 'timeout))`; an
+`(or (flow-perform ...) 'timeout)` never sees `#f`. Backed by a
 ring timeout SQE; as a losing choice member it is cancelled on the
 ring. Loop thread only — *performing* it from a compute thread raises
 `wrong-thread`, like every other ring event. Constructing one there is
@@ -676,7 +713,10 @@ protocol of its own (see Patterns). Semantics carried over from
 #### `(flow-accept fd)`
 
 Event: a client connection accepted on listening `FD`; result is the
-client fd, or `#f` on failure.
+client fd, or `#f` on failure. One acceptor per listener: a second
+`flow-accept` parked on the same `FD` while the first is raises
+"concurrent accept on fd". Accept in one fiber and spawn a fiber per
+client.
 
 #### `(flow-read fd)`
 
@@ -861,7 +901,9 @@ take-and-clear of them, sends no eventfd wake — so a resume is lost
 outright or delayed by a whole wait timeout — and parks on a
 continuation that does not exist in that thread.
 
-**Every flow2 operation raises `wrong-thread` when called from one.**
+**Every flow2 operation raises `wrong-thread` when called from one**,
+except `flow-run` itself, which raises "a flow-run is already in
+progress" (see `flow-run`).
 Not a list of them: `flow-perform` carries the check, so every
 suspending operation inherits it, and the six that reach a channel, a
 latch or the scheduler without suspending — `flow-put!`,
@@ -880,8 +922,10 @@ A compute thread that outlived its run's shutdown join — a
 not own, so its operations raise `wrong-thread` rather than reach a
 channel the live run is parked on through a pool nobody drains.
 
-Outside a `flow-run` there is nothing to corrupt and no check: priming
-a channel before the loop starts is legitimate.
+Outside a `flow-run` there is nothing to corrupt and no thread check:
+priming a channel before the loop starts is legitimate. What still
+needs a loop fails without one — a perform that has to park, and
+`flow-spawn` (see there).
 
 `flow-log` genuinely takes any thread: it appends to a box that the
 calling thread alone writes. So do the procedures that only read —
@@ -940,13 +984,16 @@ syscall costs every fiber, and on a compute thread, where blocking
 wastes the core the pool exists to use. The one exception is the
 first call in a process that has not taken the log over, which also
 forks the default printer (see `flow-log-start!`) — once, not per
-call. Before there is a loop the timestamp is `0` rather than an
-error, so a library can warn during startup without taking the
+call. Before the first loop the timestamp is `0` rather than an error, and
+between runs it is the last run's final tick, so a library can warn during startup without taking the
 program down.
 
 #### `(flow-log-drain!)`
 
-Every pending entry as a list of `(timestamp . sexp)`, oldest first
+Every pending entry as a list of `(timestamp . sexp)` — except on the
+first drain while the default printer runs, which stops the printer
+first, and the printer prints what it holds as it stops; see below.
+Entries are oldest first
 within each thread's own accumulator, threads concatenated in
 registration order rather than globally sorted — sort on the
 timestamps if you need strict cross-thread order. Draining empties.
@@ -972,7 +1019,10 @@ channel, call `flow-stop`. The cost is the same as any fiber's: a slow
 sink delays every other fiber, and a sink that parks parks the log.
 Between runs nothing calls it, and entries wait; the end of a run
 hands it whatever was logged since the last period, shutdown entries
-included, on the thread that called `flow-run`. During a run, starting
+included, on the thread that called `flow-run`. That last call — and
+the one `flow-log-stop!` makes outside a run — is **not** on a fiber:
+the loop is gone, so a sink that parks there (a sleep, a put on a full
+channel) raises, and a raising sink is unregistered for good. During a run, starting
 or stopping a procedure sink anywhere but the loop thread raises
 `wrong-thread` — `flow-log-stop!` hands the sink its final batch on the
 calling thread.
@@ -1029,7 +1079,8 @@ What the library itself logs:
 | `(flow2 log-flush-raised CONDITION)` | the sink raised; the flusher stopped and its batch was put back |
 
 `CONDITION` is the raised object rendered for a log line: a condition
-becomes its message as a string, a `<flow-error>` becomes
+becomes the string `display-condition` writes for it — "Exception in
+WHO: MESSAGE" and its irritants — a `<flow-error>` becomes
 `(flow-error SYMBOL MESSAGE)`, anything else is kept as is. The
 `uncaught` entries are the first thing to look at after an unexplained
 hang — a gather waiting on a fiber that died is waiting on one of
@@ -1040,7 +1091,9 @@ not.
 
 flow2 ships mechanisms, not protocols. These are the intended shapes,
 and each one's shape is executed somewhere — the check or reproducer
-that runs it is named with it.
+that runs it is named with it. A check runs the shape, not every
+claim made around it: read what it exercises before leaning on a
+remark it does not.
 
 ### Spawn a fiber, plainly
 
