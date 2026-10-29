@@ -2968,3 +2968,45 @@
   (assert (equal? received (string->utf8 "hello")))
   (assert (guard (ex (#t #t)) (flow-listen "203.0.113.1" PORT) #f))
   #t)
+
+;; The latch's lock is a spin lock on a box, so make threads contend on
+;; it: each round, four compute threads park on a latch the loop fires
+;; while they are registering, then all four race to fire a second one
+;; the loop waits on. Every waiter must wake with the value, exactly one
+;; fire must win, and no waiter may be left on either list.
+(define (~check-flow2-013/latch-under-contention)
+  (define rounds 300)
+  (define ok #t)
+  (flow-run
+   (lambda (workers)
+     (let ((replies (make-flow-channel)))
+       (let round ((i 0))
+         (when (fx<? i rounds)
+           (let ((go (make-flow-latch))
+                 (back (make-flow-latch)))
+             (for-each
+              (lambda (worker)
+                (flow-submit! worker
+                              (lambda ()
+                                (let ((v (flow-latch-wait! go)))
+                                  (flow-put! replies
+                                             (cons v (flow-latch-fire! back i)))))))
+              workers)
+             (flow-latch-fire! go i)
+             (let ((winners
+                    (let gather ((n 0) (winners 0))
+                      (if (fx=? n (length workers))
+                          winners
+                          (let ((reply (flow-get! replies)))
+                            (unless (eqv? (car reply) i) (set! ok #f))
+                            (gather (fx+ n 1) (if (cdr reply) (fx+ winners 1) winners)))))))
+               (unless (and (fx=? winners 1)
+                            (eqv? (flow-latch-wait! back) i)
+                            (fxzero? (%dlist-size (flow-latch-waiters go)))
+                            (fxzero? (%dlist-size (flow-latch-waiters back))))
+                 (set! ok #f))))
+           (round (fx+ i 1))))
+       (flow-stop)))
+   4)
+  (assert ok)
+  #t)

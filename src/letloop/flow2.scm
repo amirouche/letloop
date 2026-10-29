@@ -132,6 +132,7 @@
    ~check-flow2-009/a-read-composed-with-its-close-leaves-nothing-behind
    ~check-flow2-006/read-pending-sees-what-a-losing-read-left
    ~check-flow2-006/listen-accept-and-name-the-peer
+   ~check-flow2-013/latch-under-contention
 
    ;; fifth adverse pass, 2026-09-03
    ~check-flow2-001/wrap-runs-on-the-performer-after-commit
@@ -1673,25 +1674,69 @@
   ;; completes with that value. It is never reset; a new episode is a
   ;; new latch.
   ;;
-  ;; The channel's locking discipline: the mutex guards the value and
-  ;; the waiter list and is held only for list surgery, never across a
-  ;; resume. Waiting is an event, so it composes: a producer that
-  ;; should be stoppable puts (flow-latch-wait stop) in its own choices.
+  ;; The channel's locking discipline -- the lock guards the waiter
+  ;; list and is held only for list surgery, never across a resume --
+  ;; but with a spin lock on a box instead of an OS mutex. A latch is
+  ;; often made per request (a handler's one result, say), and a mutex
+  ;; costs ~60 ns to make plus a finalizer when it is collected, before
+  ;; it is ever locked; a box costs a word, and an uncontended
+  ;; box-cas! is a few ns. Every critical section here is a handful of
+  ;; pointer writes, so a contending thread spins briefly; one that
+  ;; spins long, because the holder was descheduled, sleeps a
+  ;; microsecond between tries.
+  ;;
+  ;; The value is written under the lock and read without it: it
+  ;; changes once, from unfired to the fired value, and the acquire
+  ;; fence after a read that sees it fired makes the value's contents
+  ;; visible too. So a wait on a fired latch, and flow-latch-fired?,
+  ;; take no lock at all. Waiting is an event, so it composes: a
+  ;; producer that should be stoppable puts (flow-latch-wait stop) in
+  ;; its own choices.
   (define %flow-latch-unfired (list 'unfired))
 
   (define-record-type* <flow2-latch>
-    (make-flow-latch% mutex value waiters)
+    (make-flow-latch% lock value waiters)
     flow-latch?
-    (mutex   flow-latch-mutex)
+    (lock    flow-latch-lock)
     (value   flow-latch-value   flow-latch-value!)
     (waiters flow-latch-waiters))
 
+  (define %flow-spin-pause (make-time 'time-duration 1000 0))
+
+  (define (%flow-spin-lock! lock)
+    (let spin ((tries 0))
+      (unless (box-cas! lock #f #t)
+        (if (fx<? tries 1000)
+            (spin (fx+ tries 1))
+            (begin (sleep %flow-spin-pause) (spin 0)))))
+    (memory-order-acquire))
+
+  (define (%flow-spin-unlock! lock)
+    (memory-order-release)
+    (set-box! lock #f))
+
+  (define-syntax with-latch-lock
+    (syntax-rules ()
+      ((_ latch body ...)
+       (let ((lock (flow-latch-lock latch)))
+         (%flow-spin-lock! lock)
+         (let ((result (begin body ...)))
+           (%flow-spin-unlock! lock)
+           result)))))
+
   (define (make-flow-latch)
-    (make-flow-latch% (make-mutex) %flow-latch-unfired (%dlist-new)))
+    (make-flow-latch% (box #f) %flow-latch-unfired (%dlist-new)))
+
+  ;; LATCH's value, read without the lock: %flow-latch-unfired, or the
+  ;; value it fired with.
+  (define (%flow-latch-value-now latch)
+    (let ((value (flow-latch-value latch)))
+      (unless (eq? value %flow-latch-unfired)
+        (memory-order-acquire))
+      value))
 
   (define (flow-latch-fired? latch)
-    (with-mutex (flow-latch-mutex latch)
-      (not (eq? (flow-latch-value latch) %flow-latch-unfired))))
+    (not (eq? (%flow-latch-value-now latch) %flow-latch-unfired)))
 
   ;; #t when this call fired LATCH, #f when it had already fired, in
   ;; which case the first value stays. Like flow-put!, callable from the
@@ -1699,14 +1744,14 @@
   (define (flow-latch-fire! latch value)
     (%flow-check-caller-thread! 'flow-latch-fire!)
     (let ((waiters
-           (with-mutex (flow-latch-mutex latch)
+           (with-latch-lock latch
              (and (eq? (flow-latch-value latch) %flow-latch-unfired)
                   (begin
                     (flow-latch-value! latch value)
                     (%dlist-take-all! (flow-latch-waiters latch)))))))
       (and waiters
            (begin
-             ;; Outside the mutex: a resume runs continuation code. A
+             ;; Outside the lock: a resume runs continuation code. A
              ;; resume that reports #f lost to another base of its own
              ;; choice, and since a latch wait consumes nothing there is
              ;; nothing to put back.
@@ -1716,15 +1761,14 @@
              #t))))
 
   (define (%latch-remove-waiter! latch node)
-    (with-mutex (flow-latch-mutex latch)
+    (with-latch-lock latch
       (%dlist-unlink! (flow-latch-waiters latch) node)))
 
   (define (flow-latch-wait latch)
     (make-flow% 'base (cons 'flow2-latch latch)
                 (lambda (x) x)
                 (lambda ()
-                  (let ((value (with-mutex (flow-latch-mutex latch)
-                                 (flow-latch-value latch))))
+                  (let ((value (%flow-latch-value-now latch)))
                     (and (not (eq? value %flow-latch-unfired))
                          (lambda () value))))
                 (lambda (state resume register-cancel!)
@@ -1738,7 +1782,7 @@
                   (register-cancel!
                    (lambda () (%latch-remove-waiter! latch node)))
                   (let ((value
-                         (with-mutex (flow-latch-mutex latch)
+                         (with-latch-lock latch
                            (let ((value (flow-latch-value latch)))
                              (when (eq? value %flow-latch-unfired)
                                (%dlist-link! (flow-latch-waiters latch) node))
