@@ -6,7 +6,8 @@
 #   letloop http serve
 #     -> letloop-http-serve            src/letloop/base.scm
 #          -> transparent / transparent*  src/letloop/http/server.body.scm
-#               -> loop-new, register-signal-handler, handle-connection
+#               -> register-signal-handler (flow-stop), then flow-run
+#                  around %idle-reaper and %accept-loop -> handle-connection
 #
 # (The name is historical. There is no (letloop transparent) library;
 # the unrelated examples/transparent*.scm files this could be confused
