@@ -139,19 +139,13 @@ Or build the pair yourself: `(cons bytevector "image/png")`.
 flow2 fiber may do, a handler may do. It can sleep (`flow-sleep`), use
 channels and latches, start fibers of its own (`flow-spawn`), race
 events with `flow-choice`, and do I/O on other descriptors
-(`flow-read`, `flow-write`, `flow-open`, …). The ring layer's own
-operations, such as `loop-sleep`, work too.
+(`flow-read`, `flow-write`, `flow-open`, …).
 
 What a handler must **not** do is block the thread. A blocking syscall,
 a `sleep`, or a long CPU-bound loop stops every connection on the
 server until it returns. The server starts no compute pool
 (`flow-run`'s worker count is 0), so there is nowhere to hand CPU-bound
 work to yet.
-
-A handler that waits is cheap. One that answers without suspending is
-cheaper still: the server lets `dispatch` run before it starts watching
-the deadline and the connection, and arms neither when the answer is
-already there. See [Performance](#performance).
 
 ## Deadlines and the request context
 
@@ -194,7 +188,8 @@ down its write side still gets its response; the connection closes
 after it.
 
 **Idle connections** are reaped. A sweep every 5 seconds closes any
-connection with no read or write activity in the last 30 seconds. The
+connection with no read or write activity in the last 30 seconds, so
+an idle connection is closed 30 to 35 seconds after it went quiet. The
 dispatch deadline (28 s) is shorter on purpose, so a slow request gets
 a 504 and not a silent reset from the reaper.
 
@@ -224,33 +219,37 @@ handler and return a 500 yourself:
 
 ## Shutdown
 
-SIGINT or SIGTERM prints a line to stdout and stops the loop with
-`flow-stop`. This is a shutdown, not a drain. Requests in flight are
-not finished and open connections are not closed gracefully; the
-process simply stops serving, and `transparent` returns.
+SIGINT or SIGTERM prints a line to stdout and fires a stop latch. The
+accept loop, which races every accept against that latch, closes the
+listening socket and ends the run with `flow-stop`. This is a
+shutdown, not a drain. Requests in flight are not finished and open
+connections are not closed gracefully; the process simply stops
+serving, and `transparent` returns.
+
+The port is bound before the run starts, and before `(application)`
+is called, so a port that cannot be had raises from `transparent` with
+the reason.
 
 ## Performance
 
 `bench-server`, compiled at `--optimize-level=3` with the server pinned
 to one core and `wrk -t7 -c64 -d10s` on seven others, serves about
-372k requests per second on the machine this was last measured on.
+249k requests per second on the machine this was last measured on.
 Absolute numbers depend on the machine. To compare two versions, build
 both and run them back to back on the same machine.
 
-Two choices carry most of that:
+The server is written against flow2's exports alone: it reads with
+`flow-read`, writes with `flow-write-all!`, closes with `flow-close`,
+and listens with `flow-listen`. Nothing reaches under flow2 into the
+ring layer. That costs throughput on this benchmark, whose handler
+answers without waiting. Before, the server read with the ring layer's
+`loop-read`, and let `dispatch` run before arming the deadline and the
+read, so an answer that was already there cost no timer and no recv
+to cancel. That version served about 374k on the same machine.
 
-- **Reads are plain.** A connection reads with the ring layer's
-  `loop-read`, not with a flow2 perform. A perform per read once cost
-  19–45% of throughput (`ec70498`). The connection switches to
-  `flow-read` only while flow2's `flow-read-pending?` says an earlier
-  race left a read behind.
-- **A handler that does not wait is never raced.** The connection
-  fiber yields to `dispatch` before it arms the deadline and the read.
-  An answer that is already there costs no timer and no recv to cancel.
-  Arming and cancelling them on every request cost about 30%. The
-  result passes between the two fibers in a one-shot event, not a flow2
-  channel: both ends are on the loop thread, and a channel's mutex cost
-  about 5%.
+A handler that does I/O suspends either way, so the deadline and the
+read are armed for it regardless; the gap is narrower for real
+handlers than for this one.
 
 ## Lower-level exports
 
@@ -267,10 +266,6 @@ Two choices carry most of that:
   response and no log entry. Guard in the handler, as shown above.
 - **`status-code->reason` knows 12 codes.** Any other status, 503 for
   instance, goes out as `503 OK`.
-- **The reaper can close a number twice.** When the idle reaper closes a
-  connection under a handler, the connection's own cleanup closes it
-  again. If the kernel has reissued that descriptor number to a new
-  connection in between, that connection is closed.
 - **No compute pool.** A handler has nowhere to send CPU-bound work.
 
 ## Tests

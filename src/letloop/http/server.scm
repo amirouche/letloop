@@ -60,14 +60,9 @@
           (letloop http)
           (rename (only (letloop www) www-percent-decode www-query-read)
                   (www-percent-decode percent-decode))
-          (letloop liburing low)
-          ;; flow2 owns the run: flow-run, the reaper and connection
-          ;; fibers, and the per-request dispatch race (flow-choice over
-          ;; the dispatch-result channel, a timer, and a read on the
-          ;; connection's own fd). NOT the per-byte read loop, which
-          ;; stays on the ring layer's loop-read -- a perform per read
-          ;; is what cost ec70498/05ab523 ~19-45% of throughput; the
-          ;; race runs once per REQUEST, not once per read.
+          ;; flow2's exports and nothing below them: the listener,
+          ;; accept, reads, writes, closes, the per-request dispatch
+          ;; race and the idle reaper are all flow2 events and fibers.
           (letloop flow2))
 
   (begin
