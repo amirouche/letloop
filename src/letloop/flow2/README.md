@@ -9,7 +9,7 @@ Amirouche A. BOUBEKKI
 ## Status
 
 `(letloop flow2)` is **implemented**, in `src/letloop/flow2.scm`, with
-82 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
+83 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
 `(letloop flow)` stays untouched and keeps serving its current ones.
 
 This document began as a draft specification and is now the library's
@@ -988,6 +988,12 @@ fork another and its sink is ignored. `flow-log-stop!` blocks until
 the thread has done a final drain, so nothing logged before the
 request is lost; after it, entries accumulate until the program drains
 them or starts a flusher again.
+
+A port flusher writes once per period and nothing waits for it, so
+`flow-run` also flushes it on its way out, on the calling thread:
+an entry logged in the last tick of a run — an uncaught error in the
+fiber that ran as the run stopped — is written before `flow-run`
+returns, not left in memory for a program about to exit.
 
 If the sink raises — a port that fails to write, a procedure that
 raises — the flusher stops: the flush thread exits, or the procedure is

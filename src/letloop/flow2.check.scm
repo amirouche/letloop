@@ -2890,3 +2890,22 @@
   (assert (pair? outcomes))
   (assert (for-all (lambda (x) (eq? x 'timeout)) outcomes))
   #t)
+
+;; The flush thread writes once per period and nothing waits for it, so
+;; an entry logged in the tick a run stopped was still in memory when
+;; flow-run returned, and a program that exited then never printed it
+;; -- an uncaught fiber error included, 5 runs in 5 with the default
+;; printer. flow-run now flushes the thread's port on its way out. The
+;; period here is a minute, so only that flush can have written it.
+(define (~check-flow2-000/a-run-flushes-the-printer-on-its-way-out)
+  (flow-log-drain!)
+  (let-values (((port extract) (open-string-output-port)))
+    (flow-log-start! 60 port)
+    (flow-run
+     (lambda (_)
+       (flow-spawn (lambda () (flow-stop)))
+       (flow-spawn (lambda () (error 'last-fiber "last words")))))
+    (let ((out (extract)))
+      (flow-log-stop!)
+      (assert (flow2-check-substring? "last words" out))))
+  #t)

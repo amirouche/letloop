@@ -163,6 +163,7 @@
    ~check-flow2-000/log-prints-to-stderr-by-default
    ~check-flow2-000/a-procedure-sink-runs-on-the-loop
    ~check-flow2-000/a-raising-procedure-sink-keeps-its-batch
+   ~check-flow2-000/a-run-flushes-the-printer-on-its-way-out
 
    ;; seventh adverse pass
    ~check-flow2-002/a-dead-runs-getter-takes-nothing
@@ -378,6 +379,12 @@
   (define %flow-log-stop-requested? (box #f))
   (define %flow-log-stopped? (box #t))
 
+  ;; The running flush thread's port, and the mutex every write to it
+  ;; holds, so flow-run can flush on its way out without interleaving
+  ;; with the thread; see %flow-log-flush-thread-now!.
+  (define %flow-log-thread-port (box #f))
+  (define %flow-log-write-mutex (make-mutex))
+
   ;; Guarded against a second concurrent flusher, which flow left
   ;; merely documented as unsupported. Draining stays correct either
   ;; way — flow-box-drain! never double-delivers — but two flushers
@@ -468,6 +475,7 @@
     (when (box-cas! %flow-log-stopped? #t #f)
       (set-box! %flow-log-stop-requested? #f)
       (set-box! %flow-log-default-running? default?)
+      (set-box! %flow-log-thread-port sink)
       (let ((ticks (fxmax 1 (exact (round (/ period-seconds
                                              %flow-log-poll-interval))))))
         (fork-thread
@@ -483,9 +491,10 @@
                                                     1000000000)))
                                    0))
                  (wait (fx+ n 1))))
-             (if (and (%flow-log-flush!
-                       (lambda (entries)
-                         (%flow-log-write! entries sink)))
+             (if (and (with-mutex %flow-log-write-mutex
+                        (%flow-log-flush!
+                         (lambda (entries)
+                           (%flow-log-write! entries sink))))
                       (not (unbox %flow-log-stop-requested?)))
                  (lp)
                  (begin
@@ -510,6 +519,21 @@
                      #f))
         (write! entries)
         #t)))
+
+  ;; One drain-and-write into the flush thread's port, now, on the
+  ;; calling thread. flow-run calls it on its way out. The thread
+  ;; writes once per period -- 100ms for the default printer -- and
+  ;; nothing waits for it, so a program that ended within a period of
+  ;; its last entry exited with that entry unprinted: a fiber that
+  ;; raised in the tick its run stopped was logged and never seen, the
+  ;; error the default printer exists to show. A write that raises is
+  ;; handled as the thread's own would be: the batch goes back.
+  (define (%flow-log-flush-thread-now!)
+    (with-mutex %flow-log-write-mutex
+      (let ((port (unbox %flow-log-thread-port)))
+        (when (and port (not (unbox %flow-log-stopped?)))
+          (%flow-log-flush! (lambda (entries)
+                              (%flow-log-write! entries port)))))))
 
   ;; Blocks the caller until the flush thread has done one final
   ;; drain-and-write and exited, so nothing logged before the stop
@@ -2465,6 +2489,7 @@
          ;; entries included -- would otherwise wait for the next run.
          ;; Outside the run now, so on this thread is allowed.
          (%flow-log-call-sink!)
+         (%flow-log-flush-thread-now!)
          (void)))))
 
   ;; The way out of a run, normal or not: join the pool, then give up
