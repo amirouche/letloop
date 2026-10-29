@@ -234,7 +234,7 @@ the reason.
 
 `bench-server`, compiled at `--optimize-level=3` with the server pinned
 to one core and `wrk -t7 -c64 -d10s` on seven others, serves about
-249k requests per second on the machine this was last measured on.
+285k requests per second on the machine this was last measured on.
 Absolute numbers depend on the machine. To compare two versions, build
 both and run them back to back on the same machine.
 
@@ -250,6 +250,13 @@ to cancel. That version served about 374k on the same machine.
 A handler that does I/O suspends either way, so the deadline and the
 read are armed for it regardless; the gap is narrower for real
 handlers than for this one.
+
+What closed part of the gap went into flow2, where every program gets
+it: the 28 s deadline is a heap entry rather than a kernel timer, so
+arming and cancelling it costs no syscall (+11%); the dispatch outcome
+travels in a latch that takes no OS mutex (+7%); and a perform with
+nothing to cancel skips the cancel pass (+1.5%). The server on flow2
+alone measured 249k before those.
 
 ## Lower-level exports
 
