@@ -131,8 +131,10 @@
                                       (chars chars-unescaped))
                      (let ((next-char (generator)))
                        (if (and (<= #xd800 code1 #xdbff)
+                                (char? next-char)
                                 (char=? next-char #\\))
-                           (if (char=? (generator) #\u)
+                           (let ((escape (generator)))
+                            (if (and (char? escape) (char=? escape #\u))
                                (let ((code2 (read-unicode-escape generator)))
                                  (if (<= #xdc00 code2 #xdfff)
                                      (let ((integer
@@ -144,15 +146,20 @@
                                              (cons (integer->char integer)
                                                    (append chars
                                                            out))))
-                                     ;; This is another unicode char
-                                     (loop-unicode (read-unicode-escape generator)
+                                     ;; Not a low surrogate: CODE1 was
+                                     ;; lone, and CODE2 -- already read --
+                                     ;; is the next escape. Reading a
+                                     ;; further four digits here dropped
+                                     ;; it: "\ud83dABCDE" lost its A.
+                                     (loop-unicode code2
                                                    (cons (json-safe-integer->char code1) chars))))
-                               ;; The escaped unicode char is
-                               ;; parsed, need to parse another
-                               ;; escape that is not a unicode
-                               ;; escape sequence
-                               (loop-unescape char (cons (json-safe-integer->char code1)
-                                                         chars)))
+                               ;; A lone high surrogate followed by
+                               ;; another kind of escape: hand that
+                               ;; escape's character on, not the
+                               ;; outer #\u -- "\ud83d\n" read its n
+                               ;; as the start of a \u escape.
+                               (loop-unescape escape (cons (json-safe-integer->char code1)
+                                                           chars))))
                            ;; This is not a big-ish unicode char and
                            ;; the next thing is some other char.
                            (loop next-char
