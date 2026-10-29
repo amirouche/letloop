@@ -705,10 +705,24 @@ the submitting fiber to perform.
 
 ### Network and file I/O
 
-All main thread only; from a compute thread each raises
+The events are main thread only; from a compute thread each raises
 `wrong-thread` — a compute task obtains I/O through a channel
 protocol of its own (see Patterns). Semantics carried over from
 `(letloop flow)`:
+
+#### `(flow-listen ip port [backlog])`
+
+A procedure, not an event: a TCP socket listening on `IP`:`PORT`
+(IPv4), ready for `flow-accept`. `BACKLOG` defaults to 128. The
+address and port are reusable (`SO_REUSEADDR`, `SO_REUSEPORT`), so
+several processes can share a port. It makes plain syscalls, so it may
+be called before `flow-run`, and a server that cannot bind fails before
+it starts: a failed bind or listen closes the socket and raises.
+
+#### `(flow-peer-address fd)`
+
+A procedure: the IPv4 address of the peer connected on `FD`, as a
+string such as `"127.0.0.1"`, or `#f` when there is none.
 
 #### `(flow-accept fd)`
 

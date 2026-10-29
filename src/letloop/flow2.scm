@@ -50,6 +50,7 @@
    flow-timeout flow-sleep
 
    ;; network and file I/O
+   flow-listen flow-peer-address
    flow-accept flow-read flow-read-pending? flow-write flow-write-all!
    flow-open flow-read-at flow-write-at flow-close
    O-RDONLY O-WRONLY O-RDWR O-CREAT O-TRUNC O-APPEND
@@ -130,6 +131,7 @@
    ~check-flow2-009/close-while-read-in-flight
    ~check-flow2-009/a-read-composed-with-its-close-leaves-nothing-behind
    ~check-flow2-006/read-pending-sees-what-a-losing-read-left
+   ~check-flow2-006/listen-accept-and-name-the-peer
 
    ;; fifth adverse pass, 2026-09-03
    ~check-flow2-001/wrap-runs-on-the-performer-after-commit
@@ -2201,6 +2203,30 @@
                        (lambda ()
                          (hashtable-delete! (loop-handlers (loop-current))
                                             id))))))))
+
+  ;; A listening TCP socket on IP:PORT, for flow-accept. Plain
+  ;; syscalls, not ring events, so it may be called before flow-run --
+  ;; a server that cannot bind should fail before it starts. The
+  ;; address and port are reusable (SO_REUSEADDR, SO_REUSEPORT), so
+  ;; several processes can share a port. A bind or listen that fails
+  ;; closes the socket before it raises.
+  (define flow-listen
+    (case-lambda
+      ((ip port) (flow-listen ip port 128))
+      ((ip port backlog)
+       (let ((fd (loop-socket-new AF-INET SOCK-STREAM 0)))
+         (unless fd
+           (error 'flow-listen "socket() failed" ip port))
+         (guard (ex (#t (%eventfd-close fd) (raise ex)))
+           (loop-bind fd ip port)
+           (loop-listen fd backlog))
+         fd))))
+
+  ;; The IPv4 address of the peer connected on FD, as a string such as
+  ;; "127.0.0.1", or #f when it has none (not connected, or already
+  ;; gone). A plain syscall.
+  (define (flow-peer-address fd)
+    (loop-getpeername fd))
 
   (define O-RDONLY 0)
   (define O-WRONLY 1)

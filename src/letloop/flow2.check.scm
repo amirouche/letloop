@@ -2935,3 +2935,36 @@
      (flow-stop)))
   (assert (equal? (reverse seen) '(#f timeout #t #t "hi" #f)))
   #t)
+
+;; flow-listen gives a socket flow-accept takes clients from, and
+;; flow-peer-address names the client; a port already bound without
+;; SO_REUSEPORT's cooperation is refused with a raise, not a bad fd.
+(define (~check-flow2-006/listen-accept-and-name-the-peer)
+  (define PORT 18249)
+  (define peer #f)
+  (define received #f)
+  (define listen-fd (flow-listen "127.0.0.1" PORT))
+  (flow-run
+   (lambda (workers)
+     (flow-spawn
+      (lambda ()
+        (guard (ex (#t (set! peer 'raised)))
+          (let ((client (flow-perform (flow-accept listen-fd))))
+            (set! peer (flow-peer-address client))
+            (set! received (flow-perform (flow-read client)))
+            (flow-perform (flow-close client))))
+        (flow-perform (flow-close listen-fd))
+        (flow-stop)))
+     (flow-spawn
+      (lambda ()
+        (call-with-values (lambda () (make-sockaddr-in 127 0 0 1 PORT))
+          (lambda (addr addrlen)
+            (let ((fd (loop-connect addr addrlen)))
+              (foreign-free addr)
+              (flow-write-all! fd (string->utf8 "hello"))
+              (flow-sleep 0.05)
+              (flow-perform (flow-close fd)))))))))
+  (assert (equal? peer "127.0.0.1"))
+  (assert (equal? received (string->utf8 "hello")))
+  (assert (guard (ex (#t #t)) (flow-listen "203.0.113.1" PORT) #f))
+  #t)
