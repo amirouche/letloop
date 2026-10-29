@@ -397,6 +397,10 @@
    ;; per fd and purged with the fd
    loop-recv-backlog-put! loop-recv-backlog-take! loop-recv-backlog-pending?
 
+   ;; timers kept above the ring, by (letloop flow2): expired at the top
+   ;; of every tick, and the loop's wait shortened to the next deadline
+   loop-timers!
+
    ;; the per-fd operation index loop-close-prep! tears down, for
    ;; libraries that build their own SQEs instead of calling loop-read
    ;; and loop-write -- a socket operation NOT in this index outlives
@@ -1987,6 +1991,42 @@
   (define %read-timeout-seconds 5)
   (define %read-timeout-ts #f)
   (define %wait-timeout #f)
+  (define %wait-timeout-ns 0)
+
+  ;; A timer table kept above the ring, installed with loop-timers!
+  ;; and cleared by loop-new. EXPIRE! is called with the current jiffy
+  ;; on every tick, after the tick's wait and before its completions
+  ;; are handled: a timer that came due first wins over a completion
+  ;; that arrived after it, as a ring timeout's CQE would have been
+  ;; queued ahead of it, and one the wait was cut short for fires as
+  ;; soon as the wait ends. NEXT-NS is called with
+  ;; the current jiffy whenever the loop is about to block, and answers
+  ;; how many nanoseconds until its earliest deadline, or #f for none:
+  ;; the wait is cut to that, so a deadline sooner than the idle wait
+  ;; is not rounded up to it. The wait's timeout travels with the
+  ;; enter call itself, so a timer costs no SQE. Without a table the
+  ;; loop behaves exactly as it always has.
+  (define %timers-expire! #f)
+  (define %timers-next-ns #f)
+  (define %timers-wait-ts #f)
+
+  (define (loop-timers! expire! next-ns)
+    (set! %timers-expire! expire!)
+    (set! %timers-next-ns next-ns))
+
+  ;; The timespec the loop blocks for: the idle wait, or less when a
+  ;; timer is due sooner. One timespec, allocated once and rewritten,
+  ;; since this runs on every blocking tick.
+  (define (%loop-wait-ts)
+    (let ((ns (and %timers-next-ns (%timers-next-ns (jiffy-current)))))
+      (if (and ns (< ns %wait-timeout-ns))
+          (let ((ns (max ns 0)))
+            (unless %timers-wait-ts
+              (set! %timers-wait-ts (make-timespec 0 0)))
+            (ftype-set! <kernel-timespec> (seconds) %timers-wait-ts (div ns 1000000000))
+            (ftype-set! <kernel-timespec> (nanoseconds) %timers-wait-ts (mod ns 1000000000))
+            %timers-wait-ts)
+          %wait-timeout)))
 
   ;;------------------------------------------------------------
   ;; Event loop record
@@ -2178,11 +2218,17 @@
             (when has-pending? (io-uring-submit ring)))
            (has-handlers?
             (io-uring-submit ring)
-            (io-uring-wait-cqe-timeout ring cqe-ptr %wait-timeout))
+            (io-uring-wait-cqe-timeout ring cqe-ptr (%loop-wait-ts)))
            (has-pending?
             (io-uring-submit ring))
            (else
-            (io-uring-wait-cqe-timeout ring cqe-ptr %wait-timeout))))
+            (io-uring-wait-cqe-timeout ring cqe-ptr (%loop-wait-ts)))))
+
+        ;; Timers that came due by now fire before this tick's
+        ;; completions are handled, as a ring timeout's CQE would have
+        ;; been queued ahead of a completion that arrived after it.
+        (when %timers-expire!
+          (%timers-expire! (jiffy-current)))
 
         (let drain ()
           (when (fxzero? (io-uring-peek-cqe ring cqe-ptr))
@@ -2274,10 +2320,12 @@
         ;; Default 100ms, the historical constant; env-tunable so an
         ;; A/B benchmark (e.g. atlas-stoa 0x0042's serve runs) can try
         ;; a shorter tick without a source edit.
-        (set! %wait-timeout
-          (let* ((env (getenv "LETLOOP_WAIT_TIMEOUT_MS"))
-                 (ms (or (and env (string->number env)) 100)))
-            (make-timespec (div ms 1000) (* (mod ms 1000) 1000000))))
+        (let* ((env (getenv "LETLOOP_WAIT_TIMEOUT_MS"))
+               (ms (or (and env (string->number env)) 100)))
+          (set! %wait-timeout
+            (make-timespec (div ms 1000) (* (mod ms 1000) 1000000)))
+          (set! %wait-timeout-ns (* (+ (* (div ms 1000) 1000) (mod ms 1000)) 1000000)))
+        (loop-timers! #f #f)
         (set! %multishots       (make-eqv-hashtable))
         (set! %multishot-ids    (make-eqv-hashtable))
         (set! %buf-data         (make-eqv-hashtable))
