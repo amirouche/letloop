@@ -395,7 +395,7 @@
    ;; the same backlog, for the recv side: a payload whose waiter lost
    ;; its choice cannot be handed back to the kernel, so it is stashed
    ;; per fd and purged with the fd
-   loop-recv-backlog-put! loop-recv-backlog-take!
+   loop-recv-backlog-put! loop-recv-backlog-take! loop-recv-backlog-pending?
 
    ;; the per-fd operation index loop-close-prep! tears down, for
    ;; libraries that build their own SQEs instead of calling loop-read
@@ -2481,6 +2481,11 @@
         (if (null? ids)
             (hashtable-delete! %fd-handlers fd)
             (hashtable-set! %fd-handlers fd ids)))))
+
+  ;; Whether FD has a stashed payload, without taking it.
+  (define loop-recv-backlog-pending?
+    (lambda (fd)
+      (pair? (hashtable-ref %recv-backlog fd '()))))
 
   ;; Non-blocking: pop the oldest stashed payload for FD, or #f.
   (define loop-recv-backlog-take!

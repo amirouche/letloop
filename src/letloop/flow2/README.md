@@ -9,7 +9,7 @@ Amirouche A. BOUBEKKI
 ## Status
 
 `(letloop flow2)` is **implemented**, in `src/letloop/flow2.scm`, with
-83 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
+84 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
 `(letloop flow)` stays untouched and keeps serving its current ones.
 
 This document began as a draft specification and is now the library's
@@ -744,6 +744,17 @@ error such as a reset is reported once by the kernel, and the recv
 after it returns `0`, so dropping it turned the error into a clean EOF.
 The backlog and any recv left in flight are discarded with the fd, on
 close.
+
+#### `(flow-read-pending? fd)`
+
+`#t` when a `flow-read` on `FD` would not start a fresh recv: a payload
+or failure is kept on the fd's backlog, or a recv that a losing read
+left in flight is waiting to be taken over. For a caller that reads one
+fd both through `flow-read` and through the ring layer's plain
+`loop-read` — a hot path where a perform per read costs throughput, as
+in `(letloop http server)`: while this is `#t`, a plain read would take
+bytes out of order or miss the kept ones, so read through `flow-read`
+until it is `#f`. Loop thread only.
 
 #### `(flow-write fd bytevector [start])`
 

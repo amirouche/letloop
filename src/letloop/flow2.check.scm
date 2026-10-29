@@ -2909,3 +2909,29 @@
       (flow-log-stop!)
       (assert (flow2-check-substring? "last words" out))))
   #t)
+
+;; flow-read-pending? is what lets a caller mix flow-read with the ring
+;; layer's plain loop-read on one fd: #f on a fresh fd, #t while a read
+;; that lost its race left its recv in flight or its bytes kept, and #f
+;; again once a flow-read has taken them.
+(define (~check-flow2-006/read-pending-sees-what-a-losing-read-left)
+  (define seen '())
+  (define (note! x) (set! seen (cons x seen)))
+  (flow-run
+   (lambda (_)
+     (let-values (((a b) (flow2-check-socketpair)))
+       (note! (flow-read-pending? a))                         ; fresh: #f
+       (note! (flow-perform
+               (flow-choice (flow-read a)
+                            (flow-wrap (flow-timeout 0) (lambda (_) 'timeout)))))
+       (note! (flow-read-pending? a))                         ; in flight: #t
+       (flow-perform (flow-write b (string->utf8 "hi")))
+       (flow-sleep 0.02)
+       (note! (flow-read-pending? a))                         ; kept: #t
+       (note! (utf8->string (flow-perform (flow-read a))))
+       (note! (flow-read-pending? a))                         ; taken: #f
+       (flow-perform (flow-close a))
+       (flow-perform (flow-close b)))
+     (flow-stop)))
+  (assert (equal? (reverse seen) '(#f timeout #t #t "hi" #f)))
+  #t)

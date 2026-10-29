@@ -50,7 +50,7 @@
    flow-timeout flow-sleep
 
    ;; network and file I/O
-   flow-accept flow-read flow-write flow-write-all!
+   flow-accept flow-read flow-read-pending? flow-write flow-write-all!
    flow-open flow-read-at flow-write-at flow-close
    O-RDONLY O-WRONLY O-RDWR O-CREAT O-TRUNC O-APPEND
 
@@ -129,6 +129,7 @@
    ~check-flow2-009/close-under-choice-fd-actually-closed
    ~check-flow2-009/close-while-read-in-flight
    ~check-flow2-009/a-read-composed-with-its-close-leaves-nothing-behind
+   ~check-flow2-006/read-pending-sees-what-a-losing-read-left
 
    ;; fifth adverse pass, 2026-09-03
    ~check-flow2-001/wrap-runs-on-the-performer-after-commit
@@ -2037,6 +2038,22 @@
                       (%flow-recv-owner! r resume)
                       (register-cancel!
                        (lambda () (%flow-recv-orphan! fd r resume))))))))
+
+  ;; #t when a flow-read on FD would not start a fresh recv: a payload
+  ;; or failure is kept on its backlog, or a recv a losing read left in
+  ;; flight is waiting to be adopted. For a caller that reads FD both
+  ;; through flow-read and through something that does not know about
+  ;; either -- the ring layer's loop-read, on a hot path where a perform
+  ;; per read costs throughput: while this is #t, a plain read would
+  ;; take bytes out of order or miss the kept ones, so read through
+  ;; flow-read until it is #f. Loop thread only, like every ring event.
+  (define (flow-read-pending? fd)
+    (or (loop-recv-backlog-pending? fd)
+        (let ((r (hashtable-ref %flow-recv-orphans fd #f)))
+          (and r
+               (%flow-recv-in-flight? r)
+               (%flow-recv-current? fd r)
+               #t))))
 
   (define (%flow-recv-submit! fd)
     (let* ((ring (loop-ring (loop-current)))
