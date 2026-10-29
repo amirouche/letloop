@@ -688,7 +688,7 @@
   (define flow-poll
     (lambda (bases)
       (let ((n (length bases)))
-        (let loop ((bs (flow-rotate bases (if (fxzero? n) 0 (random n)))))
+        (let loop ((bs (if (fx<? n 2) bases (flow-rotate bases (random n)))))
           (if (null? bs)
               %flow-not-ready
               (let ((thunk ((flow-try-proc (car bs)))))
@@ -997,7 +997,8 @@
   (define flow-block-and-wait-on-loop
     (lambda (bases)
       (let ((state (box 'waiting))
-            (cancels (box '())))
+            (cancels (box '()))
+            (registering? #t))
         (loop-abort
          (lambda (k)
            (define resume-from
@@ -1017,8 +1018,19 @@
                       ;; separate thunks, so a raising cancel is
                       ;; confined by loop-apply's guard and k survives.
                       (%flow-spawn-safe (lambda () (k value)))
-                      (%flow-spawn-safe
-                       (lambda () (%flow-run-cancels! (unbox cancels) tag)))
+                      ;; The cancel pass is a second spawn, and a perform
+                      ;; with nothing to cancel -- a lone flow-read, the
+                      ;; commonest wait there is -- paid for it anyway.
+                      ;; Skip it when every registered cancel is the
+                      ;; winner's own. Not during registration, though:
+                      ;; a base that wins synchronously there is followed
+                      ;; by bases whose cancels are not registered yet,
+                      ;; and the pass reads CANCELS only when it runs.
+                      (when (or registering?
+                                (exists (lambda (entry) (not (eq? (car entry) tag)))
+                                        (unbox cancels)))
+                        (%flow-spawn-safe
+                         (lambda () (%flow-run-cancels! (unbox cancels) tag))))
                       #t))))
            ;; Registration runs on the scheduler's stack, so a raise
            ;; here cannot reach the fiber by unwinding — see
@@ -1050,7 +1062,8 @@
                                                       (cons (flow-data base)
                                                             thunk))
                                                 (unbox cancels)))))))
-                         bases))))))))
+                         bases)
+               (set! registering? #f))))))))
 
   ;; A compute thread is not a fiber: it parks on a condition
   ;; variable, and its resume fills a slot and broadcasts. Only
