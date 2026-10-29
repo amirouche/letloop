@@ -3010,3 +3010,118 @@
    4)
   (assert ok)
   #t)
+
+;;------------------------------------------------------------
+;; Timers kept in a heap above the ring
+;;------------------------------------------------------------
+
+;; Fifty sleeps of shuffled length wake in deadline order.
+(define (~check-flow2-014/timeouts-fire-in-deadline-order)
+  (define woke '())
+  (define durations
+    (let loop ((i 0) (out '()))
+      (if (fx=? i 50) out
+          (loop (fx+ i 1) (cons (* 0.001 (mod (* i 37) 50)) out)))))
+  (flow-run
+   (lambda (workers)
+     (let ((done (make-flow-channel 'done #f)))
+       (for-each (lambda (d)
+                   (flow-spawn (lambda ()
+                                 (flow-sleep d)
+                                 (set! woke (cons d woke))
+                                 (flow-put! done #t))))
+                 durations)
+       (for-each (lambda (_) (flow-get! done)) durations)
+       (flow-stop))))
+  (assert (equal? (reverse woke) (sort < durations)))
+  #t)
+
+;; A timeout that loses is out of the heap at once, not when it would
+;; have fired: a read wins 1000 races against a 5 s timeout, and no
+;; timer is left.
+(define (~check-flow2-014/a-losing-timeout-leaves-the-heap-at-once)
+  (define left #f)
+  (flow-run
+   (lambda (workers)
+     ;; guarded, so a regression fails the check instead of hanging it
+     (guard (ex (#t (set! left 'raised)))
+       (let-values (((a b) (flow2-check-socketpair)))
+         (let loop ((i 0))
+           (when (fx<? i 1000)
+             (flow-write-all! b (bytevector (fxand i 255)))
+             (flow-perform (flow-choice (flow-read a) (flow-timeout 5)))
+             (loop (fx+ i 1))))
+         (set! left (%flow-timers-count))
+         (flow-perform (flow-close a))
+         (flow-perform (flow-close b))))
+     (flow-stop)))
+  (assert (eqv? left 0))
+  #t)
+
+;; The loop's idle wait is 100 ms, and a shorter sleep must not be
+;; rounded up to it; a longer one is not cut short.
+(define (~check-flow2-014/a-sleep-is-not-rounded-to-the-idle-wait)
+  (define short #f)
+  (define long #f)
+  (flow-run
+   (lambda (workers)
+     (let ((t0 (real-time)))
+       (flow-sleep 0.03)
+       (set! short (- (real-time) t0)))
+     (let ((t0 (real-time)))
+       (flow-sleep 0.25)
+       (set! long (- (real-time) t0)))
+     (flow-stop)))
+  (assert (and (>= short 30) (< short 60)))
+  (assert (and (>= long 250) (< long 300)))
+  #t)
+
+;; (flow-sleep 0) yields: two fibers that sleep 0 between steps take
+;; turns, neither taking two steps while the other takes none. Within
+;; a tick the loop runs what it queued last first, so the order inside
+;; each round alternates: (a b) (b a) (a b).
+(define (~check-flow2-014/sleep-zero-yields)
+  (define trace '())
+  (flow-run
+   (lambda (workers)
+     (let ((done (make-flow-channel 'done #f)))
+       (for-each (lambda (name)
+                   (flow-spawn (lambda ()
+                                 (do ((i 0 (fx+ i 1))) ((fx=? i 3))
+                                   (set! trace (cons name trace))
+                                   (flow-sleep 0))
+                                 (flow-put! done #t))))
+                 '(a b))
+       (flow-get! done)
+       (flow-get! done)
+       (flow-stop))))
+  (let ((trace (reverse trace)))
+    (assert (= 6 (length trace)))
+    ;; every round holds one step of each
+    (assert (let loop ((t trace))
+              (or (null? t)
+                  (and (not (eq? (car t) (cadr t))) (loop (cddr t)))))))
+  #t)
+
+;; A run that stops with a timeout pending leaves nothing behind: the
+;; next run starts with no timers and its own sleeps work.
+(define (~check-flow2-014/no-timer-crosses-runs)
+  (define first-left #f)
+  (define second-start #f)
+  (define slept #f)
+  (flow-run
+   (lambda (workers)
+     (flow-spawn (lambda () (flow-sleep 10)))
+     (flow-sleep 0.01)
+     (set! first-left (%flow-timers-count))
+     (flow-stop)))
+  (flow-run
+   (lambda (workers)
+     (set! second-start (%flow-timers-count))
+     (flow-sleep 0.01)
+     (set! slept #t)
+     (flow-stop)))
+  (assert (eqv? first-left 1))
+  (assert (eqv? second-start 0))
+  (assert slept)
+  #t)

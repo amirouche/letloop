@@ -692,9 +692,23 @@ is known, or pass a sentinel that cannot collide — a fresh `(list
 Returns an event ready after `SECONDS` (a real number), whose result is
 `(void)` — wrap it to tell it apart in a choice, as in
 `(flow-wrap (flow-timeout 1.0) (lambda (_) 'timeout))`; an
-`(or (flow-perform ...) 'timeout)` never sees `#f`. Backed by a
-ring timeout SQE; as a losing choice member it is cancelled on the
-ring. Loop thread only — *performing* it from a compute thread raises
+`(or (flow-perform ...) 'timeout)` never sees `#f`. The clock starts
+when the event is performed, not when it is made.
+
+A timeout costs the kernel nothing. Pending timeouts are kept in a heap
+on the loop thread, the loop expires the due ones on every tick before
+it handles that tick's completions, and its wait is cut to the earliest
+deadline, so a 30 ms timeout is not rounded up to the loop's 100 ms idle
+wait. Arming is a heap insert and losing a choice is a heap removal: a
+deadline raced against something that usually wins first costs no
+syscall either way. A timeout fires on the first tick at or after its
+deadline, so on a busy loop it can be late by however long a tick takes.
+
+A timeout is never ready before it blocks, even at `0` seconds, so
+`(flow-sleep 0)` lets every fiber that is already runnable go first and
+resumes on the next tick.
+
+Loop thread only — *performing* it from a compute thread raises
 `wrong-thread`, like every other ring event. Constructing one there is
 harmless, which is what lets a worker build an event it hands back for
 the submitting fiber to perform.

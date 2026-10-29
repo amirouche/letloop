@@ -133,6 +133,11 @@
    ~check-flow2-006/read-pending-sees-what-a-losing-read-left
    ~check-flow2-006/listen-accept-and-name-the-peer
    ~check-flow2-013/latch-under-contention
+   ~check-flow2-014/timeouts-fire-in-deadline-order
+   ~check-flow2-014/a-losing-timeout-leaves-the-heap-at-once
+   ~check-flow2-014/a-sleep-is-not-rounded-to-the-idle-wait
+   ~check-flow2-014/sleep-zero-yields
+   ~check-flow2-014/no-timer-crosses-runs
 
    ;; fifth adverse pass, 2026-09-03
    ~check-flow2-001/wrap-runs-on-the-performer-after-commit
@@ -1887,39 +1892,136 @@
         (%channel-wake-space! channel))))
 
   ;;------------------------------------------------------------
-  ;; Timers (identical to flow)
+  ;; Timers: a heap above the ring
   ;;------------------------------------------------------------
 
+  ;; A timeout used to be a ring operation: IORING_OP_TIMEOUT to arm,
+  ;; with a foreign-alloc'd timespec, IORING_OP_TIMEOUT_REMOVE when it
+  ;; lost a choice, and a completion for each. A timeout raced against
+  ;; something that usually wins first -- a request's deadline, a
+  ;; read's idle timeout -- paid all four every time, and the HTTP
+  ;; server measured that at 17% of its throughput.
+  ;;
+  ;; Pending timeouts now live in a binary min-heap on the loop
+  ;; thread, keyed by deadline in monotonic nanoseconds. The ring layer
+  ;; calls %flow-timers-expire! on every tick, after its wait and before
+  ;; its completions, and cuts the wait to %flow-timers-next-ns, so arming is a push, losing is a
+  ;; removal, and neither touches the kernel. An entry is
+  ;; #(DEADLINE INDEX RESUME) and knows its own slot, so a cancel
+  ;; removes it at once: left in place until due, a 28 s deadline
+  ;; cancelled after a millisecond would pile up by the million.
+  ;; INDEX is -1 once the entry is out of the heap.
+  (define %flow-timers (make-vector 64 #f))
+  (define %flow-timers-size 0)
+
+  (define (%flow-timer-deadline entry) (vector-ref entry 0))
+
+  (define (%flow-timer-place! i entry)
+    (vector-set! %flow-timers i entry)
+    (vector-set! entry 1 i))
+
+  (define (%flow-timer-up! i)
+    (when (fx>? i 0)
+      (let* ((parent (fxsrl (fx- i 1) 1))
+             (entry (vector-ref %flow-timers i))
+             (above (vector-ref %flow-timers parent)))
+        (when (< (%flow-timer-deadline entry) (%flow-timer-deadline above))
+          (%flow-timer-place! parent entry)
+          (%flow-timer-place! i above)
+          (%flow-timer-up! parent)))))
+
+  (define (%flow-timer-down! i)
+    (let* ((left (fx+ (fx* 2 i) 1))
+           (right (fx+ left 1))
+           (least (if (and (fx<? left %flow-timers-size)
+                           (< (%flow-timer-deadline (vector-ref %flow-timers left))
+                              (%flow-timer-deadline (vector-ref %flow-timers i))))
+                      left
+                      i))
+           (least (if (and (fx<? right %flow-timers-size)
+                           (< (%flow-timer-deadline (vector-ref %flow-timers right))
+                              (%flow-timer-deadline (vector-ref %flow-timers least))))
+                      right
+                      least)))
+      (unless (fx=? least i)
+        (let ((entry (vector-ref %flow-timers i)))
+          (%flow-timer-place! i (vector-ref %flow-timers least))
+          (%flow-timer-place! least entry)
+          (%flow-timer-down! least)))))
+
+  (define (%flow-timer-push! entry)
+    (when (fx=? %flow-timers-size (vector-length %flow-timers))
+      (let ((bigger (make-vector (fx* 2 %flow-timers-size) #f)))
+        (do ((i 0 (fx+ i 1))) ((fx=? i %flow-timers-size))
+          (vector-set! bigger i (vector-ref %flow-timers i)))
+        (set! %flow-timers bigger)))
+    (%flow-timer-place! %flow-timers-size entry)
+    (set! %flow-timers-size (fx+ %flow-timers-size 1))
+    (%flow-timer-up! (fx- %flow-timers-size 1)))
+
+  ;; Idempotent: an entry already out of the heap is left alone.
+  (define (%flow-timer-remove! entry)
+    (let ((i (vector-ref entry 1)))
+      (when (fx>=? i 0)
+        (let ((last (fx- %flow-timers-size 1)))
+          (vector-set! entry 1 -1)
+          (set! %flow-timers-size last)
+          (if (fx=? i last)
+              (vector-set! %flow-timers last #f)
+              (let ((moved (vector-ref %flow-timers last)))
+                (vector-set! %flow-timers last #f)
+                (%flow-timer-place! i moved)
+                (%flow-timer-down! i)
+                (%flow-timer-up! (vector-ref moved 1))))))))
+
+  ;; Every tick, before its completions: resume every timeout that is
+  ;; due, earliest first. One that raises is logged and the rest still
+  ;; fire.
+  (define (%flow-timers-expire! now)
+    (let loop ()
+      (when (and (fx>? %flow-timers-size 0)
+                 (<= (%flow-timer-deadline (vector-ref %flow-timers 0)) now))
+        (let ((entry (vector-ref %flow-timers 0)))
+          (%flow-timer-remove! entry)
+          (guard (ex (#t (flow-log (list 'flow2 'timer-raised
+                                         (%flow-condition-sexp ex)))))
+            ((vector-ref entry 2) (void))))
+        (loop))))
+
+  ;; How long the loop may block: until the earliest deadline, or #f.
+  (define (%flow-timers-next-ns now)
+    (and (fx>? %flow-timers-size 0)
+         (- (%flow-timer-deadline (vector-ref %flow-timers 0)) now)))
+
+  ;; A new run starts with no timers. Entries a stopped run left behind
+  ;; are marked out of the heap, so a stray cancel of one cannot remove
+  ;; whatever now sits in its old slot.
+  (define (%flow-timers-clear!)
+    (do ((i 0 (fx+ i 1))) ((fx=? i %flow-timers-size))
+      (vector-set! (vector-ref %flow-timers i) 1 -1)
+      (vector-set! %flow-timers i #f))
+    (set! %flow-timers-size 0)
+    (loop-timers! %flow-timers-expire! %flow-timers-next-ns))
+
+  (define (%flow-timers-count) %flow-timers-size)
+
+  ;; Armed when performed: the deadline is SECONDS from the moment the
+  ;; perform blocks. A timeout is never ready at try time, even at 0
+  ;; seconds, so (flow-sleep 0) yields to every fiber already runnable
+  ;; and resumes on the next tick.
   (define flow-timeout
     (lambda (seconds)
       (make-flow% 'base #f
                   (lambda (x) (void))
                   (lambda () #f)
                   (lambda (state resume register-cancel!)
-                    ;; The SQE is claimed BEFORE the timespec is
-                    ;; foreign-alloc'd: loop-get-sqe raises when the
-                    ;; ring is full, and an allocation made ahead of it
-                    ;; had no owner to free it — 16 leaked bytes per
-                    ;; raise, on exactly the overloaded tick that
-                    ;; produces many of them. The other events allocate
-                    ;; only GC-managed bytevectors ahead of their SQE.
-                    (let* ((ring (loop-ring (loop-current)))
-                           (id   (loop-alloc-id!))
-                           (ns   (exact (round (* seconds 1000000000))))
-                           (sqe  (loop-get-sqe ring))
-                           (ts   (make-timespec (div ns 1000000000)
-                                                (mod ns 1000000000))))
-                      (io-uring-prep-timeout sqe (ftype-pointer-address ts) 0 0)
-                      (io-uring-sqe-set-data64 sqe id)
-                      (hashtable-set! (loop-handlers (loop-current)) id
-                                      (lambda (res)
-                                        (foreign-free (ftype-pointer-address ts))
-                                        (resume res)))
+                    (let ((entry (vector (+ (jiffy-current)
+                                            (exact (round (* seconds 1000000000))))
+                                         -1
+                                         resume)))
+                      (%flow-timer-push! entry)
                       (register-cancel!
-                       (lambda ()
-                         (let ((csqe (loop-get-sqe ring)))
-                           (io-uring-prep-timeout-remove csqe id 0)
-                           (io-uring-sqe-set-data64 csqe (loop-alloc-id!))))))))))
+                       (lambda () (%flow-timer-remove! entry))))))))
 
   (define flow-sleep
     (lambda (seconds) (flow-perform (flow-timeout seconds))))
@@ -2540,6 +2642,9 @@
            (loop-new)
            ;; orphaned recvs belong to the previous ring
            (%flow-recv-orphans-clear!)
+           ;; and so do pending timeouts; this also installs the timer
+           ;; table on the new loop, which loop-new cleared
+           (%flow-timers-clear!)
            ;; The pool is created per run and handed to the workers and
            ;; the collector as a closure, never through a global — a
            ;; straggler from a previous run therefore cannot touch this
