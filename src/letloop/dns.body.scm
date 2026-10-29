@@ -309,14 +309,26 @@
           (let ((buf (make-bytevector 512)))
             (lock-object buf)
             ;; IOSQE-IO-LINK requires the recv SQE and its timeout to be
-            ;; CONSECUTIVE in the submission queue, so both are reserved
-            ;; here BEFORE either is prepped. loop-get-sqe submits on a
-            ;; full queue before retrying, and a submit between the two
-            ;; would flush the recv on its own and break the link --
-            ;; hence reserve-then-prep rather than a per-site
-            ;; substitution. Reserving in order also keeps them adjacent:
-            ;; the second call cannot submit, because the first already
-            ;; guaranteed a slot and nothing else preps in between.
+            ;; CONSECUTIVE in the submission queue, and nothing may be
+            ;; submitted between taking the first and prepping it.
+            ;; loop-get-sqe submits when the queue is full, so the two
+            ;; slots must exist BEFORE either is taken. Taking them
+            ;; back to back was not enough: with exactly one slot free,
+            ;; the first call took it and the second found the queue
+            ;; full and submitted -- flushing the first slot UNPREPPED.
+            ;; io_uring_get_sqe clears only a few fields, so the kernel
+            ;; ran whatever that slot held last (a recv into a buffer
+            ;; since unlocked, a close of a number since reissued), the
+            ;; recv was then prepped into a slot already consumed and
+            ;; never ran, and the resolver parked forever. Make room
+            ;; first; with two slots free neither call submits.
+            (let ((ring (loop-ring (loop-current))))
+              (when (fx<? (io-uring-sq-space-left ring) 2)
+                (io-uring-submit ring)
+                (when (fx<? (io-uring-sq-space-left ring) 2)
+                  (unlock-object buf)
+                  (loop-close udp-fd)
+                  (error 'dns-resolve-a "submission queue full"))))
             (let* ((ring (loop-ring (loop-current)))
                    (sqe (loop-get-sqe ring))
                    (tsqe (loop-get-sqe ring))
