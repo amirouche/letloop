@@ -70,6 +70,18 @@
         (decodes-to-replacement? "\"\\udc00\"")
         ;; high surrogate followed by an ordinary character, not \u
         (decodes-to-replacement? "\"\\ud83dx\"")
+        ;; high surrogate followed by a \u escape that is not a low
+        ;; surrogate: that escape is the next character, not the start
+        ;; of a third one
+        (equal? (json-read (open-input-string "\"\\ud83d\\u0041BCDE\""))
+                "\xfffd;ABCDE")
+        (equal? (json-read (open-input-string "\"\\ud83d\\u0041\""))
+                "\xfffd;A")
+        ;; ... or by another kind of escape
+        (equal? (json-read (open-input-string "\"\\ud83d\\n\""))
+                "\xfffd;\n")
+        (equal? (json-read (open-input-string "\"\\ud83d\\\"x\""))
+                "\xfffd;\"x")
         ;; a REAL pair must still decode to one proper character, not
         ;; two replacement characters
         (let ((s (json-read (open-input-string "\"\\ud83d\\ude00\""))))

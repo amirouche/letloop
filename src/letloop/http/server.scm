@@ -8,8 +8,10 @@
 ;; SIGINT/SIGTERM:
 ;;  - (APPLICATION) → app-wide state, once at startup
 ;;  - (CONTEXT app client req) → per-connection state, first request
-;;  - (DISPATCH app state method path params req)
+;;  - (DISPATCH app state method path params req [rctx])
 ;;      → (values status (body-bytevector . content-type) extra-headers)
+;;    RCTX, the request context below, is passed only to a DISPATCH
+;;    that takes seven arguments; a six-argument one still works.
 ;;    where the response pair usually comes from the json/html/xml/
 ;;    response helpers.
 (library (letloop http server)
@@ -20,6 +22,18 @@
           http-response-write*
           uri-parse/range
           try-parse-http-request
+
+          ;; Per-request cancellation, added 2026-08-14: DISPATCH now
+          ;; receives an extra REQUEST-CONTEXT argument. Its NEEDED?
+          ;; field starts #t and is flipped to #f by the server itself
+          ;; when it gives up on the request (timeout or the
+          ;; connection dying mid-dispatch) -- a handler doing
+          ;; long-running fanned-out work (e.g. multiple upstream
+          ;; fetches) should check it periodically and stop spawning/
+          ;; waiting on more work once it reads #f, rather than
+          ;; running to completion for a response nobody will ever
+          ;; receive.
+          request-context? request-context-needed?
 
           ;; re-exports for dispatch procedures inspecting REQ
           phr-request-body
@@ -34,7 +48,8 @@
           ~check-http-server-002
           ~check-http-server-003
           ~check-http-server-004
-          ~check-http-server-005)
+          ~check-http-server-005
+          ~check-http-server-006)
 
   (import (chezscheme)
           (letloop aql shims)
@@ -45,7 +60,10 @@
           (letloop http)
           (rename (only (letloop www) www-percent-decode www-query-read)
                   (www-percent-decode percent-decode))
-          (letloop liburing low))
+          ;; flow2's exports and nothing below them: the listener,
+          ;; accept, reads, writes, closes, the per-request dispatch
+          ;; race and the idle reaper are all flow2 events and fibers.
+          (letloop flow2))
 
   (begin
     (include "letloop/http/server.body.scm")

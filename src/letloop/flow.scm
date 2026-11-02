@@ -21,7 +21,14 @@
   (export make-flow flow? flow-wrap flow-guard flow-choice flow-perform
 
           make-flow-channel flow-channel? flow-put flow-get
-          flow-put! flow-get!
+          flow-put! flow-get! flow-put-try!
+          ;; Diagnostic only: raw internal list lengths, to tell apart
+          ;; "logically empty" (put-count = get-count) from "channel
+          ;; has released its internal state" -- see the entries in
+          ;; letloop TODO.md for the full diagnosis this was built for
+          ;; (a downstream indexing pipeline's unbounded RSS growth on
+          ;; a large corpus pass).
+          flow-channel-puts-length flow-channel-pops-length
           flow-same-channel-choice-condition?
           flow-same-channel-choice-channel
 
@@ -35,6 +42,16 @@
           flow-spawn flow-run flow-stop
 
           flow-log flow-log-start! flow-log-stop! flow-log-drain!
+
+          flow-worker-start! flow-worker-stop! flow-worker-call
+          flow-worker-io flow-worker-current?
+          ~check-flow-worker-runs-off-loop
+          ~check-flow-worker-propagates-raise
+          ~check-flow-worker-overlaps
+          ~check-flow-worker-io-runs-on-loop
+          ~check-flow-worker-ring-event-off-loop
+          ~check-flow-worker-multiple-values
+          ~check-flow-channel-crosses-threads
 
           ~check-flow-000/always-ready
           ~check-flow-000/wrap-order
@@ -57,6 +74,7 @@
 
           ~check-flow-006/echo-pair
           ~check-flow-006/read-or-timeout-leaves-fd-usable
+          ~check-flow-006/accept-cancel-leaves-listener-usable
           ~check-flow-006/request-loop-idle-timeout
 
           ~check-flow-009/file-write-read-roundtrip
@@ -75,7 +93,11 @@
 
           ~check-flow-011/sync-resume-runs-later-cancels
           ~check-flow-011/raising-cancel-does-not-lose-fiber
-          ~check-flow-011/winner-own-cancel-not-fired)
+          ~check-flow-011/winner-own-cancel-not-fired
+          ~check-flow-011/block-raise-reaches-the-caller
+          ~check-flow-011/block-raise-does-not-strand-a-worker
+          ~check-flow-011/lost-get-does-not-eat-a-value
+          ~check-flow-011/lost-put-does-not-deliver)
 
   (import (chezscheme)
           (letloop r999)
@@ -205,7 +227,149 @@
   ;; as flow-poll applies wrap on the ready path — so no block
   ;; implementation has to remember to wrap its own raw completion
   ;; value (a real io_uring res code, an object off a channel, ...).
+  ;; Off-loop callers cannot loop-abort: a worker thread is not a
+  ;; fiber, there is no prompt to abort to. It blocks on a condition
+  ;; variable instead, and its resume fills a slot and broadcasts
+  ;; rather than spawning a continuation. Everything else -- the state
+  ;; box, the CAS that picks one winner, the cancel bookkeeping -- is
+  ;; shared with the fiber path below, so a rendezvous between a worker
+  ;; and a fiber works in either direction with one implementation of
+  ;; the protocol.
+  ;; A raise from a base's block procedure, on its way back to the
+  ;; party that is waiting on this synchronization.
+  ;;
+  ;; Registration never runs in the waiter's own dynamic extent. On the
+  ;; loop it runs inside loop-abort's thunk, on the SCHEDULER's stack
+  ;; with the prompt already unwound; off the loop it is marshalled
+  ;; onto the loop by %flow-spawn-safe and runs there. Either way a
+  ;; raise reaches loop-apply's catch-all instead of the caller: the
+  ;; fiber is killed with its continuation unrun, or — worse, off the
+  ;; loop — the worker thread is never broadcast to and blocks on its
+  ;; condition variable for the life of the process. Both present as a
+  ;; lost wakeup, which is exactly what they are not.
+  ;;
+  ;; Not a hypothetical: loop-get-sqe raises "submission queue full"
+  ;; once more than 256 operations are queued in a tick, and every
+  ;; ring-touching block proc reaches it — flow-timeout, flow-read,
+  ;; flow-write, flow-open, flow-read-at — as does loop-accept-block's
+  ;; "concurrent accept on fd". The cancel path a few lines below has
+  ;; been hardened against precisely this raise since the NULL-SQE fix;
+  ;; the registration pass had not been.
+  ;;
+  ;; So carry the object out as a VALUE, through the same resume the
+  ;; winning base would have used, and re-raise it in %flow-settle on
+  ;; the waiting party's own stack, where its guards are.
+  (define-record-type* <flow-raise>
+    (%make-flow-raise object)
+    %flow-raise?
+    (object %flow-raise-object))
+
+  (define (%flow-settle result)
+    (if (%flow-raise? result)
+        (raise (%flow-raise-object result))
+        result))
+
+  (define flow-block-and-wait-off-loop
+    (lambda (bases)
+      (let ((state (box 'waiting))
+            (cancels (box '()))
+            (mutex (make-mutex))
+            (ready (make-condition))
+            (slot #f)
+            (done? #f))
+        (define resume-from
+          (lambda (tag value)
+            (and (box-cas! state 'waiting 'synched)
+                 (begin
+                   ;; Cancels touch the ring, so they must run ON the
+                   ;; loop even though we are not on it.
+                   ;;
+                   ;; Known residual, unlike the on-loop path below:
+                   ;; the broadcast wakes this worker on ITS thread
+                   ;; while the cancels are still only queued on the
+                   ;; loop, so a worker that immediately re-performs
+                   ;; can have its new registration marshalled ahead of
+                   ;; the old cancel. Only matters for a cancel that
+                   ;; frees something the next registration needs —
+                   ;; today just flow-accept's handler slot — i.e. a
+                   ;; worker losing an accept race and re-accepting the
+                   ;; same fd at once. Ordering these across the thread
+                   ;; boundary would mean blocking the worker on the
+                   ;; loop, which is worse than the case it fixes.
+                   (%flow-spawn-safe
+                     (lambda ()
+                       (for-each (lambda (pair)
+                                   (unless (eq? (car pair) tag)
+                                     ((cdr pair))))
+                                 (unbox cancels))))
+                   (with-mutex mutex
+                     (set! slot value)
+                     (set! done? #t)
+                     (condition-broadcast ready))
+                   #t))))
+        ;; Registration runs ON THE LOOP, for exactly the reason the
+        ;; cancels above do: a block-proc for anything other than a
+        ;; channel operation preps an SQE and mutates
+        ;; (loop-handlers (loop-current)) -- flow-timeout, flow-read,
+        ;; flow-write, flow-accept, flow-open. Doing that from a worker
+        ;; thread corrupts the ring, and it does not fail where it
+        ;; happens: it surfaces later as a segfault somewhere unrelated.
+        ;; A downstream server died with "nonrecoverable invalid memory
+        ;; reference" under load this way, and hung for 25 minutes on
+        ;; another occasion.
+        ;;
+        ;; Channel block-procs touch only CAS boxes and were always
+        ;; safe here, which is why worker mode appeared to work: every
+        ;; event a compute worker actually performed happened to be a
+        ;; channel operation.
+        ;;
+        ;; Deferring registration is safe against the wait below. RESUME-FROM
+        ;; elects a single winner with box-cas! on STATE regardless of which
+        ;; thread it runs on, and the worker either finds DONE? already set
+        ;; and never waits, or waits and is broadcast to. The mutex is held
+        ;; only around the slot, and condition-wait releases it.
+        (%flow-spawn-safe
+          (lambda ()
+            ;; This thunk runs on the LOOP while the worker sleeps on
+            ;; the condition variable below, so a raise in a block proc
+            ;; here would be swallowed by loop-apply and the worker
+            ;; would never be broadcast to again. Hand it back as this
+            ;; synchronization's winning value instead: ERROR-TAG
+            ;; matches no base, so every already registered cancel
+            ;; fires, and the worker wakes into %flow-settle.
+            (let ((error-tag (cons #f #f)))
+              (guard (ex (#t
+                          (unless (resume-from error-tag (%make-flow-raise ex))
+                            (display "flow: block registration raised after another base won: "
+                                     (current-error-port))
+                            (if (condition? ex)
+                                (display-condition ex (current-error-port))
+                                (display ex (current-error-port)))
+                            (newline (current-error-port))
+                            (flush-output-port (current-error-port)))))
+                (for-each (lambda (base)
+                            (let ((tag (cons #f #f)))
+                              ((flow-block-proc base) state
+                               (lambda (raw)
+                                 (resume-from tag ((flow-wrap-proc base) raw)))
+                               (lambda (thunk)
+                                 (set-box! cancels
+                                           (cons (cons tag thunk) (unbox cancels)))))))
+                          bases)))))
+        (with-mutex mutex
+          (let wait ()
+            (unless done?
+              (condition-wait ready mutex)
+              (wait))))
+        slot)))
+
   (define flow-block-and-wait
+    (lambda (bases)
+      (if (%worker-current?)
+        (flow-block-and-wait-off-loop bases)
+        (flow-block-and-wait-on-loop bases))))
+
+  (define flow-block-and-wait-on-loop
     (lambda (bases)
       (let ((state (box 'waiting))
             (cancels (box '())))
@@ -237,26 +401,66 @@
              (lambda (tag value)
                (and (box-cas! state 'waiting 'synched)
                     (begin
-                      (loop-spawn
+                      ;; %flow-spawn-safe, not loop-spawn: the party
+                      ;; completing this rendezvous may be a worker
+                      ;; thread, and loop-spawn conses onto the loop's
+                      ;; unsynchronized thunk list. On the loop thread
+                      ;; it IS loop-spawn, so the common path is
+                      ;; unchanged.
+                      ;; k is spawned FIRST so that it runs LAST:
+                      ;; loop-spawn conses, and loop-run-once walks the
+                      ;; list front to back, so the thunk queued last
+                      ;; runs first. The losers' cancels must land
+                      ;; before the resumed fiber does anything, because
+                      ;; a cancel can free a resource the fiber
+                      ;; immediately reuses — flow-accept's cancel
+                      ;; releases the multishot's single handler slot,
+                      ;; and a fiber that re-accepts before it runs gets
+                      ;; "concurrent accept on fd" instead. Still two
+                      ;; separate thunks, so a raising cancel is
+                      ;; confined by loop-apply's guard and k survives
+                      ;; it either way.
+                      (%flow-spawn-safe (lambda () (k value)))
+                      (%flow-spawn-safe
                        (lambda ()
                          (for-each (lambda (pair)
                                      (unless (eq? (car pair) tag)
                                        ((cdr pair))))
                                    (unbox cancels))))
-                      (loop-spawn (lambda () (k value)))
                       #t))))
-           (for-each (lambda (base)
-                       ;; one fresh tag per registration — see the
-                       ;; comment above on winner-cancel exclusion
-                       (let ((tag (cons #f #f)))
-                         ((flow-block-proc base) state
-                          (lambda (raw)
-                            (resume-from tag ((flow-wrap-proc base) raw)))
-                          (lambda (thunk)
-                            (set-box! cancels
-                                      (cons (cons tag thunk)
-                                            (unbox cancels)))))))
-                     bases))))))
+           ;; Same hazard as the cancel split described above, on the
+           ;; other pass: a block proc can raise, and here that would
+           ;; take k with it and strand the fiber. ERROR-TAG matches no
+           ;; base, so the losers' cancels all fire and the fiber
+           ;; resumes into %flow-settle, which re-raises on its own
+           ;; stack. Bases after the failing one never register — this
+           ;; synchronization is over.
+           (let ((error-tag (cons #f #f)))
+             (guard (ex (#t
+                         ;; A base may already have won synchronously
+                         ;; during registration, in which case the
+                         ;; fiber is committed to that value and the
+                         ;; CAS fails. Report rather than swallow.
+                         (unless (resume-from error-tag (%make-flow-raise ex))
+                           (display "flow: block registration raised after another base won: "
+                                    (current-error-port))
+                           (if (condition? ex)
+                               (display-condition ex (current-error-port))
+                               (display ex (current-error-port)))
+                           (newline (current-error-port))
+                           (flush-output-port (current-error-port)))))
+               (for-each (lambda (base)
+                           ;; one fresh tag per registration — see the
+                           ;; comment above on winner-cancel exclusion
+                           (let ((tag (cons #f #f)))
+                             ((flow-block-proc base) state
+                              (lambda (raw)
+                                (resume-from tag ((flow-wrap-proc base) raw)))
+                              (lambda (thunk)
+                                (set-box! cancels
+                                          (cons (cons tag thunk)
+                                                (unbox cancels)))))))
+                         bases))))))))
 
   (define flow-perform
     (lambda (event)
@@ -264,7 +468,7 @@
         (flow-check-same-channel-choice! bases)
         (let ((result (flow-poll bases)))
           (if (eq? result %flow-not-ready)
-              (flow-block-and-wait bases)
+              (%flow-settle (flow-block-and-wait bases))
               result)))))
 
   ;;------------------------------------------------------------
@@ -327,6 +531,12 @@
   (define make-flow-channel
     (lambda ()
       (make-flow-channel% (box '()) (box '()) (box 0))))
+
+  ;; Diagnostic only -- see the export comment above.
+  (define flow-channel-puts-length
+    (lambda (channel) (length (unbox (flow-channel-puts channel)))))
+  (define flow-channel-pops-length
+    (lambda (channel) (length (unbox (flow-channel-pops channel)))))
 
   ;; A pending party: the (possibly choice-shared) state box and
   ;; resume from flow-perform, plus — for puts only — the value being
@@ -406,6 +616,19 @@
         (unless (box-cas! box lst (filter flow-channel-entry-waiting? lst))
           (flow-channel-compact! box)))))
 
+  ;; Atomically unlink ONE specific entry from BOX's list right at the
+  ;; moment it is matched via the non-blocking try path (flow-put-try/
+  ;; flow-get-try below), instead of leaving it for the next periodic
+  ;; flow-channel-compact! sweep. remq compares by eq?, so this removes
+  ;; exactly the matched cons cell and nothing else; retries against a
+  ;; fresh snapshot on a concurrent racing push/removal, same shape as
+  ;; flow-channel-compact! above.
+  (define flow-channel-remove!
+    (lambda (box entry)
+      (let ((lst (unbox box)))
+        (unless (box-cas! box lst (remq entry lst))
+          (flow-channel-remove! box entry)))))
+
   ;; Bump the shared gc-counter on every enqueue; once it reaches the
   ;; threshold, drop every dead entry from both lists and reset the
   ;; counter (§4.4). If a concurrent bump also crossed the threshold
@@ -452,6 +675,22 @@
                  ((flow-channel-entry-resume (car pops)) obj))
             (%flow-trace! "put-try hit e" (%flow-trace-entry-id (car pops))
                           " ch" (%flow-trace-channel-id channel))
+            ;; Bug fix, 2026-08-14: the try path resolves a rendezvous
+            ;; without ever removing the matched entry from POPS,
+            ;; which previously only happened via the periodic batch
+            ;; flow-channel-compact! sweep (triggered only from the
+            ;; BLOCKING path's counter -- a channel whose traffic
+            ;; mostly resolves via try, the common, healthy,
+            ;; non-backlogged case, almost never triggered it). Every
+            ;; matched-but-unremoved entry, and the payload its VALUE
+            ;; field still references, piled up in the channel's
+            ;; internal list for the channel's whole lifetime -- see
+            ;; letloop TODO.md's top entry for the full diagnosis (a
+            ;; downstream indexing pipeline leaking unbounded RSS on
+            ;; a large corpus pass). This unlinks the ONE matched
+            ;; entry immediately -- a small targeted CAS, not a
+            ;; periodic whole-list rebuild.
+            (flow-channel-remove! (flow-channel-pops channel) (car pops))
             (lambda () (void)))
            (else (scan (cdr pops))))))))
 
@@ -484,12 +723,29 @@
                ((null? pops)
                 (set-box! (flow-channel-entry-claimed entry) #f))
                ((and (flow-channel-entry-waiting? (car pops))
-                     (flow-channel-entry-claim! (car pops))
-                     ((flow-channel-entry-resume (car pops)) obj))
+                     (flow-channel-entry-claim! (car pops)))
                 (%flow-trace! "put-block rendezvous e"
                               (%flow-trace-entry-id entry)
                               " with e" (%flow-trace-entry-id (car pops)))
-                ((flow-channel-entry-resume entry) (void)))
+                ;; Commit OUR side before delivering, not after. This
+                ;; resume reports #f when an earlier base of the same
+                ;; perform won during registration — the put did not
+                ;; happen, its caller is about to return through the
+                ;; other base — and delivering anyway would hand a peer
+                ;; a value from a put that, as far as its own caller can
+                ;; tell, never took place. Release the peer's claim
+                ;; untouched and stop: there is nothing left to deliver.
+                (if ((flow-channel-entry-resume entry) (void))
+                    ;; Committed: the put HAS happened, so from here the
+                    ;; value must reach someone. Under the claim!
+                    ;; invariant this resume cannot fail; if it ever
+                    ;; does, redeposit rather than drop — same reasoning
+                    ;; as flow-get-block's side.
+                    (unless ((flow-channel-entry-resume (car pops)) obj)
+                      (%flow-channel-redeposit! channel obj))
+                    (begin
+                      (set-box! (flow-channel-entry-claimed (car pops)) #f)
+                      (set-box! (flow-channel-entry-claimed entry) #f))))
                (else (scan (cdr pops))))))))))
 
   (define flow-put
@@ -510,9 +766,56 @@
                  ((flow-channel-entry-resume (car puts)) (void)))
             (%flow-trace! "get-try hit e" (%flow-trace-entry-id (car puts))
                           " ch" (%flow-trace-channel-id channel))
+            ;; Bug fix, 2026-08-14: see the matching comment in
+            ;; flow-put-try -- immediate targeted removal, not a
+            ;; compaction-counter bump.
             (let ((obj (flow-channel-entry-value (car puts))))
+              (flow-channel-remove! (flow-channel-puts channel) (car puts))
               (lambda () obj)))
            (else (scan (cdr puts))))))))
+
+  ;; A rendezvous whose putter has already been resumed cannot be
+  ;; called off: its flow-put! has returned, the handoff DID happen. So
+  ;; when the getter's own resume then reports #f — this perform synched
+  ;; on another base first — the value must land somewhere rather than
+  ;; evaporate. Hand it to another waiting getter if there is one;
+  ;; otherwise leave it on the puts list as an entry with no
+  ;; continuation behind it, only a state box its resume CASes exactly
+  ;; like a real party's does.
+  ;;
+  ;; That CAS is what makes the entry single-use: the first taker wins
+  ;; and the entry stops being `waiting?`, so a second one skips it and
+  ;; compaction drops it. Without it the entry would stay waiting
+  ;; forever and hand the same value out repeatedly — a synthetic
+  ;; putter that never dies is worse than the lost value it replaces.
+  ;;
+  ;; The entry satisfies flow-get-try's waiting?/claim!/resume test
+  ;; unchanged, so no reader needs to know it is special.
+  (define %flow-channel-redeposit!
+    (lambda (channel obj)
+      (let scan ((pops (unbox (flow-channel-pops channel))))
+        (cond
+         ((null? pops)
+          (let* ((state (box 'waiting))
+                 (entry (make-flow-channel-entry*
+                         state
+                         (lambda (ignored) (box-cas! state 'waiting 'synched))
+                         obj)))
+            (%flow-trace! "redeposit e" (%flow-trace-entry-id entry)
+                          " ch" (%flow-trace-channel-id channel))
+            (flow-box-cons! (flow-channel-puts channel) entry)))
+         ((and (flow-channel-entry-waiting? (car pops))
+               (flow-channel-entry-claim! (car pops)))
+          (if ((flow-channel-entry-resume (car pops)) obj)
+              (flow-channel-remove! (flow-channel-pops channel) (car pops))
+              ;; Cannot happen under the claim! invariant, but a claim
+              ;; left set on an entry we then walk away from would
+              ;; strand that getter for good — release it rather than
+              ;; rely on the invariant holding forever.
+              (begin
+                (set-box! (flow-channel-entry-claimed (car pops)) #f)
+                (scan (cdr pops)))))
+         (else (scan (cdr pops)))))))
 
   ;; Mirror of flow-put-block's lost-wakeup fix; see its comment.
   (define flow-get-block
@@ -534,8 +837,13 @@
                 (%flow-trace! "get-block rendezvous e"
                               (%flow-trace-entry-id entry)
                               " with e" (%flow-trace-entry-id (car puts)))
-                ((flow-channel-entry-resume entry)
-                 (flow-channel-entry-value (car puts))))
+                ;; The putter above is already committed, so this
+                ;; resume's #f — an earlier base of this same perform
+                ;; won during registration — must not drop the value on
+                ;; the floor. See %flow-channel-redeposit!.
+                (let ((obj (flow-channel-entry-value (car puts))))
+                  (unless ((flow-channel-entry-resume entry) obj)
+                    (%flow-channel-redeposit! channel obj))))
                (else (scan (cdr puts))))))))))
 
   (define flow-get
@@ -550,6 +858,22 @@
 
   (define flow-get!
     (lambda (channel) (flow-perform (flow-get channel))))
+
+  ;; Attempt a PUT without ever suspending: if a waiting GET exists
+  ;; right now, deliver OBJ to it and return #t; otherwise return #f
+  ;; immediately instead of registering and blocking. For a producer
+  ;; that would rather drop a value than park forever waiting for a
+  ;; consumer that may never arrive (e.g. the request this value was
+  ;; computed for has already been abandoned and nothing is calling
+  ;; flow-get! on this channel anymore) -- the non-blocking counterpart
+  ;; to flow-put!, added 2026-08-14 alongside the flow-put-try/
+  ;; flow-get-try immediate-removal fix above, for exactly this use.
+  ;; (flow-put-try channel obj) returns a THUNK to attempt one
+  ;; non-blocking match, not the attempt itself -- this wraps that
+  ;; shape into a plain #t/#f call.
+  (define flow-put-try!
+    (lambda (channel obj)
+      (and ((flow-put-try channel obj)) #t)))
 
   ;; A choice containing both a put and a get on the same channel can
   ;; never rendezvous with anything but itself and would deadlock;
@@ -697,13 +1021,24 @@
                       (submit! bv))))))
 
   ;; try/block delegate directly to loop-accept-try/loop-accept-block
-  ;; (§4.5's one hook into (letloop liburing low)). No register-cancel!
-  ;; — the multishot is per-fd infrastructure, never torn down just
-  ;; because one choice touching it loses; a client accepted after we
-  ;; already lost is pushed back onto the accept backlog by
-  ;; loop-accept-block itself rather than leaked. resume's return
+  ;; (§4.5's one hook into (letloop liburing low)). resume's return
   ;; value (#t on winning the CAS, #f otherwise) is exactly the
-  ;; claim/decline signal loop-accept-block's handler expects.
+  ;; claim/decline signal loop-accept-block's handler expects, so a
+  ;; client accepted after we already lost is pushed back onto the
+  ;; accept backlog rather than leaked.
+  ;;
+  ;; This block DOES need a register-cancel!, which it long lacked. The
+  ;; old reasoning — the multishot is per-fd infrastructure and must
+  ;; not be torn down just because one choice touching it lost — is
+  ;; right, and the cancel below does not tear it down. What it missed
+  ;; is the HANDLER: loop-accept-block keys a single continuation slot
+  ;; by the multishot's id and refuses a second waiter on it, so a
+  ;; losing accept that left its handler behind poisons the listening
+  ;; fd — every later flow-accept on it raises "concurrent accept on
+  ;; fd", for as long as no client happens to arrive to clear the slot,
+  ;; i.e. precisely while the server is idle. Deleting just the handler
+  ;; costs nothing: a client the multishot accepts with none registered
+  ;; lands on the backlog exactly as above.
   (define flow-accept
     (lambda (fd)
       (make-flow% 'base #f
@@ -712,7 +1047,12 @@
                     (let ((client (loop-accept-try fd)))
                       (and client (lambda () client))))
                   (lambda (state resume register-cancel!)
-                    (loop-accept-block fd (lambda (client) (resume client)))))))
+                    (let ((id (loop-accept-block
+                               fd (lambda (client) (resume client)))))
+                      (register-cancel!
+                       (lambda ()
+                         (hashtable-delete! (loop-handlers (loop-current))
+                                            id))))))))
 
   ;;------------------------------------------------------------
   ;; File I/O events (§4.5, regular-file variant)
@@ -946,7 +1286,19 @@
                                       (lambda (res)
                                         (resume (and (fx>=? res 0) res))))))))
 
-  (define flow-spawn loop-spawn)
+  ;; %flow-spawn-safe, not loop-spawn: on the loop thread this IS
+  ;; loop-spawn, so nothing changes for existing callers, but it also
+  ;; lets a compute worker fan work out onto the loop.
+  ;;
+  ;; That is what makes an ordinary concurrent-fetch helper -- spawn N
+  ;; fibers, have each flow-put! its result, flow-get! them all -- work
+  ;; unchanged when called from a worker: the spawns land on the loop,
+  ;; the puts happen there, and the worker's gets block off-loop on a
+  ;; condition variable. Without it a worker had to fall back to
+  ;; fetching one object at a time, which measured 2x SLOWER than the
+  ;; single-threaded server on cold, I/O-bound queries.
+  (define flow-spawn
+    (lambda (thunk) (%flow-spawn-safe thunk)))
   (define flow-run loop-run)
   (define flow-stop loop-stop)
 
@@ -1090,5 +1442,288 @@
         (unless (unbox flow-log-stopped?)
           (sleep (make-time 'time-duration 10000000 0))
           (wait)))))
+
+  ;;------------------------------------------------------------
+  ;; flow-worker: run CPU-bound work on OS threads
+  ;;------------------------------------------------------------
+  ;;
+  ;; The loop is one OS thread, so a fiber doing sustained CPU work
+  ;; blocks every other fiber for its whole duration -- cooperative
+  ;; scheduling only overlaps I/O WAITS, never computation. This gives
+  ;; a fiber a way to hand a pure-CPU thunk to a pool of OS threads and
+  ;; park until it is done, so the loop keeps serving other connections
+  ;; meanwhile.
+  ;;
+  ;; This is deliberately NOT FL-7. Workers never touch the ring, never
+  ;; call loop-spawn/loop-read/loop-write, never see %loop; they compute
+  ;; and push a result. Only the loop thread ever resumes a fiber. The
+  ;; loop's unsynchronized state (its thunk list, its handler table)
+  ;; therefore stays owned by exactly one thread, which is the invariant
+  ;; FL-7's removal restored and this must not break.
+  ;;
+  ;; Two queues, each matched to its direction:
+  ;;
+  ;; - jobs (loop thread -> workers): a mutex and condition variable,
+  ;;   because idle workers must BLOCK rather than spin, and that is
+  ;;   what a condvar is for. FIFO, so a burst cannot starve its own
+  ;;   oldest request.
+  ;; - results (workers -> loop thread): flow-box-cons!/flow-box-drain!,
+  ;;   the lock-free CAS list already used by flow-log, already
+  ;;   documented safe for concurrent push from any number of threads.
+  ;;
+  ;; The wake-up is an eventfd. Without one, a result would still be
+  ;; noticed on the loop's next tick, but that tick can be up to
+  ;; %wait-timeout (100ms) away -- fine for correctness, useless for a
+  ;; request whose whole budget is tens of milliseconds. A worker
+  ;; writes 8 bytes; the collector fiber is parked on an io_uring read
+  ;; of that fd and wakes through the ordinary completion path, so no
+  ;; new scheduler machinery is involved.
+
+  (define %worker-eventfd-create
+    (let ((func (foreign-procedure __atomic __disable_interrupts __errno
+                                   "eventfd" (unsigned-int int) int)))
+      (lambda ()
+        (call-with-values (lambda () (func 0 0))
+          (lambda (fd errno)
+            (when (fx<? fd 0)
+              (error 'flow-worker-start! "eventfd failed" errno))
+            fd)))))
+
+  ;; Called from a WORKER thread, never the loop thread. An eventfd
+  ;; write of 8 bytes cannot block short of the counter saturating at
+  ;; 2^64-2, which no real run reaches, so this needs no async path.
+  (define %worker-eventfd-signal!
+    (let ((func (foreign-procedure __atomic __disable_interrupts __errno
+                                   "write" (int void* size_t) integer-64)))
+      (lambda (fd)
+        (let ((ptr (foreign-alloc 8)))
+          (foreign-set! 'unsigned-64 ptr 0 1)
+          (call-with-values (lambda () (func fd ptr 8))
+            (lambda (n errno)
+              (foreign-free ptr)
+              (>= n 0)))))))
+
+  (define %worker-eventfd-close
+    (let ((func (foreign-procedure __atomic __disable_interrupts __errno
+                                   "close" (int) int)))
+      (lambda (fd) (call-with-values (lambda () (func fd)) (lambda (r e) r)))))
+
+  ;; Park the calling fiber on FD until a worker signals it, consuming
+  ;; the counter. Structured exactly like loop-read: one SQE, register
+  ;; the continuation under its id, loop-abort.
+  (define %worker-eventfd-wait
+    (lambda (fd)
+      (let ((buffer (foreign-alloc 8)))
+        (let* ((sqe (loop-get-sqe (loop-ring (loop-current))))
+               (id (loop-alloc-id!)))
+          (io-uring-prep-read sqe fd buffer 8 0)
+          (io-uring-sqe-set-data64 sqe id)
+          (let ((res (loop-abort
+                       (lambda (k) (hashtable-set! (loop-handlers (loop-current)) id k)))))
+            (foreign-free buffer)
+            res)))))
+
+  ;; #t only on threads forked by flow-worker-start!, so code shared by
+  ;; both sides can ask which thread it is on. A thread parameter, so
+  ;; the loop thread never observes another thread's value.
+  (define %worker-current? (make-thread-parameter #f))
+
+  (define (flow-worker-current?) (%worker-current?))
+
+  ;; One I/O request marshalled from a worker to the loop thread. The
+  ;; worker blocks on MUTEX/CONDITION -- blocking an OS thread that has
+  ;; nothing else to do, never the loop.
+  (define-record-type* <flow-io-request>
+    (make-flow-io-request% thunk done? result mutex condition)
+    flow-io-request?
+    (thunk     flow-io-request-thunk)
+    (done?     flow-io-request-done?     flow-io-request-done?-set!)
+    (result    flow-io-request-result    flow-io-request-result-set!)
+    (mutex     flow-io-request-mutex)
+    (condition flow-io-request-condition))
+
+  (define %io-requests (box '()))
+
+  ;; Thunks a foreign OS thread wants run on the loop thread. This is
+  ;; the "mailbox indirection" the channel contract above says FL-7's
+  ;; removal deleted: with it, completing a rendezvous from another
+  ;; thread is safe again, because the peer's resume is queued here and
+  ;; performed BY the loop rather than conses onto the loop's
+  ;; unsynchronized thunk list by whoever happened to complete it.
+  (define %cross-thread-spawns (box '()))
+
+  ;; loop-spawn from the loop thread (the hot path, untouched), queue +
+  ;; wake from anywhere else. A worker completing a rendezvous with no
+  ;; pool running has nothing to wake, which can only mean the pool was
+  ;; stopped underneath it -- better to say so than to enqueue a thunk
+  ;; nobody will ever run.
+  (define %flow-spawn-safe
+    (lambda (thunk)
+      (if (%worker-current?)
+        (begin
+          (unless %worker-eventfd
+            (error 'flow "cross-thread resume with no worker pool running"))
+          (flow-box-cons! %cross-thread-spawns thunk)
+          (%worker-eventfd-signal! %worker-eventfd))
+        (loop-spawn thunk))))
+
+  ;; Run THUNK on the loop thread and return its value, wherever the
+  ;; caller happens to be.
+  ;;
+  ;; This is what lets compute workers do I/O without ever touching the
+  ;; ring: a worker submits the thunk, the loop runs it in a fiber of
+  ;; its own -- so several workers' I/O overlaps exactly as ordinary
+  ;; fiber I/O does, over ONE connection pool -- and the worker blocks
+  ;; until the reply. Called on the loop thread it simply runs the
+  ;; thunk, so the same storage code path serves warm-up and queries.
+  (define flow-worker-io
+    (lambda (thunk)
+      (if (not (%worker-current?))
+        (thunk)
+        (let ((request (make-flow-io-request% thunk #f #f
+                                              (make-mutex) (make-condition))))
+          (flow-box-cons! %io-requests request)
+          (%worker-eventfd-signal! %worker-eventfd)
+          (with-mutex (flow-io-request-mutex request)
+            (let wait ()
+              (unless (flow-io-request-done? request)
+                (condition-wait (flow-io-request-condition request)
+                                (flow-io-request-mutex request))
+                (wait))))
+          (let ((outcome (flow-io-request-result request)))
+            (if (eq? (car outcome) 'value)
+              ;; Multiple-value transparent: www-request returns five
+              ;; values, and a marshalling layer that quietly kept only
+              ;; the first turned every S3 read into garbage -- queries
+              ;; still "worked", they just returned no results.
+              (apply values (cdr outcome))
+              (raise (cdr outcome))))))))
+
+  (define %worker-mutex (make-mutex))
+  (define %worker-available (make-condition))
+  (define %worker-jobs-in '())          ;; pushed here (reversed)
+  (define %worker-jobs-out '())         ;; popped here
+  (define %worker-results (box '()))
+  (define %worker-pending #f)           ;; id -> continuation, loop thread only
+  (define %worker-eventfd #f)
+  (define %worker-next-id (box 0))
+  (define %worker-stop? #f)
+  (define %worker-running? #f)
+
+  (define %worker-job-pop!
+    ;; Caller holds %worker-mutex. #f means "stop requested".
+    (lambda ()
+      (let wait ()
+        (cond
+          (%worker-stop? #f)
+          ((pair? %worker-jobs-out)
+           (let ((job (car %worker-jobs-out)))
+             (set! %worker-jobs-out (cdr %worker-jobs-out))
+             job))
+          ((pair? %worker-jobs-in)
+           (set! %worker-jobs-out (reverse %worker-jobs-in))
+           (set! %worker-jobs-in '())
+           (wait))
+          (else (condition-wait %worker-available %worker-mutex) (wait))))))
+
+  (define %worker-body
+    (lambda ()
+      (%worker-current? #t)
+      (let loop ()
+        (let ((job (with-mutex %worker-mutex (%worker-job-pop!))))
+          (when job
+            ;; A raising thunk must still produce a result, or the
+            ;; fiber that submitted it parks forever and its connection
+            ;; hangs until the idle reaper closes it.
+            (let ((outcome (guard (exception (#t (cons 'raised exception)))
+                             (cons 'value (call-with-values (cdr job) list)))))
+              (flow-box-cons! %worker-results (cons (car job) outcome))
+              (%worker-eventfd-signal! %worker-eventfd))
+            (loop))))))
+
+  ;; Drains finished results and resumes their fibers. Runs as one
+  ;; fiber ON the loop thread -- which is what makes resuming safe.
+  (define %worker-collector
+    (lambda ()
+      (let loop ()
+        (when %worker-running?
+          (%worker-eventfd-wait %worker-eventfd)
+          ;; Resumes handed over by foreign threads: run them as the
+          ;; loop's own thunks, which is the whole point of the queue.
+          (for-each loop-spawn (flow-box-drain! %cross-thread-spawns))
+          ;; I/O requests first: a worker is blocked on each one, and
+          ;; every fiber spawned here can be in flight at the same
+          ;; time, which is what keeps several workers' fetches
+          ;; overlapping on the one ring.
+          (for-each
+            (lambda (request)
+              (loop-spawn
+                (lambda ()
+                  (let ((outcome (guard (exception (#t (cons 'raised exception)))
+                                   (cons 'value
+                                         (call-with-values
+                                           (flow-io-request-thunk request)
+                                           list)))))
+                    (with-mutex (flow-io-request-mutex request)
+                      (flow-io-request-result-set! request outcome)
+                      (flow-io-request-done?-set! request #t)
+                      (condition-broadcast (flow-io-request-condition request)))))))
+            (flow-box-drain! %io-requests))
+          (for-each
+            (lambda (entry)
+              (let ((k (hashtable-ref %worker-pending (car entry) #f)))
+                (when k
+                  (hashtable-delete! %worker-pending (car entry))
+                  (loop-spawn (lambda () (k (cdr entry)))))))
+            (flow-box-drain! %worker-results))
+          (loop)))))
+
+  ;; Start COUNT worker threads. Must be called from inside a running
+  ;; loop (it spawns the collector fiber).
+  (define flow-worker-start!
+    (lambda (count)
+      (when %worker-running?
+        (error 'flow-worker-start! "worker pool already running"))
+      (set! %worker-stop? #f)
+      (set! %worker-pending (make-eqv-hashtable))
+      (set! %worker-eventfd (%worker-eventfd-create))
+      (set! %worker-running? #t)
+      (do ((i 0 (fx+ i 1))) ((fx=? i count))
+        (fork-thread %worker-body))
+      (loop-spawn %worker-collector)))
+
+  (define flow-worker-stop!
+    (lambda ()
+      (when %worker-running?
+        (set! %worker-running? #f)
+        (with-mutex %worker-mutex
+          (set! %worker-stop? #t)
+          (condition-broadcast %worker-available))
+        ;; Wake the collector so it observes %worker-running? and exits
+        ;; instead of staying parked on a read nobody will satisfy.
+        (%worker-eventfd-signal! %worker-eventfd))))
+
+  ;; Run THUNK on a worker thread; park this fiber until it finishes.
+  ;; Returns the thunk's value, or re-raises whatever it raised, so a
+  ;; caller cannot tell the work happened on another thread except that
+  ;; the loop kept running.
+  ;;
+  ;; No race between queueing and parking: both happen on the loop
+  ;; thread, and the collector is itself a fiber on that same thread,
+  ;; so it cannot observe the result until this fiber has parked and
+  ;; registered its continuation below.
+  (define flow-worker-call
+    (lambda (thunk)
+      (unless %worker-running?
+        (error 'flow-worker-call "worker pool not running"))
+      (let ((id (flow-box-increment! %worker-next-id)))
+        (with-mutex %worker-mutex
+          (set! %worker-jobs-in (cons (cons id thunk) %worker-jobs-in))
+          (condition-signal %worker-available))
+        (let ((outcome (loop-abort
+                         (lambda (k) (hashtable-set! %worker-pending id k)))))
+          (if (eq? (car outcome) 'value)
+            (apply values (cdr outcome))
+            (raise (cdr outcome)))))))
 
   (include "letloop/flow.check.scm"))

@@ -84,3 +84,25 @@
         (check #t (and (string=? "HTTP/1.1 200 OK\r\n" (substring text 0 17))
                        (let ((len (string-length text)))
                          (string=? "hello" (substring text (- len 5) len)))))))))
+
+;; A six-argument DISPATCH, written to the contract as documented before
+;; the request context existed, is called without it; a seven-argument
+;; one gets it; anything else is refused at startup, not per request.
+;; The procedures are built by eval: inlined, %dispatch-adapt's branch
+;; for the arity a procedure does NOT have draws Chez's argument-count
+;; warning, and a warning fails the library's load.
+(define ~check-http-server-006
+  (lambda ()
+    (define (opaque sexp) (eval sexp (environment '(chezscheme))))
+    (let ((six (%dispatch-adapt
+                (opaque '(lambda (app state method path params req)
+                           (list app state method path params req)))))
+          (seven (%dispatch-adapt
+                  (opaque '(lambda (app state method path params req rctx)
+                             rctx)))))
+      (assert (equal? (six 1 2 3 4 5 6 'rctx) '(1 2 3 4 5 6)))
+      (assert (eq? (seven 1 2 3 4 5 6 'rctx) 'rctx))
+      (assert (guard (ex (#t #t))
+                (%dispatch-adapt (opaque '(lambda (a b c) a)))
+                #f))
+      #t)))
