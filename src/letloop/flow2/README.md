@@ -9,7 +9,7 @@ Amirouche A. BOUBEKKI
 ## Status
 
 `(letloop flow2)` is **implemented**, in `src/letloop/flow2.scm`, with
-99 checks in `src/letloop/flow2.check.scm`. `(letloop http server)`
+100 checks in `src/letloop/flow2.check.scm`. `(letloop http server)`
 runs on it; `(letloop flow)` stays untouched and keeps serving its
 other consumers.
 
@@ -573,16 +573,13 @@ never fires and costs nothing, so a caller with an optional deadline
 can keep one choice — `(flow-timeout (or seconds +inf.0))` — instead
 of building two. A negative number is a deadline already past.
 
-A timeout costs the kernel nothing. Pending timeouts are kept in a heap
-on the loop thread, the loop expires the due ones on every tick before
-it handles that tick's completions, and its wait is cut to the earliest
-deadline, so a 30 ms timeout is not rounded up to the loop's 100 ms idle
-wait. Arming is a heap insert and losing a choice is a heap removal: a
-deadline raced against something that usually wins first costs no
-syscall either way. A timeout fires on the first tick at or after its
-deadline, so on a busy loop it can be late by however long a tick takes.
-Timeouts that come due in the same tick wake in no particular order
-(see `flow-spawn`).
+A timeout costs no syscall, to arm or to lose: pending timeouts are
+kept on the loop thread, not in the ring, so a deadline raced against
+something that usually wins first is cheap. A timeout shorter than the
+loop's 100 ms idle wait is not rounded up to it. A timeout fires on the
+first tick at or after its deadline, so on a busy loop it can be late
+by however long a tick takes. Timeouts that come due in the same tick
+wake in no particular order (see `flow-spawn`).
 
 A timeout is never ready before it blocks, even at `0` seconds, so
 `(flow-sleep 0)` lets every fiber that is already runnable go first and
@@ -640,18 +637,16 @@ Distinguishing the last two matters — a loop that treats `#f` as EOF
 silently turns an error into a normal end of stream.
 
 A read that **loses** a `flow-choice` — the idle-timeout idiom below,
-say — does not lose its bytes, and does not reorder them. Its recv is
-not cancelled: it stays in flight, and the next `flow-read` on that fd
-takes it over rather than submitting a second one, so bytes arrive in
-the order the kernel took them off the socket. A recv that completes
-while nobody is reading — including in the same tick the winner
-completed — keeps its payload on a per-fd backlog that the next
-`flow-read` takes first. A recv that *fails* while nobody is reading
-is kept the same way, and the next `flow-read` reports `#f`: a socket
-error such as a reset is reported once by the kernel, and the recv
-after it returns `0`, so dropping it turned the error into a clean EOF.
-The backlog and any recv left in flight are discarded with the fd, on
-close.
+say — loses no bytes and does not reorder them: whatever its recv
+delivers is kept for the next `flow-read` on that fd, in the order the
+kernel took it off the socket. A failure that arrives while nobody is
+reading is kept the same way, and the next `flow-read` reports `#f`, so
+a reset is not later mistaken for a clean EOF. What is kept is
+discarded with the fd, on close.
+
+The losing recv is left in flight rather than cancelled, and the next
+read adopts it; a completion nobody is waiting for goes on a per-fd
+backlog. `flow-read-pending?` reports either.
 
 #### `(flow-read-pending? fd)`
 
@@ -740,7 +735,7 @@ with bytes already on the fd's backlog, say — is won by that base at
 poll time, and the close is never issued: the fd stays open. Composing
 a close with an operation on the *same* fd buys nothing either way,
 since the close ends that operation regardless. What such a
-composition can no longer do is poison the fd number: a recv submitted
+composition cannot do is poison the fd number: a recv submitted
 while its fd is closing — a `flow-read` registered after the close in
 the same perform — answers its own reader if anyone, and is never left
 on the backlog for whatever socket the kernel gives that number next.
@@ -874,11 +869,6 @@ purpose:
   be preempted, and flow2 has no cancellation; a long task that should
   be stoppable checks a latch — `flow-latch-fired?` between chunks, or
   `flow-latch-wait` in the choice it parks on.
-
-Until 2026-10-20 the framework also put a `compute` `<flow-error>` on a
-response channel passed to `flow-submit!` whenever the task raised,
-and skipped or cancelled tasks whose submitting scope had died. Both
-went with nurseries (see Rationale).
 
 #### `(flow-submit! worker-channel thunk)`
 
@@ -1030,21 +1020,22 @@ the HTTP server's hot path.
 ### Fan out and gather, every fiber reporting its end
 
 ```scheme
-(define (query-ngrams ngrams)
-  (define replies (make-flow-channel 'replies))
-  (for-each (lambda (ngram)
-              (flow-spawn
-               (lambda ()
-                 ;; one reply per fiber, whatever happens to it
-                 (flow-put! replies
-                            (guard (ex (#t (cons 'failed ex)))
-                              (cons 'done (fetch-ngram ngram)))))))
-            ngrams)
-  ;; exactly (length ngrams) replies, so count them out
-  (let loop ((n (length ngrams)) (out '()))
-    (if (zero? n)
-        out
-        (loop (- n 1) (cons (flow-get! replies) out)))))
+(define query-ngrams
+  (lambda (ngrams)
+    (define replies (make-flow-channel 'replies))
+    (for-each (lambda (ngram)
+                (flow-spawn
+                 (lambda ()
+                   ;; one reply per fiber, whatever happens to it
+                   (flow-put! replies
+                              (guard (ex (#t (cons 'failed ex)))
+                                (cons 'done (fetch-ngram ngram)))))))
+              ngrams)
+    ;; exactly (length ngrams) replies, so count them out
+    (let loop ((n (length ngrams)) (out '()))
+      (if (zero? n)
+          out
+          (loop (- n 1) (cons (flow-get! replies) out))))))
 ```
 
 The `guard` is what keeps the count honest: without it a raising fetch
@@ -1055,8 +1046,8 @@ legitimately answer `#f`, and `(flow-get-try replies #f)` as a loop test
 stops at the first one. The gather runs while the fetches do, so the
 default bound is fine: a fetch that outruns the gatherer parks until it
 catches up. Run by `checks/repro-flow2-fourth-pass.scm`,
-`readme-gather-keeps-a-false-reply`, and at 2000 fibers -- past the
-point where the bound used to strand the producers -- by
+`readme-gather-keeps-a-false-reply`, and at 2000 fibers, well past
+the bound, by
 `~check-flow2-002/a-fan-out-past-the-bound-gathers-every-reply`.
 
 ### Gather until a deadline, then hand off
@@ -1068,51 +1059,59 @@ and fills the cache for the next query:
 
 ```scheme
 ;; Every page still queued, newest first onto SEEN.
-(define (drain pages seen)
-  (let ((none (list 'none)))
-    (let loop ((seen seen))
-      (let ((p (flow-get-try pages none)))
-        (if (eq? p none) seen (loop (cons p seen)))))))
+(define drain
+  (lambda (pages seen)
+    (let ((none (list 'none)))
+      (let loop ((seen seen))
+        (let ((p (flow-get-try pages none)))
+          (if (eq? p none) seen (loop (cons p seen))))))))
 
-(define (gather pages exits live seen deadline)
-  (let loop ((live live) (seen seen))
-    (if (zero? live)
-        (values 'complete (drain pages seen))
-        (let ((ev (flow-perform
-                   (apply flow-choice
-                          (flow-wrap (flow-get pages) (lambda (p) (cons 'page p)))
-                          (flow-wrap (flow-get exits) (lambda (x) (cons 'exit x)))
-                          (if deadline
-                              (list (flow-wrap (flow-timeout (seconds-until deadline))
-                                               (lambda (_) '(deadline))))
-                              '())))))
-          (case (car ev)
-            ((page) (loop live (cons (cdr ev) seen)))
-            ((exit) (loop (- live 1) seen))
-            (else (values (cons 'partial live) seen)))))))
+(define gather
+  (lambda (pages exits live seen deadline)
+    (let loop ((live live) (seen seen))
+      (if (zero? live)
+          (values 'complete (drain pages seen))
+          (let ((ev (flow-perform
+                     (apply flow-choice
+                            (flow-wrap (flow-get pages)
+                                       (lambda (p) (cons 'page p)))
+                            (flow-wrap (flow-get exits)
+                                       (lambda (x) (cons 'exit x)))
+                            (if deadline
+                                (list (flow-wrap
+                                       (flow-timeout (seconds-until deadline))
+                                       (lambda (_) '(deadline))))
+                                '())))))
+            (case (car ev)
+              ((page) (loop live (cons (cdr ev) seen)))
+              ((exit) (loop (- live 1) seen))
+              (else (values (cons 'partial live) seen))))))))
 
-(define (search key combos)
-  (let ((pages (make-flow-channel 'pages))
-        (exits (make-flow-channel 'exits)))
-    (for-each (lambda (combo)
-                (flow-spawn
-                 (lambda ()
-                   (flow-put! exits
-                              (guard (ex (#t (list 'failed combo ex)))
-                                (fetch-pages combo pages)   ; streams onto PAGES
-                                (list 'done combo))))))
-              combos)
-    (let-values (((state seen) (gather pages exits (length combos) '()
-                                       (deadline-in 0.050))))
-      (if (eq? state 'complete)
-          (begin (cache-complete! key seen) (rank-full seen))
-          (begin
-            ;; the producers never learn their reader changed
-            (flow-spawn
-             (lambda ()
-               (let-values (((_ all) (gather pages exits (cdr state) seen #f)))
-                 (cache-complete! key all))))
-            (rank-approx seen))))))
+(define search
+  (lambda (key combos)
+    (let ((pages (make-flow-channel 'pages))
+          (exits (make-flow-channel 'exits)))
+      (for-each (lambda (combo)
+                  (flow-spawn
+                   (lambda ()
+                     (flow-put! exits
+                                (guard (ex (#t (list 'failed combo ex)))
+                                  ;; streams onto PAGES
+                                  (fetch-pages combo pages)
+                                  (list 'done combo))))))
+                combos)
+      (let-values (((state seen) (gather pages exits (length combos) '()
+                                         (deadline-in 0.050))))
+        (if (eq? state 'complete)
+            (begin (cache-complete! key seen) (rank-full seen))
+            (begin
+              ;; the producers never learn their reader changed
+              (flow-spawn
+               (lambda ()
+                 (let-values (((_ all)
+                              (gather pages exits (cdr state) seen #f)))
+                   (cache-complete! key all))))
+              (rank-approx seen)))))))
 ```
 
 The `drain` is not optional. `flow-choice` takes a *ready* event at
@@ -1169,40 +1168,42 @@ come back on a downlink channel.
 
 ```scheme
 ;; --- main thread: submit, then serve the task's protocol ---
-(define (run-indexing worker filepath)
-  (define up (make-flow-channel))     ; task -> main
-  (define down (make-flow-channel))   ; main -> task
-  (flow-submit! worker
-                (lambda ()
-                  ;; the task reports its own failure; flow2 will not
-                  (guard (ex (#t (flow-put! up `(raised ,ex))))
-                    (index-file down up filepath))))
-  (let loop ()
-    (let ((msg (flow-get! up)))
-      (case (car msg)
-        ((read-at)                              ; (read-at path offset size)
-         (flow-spawn                            ; concurrent, not serial:
-          (lambda ()                            ; N read-ats overlap on the ring
-            (flow-put! down (apply do-read-at (cdr msg)))))
-         (loop))
-        ((done) (cadr msg))
-        ((failed) (error 'run-indexing "read failed" (cadr msg)))
-        ((raised) (raise (cadr msg)))))))
+(define run-indexing
+  (lambda (worker filepath)
+    (define up (make-flow-channel))     ; task -> main
+    (define down (make-flow-channel))   ; main -> task
+    (flow-submit! worker
+                  (lambda ()
+                    ;; the task reports its own failure; flow2 will not
+                    (guard (ex (#t (flow-put! up `(raised ,ex))))
+                      (index-file down up filepath))))
+    (let loop ()
+      (let ((msg (flow-get! up)))
+        (case (car msg)
+          ((read-at)                            ; (read-at path offset size)
+           (flow-spawn                          ; concurrent, not serial:
+            (lambda ()                          ; N read-ats overlap on the ring
+              (flow-put! down (apply do-read-at (cdr msg)))))
+           (loop))
+          ((done) (cadr msg))
+          ((failed) (error 'run-indexing "read failed" (cadr msg)))
+          ((raised) (raise (cadr msg))))))))
 
 ;; --- compute thread: pure compute, I/O by message ---
-(define (index-file down up filepath)
-  (let loop ((offset 0) (index empty-index))
-    (flow-put! up `(read-at ,filepath ,offset 65536))
-    (let ((chunk (flow-get! down)))             ; parks the OS thread
-      (cond
-       ((bytevector? chunk)
-        (loop (+ offset 65536) (index-chunk index chunk)))
-       ;; #t is a clean EOF and #f is a failure -- the three-way result
-       ;; of flow-read-at, not a truth test. `(if chunk ...)` here loops
-       ;; forever on EOF, feeding #t to index-chunk, and reports a
-       ;; failure as a normal `done` carrying a truncated index.
-       ((eq? chunk #t) (flow-put! up `(done ,index)))
-       (else (flow-put! up `(failed ,offset)))))))
+(define index-file
+  (lambda (down up filepath)
+    (let loop ((offset 0) (index empty-index))
+      (flow-put! up `(read-at ,filepath ,offset 65536))
+      (let ((chunk (flow-get! down)))             ; parks the OS thread
+        (cond
+         ((bytevector? chunk)
+          (loop (+ offset 65536) (index-chunk index chunk)))
+         ;; #t is a clean EOF and #f is a failure -- the three-way result
+         ;; of flow-read-at, not a truth test. `(if chunk ...)` here loops
+         ;; forever on EOF, feeding #t to index-chunk, and reports a
+         ;; failure as a normal `done` carrying a truncated index.
+         ((eq? chunk #t) (flow-put! up `(done ,index)))
+         (else (flow-put! up `(failed ,offset))))))))
 ```
 
 The main-side handler *spawns a fiber per request*, so a task that
@@ -1238,10 +1239,7 @@ in the library: print it, count it, page someone, or fire a latch a
 supervising fiber waits on and let *it* decide whether to stop the
 run. A procedure sink runs on the loop, so it could call `flow-stop`
 itself; firing a latch keeps the decision with a fiber that knows what
-is still in flight. Until 2026-10-28 the sink ran on the flush thread,
-which flow2 refuses like any thread it does not own, and this page's
-`flow-latch-fire!` raised `wrong-thread` and stopped the logger on the
-first uncaught error — while the check named here never fired a latch.
+is still in flight.
 Run as printed by `~check-flow2-000/a-procedure-sink-runs-on-the-loop`.
 
 ## History
@@ -1456,6 +1454,17 @@ thousand. The fourth — a raise in the loop's own tick ending
 `flow-run` silently — is not reachable through flow2: every thunk and
 handler runs under the ring layer's guard, and the timer pass has its
 own.
+
+Reading the ring layer's close path, left undone on the day, found
+one more, and it is the eighth pass's recv defect on the accept side:
+**a purge is not the end of what an fd owns.** A client the kernel
+accepted in the tick its listener was closed completed after the close
+had purged the listener's backlog, and was stashed there again — never
+closed, and handed to the next listener given that fd number. A closing
+listener's late clients are closed now. Three checks that could not
+fail for the reason in their name, or could fail for another, were
+rewritten, and every pattern on this page was run as printed, in the
+order printed, and held.
 
 ## References
 
