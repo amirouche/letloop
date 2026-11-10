@@ -9,13 +9,14 @@ Amirouche A. BOUBEKKI
 ## Status
 
 `(letloop flow2)` is **implemented**, in `src/letloop/flow2.scm`, with
-84 checks in `src/letloop/flow2.check.scm`. It has no consumers yet;
-`(letloop flow)` stays untouched and keeps serving its current ones.
+97 checks in `src/letloop/flow2.check.scm`. `(letloop http server)`
+runs on it; `(letloop flow)` stays untouched and keeps serving its
+other consumers.
 
 This document began as a draft specification and is now the library's
 reference, so where the two ever disagree the source wins. It was last
-reconciled against the implementation on 2026-10-28, after the
-seventh pass's findings were fixed. The day before, nurseries were
+reconciled against the implementation on 2026-11-10, after the ninth
+pass's findings were fixed. Before the seventh pass, nurseries were
 removed — the largest change to documented behaviour since the
 draft: `flow-nursery`, `flow-monitor`, scope cancellation and the
 compute-task error reply are gone, and `flow-submit!` takes a thunk
@@ -214,6 +215,36 @@ and stopped the logger on the first uncaught error; its check never
 fired a latch. Procedure sinks run on the loop now, and the log prints
 to stderr until the program takes it over, instead of growing unread
 when nobody configured it.
+
+An eighth pass on 2026-10-29 read this page against the code and
+found the page wrong more often than the code: a choice takes a ready
+event at random, a losing read is left in flight rather than
+cancelled, a timeout's result is `(void)`. Three defects came with it
+and were fixed that day -- the gather pattern called itself complete
+with pages still queued, a recv submitted on a closing fd stashed its
+failure under a number the kernel reissued, and a run's last log
+entries were left unprinted. A fourth was found and left open: a
+worker's resume could run a tick ahead of the cancels meant to precede
+it.
+
+A ninth pass on 2026-11-10 went after what had changed since -- the
+timer heap, the latch's spin lock, the skipped cancel pass -- and
+found its one serious defect in none of them. Its pattern: **a
+wake-up counted against the wrong event.** A dequeue woke one parked
+putter, as if dequeues were the only way room appears; a woken put
+that met a parked getter handed its value over without touching the
+queue, and nobody woke the next putter. Producers stayed parked for
+room on an empty channel: the "fan out and gather" pattern below
+delivered 990 of 2000 replies on the default bound and hung, on the
+page that says the default bound is fine. A woken put now passes the
+wake on. The eighth pass's open race was the same shape seen from the
+mailbox -- two spawns counted as one event -- and a resume now carries
+its cancels in the same thunk. Three smaller ones: a run left by a
+continuation kept its claim on the loop, `flow-read-pending?` answered
+on a compute thread, and `(flow-timeout +inf.0)` raised from inside
+the perform. The heap itself held under churn. One thing found is
+documented rather than changed: fibers resumed in the same tick run
+newest first (see `flow-spawn`). Each fix has a regression check.
 
 ## Rationale
 
@@ -490,6 +521,16 @@ it and nothing but its own code can stop it. A spawner that needs to
 know how the fiber ended says so in the thunk — puts a result, or a
 failure caught by a `guard`, on a channel it reads (see Patterns).
 
+**The order fibers run in within a tick is unspecified.** A spawn, and
+every resume of a parked fiber, queues the fiber for the next tick,
+and a tick runs what was queued last first. So three fibers whose
+sleeps of 10, 20 and 30 ms all came due during one busy tick wake as
+30, 20, 10, and getters parked on a channel receive values oldest
+first but then run newest first. Who gets which value, and that no
+timeout fires early, are guaranteed; which of several runnable fibers
+goes first is not. A program that needs an order between fibers says
+so with a channel.
+
 An error the fiber does not handle ends it and is logged as
 `(flow2 uncaught fiber CONDITION)`, the condition rendered to a
 string; the loop and every other fiber carry on. Main thread only —
@@ -709,6 +750,8 @@ wait. Arming is a heap insert and losing a choice is a heap removal: a
 deadline raced against something that usually wins first costs no
 syscall either way. A timeout fires on the first tick at or after its
 deadline, so on a busy loop it can be late by however long a tick takes.
+Timeouts that come due in the same tick wake in no particular order
+(see `flow-spawn`).
 
 A timeout is never ready before it blocks, even at `0` seconds, so
 `(flow-sleep 0)` lets every fiber that is already runnable go first and
@@ -1119,6 +1162,7 @@ What the library itself logs:
 | `(flow2 channel-full NAME BOUND)` | a put parked on a full channel, once per saturation episode |
 | `(flow2 cancel-raised BASE CONDITION)` | a losing base's cancel thunk raised; the rest of the batch still ran. `BASE` is the base's tag (`(flow2-get NAME)` for a channel get, `(flow2-space NAME)` for a parked put, `flow2-latch` for a latch wait, `#f` for a ring event or a base built with `make-flow`) |
 | `(flow2 block-raised-after-win CONDITION)` | a base's block proc raised after another base of the same perform had already won; the fiber kept the winner's value |
+| `(flow2 timer-raised CONDITION)` | resuming an expired timeout raised; the other timeouts due that tick still fired |
 | `(flow2 collector-wait-raised)` | the collector could not re-arm its eventfd read; it retries next tick |
 | `(flow2 shutdown-workers-still-running N)` | `flow-run` gave up joining `N` workers and leaked the eventfd rather than reuse its number |
 | `(flow2 log-flush-raised CONDITION)` | the sink raised; the flusher stopped and its batch was put back |
@@ -1180,7 +1224,9 @@ legitimately answer `#f`, and `(flow-get-try replies #f)` as a loop test
 stops at the first one. The gather runs while the fetches do, so the
 default bound is fine: a fetch that outruns the gatherer parks until it
 catches up. Run by `checks/repro-flow2-fourth-pass.scm`,
-`readme-gather-keeps-a-false-reply`.
+`readme-gather-keeps-a-false-reply`, and at 2000 fibers -- past the
+point where the bound used to strand the producers -- by
+`~check-flow2-002/a-fan-out-past-the-bound-gathers-every-reply`.
 
 ### Gather until a deadline, then hand off
 

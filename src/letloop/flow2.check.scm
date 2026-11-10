@@ -3015,7 +3015,11 @@
 ;; Timers kept in a heap above the ring
 ;;------------------------------------------------------------
 
-;; Fifty sleeps of shuffled length wake in deadline order.
+;; Fifty sleeps of shuffled length wake in deadline order -- on an idle
+;; loop, where a millisecond apart means a tick apart. Timeouts that
+;; come due in the SAME tick run newest first, like everything else a
+;; tick resumes (see flow-spawn in the README), so this is a check of
+;; the heap's order and not a promise about a busy loop.
 (define (~check-flow2-014/timeouts-fire-in-deadline-order)
   (define woke '())
   (define durations
