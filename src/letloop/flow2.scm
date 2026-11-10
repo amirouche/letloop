@@ -1325,31 +1325,20 @@
     ;; %channel-warn-saturated!.
     (saturated? flow-channel-saturated? flow-channel-saturated?!))
 
-  ;; Every channel carries a name, and one created without a name still
-  ;; gets a process-unique integer rather than nothing. A diagnostic
-  ;; that cannot say WHICH channel is in trouble is barely better than
-  ;; no diagnostic: (letloop flow) learned that from a hang it could not
-  ;; attribute, and bolted sequential ids onto channels through a weak
-  ;; hashtable purely so its trace could name them. This is that, made
-  ;; deliberate and always on.
-  ;;
-  ;; The auto name is the integer itself rather than a symbol built from
-  ;; it. Chez interns symbols for the life of the process, so minting
-  ;; one per channel would leak steadily in a program that creates
-  ;; channels in a loop — which is exactly the kind of program whose
-  ;; channel diagnostics you end up reading.
+  ;; Every channel carries a name, so a diagnostic can say WHICH
+  ;; channel is in trouble; one created without a name gets a
+  ;; process-unique integer. The integer itself, not a symbol built
+  ;; from it: Chez interns symbols for the life of the process, so one
+  ;; per channel would leak in a program that creates channels in a
+  ;; loop.
   (define %flow-channel-counter (box 0))
 
-  ;; Bounded by default, because unbounded is not a capacity choice —
-  ;; it is the decision to convert a rate mismatch into unbounded
-  ;; memory growth and discover it as an OOM hours later. flow's own
-  ;; history is the argument: a channel that accumulated entries for a
-  ;; process lifetime cost 44GB before anyone could name the cause.
-  ;;
-  ;; The particular number matters far less than its being finite, and
-  ;; a full put PARKS rather than raising, so a bound set too low costs
-  ;; throughput and never correctness. Pass #f for a genuinely
-  ;; unbounded channel, deliberately and visibly at the call site.
+  ;; Bounded by default: an unbounded channel turns a rate mismatch
+  ;; into memory growth found as an OOM hours later. The number matters
+  ;; far less than its being finite, and a full put PARKS rather than
+  ;; raising, so a bound set too low costs throughput and never
+  ;; correctness. Pass #f for an unbounded channel, visibly at the call
+  ;; site.
   (define %flow-channel-default-bound 43)
 
   (define make-flow-channel
@@ -1477,17 +1466,12 @@
   ;; one.
   ;;
   ;; WOKEN? is #t once this put has parked for room and been woken. Such
-  ;; a put owes the wake it was given to the next parked putter. A
-  ;; dequeue wakes exactly one, on the assumption that the woken put
-  ;; then fills the slot -- but if a getter parked in the meantime, the
-  ;; woken put hands its value straight to it and the slot stays free
-  ;; with nobody left to say so. The remaining putters then sat parked
-  ;; for room on an EMPTY channel, beside a getter parked for a value:
-  ;; three one-shot producers on a channel bounded at 1 delivered two
-  ;; values, and the README's own fan-out, 2000 fibers on the default
-  ;; bound, delivered 990 and hung. Room is rechecked under the mutex by
-  ;; %channel-wake-space!, so passing the wake on when the slot did get
-  ;; filled is a no-op.
+  ;; a put owes the wake it was given to the next parked putter: a
+  ;; dequeue wakes exactly one, assuming the woken put then fills the
+  ;; slot, but a woken put that meets a parked getter hands its value
+  ;; straight over and the slot stays free with nobody left to say so.
+  ;; %channel-wake-space! rechecks the room under the mutex, so passing
+  ;; the wake on when the slot did get filled is a no-op.
   (define (%channel-put! channel obj)
     (let try ((woken? #f))
       (let ((entry
@@ -1637,15 +1621,13 @@
                                                   (%flow-waiter-token)))
                          (node (%dnode-new entry)))
                     ;; Armed BEFORE the entry is reachable, and the
-                    ;; recheck below closes the remaining window. Without
-                    ;; a cancel at all, a get that loses a choice leaves
-                    ;; its entry on the list forever: the only reaper is
-                    ;; %channel-pop-getter!, which runs only from a put,
-                    ;; so a channel that is polled and never written —
-                    ;; (flow-choice (flow-get ch) (flow-timeout 0.1)),
-                    ;; the ordinary idle shape — grows without bound, and
-                    ;; each dead entry pins a whole captured continuation
-                    ;; through its resume.
+                    ;; recheck below closes the remaining window. A get
+                    ;; that loses a choice must take its entry off the
+                    ;; list itself: the only other reaper runs from a
+                    ;; put, so a channel polled and never written --
+                    ;; (flow-choice (flow-get ch) (flow-timeout 0.1)) --
+                    ;; would grow without bound, each dead entry pinning
+                    ;; a captured continuation.
                     (register-cancel!
                      (lambda () (%channel-remove-getter! channel node)))
                     (let ((immediate
@@ -1659,20 +1641,16 @@
                                    #f)))))
                       (if immediate
                           ;; resume reports #f when an earlier base of
-                          ;; this same perform already won — registration
-                          ;; is a for-each with no early exit, so a base
-                          ;; that resumed inline is followed by every
-                          ;; later base's block. The value is already out
-                          ;; of the queue at that point, so put it back
-                          ;; rather than drop it. %channel-put! has made
-                          ;; the same test since day one.
+                          ;; this same perform already won: registration
+                          ;; has no early exit, so every later base's
+                          ;; block still runs. The value is out of the
+                          ;; queue by then, so put it back.
                           ;;
                           ;; Putters are woken only once the value is
-                          ;; really taken. Waking them first, as this
-                          ;; did, let a putter on another compute thread
-                          ;; fill the slot before the unget, which then
-                          ;; left the channel one past its bound --
-                          ;; %channel-unget! does not consult it.
+                          ;; really taken: woken first, one could fill
+                          ;; the slot before the unget, which does not
+                          ;; consult the bound and would leave the
+                          ;; channel one past it.
                           (if (resume (cdr immediate))
                               (%channel-wake-space! channel)
                               (%channel-unget! channel (cdr immediate)))
@@ -1699,7 +1677,7 @@
         (car value))
        (else default))))
 
-;;------------------------------------------------------------
+  ;;------------------------------------------------------------
   ;; Latches: fire once, wake every waiter
   ;;------------------------------------------------------------
   ;;
@@ -1832,25 +1810,15 @@
   (define (flow-latch-wait! latch)
     (flow-perform (flow-latch-wait latch)))
 
-    ;;------------------------------------------------------------
+  ;;------------------------------------------------------------
   ;; Diagnostics: raw internal lengths
   ;;------------------------------------------------------------
   ;;
-  ;; (letloop flow) gained flow-channel-puts-length /
-  ;; flow-channel-pops-length after its 44GB incident, commented as
-  ;; existing "to tell apart logically empty (put-count = get-count)
-  ;; from channel has released its internal state". Per TODO.md that
-  ;; instrumentation is what finally confirmed the leak after the
-  ;; business logic had been exonerated by eight repeated-allocation
-  ;; passes: the raw puts list held 62 entries at 70 cumulative puts
-  ;; while logical pending stayed exactly 0.
-  ;;
-  ;; The whole point is that these are RAW list lengths, not logical
-  ;; ones. A structure holding entries nobody will ever resume looks
-  ;; identical from the outside to one that is genuinely idle, and
-  ;; every leak in this family — flow's §1.1, flow2's finding 4 — is
-  ;; the gap between the two. Without a way to read both numbers you
-  ;; are reduced to guessing from RSS.
+  ;; These are RAW list lengths, not logical ones. A structure holding
+  ;; entries nobody will ever resume looks, from outside, like one that
+  ;; is idle, and a leak of waiters is the gap between the two numbers;
+  ;; without both you are guessing from RSS. (letloop flow) gained the
+  ;; same readers after a 44GB leak of exactly that shape.
   ;;
   ;; flow2 has two such structures, so both are readable: a channel's
   ;; parked getters and its parked putters.
@@ -1863,7 +1831,7 @@
 
   ;; Entries on the getters list, dead ones included. Compare against
   ;; the number of fibers you believe are actually parked on this
-  ;; channel; a gap that grows is finding 4's shape.
+  ;; channel; a gap that grows is a leak of dead getters.
   (define (flow-channel-getters-length channel)
     (with-mutex (flow-channel-mutex channel)
       (%dlist-size (flow-channel-getters channel))))
@@ -1879,21 +1847,13 @@
   ;; than N values: the bound is never observably violated, and the
   ;; queue-vs-bound mismatch surfaces at the call site that made it.
   ;; The domain is make-flow-channel's: a positive fixnum, or #f for
-  ;; unbounded. Zero used to slip through here — the constructor
-  ;; rejects it — and produced a channel that could never make progress
-  ;; put-first: the put parks on space, space waiters are only woken by
-  ;; a dequeue, and nothing can ever enter a zero-bound queue, so
-  ;; put-then-get deadlocked while get-then-put happened to work (a put
-  ;; hands its value straight to a parked getter, skipping the queue) —
-  ;; an order-dependent hang, the worst kind. And #f was refused, so a
-  ;; bounded channel could never be made unbounded even though the
-  ;; constructor allows creating one.
+  ;; unbounded. Zero is refused because nothing can enter a zero-bound
+  ;; queue: put-then-get would deadlock while get-then-put worked, an
+  ;; order-dependent hang.
   (define (flow-channel-buffer-size! channel n)
     ;; Growing a bound wakes the putters it admits, and a wake is a
     ;; resume -- on a stray thread, the unsynchronized loop-spawn the
-    ;; guard exists to prevent. This was the one entry point that
-    ;; reaches the scheduler and had no guard after the fourth pass
-    ;; moved it to the choke point.
+    ;; guard exists to prevent.
     (%flow-check-caller-thread! 'flow-channel-buffer-size!)
     (unless (or (not n) (and (fixnum? n) (fx>? n 0)))
       (error 'flow-channel-buffer-size!
