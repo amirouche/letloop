@@ -695,6 +695,12 @@ Returns an event ready after `SECONDS` (a real number), whose result is
 `(or (flow-perform ...) 'timeout)` never sees `#f`. The clock starts
 when the event is performed, not when it is made.
 
+`SECONDS` is checked when the event is made: anything but a real
+number, or a NaN, is an error at that call. `+inf.0` is a timeout that
+never fires and costs nothing, so a caller with an optional deadline
+can keep one choice — `(flow-timeout (or seconds +inf.0))` — instead
+of building two. A negative number is a deadline already past.
+
 A timeout costs the kernel nothing. Pending timeouts are kept in a heap
 on the loop thread, the loop expires the due ones on every tick before
 it handles that tick's completions, and its wait is cut to the earliest

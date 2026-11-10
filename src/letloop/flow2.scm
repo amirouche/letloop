@@ -188,7 +188,8 @@
    ~check-flow2-002/a-fan-out-past-the-bound-gathers-every-reply
    ~check-flow2-005/workers-putting-once-each-all-get-through
    ~check-flow2-005/a-run-left-by-a-continuation-releases-the-loop
-   ~check-flow2-005/read-pending-on-a-compute-thread-is-refused)
+   ~check-flow2-005/read-pending-on-a-compute-thread-is-refused
+   ~check-flow2-014/an-infinite-timeout-never-fires)
 
   (import (chezscheme)
           (letloop r999)
@@ -2039,19 +2040,36 @@
   ;; perform blocks. A timeout is never ready at try time, even at 0
   ;; seconds, so (flow-sleep 0) yields to every fiber already runnable
   ;; and resumes on the next tick.
+  ;;
+  ;; SECONDS is checked here, when the event is made, so a bad one is
+  ;; an error at the call that wrote it. It used to surface from inside
+  ;; the perform, as "Exception in exact: no exact representation for
+  ;; +inf.0" out of whatever choice the timeout was composed into. And
+  ;; +inf.0 is a real: it is how a caller with an optional deadline
+  ;; says "none" without building a different choice, so it makes a
+  ;; timeout that never fires -- nothing goes on the heap at all.
   (define flow-timeout
     (lambda (seconds)
-      (make-flow% 'base #f
-                  (lambda (x) (void))
-                  (lambda () #f)
-                  (lambda (state resume register-cancel!)
-                    (let ((entry (vector (+ (jiffy-current)
-                                            (exact (round (* seconds 1000000000))))
-                                         -1
-                                         resume)))
-                      (%flow-timer-push! entry)
-                      (register-cancel!
-                       (lambda () (%flow-timer-remove! entry))))))))
+      (unless (and (real? seconds) (not (nan? seconds)))
+        (error 'flow-timeout "seconds must be a real number" seconds))
+      (if (and (infinite? seconds) (positive? seconds))
+          (make-flow% 'base #f
+                      (lambda (x) (void))
+                      (lambda () #f)
+                      (lambda (state resume register-cancel!) (void)))
+          (let ((ns (if (infinite? seconds)
+                        0
+                        (exact (round (* seconds 1000000000))))))
+            (make-flow% 'base #f
+                        (lambda (x) (void))
+                        (lambda () #f)
+                        (lambda (state resume register-cancel!)
+                          (let ((entry (vector (+ (jiffy-current) ns)
+                                               -1
+                                               resume)))
+                            (%flow-timer-push! entry)
+                            (register-cancel!
+                             (lambda () (%flow-timer-remove! entry))))))))))
 
   (define flow-sleep
     (lambda (seconds) (flow-perform (flow-timeout seconds))))

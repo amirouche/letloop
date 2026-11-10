@@ -3259,3 +3259,29 @@
   (flow-log-drain!)
   (assert (eq? saw 'wrong-thread))
   #t)
+
+;; +inf.0 is a real, and "no deadline" where a deadline is optional. It
+;; used to raise out of the perform; now it never fires and leaves
+;; nothing on the heap. A SECONDS that is no number is refused when the
+;; event is made, not when it is performed.
+(define (~check-flow2-014/an-infinite-timeout-never-fires)
+  (define saw #f)
+  (define armed #f)
+  (flow-run
+   (lambda (workers)
+     (let ((ch (make-flow-channel 'ch)))
+       (flow-spawn (lambda ()
+                     (flow-sleep 0.01)
+                     (set! armed (%flow-timers-count))
+                     (flow-put! ch 'value)))
+       (set! saw (guard (ex (#t (list 'raised ex)))
+                   (flow-perform (flow-choice (flow-get ch)
+                                              (flow-timeout +inf.0)))))
+       (flow-stop))))
+  (assert (eq? saw 'value))
+  (assert (eqv? armed 0))
+  (assert (guard (ex (#t #t)) (flow-timeout 'soon) #f))
+  (assert (guard (ex (#t #t)) (flow-timeout +nan.0) #f))
+  (assert (flow? (flow-timeout -1)))
+  (assert (flow? (flow-timeout 1/3)))
+  #t)
