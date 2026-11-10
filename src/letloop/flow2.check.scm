@@ -2478,27 +2478,69 @@
     (assert (eqv? 0 (flow-channel-queue-length ch)))
     #t))
 
-;; Per-thread log boxes were inherited across fork-thread, so a forked
-;; thread logged into its parent's box: two threads CASing one box, and
-;; entries interleaved where the drain order promises per-thread runs.
-(define ~check-flow2-000/a-forked-thread-logs-to-its-own-box
+;; A thread the program forked logs to the one shared box, as the main
+;; thread does outside a run: entries come out in arrival order, and no
+;; box is left in the registry for a thread flow2 cannot see exit --
+;; fifty such threads used to leave fifty. It does not inherit a box
+;; from the thread that forked it either, which is checked from a
+;; compute task, the one place a box of one's own is there to inherit.
+(define ~check-flow2-000/a-forked-thread-logs-to-the-shared-box
   (lambda ()
-    (define done (box #f))
+    (define threads 50)
+    (define done (box 0))
+    (define before #f)
+    (define wait-for
+      (lambda (n)
+        (let wait ((tries 0))
+          (when (and (fx<? (unbox done) n) (fx<? tries 400))
+            (sleep (make-time 'time-duration 5000000 0))
+            (wait (fx+ tries 1))))))
+    (define mine
+      (lambda ()
+        (filter (lambda (x) (and (pair? x) (eq? 'flow2-check (car x))))
+                (map cdr (flow-log-drain!)))))
     (flow-log-drain!)
+    (set! before (length (unbox %flow-log-registry)))
+    ;; arrival order, parent and child alike
     (flow-log '(flow2-check parent-before))
-    (fork-thread (lambda () (flow-log '(flow2-check child)) (set-box! done #t)))
-    (let wait ((n 0))
-      (when (and (not (unbox done)) (fx<? n 200))
-        (sleep (make-time 'time-duration 5000000 0))
-        (wait (fx+ n 1))))
+    (fork-thread (lambda ()
+                   (flow-log '(flow2-check child))
+                   (flow-box-increment! done)))
+    (wait-for 1)
     (flow-log '(flow2-check parent-after))
-    ;; the parent's box was registered first, so its two entries come
-    ;; first and together; a shared box gave (before child after)
-    (assert (equal? '((flow2-check parent-before)
-                      (flow2-check parent-after)
-                      (flow2-check child))
-                    (filter (lambda (x) (and (pair? x) (eq? 'flow2-check (car x))))
-                            (map cdr (flow-log-drain!)))))
+    (assert (equal? (mine) '((flow2-check parent-before)
+                             (flow2-check child)
+                             (flow2-check parent-after))))
+    ;; many of them, and nothing left behind
+    (do ((i 0 (+ i 1))) ((= i threads))
+      (fork-thread (lambda ()
+                     (flow-log (list 'flow2-check 'stranger i))
+                     (flow-box-increment! done))))
+    (wait-for (+ threads 1))
+    (assert (= threads (length (mine))))
+    (assert (= before (length (unbox %flow-log-registry))))
+    ;; forked inside a compute task: not the worker's box
+    (let ((worker-box #f) (child-box #f))
+      (flow-run
+       (lambda (workers)
+         (let ((reply (make-flow-channel 'reply)))
+           (flow-submit! (car workers)
+                         (lambda ()
+                           (set! worker-box (%flow-log-ensure-box!))
+                           (fork-thread
+                            (lambda ()
+                              (set! child-box (%flow-log-ensure-box!))
+                              (flow-box-increment! done)))
+                           (flow-put! reply #t)))
+           (flow-get! reply)
+           (flow-stop)))
+       1)
+      (wait-for (+ threads 2))
+      (assert (box? worker-box))
+      (assert (not (eq? worker-box %flow-log-shared)))
+      (assert (eq? child-box %flow-log-shared)))
+    ;; and the run took its own boxes with it
+    (assert (= before (length (unbox %flow-log-registry))))
     #t))
 
 ;; A read that lost its choice used to cancel its recv, and the cancel
@@ -3476,8 +3518,8 @@
                     (and (pair? x) (pair? (cdr x))
                          (equal? (list-head x 2) '(flow2-check box))))
                   (map cdr (flow-log-drain!))))
-    ;; the loop thread may have registered its own in the meantime
-    (assert (<= (- (length (unbox %flow-log-registry)) before) 1))
+    ;; the loop thread's own went with each run too
+    (assert (= (length (unbox %flow-log-registry)) before))
     (assert (= (length logged) (* runs count)))
     #t))
 

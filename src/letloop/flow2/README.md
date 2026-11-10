@@ -71,10 +71,6 @@ No known defect is open.
 One behaviour is left unspecified on purpose: the order in which
 fibers made runnable in the same tick run (see `flow-spawn`).
 
-One small leak is known and left: a thread the program forks itself,
-and that logs, keeps its log accumulator registered after it exits —
-flow2 has no way to see it go. Compute threads retire theirs.
-
 The findings of every pass, and what each one taught, are in History.
 
 ## Rationale
@@ -886,11 +882,14 @@ agree on.
 
 Records `SEXP`, timestamped with the loop's cached per-tick jiffy, and
 returns. Callable from **any** thread, and the one facility here that
-is: a call conses onto a box the calling thread owns and does nothing
-else — no mutex, no port, no syscall. That is the whole design
-requirement. Logging has to be safe on the loop thread, where a
-syscall costs every fiber, and on a compute thread, where blocking
-wastes the core the pool exists to use. The one exception is the
+is: a call conses onto a box and does nothing else — no mutex, no
+port, no syscall. That is the whole design requirement. Logging has to
+be safe on the loop thread, where a syscall costs every fiber, and on a
+compute thread, where blocking wastes the core the pool exists to use,
+so each of those has a box of its own and never contends for it. Every
+other thread — the main thread outside a run, a thread the program
+forked — shares one box, which costs them a retry when two log at the
+same instant. The one exception is the
 first call in a process that has not taken the log over, which also
 forks the default printer (see `flow-log-start!`) — once, not per
 call. Before the first loop the timestamp is `0` rather than an error, and
@@ -902,10 +901,12 @@ program down.
 Every pending entry as a list of `(timestamp . sexp)` — except on the
 first drain while the default printer runs, which stops the printer
 first, and the printer prints what it holds as it stops; see below.
-Entries are oldest first within each thread's own accumulator: those
-of compute threads that have exited come first, then the live threads
-in registration order rather than globally sorted — sort on the
-timestamps if you need strict cross-thread order. Draining empties.
+Entries are oldest first within each accumulator: first those of runs
+and compute threads that have ended, then the one shared by threads
+flow2 does not run, in the order they arrived, then the live loop and
+compute threads in registration order rather than globally sorted —
+sort on the timestamps if you need strict cross-thread order. Draining
+empties.
 
 A drain also takes the log over from the default printer (see below),
 which stops; what is logged afterwards waits for the next drain.
@@ -1465,6 +1466,16 @@ listener's late clients are closed now. Three checks that could not
 fail for the reason in their name, or could fail for another, were
 rewritten, and every pattern on this page was run as printed, in the
 order printed, and held.
+
+Two more came of looking again. The handler a parked acceptor leaves
+on a multishot forgot "the fd's multishot" by number when it ended in
+an error, and after a close made with the ring layer's `loop-close` —
+whose caller resumes inside the completion drain — that number could
+already be a new listener's: its next client was accepted and dropped.
+And the log's registry still kept an accumulator for every thread the
+program forked itself, since flow2 cannot see such a thread exit.
+Those threads now share one accumulator, and only the threads flow2
+runs — which it does see end — have their own.
 
 ## References
 

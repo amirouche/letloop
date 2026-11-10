@@ -82,7 +82,7 @@
    ~check-flow2-000/log-flush-writes-to-the-port-current-at-start
    ~check-flow2-000/a-failing-flush-stops-cleanly-and-keeps-its-batch
    ~check-flow2-000/log-sink-can-be-a-procedure
-   ~check-flow2-000/a-forked-thread-logs-to-its-own-box
+   ~check-flow2-000/a-forked-thread-logs-to-the-shared-box
    ~check-flow2-000/log-prints-to-stderr-by-default
    ~check-flow2-000/a-procedure-sink-runs-on-the-loop
    ~check-flow2-000/a-raising-procedure-sink-keeps-its-batch
@@ -305,32 +305,45 @@
     (lambda (param value)
       (param (cons (get-thread-id) value))))
 
-  ;; Per thread, not a global: two OS threads logging concurrently would
-  ;; otherwise clobber each other's accumulator.
+  ;; A box of its own for each thread flow2 runs: the loop thread
+  ;; during a run, and the compute threads. Two of them CASing one box
+  ;; would spin against each other on the path this exists to stay off.
   (define %flow-log-box (%make-thread-own))
+
+  ;; The one box every other thread logs to: the main thread outside a
+  ;; run, the flush thread, a thread the program forked. flow2 cannot
+  ;; see those exit, so a box each would stay in the registry for good;
+  ;; and none of them is a thread whose logging has to be free of
+  ;; contention. Entries here are in arrival order across threads.
+  (define %flow-log-shared (box '()))
 
   ;; Created and registered on first use, so logging needs no setup
   ;; step on any thread. Only this thread writes its own parameter, so
   ;; the check-then-set needs no CAS; flow-box-cons! is what makes the
-  ;; registry push safe against concurrent registration.
+  ;; registry push safe against concurrent registration. A registered
+  ;; box is retired by %flow-log-retire-box! when its thread is done
+  ;; being flow2's.
   (define %flow-log-ensure-box!
     (lambda ()
       (or (%thread-own-ref %flow-log-box)
-          (let ((b (box '())))
-            (%thread-own-set! %flow-log-box b)
-            (flow-box-cons! %flow-log-registry b)
-            b))))
+          (if (or (%worker-current?)
+                  (eqv? (unbox %flow-loop-thread) (get-thread-id)))
+              (let ((b (box '())))
+                (%thread-own-set! %flow-log-box b)
+                (flow-box-cons! %flow-log-registry b)
+                b)
+              %flow-log-shared))))
 
   ;; Entries of threads that have exited, newest first like any box.
   (define %flow-log-retired (box '()))
 
-  ;; Called by a thread flow2 forked, on its way out: its box leaves the
-  ;; registry, and what it still holds moves to the one retired box, in
-  ;; order. The registry would otherwise keep a box for every compute
-  ;; thread of every run, and every drain walks all of it. An entry is
-  ;; in exactly one place throughout -- flow-box-drain! never delivers
-  ;; twice -- so a drain racing this sees it now or next time. A thread
-  ;; the user forked has no such hook, and its box stays.
+  ;; Called by a compute thread on its way out, and by the loop thread
+  ;; as its run ends: the box leaves the registry, and what it still
+  ;; holds moves to the one retired box, in order. The registry would
+  ;; otherwise keep a box for every thread of every run, and every
+  ;; drain walks all of it. An entry is in exactly one place throughout
+  ;; -- flow-box-drain! never delivers twice -- so a drain racing this
+  ;; sees it now or next time.
   (define %flow-log-retire-box!
     (lambda ()
       (let ((b (%thread-own-ref %flow-log-box)))
@@ -403,8 +416,8 @@
       (when (unbox %flow-log-default-running?)
         (%flow-log-stop-thread!))))
 
-  ;; Every pending entry: oldest-first within each thread's own box,
-  ;; exited threads' entries first, then the live boxes in registration
+  ;; Every pending entry, oldest-first within each box: the retired
+  ;; box, then the shared one, then the live threads' in registration
   ;; order rather than globally sorted — a caller wanting strict
   ;; cross-thread order can sort on the timestamps. The
   ;; registry is read, not drained: it is a cons list, newest first, so
@@ -423,6 +436,7 @@
     (lambda ()
       (let ((boxes (reverse (unbox %flow-log-registry))))
         (append (reverse (flow-box-drain! %flow-log-retired))
+                (reverse (flow-box-drain! %flow-log-shared))
                 (apply append
                        (map (lambda (b) (reverse (flow-box-drain! b)))
                             boxes))))))
@@ -560,8 +574,6 @@
                         (not (unbox %flow-log-stop-requested?)))
                    (lp)
                    (begin
-                     ;; a failed flush logged from this thread
-                     (%flow-log-retire-box!)
                      (set-box! %flow-log-default-running? #f)
                      (set-box! %flow-log-stopped? #t))))))))
       (void)))
@@ -2770,7 +2782,10 @@
         (%flow-shutdown-pool! pool channels)
         (set-box! (%pool-alive pool) #f))
       (set-box! %flow-pool-current #f)
-      (set-box! %flow-loop-thread #f)))
+      (set-box! %flow-loop-thread #f)
+      ;; this thread is the loop's no longer, and its log box goes with
+      ;; the run: a program may start each run from a different thread
+      (%flow-log-retire-box!)))
 
   ;; Stop the pool and, crucially, WAIT before dismantling what the
   ;; workers are still using.
