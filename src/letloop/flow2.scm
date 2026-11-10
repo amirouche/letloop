@@ -1792,22 +1792,19 @@
   ;; Timers: a heap above the ring
   ;;------------------------------------------------------------
 
-  ;; A timeout used to be a ring operation: IORING_OP_TIMEOUT to arm,
-  ;; with a foreign-alloc'd timespec, IORING_OP_TIMEOUT_REMOVE when it
-  ;; lost a choice, and a completion for each. A timeout raced against
-  ;; something that usually wins first -- a request's deadline, a
-  ;; read's idle timeout -- paid all four every time, and the HTTP
-  ;; server measured that at 17% of its throughput.
+  ;; Pending timeouts live in a binary min-heap on the loop thread,
+  ;; keyed by deadline in monotonic nanoseconds, not in the ring: the
+  ;; ring layer calls %flow-timers-expire! on every tick, after its
+  ;; wait and before its completions, and cuts the wait to
+  ;; %flow-timers-next-ns. Arming is a push, losing a choice is a
+  ;; removal, and neither touches the kernel -- as ring operations, a
+  ;; deadline raced against something that usually wins first cost the
+  ;; HTTP server 17% of its throughput.
   ;;
-  ;; Pending timeouts now live in a binary min-heap on the loop
-  ;; thread, keyed by deadline in monotonic nanoseconds. The ring layer
-  ;; calls %flow-timers-expire! on every tick, after its wait and before
-  ;; its completions, and cuts the wait to %flow-timers-next-ns, so arming is a push, losing is a
-  ;; removal, and neither touches the kernel. An entry is
-  ;; #(DEADLINE INDEX RESUME) and knows its own slot, so a cancel
-  ;; removes it at once: left in place until due, a 28 s deadline
-  ;; cancelled after a millisecond would pile up by the million.
-  ;; INDEX is -1 once the entry is out of the heap.
+  ;; An entry is #(DEADLINE INDEX RESUME) and knows its own slot, so a
+  ;; cancel removes it at once: left in place until due, a 28 s
+  ;; deadline cancelled after a millisecond would pile up by the
+  ;; million. INDEX is -1 once the entry is out of the heap.
   (define %flow-timers (make-vector 64 #f))
   (define %flow-timers-size 0)
 
@@ -1908,12 +1905,11 @@
   ;; and resumes on the next tick.
   ;;
   ;; SECONDS is checked here, when the event is made, so a bad one is
-  ;; an error at the call that wrote it. It used to surface from inside
-  ;; the perform, as "Exception in exact: no exact representation for
-  ;; +inf.0" out of whatever choice the timeout was composed into. And
-  ;; +inf.0 is a real: it is how a caller with an optional deadline
-  ;; says "none" without building a different choice, so it makes a
-  ;; timeout that never fires -- nothing goes on the heap at all.
+  ;; an error at the call that wrote it and not inside whatever choice
+  ;; the timeout was composed into. +inf.0 is a real: it is how a
+  ;; caller with an optional deadline says "none" without building a
+  ;; different choice, so it makes a timeout that never fires --
+  ;; nothing goes on the heap at all.
   (define flow-timeout
     (lambda (seconds)
       (unless (and (real? seconds) (not (nan? seconds)))
@@ -1941,34 +1937,25 @@
     (lambda (seconds) (flow-perform (flow-timeout seconds))))
 
   ;;------------------------------------------------------------
-  ;; Network and file I/O events (identical to flow)
+  ;; Network and file I/O events
   ;;------------------------------------------------------------
 
   ;; A read that LOSES its choice still has to account for the bytes.
   ;; The recv and the base that beat it — typically the deadline in the
   ;; idle-timeout idiom — complete in the same tick whenever the loop is
-  ;; late draining, i.e. under load, i.e. exactly when idle timeouts
-  ;; fire; the handlers then run in completion-queue order and the
-  ;; loser's resume returns #f. The bytes are already off the socket at
-  ;; that point, so discarding them is silent, unrecoverable data loss
-  ;; for that connection — a request truncated with nothing logged. It
-  ;; goes on the fd's recv backlog instead, and this event's try pops it
-  ;; before preparing another recv, which is the shape flow-accept has
-  ;; always had for a client it could not hand over.
-  ;;
-  ;; Only the data case needs it. A clean EOF and a failure are both
-  ;; level-triggered: the next recv reports them again, so there is
-  ;; nothing to preserve.
+  ;; late draining, i.e. under load; the handlers then run in
+  ;; completion-queue order and the loser's resume returns #f. The
+  ;; bytes are already off the socket, so they go on the fd's recv
+  ;; backlog, and this event's try pops it before preparing another
+  ;; recv. A failure is kept the same way; a clean EOF is
+  ;; level-triggered, the next recv reports it again, and needs
+  ;; nothing.
   ;;
   ;; A loser's recv is NOT cancelled: it is left in flight, ownerless,
   ;; and the next flow-read on the fd adopts it instead of preparing a
-  ;; second one. Cancelling it reordered the stream. The cancel is
-  ;; asynchronous, so the kernel could still complete the old recv with
-  ;; data -- after the next flow-read had already found the backlog
-  ;; empty and submitted a recv of its own. That second recv then took
-  ;; the NEXT bytes, the late completion parked the earlier ones on the
-  ;; backlog, and the read after returned them: (timeout "two" "one")
-  ;; where the peer sent "one" then "two". With at most one recv in
+  ;; second one. A cancel is asynchronous, so the old recv could still
+  ;; complete with data after the next read had submitted its own, and
+  ;; the stream would come back out of order. With at most one recv in
   ;; flight per reader, bytes arrive in the order the kernel took them.
   ;;
   ;; An orphan nobody adopts completes into the backlog, or is torn
@@ -1986,13 +1973,12 @@
   ;; run; and fd -> the count of a close still in flight. A recv belongs
   ;; to the fd it was submitted on, and the number alone cannot say
   ;; which one that was. loop-close-prep! purges what was in flight when
-  ;; the close began, but a recv submitted AFTER it -- by a flow-read
-  ;; composed with the close, (flow-choice (flow-close fd) (flow-read
-  ;; fd)), whose block runs once the close's has -- escaped the purge:
-  ;; it completed with -EBADF after the close had won, nobody owned it,
-  ;; and its failure marker went on the backlog of the NUMBER. The next
-  ;; socket the kernel gave that number then read #f before any I/O, 20
-  ;; times in 20.
+  ;; the close began, but not a recv submitted AFTER it -- by a
+  ;; flow-read composed with the close, (flow-choice (flow-close fd)
+  ;; (flow-read fd)), whose block runs once the close's has. That one
+  ;; completes with -EBADF, owned by nobody, and must not leave its
+  ;; failure on the backlog of the NUMBER for the next socket the
+  ;; kernel gives it.
   ;;
   ;; So a recv records the count it was submitted under, or #f when the
   ;; fd was closing then, and is current only while that still matches.
@@ -2075,13 +2061,11 @@
        ((fx<? res 0)
         ;; A failure nobody took is kept, like data: it is NOT
         ;; level-triggered. Linux reports a socket error such as
-        ;; ECONNRESET once and clears it, and the next recv returns 0,
-        ;; so a failure dropped here reached the next reader as a clean
-        ;; EOF -- the confusion flow-read's three results exist to
+        ;; ECONNRESET once and clears it, and the next recv returns 0 --
+        ;; a clean EOF, the confusion flow-read's three results exist to
         ;; prevent. -ECANCELED is the exception: it means the fd is
-        ;; closing, loop-close-prep! has already purged its backlog,
-        ;; and a marker left now would greet whatever reopens the
-        ;; number.
+        ;; closing, loop-close-prep! has already purged its backlog, and a
+        ;; marker left now would greet whatever reopens the number.
         (unless (or (and owner (owner #f))
                     (fx=? res (fx- 0 %flow-ecanceled))
                     (not (%flow-recv-current? fd r)))
@@ -2125,10 +2109,9 @@
   ;;
   ;; The thread test is one compare, not %flow-check-loop-thread!: this
   ;; is called per read on the path it exists to keep cheap, and a
-  ;; compute thread's id is never the owner's. Without it the call
-  ;; "worked" from a compute thread -- loop-current is a process global
-  ;; -- reading tables the loop thread mutates, where every other ring
-  ;; operation raises wrong-thread.
+  ;; compute thread's id is never the owner's. It is needed because
+  ;; loop-current is a process global, so nothing else here would stop
+  ;; a compute thread from reading tables the loop thread mutates.
   (define (flow-read-pending? fd)
     (let ((owner (unbox %flow-loop-thread)))
       (when (and owner (not (eqv? owner (get-thread-id))))
@@ -2149,17 +2132,13 @@
       (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
       (io-uring-sqe-set-buf-group sqe (loop-buf-ring-bgid))
       (io-uring-sqe-set-data64 sqe id)
-      ;; In the fd's operation index, not just in loop-handlers. Without
-      ;; it loop-close-prep!'s teardown pass skipped this recv, so its
-      ;; handler survived the close -- and a recv that completed with
-      ;; data in the window between the cancel submit and the kernel
-      ;; acting on it then ran the backlog put, re-creating a stash for
-      ;; an fd whose stash had just been purged. After the kernel
-      ;; reissued the number, the next connection's first flow-read was
-      ;; served the previous connection's bytes. Registered, the handler
-      ;; is deleted by the purge and the late CQE finds nothing (the
-      ;; drain has already recycled its buffer and drops the orphan).
-      ;; That matters more now that a losing recv stays in flight.
+      ;; In the fd's operation index, not just in loop-handlers, so that
+      ;; loop-close-prep!'s purge deletes the handler. Otherwise a recv
+      ;; completing with data between the cancel's submit and the kernel
+      ;; acting on it would put on the backlog of an fd just purged, and
+      ;; the next connection given that number would read the previous
+      ;; one's bytes. Registered, the late CQE finds nothing (the drain
+      ;; has already recycled its buffer and drops the orphan).
       ;;
       ;; flow-write deliberately does NOT register: its handler is what
       ;; unlocks the pinned bytevector, and running it from the
@@ -2175,27 +2154,17 @@
   ;; fixnum, or #f on failure. START defaults to 0 and lets a caller
   ;; resume a partial write without copying anything.
   ;;
-  ;; It deliberately does NOT loop internally. Resubmitting the
-  ;; remainder from inside the completion handler runs on the
-  ;; scheduler's stack with the fiber parked across every round trip,
-  ;; and that one decision caused three separate problems:
-  ;;
-  ;; - Uncancellable. The chain belonged to no fiber, so nothing could
-  ;;   stop it: it kept issuing ring operations against
-  ;;   an fd the cleanup path had very likely already closed, which on a
-  ;;   recycled descriptor is a write into someone else's file.
-  ;; - Unraceable. (flow-choice (flow-write ...) (flow-timeout ...))
-  ;;   would elect the timeout and the write would carry on regardless.
-  ;; - Quadratic. subbytevector copied the whole remainder on every
-  ;;   partial write, which is worst exactly when partial writes happen
-  ;;   -- a large buffer dribbling out through a slow socket.
+  ;; It deliberately does NOT loop internally. A chain resubmitted from
+  ;; the completion handler belongs to no fiber: it cannot be
+  ;; cancelled, and it cannot lose a race -- (flow-choice (flow-write
+  ;; ...) (flow-timeout ...)) would elect the timeout and the write
+  ;; carry on, against an fd the caller may since have closed.
   ;;
   ;; Looping in the CALLER makes each chunk its own perform and
   ;; therefore its own cancellation point, and costs no atomicity: each
   ;; resubmit was a separate SQE either way, so a competing send on the
   ;; same fd could always interleave. flow-write-all! below is the
-  ;; loop, and flow-write-at has reported its count all along -- this
-  ;; makes flow-write agree with it.
+  ;; loop.
   (define flow-write
     (case-lambda
       ((fd bv) (flow-write fd bv 0))
@@ -2245,10 +2214,9 @@
                             (io-uring-sqe-set-data64 csqe (loop-alloc-id!)))))))))))
 
   ;; Write all of BV, resuming after each partial write. A procedure
-  ;; rather than an event, exactly as flow-put! is: every iteration
-  ;; performs flow-write and is therefore a suspension point and a
-  ;; cancellation point, which is the property the old internal loop
-  ;; threw away. Returns #t once everything is written, #f if a write
+  ;; rather than an event, as flow-put! is: every iteration performs
+  ;; flow-write and is therefore a suspension point and a cancellation
+  ;; point. Returns #t once everything is written, #f if a write
   ;; failed -- ask flow-write directly if you need to know how far it
   ;; got. An empty bytevector costs no syscall.
   (define (flow-write-all! fd bv)
@@ -2262,16 +2230,14 @@
   ;; The cancel is not optional here, unlike the other events where it
   ;; only saves a wasted ring operation. loop-accept-block keys its
   ;; single continuation slot by the multishot's id and REFUSES a
-  ;; second waiter on it; a cancelled accept that left its handler
-  ;; behind therefore poisons the listening fd, and every later
-  ;; flow-accept on it raises "concurrent accept on fd" for as long as
-  ;; no client happens to arrive to clear the slot — i.e. exactly when
-  ;; the server is idle. Any flow-accept that lost a choice to a
-  ;; timeout hit this on the first loss.
+  ;; second waiter on it, so an accept that lost a choice and left its
+  ;; handler behind would poison the listening fd: every later
+  ;; flow-accept raises "concurrent accept on fd" until a client
+  ;; arrives to clear the slot.
   ;;
-  ;; Deleting the handler is the whole fix: a client the multishot
-  ;; accepts afterwards lands on %accept-backlog and the next
-  ;; flow-accept picks it up, so nothing is leaked and nothing is lost.
+  ;; Deleting the handler is enough: a client the multishot accepts
+  ;; afterwards lands on %accept-backlog and the next flow-accept picks
+  ;; it up, so nothing is leaked and nothing is lost.
   (define flow-accept
     (lambda (fd)
       (make-flow% 'base #f
@@ -2382,13 +2348,9 @@
                                         (resume
                                          (cond
                                           ((fx<? res 0) #f)
-                                          ;; #t, not 'eof: flow-read has
-                                          ;; said #t for a clean end of
-                                          ;; stream all along, and two
-                                          ;; encodings for the same
-                                          ;; condition across two read
-                                          ;; verbs is a trap that only
-                                          ;; ever costs a caller.
+                                          ;; #t, not 'eof: flow-read says #t
+                                          ;; for a clean end of stream, and
+                                          ;; the two read verbs must agree.
                                           ((fxzero? res) #t)
                                           ((fx=? res count) bv)
                                           (else (subbytevector bv 0 res))))))
@@ -2459,11 +2421,9 @@
   ;; An error nobody handled ends the fiber and becomes a log entry,
   ;; (flow2 uncaught fiber CONDITION) -- what happens to it next is the
   ;; logger's business: flushed to a port, handed to a procedure, or
-  ;; drained and asserted on by a test. It used to reach loop-apply's
-  ;; catch-all, which writes straight to stderr, so the one event most
-  ;; worth routing was the one flow-log never saw. The catch-all stays
-  ;; as the last resort for a fiber started below flow2, through the
-  ;; ring layer directly.
+  ;; drained and asserted on by a test. loop-apply's catch-all, which
+  ;; writes straight to stderr, stays as the last resort for a fiber
+  ;; started below flow2, through the ring layer directly.
   (define (%fiber-run thunk)
     (guard (ex (#t (flow-log (list 'flow2 'uncaught 'fiber
                                    (%flow-condition-sexp ex)))))
@@ -2504,13 +2464,9 @@
   ;; The per-worker framework loop: dequeue, run. A raise the task did
   ;; not handle itself is logged as (flow2 uncaught task WORKER
   ;; CONDITION) and the worker takes its next task: the pool must not
-  ;; shrink because one task failed.
-  ;;
-  ;; There used to be an always-a-reply rule here: the framework put a
-  ;; compute <flow-error> on the task's response channel for it. That
-  ;; made flow2 a party to every task's protocol -- it had to know the
-  ;; reply channel, force past its bound, and stay out of a straggler's
-  ;; way -- for a guarantee a task gets from one guard of its own.
+  ;; shrink because one task failed. Nothing is put on any channel for
+  ;; the task: a reply, on success or failure, is the task's own to
+  ;; send, with one guard of its own.
   (define (%worker-body pool channel)
     (%thread-own-set! %worker-pool pool)
     (let loop ()
@@ -2567,41 +2523,31 @@
     (case-lambda
       ((proc) (flow-run proc 0))
       ((proc compute-count)
-       ;; Before anything is touched. A negative count is not zero, so
-       ;; a pool was created, and the forking loop below terminates on
-       ;; (fx=? i compute-count) -- never, for i >= 0: it forked until
-       ;; fork-thread failed with EAGAIN.
+       ;; Before anything is touched: the forking loop below ends on
+       ;; (fx=? i compute-count), which a negative count never reaches.
        (unless (and (fixnum? compute-count) (fx>=? compute-count 0))
          (error 'flow-run "compute-count must be a non-negative fixnum"
                 compute-count))
        ;; A compute thread never runs a loop -- the Rationale's one
        ;; structural rule -- and there is one loop per process: loop-new
-       ;; frees the ring that is running. Nested in a fiber, a second
-       ;; flow-run tore down its caller's loop and the outer fiber died
-       ;; with "attempt to apply non-procedure #f"; from a compute task it
-       ;; did the same to the main thread's ring and two threads ran one
-       ;; loop until the process hung. The claim is a CAS, so two threads
-       ;; starting at once cannot both win it.
+       ;; frees the ring that is running, so a second flow-run nested in a
+       ;; fiber or a task would tear down its caller's. The claim is a CAS,
+       ;; so two threads starting at once cannot both win it.
        (when (%worker-current?) (%flow-wrong-thread 'flow-run))
        (unless (box-cas! %flow-loop-thread #f (get-thread-id))
          (error 'flow-run "a flow-run is already in progress"))
        ;; Whoever claimed the loop owns it for this run; see
        ;; %flow-check-caller-thread!. Everything from here on releases
-       ;; the claim on its way out, raise included. A start that failed
-       ;; -- eventfd creation refused for want of descriptors, say --
-       ;; used to leave it set, and every flow2 call from another thread
-       ;; then raised wrong-thread against a run that did not exist.
+       ;; the claim on its way out, raise included -- a start can fail,
+       ;; eventfd creation refused for want of descriptors, say.
        (set-box! %flow-loop-token (box #t))
        (let ((pool #f) (channels '()) (released? #f))
          ;; Once, on whichever way out comes first. The guard releases
          ;; before a raise travels on; the dynamic-wind is for the exits
-         ;; that are not raises. A continuation captured outside the run
-         ;; and invoked from a fiber -- an early exit, or a REPL interrupt
-         ;; resetting to the top level -- used to leave with the claim
-         ;; still held: every later flow-run raised "a flow-run is
-         ;; already in progress" for the life of the process, and the
-         ;; compute threads were never joined. Fibers switch inside
-         ;; loop-run, within this extent, so they do not trip it.
+         ;; that are not raises: a continuation captured outside the run
+         ;; and invoked from a fiber, or a REPL interrupt resetting to the
+         ;; top level. Fibers switch inside loop-run, within this extent,
+         ;; so they do not trip it.
          (define (release!)
            (unless released?
              (set! released? #t)
@@ -2679,13 +2625,10 @@
   (define (%flow-shutdown-pool! pool channels)
     (%pool-running?! pool #f)
     ;; At the HEAD of each queue, past the bound, the way a value a
-    ;; losing get took is put back. It used to be appended, so a worker
-    ;; ran every task still queued before reaching it: with six
-    ;; one-second tasks queued, flow-run spent its whole 2s join,
-    ;; logged a straggler and leaked the eventfd, and the remaining
-    ;; tasks ran after flow-run had returned, replying to nobody. A
-    ;; worker now finishes the task it is running and exits; tasks that
-    ;; never started are dropped with the channel.
+    ;; losing get took is put back: a worker finishes the task it is
+    ;; running and exits, and tasks that never started are dropped with
+    ;; the channel. Appended, the sentinel would wait behind every queued
+    ;; task, and flow-run's join with it.
     (for-each (lambda (channel)
                 (%channel-unget! channel %flow-worker-stop))
               channels)
