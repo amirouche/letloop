@@ -213,20 +213,23 @@
     (irritants flow-error-irritants)
     (cause     flow-error-cause))
 
-  (define (flow-error-overflow? obj)
-    (and (flow-error? obj) (eq? (flow-error-symbol obj) 'overflow)))
-  (define (flow-error-wrong-thread? obj)
-    (and (flow-error? obj) (eq? (flow-error-symbol obj) 'wrong-thread)))
+  (define flow-error-overflow?
+    (lambda (obj)
+      (and (flow-error? obj) (eq? (flow-error-symbol obj) 'overflow))))
+  (define flow-error-wrong-thread?
+    (lambda (obj)
+      (and (flow-error? obj) (eq? (flow-error-symbol obj) 'wrong-thread))))
 
   ;; Two callers, one symbol: an operation the loop thread reserves
   ;; called on a compute thread, and any flow2 operation called on a
   ;; thread the USER forked. The message names neither, because it
   ;; cannot: what the caller needs to know is which thread was allowed,
   ;; and that is the same answer both times.
-  (define (%flow-wrong-thread who)
-    (raise (make-flow-error 'wrong-thread
-                            "flow2: operation from a thread that does not own it"
-                            (list who) #f)))
+  (define %flow-wrong-thread
+    (lambda (who)
+      (raise (make-flow-error 'wrong-thread
+                              "flow2: operation from a thread that does not own it"
+                              (list who) #f))))
 
   ;;------------------------------------------------------------
   ;; Lock-free box helpers (same as flow's)
@@ -280,14 +283,17 @@
   ;; The cell records the owner's thread id, and a reader on any other
   ;; thread sees #f. The parent is alive when it forks, so the child's
   ;; id always differs from the one it inherited.
-  (define (%make-thread-own) (make-thread-parameter #f))
+  (define %make-thread-own
+    (lambda () (make-thread-parameter #f)))
 
-  (define (%thread-own-ref param)
-    (let ((cell (param)))
-      (and cell (eqv? (car cell) (get-thread-id)) (cdr cell))))
+  (define %thread-own-ref
+    (lambda (param)
+      (let ((cell (param)))
+        (and cell (eqv? (car cell) (get-thread-id)) (cdr cell)))))
 
-  (define (%thread-own-set! param value)
-    (param (cons (get-thread-id) value)))
+  (define %thread-own-set!
+    (lambda (param value)
+      (param (cons (get-thread-id) value))))
 
   ;; Per thread, not a global: two OS threads logging concurrently would
   ;; otherwise clobber each other's accumulator.
@@ -297,12 +303,13 @@
   ;; step on any thread. Only this thread writes its own parameter, so
   ;; the check-then-set needs no CAS; flow-box-cons! is what makes the
   ;; registry push safe against concurrent registration.
-  (define (%flow-log-ensure-box!)
-    (or (%thread-own-ref %flow-log-box)
-        (let ((b (box '())))
-          (%thread-own-set! %flow-log-box b)
-          (flow-box-cons! %flow-log-registry b)
-          b)))
+  (define %flow-log-ensure-box!
+    (lambda ()
+      (or (%thread-own-ref %flow-log-box)
+          (let ((b (box '())))
+            (%thread-own-set! %flow-log-box b)
+            (flow-box-cons! %flow-log-registry b)
+            b))))
 
   ;; The loop's cached per-tick jiffy, or 0 before there is a loop. A
   ;; plain read of an already-computed field — no syscall on the
@@ -311,8 +318,9 @@
   ;; value up to one tick stale is exactly the resolution a log line
   ;; wants. Logging before flow-run must not raise: a library that
   ;; warns during startup would otherwise take the program down.
-  (define (%flow-log-now)
-    (if (loop-current) (loop-jiffy) 0))
+  (define %flow-log-now
+    (lambda ()
+      (if (loop-current) (loop-jiffy) 0)))
 
   ;; Who owns the log. 'auto until the program says anything about it:
   ;; the first flow-log then starts the default printer, which writes
@@ -331,23 +339,25 @@
 
   (define %flow-log-default-period 0.1)
 
-  (define (flow-log sexp)
-    (flow-box-cons! (%flow-log-ensure-box!) (cons (%flow-log-now) sexp))
-    ;; One unbox on the hot path; the CAS and the fork happen once per
-    ;; process. The entry is consed first, so the printer's first drain
-    ;; sees it.
-    (when (and (eq? (unbox %flow-log-mode) 'auto)
-               (box-cas! %flow-log-mode 'auto 'default))
-      (%flow-log-start-thread! %flow-log-default-period
-                               (current-error-port) #t)))
+  (define flow-log
+    (lambda (sexp)
+      (flow-box-cons! (%flow-log-ensure-box!) (cons (%flow-log-now) sexp))
+      ;; One unbox on the hot path; the CAS and the fork happen once per
+      ;; process. The entry is consed first, so the printer's first drain
+      ;; sees it.
+      (when (and (eq? (unbox %flow-log-mode) 'auto)
+                 (box-cas! %flow-log-mode 'auto 'default))
+        (%flow-log-start-thread! %flow-log-default-period
+                                 (current-error-port) #t))))
 
   ;; The program has said where its entries go, so stop the default
   ;; printer if it runs. Its stop does a final drain-and-write, so
   ;; entries logged before this were printed, not dropped.
-  (define (%flow-log-take-over!)
-    (set-box! %flow-log-mode 'owned)
-    (when (unbox %flow-log-default-running?)
-      (%flow-log-stop-thread!)))
+  (define %flow-log-take-over!
+    (lambda ()
+      (set-box! %flow-log-mode 'owned)
+      (when (unbox %flow-log-default-running?)
+        (%flow-log-stop-thread!))))
 
   ;; Every pending entry: oldest-first within each thread's own box,
   ;; boxes in registration order rather than globally sorted — a caller
@@ -357,21 +367,24 @@
   ;;
   ;; A program that drains the log has taken it over, so this also
   ;; stops the default printer -- see %flow-log-mode.
-  (define (flow-log-drain!)
-    (%flow-log-take-over!)
-    (%flow-log-drain-all!))
+  (define flow-log-drain!
+    (lambda ()
+      (%flow-log-take-over!)
+      (%flow-log-drain-all!)))
 
   ;; The drain itself, for the flush thread, which must not take the
   ;; log over from itself.
-  (define (%flow-log-drain-all!)
-    (let ((boxes (reverse (unbox %flow-log-registry))))
-      (apply append (map (lambda (b) (reverse (flow-box-drain! b))) boxes))))
+  (define %flow-log-drain-all!
+    (lambda ()
+      (let ((boxes (reverse (unbox %flow-log-registry))))
+        (apply append (map (lambda (b) (reverse (flow-box-drain! b))) boxes)))))
 
-  (define (%flow-log-write! entries port)
-    (unless (null? entries)
-      (for-each (lambda (entry) (write entry port) (newline port))
-                entries)
-      (flush-output-port port)))
+  (define %flow-log-write!
+    (lambda (entries port)
+      (unless (null? entries)
+        (for-each (lambda (entry) (write entry port) (newline port))
+                  entries)
+        (flush-output-port port))))
 
   ;; The port is captured on the CALLING thread when the flusher
   ;; starts, or passed explicitly: current-error-port is a thread
@@ -430,74 +443,78 @@
 
   ;; A no-op while any flusher is active, port or procedure, as a
   ;; second start always was.
-  (define (%flow-log-start-fiber! period-seconds sink)
-    (when (and (unbox %flow-log-stopped?)
-               (box-cas! %flow-log-sink #f sink))
-      (set-box! %flow-log-sink-period period-seconds)
-      (flow-box-increment! %flow-log-sink-gen)
-      (when (%flow-run-in-progress?)
-        (%flow-log-spawn-fiber!))))
+  (define %flow-log-start-fiber!
+    (lambda (period-seconds sink)
+      (when (and (unbox %flow-log-stopped?)
+                 (box-cas! %flow-log-sink #f sink))
+        (set-box! %flow-log-sink-period period-seconds)
+        (flow-box-increment! %flow-log-sink-gen)
+        (when (%flow-run-in-progress?)
+          (%flow-log-spawn-fiber!)))))
 
   ;; Called on the loop thread: by flow-log-start! during a run, and by
   ;; flow-run as it starts when a sink is already registered.
-  (define (%flow-log-spawn-fiber!)
-    (let ((gen (unbox %flow-log-sink-gen)))
-      (loop-spawn
-       (lambda ()
-         (%fiber-run
-          (lambda ()
-            (let lp ()
-              (flow-sleep (unbox %flow-log-sink-period))
-              (when (and (eqv? gen (unbox %flow-log-sink-gen))
-                         (%flow-log-call-sink!))
-                (lp)))))))))
+  (define %flow-log-spawn-fiber!
+    (lambda ()
+      (let ((gen (unbox %flow-log-sink-gen)))
+        (loop-spawn
+         (lambda ()
+           (%fiber-run
+            (lambda ()
+              (let lp ()
+                (flow-sleep (unbox %flow-log-sink-period))
+                (when (and (eqv? gen (unbox %flow-log-sink-gen))
+                           (%flow-log-call-sink!))
+                  (lp))))))))))
 
   ;; One drain into the procedure sink, #f when there is no sink or it
   ;; raised. A raise unregisters the sink -- the procedure counterpart
   ;; of a flush thread that stops -- and puts the batch back, followed
   ;; by a (flow2 log-flush-raised CONDITION) entry.
-  (define (%flow-log-call-sink!)
-    (let ((sink (unbox %flow-log-sink)))
-      (and sink
-           (let ((ok (%flow-log-flush!
-                      (lambda (entries)
-                        (unless (null? entries) (sink entries))))))
-             (unless ok
-               (set-box! %flow-log-sink #f)
-               (flow-box-increment! %flow-log-sink-gen))
-             ok))))
+  (define %flow-log-call-sink!
+    (lambda ()
+      (let ((sink (unbox %flow-log-sink)))
+        (and sink
+             (let ((ok (%flow-log-flush!
+                        (lambda (entries)
+                          (unless (null? entries) (sink entries))))))
+               (unless ok
+                 (set-box! %flow-log-sink #f)
+                 (flow-box-increment! %flow-log-sink-gen))
+               ok)))))
 
   ;; DEFAULT? marks the default printer, which a take-over stops.
-  (define (%flow-log-start-thread! period-seconds sink default?)
-    (when (box-cas! %flow-log-stopped? #t #f)
-      (set-box! %flow-log-stop-requested? #f)
-      (set-box! %flow-log-default-running? default?)
-      (set-box! %flow-log-thread-port sink)
-      (let ((ticks (fxmax 1 (exact (round (/ period-seconds
-                                             %flow-log-poll-interval))))))
-        (fork-thread
-         (lambda ()
-           (let lp ()
-             ;; Re-check the stop flag at the poll interval rather
-             ;; than only at a period boundary, so flow-log-stop! is
-             ;; prompt even when the period is long.
-             (let wait ((n 0))
-               (unless (or (unbox %flow-log-stop-requested?) (fx>=? n ticks))
-                 (sleep (make-time 'time-duration
-                                   (exact (round (* %flow-log-poll-interval
-                                                    1000000000)))
-                                   0))
-                 (wait (fx+ n 1))))
-             (if (and (with-mutex %flow-log-write-mutex
-                        (%flow-log-flush!
-                         (lambda (entries)
-                           (%flow-log-write! entries sink))))
-                      (not (unbox %flow-log-stop-requested?)))
-                 (lp)
-                 (begin
-                   (set-box! %flow-log-default-running? #f)
-                   (set-box! %flow-log-stopped? #t))))))))
-    (void))
+  (define %flow-log-start-thread!
+    (lambda (period-seconds sink default?)
+      (when (box-cas! %flow-log-stopped? #t #f)
+        (set-box! %flow-log-stop-requested? #f)
+        (set-box! %flow-log-default-running? default?)
+        (set-box! %flow-log-thread-port sink)
+        (let ((ticks (fxmax 1 (exact (round (/ period-seconds
+                                               %flow-log-poll-interval))))))
+          (fork-thread
+           (lambda ()
+             (let lp ()
+               ;; Re-check the stop flag at the poll interval rather
+               ;; than only at a period boundary, so flow-log-stop! is
+               ;; prompt even when the period is long.
+               (let wait ((n 0))
+                 (unless (or (unbox %flow-log-stop-requested?) (fx>=? n ticks))
+                   (sleep (make-time 'time-duration
+                                     (exact (round (* %flow-log-poll-interval
+                                                      1000000000)))
+                                     0))
+                   (wait (fx+ n 1))))
+               (if (and (with-mutex %flow-log-write-mutex
+                          (%flow-log-flush!
+                           (lambda (entries)
+                             (%flow-log-write! entries sink))))
+                        (not (unbox %flow-log-stop-requested?)))
+                   (lp)
+                   (begin
+                     (set-box! %flow-log-default-running? #f)
+                     (set-box! %flow-log-stopped? #t))))))))
+      (void)))
 
   ;; One drain-and-write, #f when the write raised -- a full disk, a
   ;; closed pipe. The caller then marks itself stopped, so
@@ -505,16 +522,17 @@
   ;; that could not be written goes back into the log, followed by a
   ;; (flow2 log-flush-raised CONDITION) entry, so a drain or the next
   ;; flusher still sees all of it.
-  (define (%flow-log-flush! write!)
-    (let ((entries (%flow-log-drain-all!)))
-      (guard (ex (#t (let ((b (%flow-log-ensure-box!)))
-                       (for-each (lambda (entry) (flow-box-cons! b entry))
-                                 entries)
-                       (flow-log (list 'flow2 'log-flush-raised
-                                       (%flow-condition-sexp ex))))
-                     #f))
-        (write! entries)
-        #t)))
+  (define %flow-log-flush!
+    (lambda (write!)
+      (let ((entries (%flow-log-drain-all!)))
+        (guard (ex (#t (let ((b (%flow-log-ensure-box!)))
+                         (for-each (lambda (entry) (flow-box-cons! b entry))
+                                   entries)
+                         (flow-log (list 'flow2 'log-flush-raised
+                                         (%flow-condition-sexp ex))))
+                       #f))
+          (write! entries)
+          #t))))
 
   ;; One drain-and-write into the flush thread's port, now, on the
   ;; calling thread. flow-run calls it on its way out: the thread
@@ -523,12 +541,13 @@
   ;; tick its run stops -- would otherwise exit with it unprinted. A
   ;; write that raises is handled as the thread's own would be: the
   ;; batch goes back.
-  (define (%flow-log-flush-thread-now!)
-    (with-mutex %flow-log-write-mutex
-      (let ((port (unbox %flow-log-thread-port)))
-        (when (and port (not (unbox %flow-log-stopped?)))
-          (%flow-log-flush! (lambda (entries)
-                              (%flow-log-write! entries port)))))))
+  (define %flow-log-flush-thread-now!
+    (lambda ()
+      (with-mutex %flow-log-write-mutex
+        (let ((port (unbox %flow-log-thread-port)))
+          (when (and port (not (unbox %flow-log-stopped?)))
+            (%flow-log-flush! (lambda (entries)
+                                (%flow-log-write! entries port))))))))
 
   ;; Blocks the caller until the flush thread has done one final
   ;; drain-and-write and exited, so nothing logged before the stop
@@ -539,22 +558,24 @@
   ;;
   ;; A procedure sink gets its final batch on the calling thread, so
   ;; during a run that must be the loop thread, where the sink runs.
-  (define (flow-log-stop!)
-    (when (unbox %flow-log-sink)
-      (%flow-check-loop-thread! 'flow-log-stop!))
-    (set-box! %flow-log-mode 'owned)
-    (when (unbox %flow-log-sink)
-      (%flow-log-call-sink!)
-      (set-box! %flow-log-sink #f)
-      (flow-box-increment! %flow-log-sink-gen))
-    (%flow-log-stop-thread!))
+  (define flow-log-stop!
+    (lambda ()
+      (when (unbox %flow-log-sink)
+        (%flow-check-loop-thread! 'flow-log-stop!))
+      (set-box! %flow-log-mode 'owned)
+      (when (unbox %flow-log-sink)
+        (%flow-log-call-sink!)
+        (set-box! %flow-log-sink #f)
+        (flow-box-increment! %flow-log-sink-gen))
+      (%flow-log-stop-thread!)))
 
-  (define (%flow-log-stop-thread!)
-    (set-box! %flow-log-stop-requested? #t)
-    (let wait ()
-      (unless (unbox %flow-log-stopped?)
-        (sleep (make-time 'time-duration 10000000 0))
-        (wait))))
+  (define %flow-log-stop-thread!
+    (lambda ()
+      (set-box! %flow-log-stop-requested? #t)
+      (let wait ()
+        (unless (unbox %flow-log-stopped?)
+          (sleep (make-time 'time-duration 10000000 0))
+          (wait)))))
 
   ;;------------------------------------------------------------
   ;; Events: the Concurrent ML core, unchanged from flow
@@ -655,14 +676,15 @@
   ;; back as a value and is converted into a raise HERE, on the fiber's
   ;; own stack, where its guards are; the winning base's wrap is
   ;; applied here too, after the commit, for the same reason.
-  (define (%flow-settle result)
-    (let ((result (if (%flow-deferred? result)
-                      ((flow-wrap-proc (%flow-deferred-base result))
-                       (%flow-deferred-raw result))
-                      result)))
-      (cond
-       ((%flow-raise? result) (raise (%flow-raise-object result)))
-       (else result))))
+  (define %flow-settle
+    (lambda (result)
+      (let ((result (if (%flow-deferred? result)
+                        ((flow-wrap-proc (%flow-deferred-base result))
+                         (%flow-deferred-raw result))
+                        result)))
+        (cond
+         ((%flow-raise? result) (raise (%flow-raise-object result)))
+         (else result)))))
 
   (define flow-poll
     (lambda (bases)
@@ -716,12 +738,14 @@
   ;; on the loop thread — so it doubles as the am-I-on-a-worker test.
   (define %worker-pool (%make-thread-own))
 
-  (define (%worker-current?) (%thread-own-ref %worker-pool))
+  (define %worker-current?
+    (lambda () (%thread-own-ref %worker-pool)))
 
-  (define (%flow-worker-exited! pool)
-    (with-mutex (%pool-mutex pool)
-      (%pool-live! pool (fx- (%pool-live pool) 1))
-      (condition-broadcast (%pool-gone pool))))
+  (define %flow-worker-exited!
+    (lambda (pool)
+      (with-mutex (%pool-mutex pool)
+        (%pool-live! pool (fx- (%pool-live pool) 1))
+        (condition-broadcast (%pool-gone pool)))))
 
   (define %eventfd-create
     (let ((func (foreign-procedure __atomic __disable_interrupts __errno
@@ -801,34 +825,38 @@
   ;; The token of the run in progress, the dead token outside one.
   (define %flow-loop-token (box %flow-dead-token))
 
-  (define (%flow-waiter-token)
-    (let ((pool (%worker-current?)))
-      (if pool (%pool-alive pool) (unbox %flow-loop-token))))
+  (define %flow-waiter-token
+    (lambda ()
+      (let ((pool (%worker-current?)))
+        (if pool (%pool-alive pool) (unbox %flow-loop-token)))))
 
   ;; Outside a run there is no loop to corrupt and nothing to check:
   ;; flow-put! on a channel before flow-run is a legitimate way to
   ;; prime one, and it either queues or raises overflow on its own.
-  (define (%flow-check-caller-thread! who)
-    (let ((owner (unbox %flow-loop-thread))
-          (pool (%worker-current?)))
-      (when owner
-        (if pool
-            (unless (eq? pool (unbox %flow-pool-current))
-              (%flow-wrong-thread who))
-            (unless (eqv? owner (get-thread-id))
-              (%flow-wrong-thread who))))))
+  (define %flow-check-caller-thread!
+    (lambda (who)
+      (let ((owner (unbox %flow-loop-thread))
+            (pool (%worker-current?)))
+        (when owner
+          (if pool
+              (unless (eq? pool (unbox %flow-pool-current))
+                (%flow-wrong-thread who))
+              (unless (eqv? owner (get-thread-id))
+                (%flow-wrong-thread who)))))))
 
-  (define (%flow-run-in-progress?) (and (unbox %flow-loop-thread) #t))
+  (define %flow-run-in-progress?
+    (lambda () (and (unbox %flow-loop-thread) #t)))
 
   ;; Loop thread only during a run; anything outside one. For what runs
   ;; user code that may resume fibers on the loop's behalf -- the
   ;; procedure log sink.
-  (define (%flow-check-loop-thread! who)
-    (let ((owner (unbox %flow-loop-thread)))
-      (when (and owner
-                 (or (%worker-current?)
-                     (not (eqv? owner (get-thread-id)))))
-        (%flow-wrong-thread who))))
+  (define %flow-check-loop-thread!
+    (lambda (who)
+      (let ((owner (unbox %flow-loop-thread)))
+        (when (and owner
+                   (or (%worker-current?)
+                       (not (eqv? owner (get-thread-id)))))
+          (%flow-wrong-thread who)))))
 
   ;; loop-spawn from the loop thread (the hot path, untouched); from
   ;; a compute thread, queue the thunk on the worker's OWN run's pool
@@ -866,18 +894,19 @@
   ;; which point loop-run-once's submit has freed SQ slots; the
   ;; eventfd counter keeps any signal sent meanwhile, so the re-armed
   ;; read completes immediately and nothing is lost.
-  (define (%collector pool)
-    (let loop ()
-      (when (%pool-running? pool)
-        (let ((armed? (guard (ex (#t (flow-log (list 'flow2 'collector-wait-raised))
-                                     #f))
-                        (%eventfd-wait pool)
-                        #t)))
-          (for-each loop-spawn
-                    (reverse (flow-box-drain! (%pool-spawns pool))))
-          (if armed?
-              (loop)
-              (loop-spawn (lambda () (%collector pool))))))))
+  (define %collector
+    (lambda (pool)
+      (let loop ()
+        (when (%pool-running? pool)
+          (let ((armed? (guard (ex (#t (flow-log (list 'flow2 'collector-wait-raised))
+                                       #f))
+                          (%eventfd-wait pool)
+                          #t)))
+            (for-each loop-spawn
+                      (reverse (flow-box-drain! (%pool-spawns pool))))
+            (if armed?
+                (loop)
+                (loop-spawn (lambda () (%collector pool)))))))))
 
   ;;------------------------------------------------------------
   ;; Synchronization: poll, then park
@@ -887,24 +916,27 @@
   ;; data is (TAG . RECORD) for channel bases, so writing it
   ;; raw would dump a whole channel -- queue included -- into the log;
   ;; a condition writes as #<condition> and says nothing at all.
-  (define (%flow-base-name data)
-    (cond ((not (pair? data)) data)          ; 'flow2-close, or #f for a ring event
-          ((flow-channel? (cdr data)) (list (car data) (flow-channel-name (cdr data))))
-          (else (car data))))
+  (define %flow-base-name
+    (lambda (data)
+      (cond ((not (pair? data)) data)          ; 'flow2-close, or #f for a ring event
+            ((flow-channel? (cdr data)) (list (car data) (flow-channel-name (cdr data))))
+            (else (car data)))))
 
-  (define (%flow-condition-sexp ex)
-    (cond ((flow-error? ex)
-           (list 'flow-error (flow-error-symbol ex) (flow-error-message ex)))
-          ((condition? ex)
-           (call-with-string-output-port
-            (lambda (port) (display-condition ex port))))
-          (else ex)))
+  (define %flow-condition-sexp
+    (lambda (ex)
+      (cond ((flow-error? ex)
+             (list 'flow-error (flow-error-symbol ex) (flow-error-message ex)))
+            ((condition? ex)
+             (call-with-string-output-port
+              (lambda (port) (display-condition ex port))))
+            (else ex))))
 
   ;; A block proc raised after an earlier base of the same perform had
   ;; already won during registration: the fiber is committed to that
   ;; value, so the raise has nowhere to go but the log.
-  (define (%flow-log-raise-after-win ex)
-    (flow-log (list 'flow2 'block-raised-after-win (%flow-condition-sexp ex))))
+  (define %flow-log-raise-after-win
+    (lambda (ex)
+      (flow-log (list 'flow2 'block-raised-after-win (%flow-condition-sexp ex)))))
 
   ;; Fire every registered cancel except the winner's. One thunk, so the
   ;; whole batch lands before the resumed fiber does — that ordering is
@@ -920,14 +952,15 @@
   ;; only so that a (flow2 cancel-raised) entry can name the base and
   ;; the condition -- what an operator needs after an unexplained hang
   ;; or fd leak.
-  (define (%flow-run-cancels! pending tag)
-    (for-each (lambda (entry)
-                (unless (eq? (car entry) tag)
-                  (guard (ex (#t (flow-log (list 'flow2 'cancel-raised
-                                                 (%flow-base-name (cadr entry))
-                                                 (%flow-condition-sexp ex)))))
-                    ((cddr entry)))))
-              pending))
+  (define %flow-run-cancels!
+    (lambda (pending tag)
+      (for-each (lambda (entry)
+                  (unless (eq? (car entry) tag)
+                    (guard (ex (#t (flow-log (list 'flow2 'cancel-raised
+                                                   (%flow-base-name (cadr entry))
+                                                   (%flow-condition-sexp ex)))))
+                      ((cddr entry)))))
+                pending)))
 
   ;; flow's design: one shared state box CAS-elects a single winner,
   ;; each base gets its own resume, the losers' register-cancel! thunks
@@ -1079,22 +1112,24 @@
   ;; its try/block touch nothing but mutex- or CAS-protected state:
   ;; channel and latch bases qualify, anything that preps an SQE
   ;; or reads loop tables does not.
-  (define (%base-off-loop-safe? base)
-    (let ((tag (flow-data base)))
-      (and (pair? tag)
-           (memq (car tag) '(flow2-get flow2-space flow2-latch))
-           #t)))
+  (define %base-off-loop-safe?
+    (lambda (base)
+      (let ((tag (flow-data base)))
+        (and (pair? tag)
+             (memq (car tag) '(flow2-get flow2-space flow2-latch))
+             #t))))
 
-  (define (%flow-perform-off-loop event)
-    (let ((bases (flow-flatten event)))
-      (for-each (lambda (base)
-                  (unless (%base-off-loop-safe? base)
-                    (%flow-wrong-thread 'flow-perform)))
-                bases)
-      (let ((result (flow-poll bases)))
-        (%flow-settle (if (eq? result %flow-not-ready)
-                          (flow-block-and-wait-off-loop bases)
-                          result)))))
+  (define %flow-perform-off-loop
+    (lambda (event)
+      (let ((bases (flow-flatten event)))
+        (for-each (lambda (base)
+                    (unless (%base-off-loop-safe? base)
+                      (%flow-wrong-thread 'flow-perform)))
+                  bases)
+        (let ((result (flow-poll bases)))
+          (%flow-settle (if (eq? result %flow-not-ready)
+                            (flow-block-and-wait-off-loop bases)
+                            result))))))
 
   ;; The guard belongs HERE, at the choke point: every suspending
   ;; operation funnels through flow-perform. On a user-forked thread
@@ -1154,53 +1189,60 @@
     (size %dlist-size %dlist-size!))
 
   ;; Circular, around a sentinel head; an unlinked node has prev #f.
-  (define (%dlist-new)
-    (let ((head (%make-dnode #f #f #f)))
-      (%dnode-prev! head head)
-      (%dnode-next! head head)
-      (%make-dlist% head 0)))
+  (define %dlist-new
+    (lambda ()
+      (let ((head (%make-dnode #f #f #f)))
+        (%dnode-prev! head head)
+        (%dnode-next! head head)
+        (%make-dlist% head 0))))
 
-  (define (%dnode-new value) (%make-dnode value #f #f))
+  (define %dnode-new
+    (lambda (value) (%make-dnode value #f #f)))
 
   ;; Append NODE at the tail: waiters are served oldest first.
-  (define (%dlist-link! dl node)
-    (let* ((head (%dlist-head dl))
-           (tail (%dnode-prev head)))
-      (%dnode-prev! node tail)
-      (%dnode-next! node head)
-      (%dnode-next! tail node)
-      (%dnode-prev! head node)
-      (%dlist-size! dl (fx+ (%dlist-size dl) 1))))
+  (define %dlist-link!
+    (lambda (dl node)
+      (let* ((head (%dlist-head dl))
+             (tail (%dnode-prev head)))
+        (%dnode-prev! node tail)
+        (%dnode-next! node head)
+        (%dnode-next! tail node)
+        (%dnode-prev! head node)
+        (%dlist-size! dl (fx+ (%dlist-size dl) 1)))))
 
-  (define (%dlist-unlink! dl node)
-    (let ((prev (%dnode-prev node)))
-      (when prev
-        (let ((next (%dnode-next node)))
-          (%dnode-next! prev next)
-          (%dnode-prev! next prev)
-          (%dnode-prev! node #f)
-          (%dnode-next! node #f)
-          (%dlist-size! dl (fx- (%dlist-size dl) 1))))))
+  (define %dlist-unlink!
+    (lambda (dl node)
+      (let ((prev (%dnode-prev node)))
+        (when prev
+          (let ((next (%dnode-next node)))
+            (%dnode-next! prev next)
+            (%dnode-prev! next prev)
+            (%dnode-prev! node #f)
+            (%dnode-next! node #f)
+            (%dlist-size! dl (fx- (%dlist-size dl) 1)))))))
 
   ;; The oldest node, or #f.
-  (define (%dlist-first dl)
-    (let ((node (%dnode-next (%dlist-head dl))))
-      (and (not (eq? node (%dlist-head dl))) node)))
+  (define %dlist-first
+    (lambda (dl)
+      (let ((node (%dnode-next (%dlist-head dl))))
+        (and (not (eq? node (%dlist-head dl))) node))))
 
   ;; The node after NODE, or #f. NODE must still be linked.
-  (define (%dlist-after dl node)
-    (let ((next (%dnode-next node)))
-      (and (not (eq? next (%dlist-head dl))) next)))
+  (define %dlist-after
+    (lambda (dl node)
+      (let ((next (%dnode-next node)))
+        (and (not (eq? next (%dlist-head dl))) next))))
 
   ;; Every value, oldest first, leaving the list empty and every node
   ;; unlinked -- so a late cancel on one of them stays a no-op.
-  (define (%dlist-take-all! dl)
-    (let loop ((node (%dlist-first dl)) (out '()))
-      (if node
-          (let ((next (%dlist-after dl node)))
-            (%dlist-unlink! dl node)
-            (loop next (cons (%dnode-value node) out)))
-          (reverse out))))
+  (define %dlist-take-all!
+    (lambda (dl)
+      (let loop ((node (%dlist-first dl)) (out '()))
+        (if node
+            (let ((next (%dlist-after dl node)))
+              (%dlist-unlink! dl node)
+              (loop next (cons (%dnode-value node) out)))
+            (reverse out)))))
 
   ;;------------------------------------------------------------
   ;; Channels: buffered, mutex-protected, cross-thread
@@ -1275,95 +1317,101 @@
   ;; Caller holds the channel mutex. Pop the first claimable waiting
   ;; getter, dropping dead entries on the way -- each dead entry is
   ;; dropped once, so the walk is O(1) amortized.
-  (define (%channel-pop-getter! channel)
-    (let ((getters (flow-channel-getters channel)))
-      (let loop ((node (%dlist-first getters)))
-        (and node
-             (let ((next (%dlist-after getters node))
-                   (getter (%dnode-value node)))
-               (cond
-                ((not (unbox (flow-getter-token getter)))
-                 ;; its run is over; see %flow-waiter-token
-                 (%dlist-unlink! getters node)
-                 (loop next))
-                ((and (eq? (unbox (flow-getter-state getter)) 'waiting)
-                      (box-cas! (flow-getter-claimed getter) #f #t))
-                 (%dlist-unlink! getters node)
-                 getter)
-                ((eq? (unbox (flow-getter-state getter)) 'waiting)
-                 ;; claimed by a concurrent deliverer, keep it
-                 (loop next))
-                (else
-                 (%dlist-unlink! getters node)
-                 (loop next))))))))
+  (define %channel-pop-getter!
+    (lambda (channel)
+      (let ((getters (flow-channel-getters channel)))
+        (let loop ((node (%dlist-first getters)))
+          (and node
+               (let ((next (%dlist-after getters node))
+                     (getter (%dnode-value node)))
+                 (cond
+                  ((not (unbox (flow-getter-token getter)))
+                   ;; its run is over; see %flow-waiter-token
+                   (%dlist-unlink! getters node)
+                   (loop next))
+                  ((and (eq? (unbox (flow-getter-state getter)) 'waiting)
+                        (box-cas! (flow-getter-claimed getter) #f #t))
+                   (%dlist-unlink! getters node)
+                   getter)
+                  ((eq? (unbox (flow-getter-state getter)) 'waiting)
+                   ;; claimed by a concurrent deliverer, keep it
+                   (loop next))
+                  (else
+                   (%dlist-unlink! getters node)
+                   (loop next)))))))))
 
   ;; Caller holds the channel mutex.
-  (define (%channel-room? channel)
-    (let ((bound (flow-channel-bound channel)))
-      (or (not bound) (fx<? (flow-channel-length channel) bound))))
+  (define %channel-room?
+    (lambda (channel)
+      (let ((bound (flow-channel-bound channel)))
+        (or (not bound) (fx<? (flow-channel-length channel) bound)))))
 
   ;; Caller holds the channel mutex. Callers that dequeue must call
   ;; %channel-wake-space! afterwards, OUTSIDE the mutex — a resume can
   ;; run arbitrary continuation code and must never do so under a lock
   ;; this library takes on both the loop thread and a worker.
-  (define (%channel-dequeue! channel)
-    (when (null? (flow-channel-out channel))
-      (flow-channel-out! channel (reverse (flow-channel-in channel)))
-      (flow-channel-in! channel '()))
-    (let ((value (car (flow-channel-out channel))))
-      (flow-channel-out! channel (cdr (flow-channel-out channel)))
-      (flow-channel-length! channel (fx- (flow-channel-length channel) 1))
-      ;; Re-arm the saturation warning only once the queue has drained
-      ;; to half the bound, not on the first dequeue. Without the
-      ;; hysteresis a channel sitting AT its bound with a brisk consumer
-      ;; warns on every single item — a log flood at exactly the moment
-      ;; the log is worth reading.
-      (let ((bound (flow-channel-bound channel)))
-        (when (and (flow-channel-saturated? channel)
-                   bound
-                   (fx<=? (flow-channel-length channel) (fxdiv bound 2)))
-          (flow-channel-saturated?! channel #f)))
-      value))
+  (define %channel-dequeue!
+    (lambda (channel)
+      (when (null? (flow-channel-out channel))
+        (flow-channel-out! channel (reverse (flow-channel-in channel)))
+        (flow-channel-in! channel '()))
+      (let ((value (car (flow-channel-out channel))))
+        (flow-channel-out! channel (cdr (flow-channel-out channel)))
+        (flow-channel-length! channel (fx- (flow-channel-length channel) 1))
+        ;; Re-arm the saturation warning only once the queue has drained
+        ;; to half the bound, not on the first dequeue. Without the
+        ;; hysteresis a channel sitting AT its bound with a brisk consumer
+        ;; warns on every single item — a log flood at exactly the moment
+        ;; the log is worth reading.
+        (let ((bound (flow-channel-bound channel)))
+          (when (and (flow-channel-saturated? channel)
+                     bound
+                     (fx<=? (flow-channel-length channel) (fxdiv bound 2)))
+            (flow-channel-saturated?! channel #f)))
+        value)))
 
   ;; Wake putters parked on a full channel, now that there is room.
   ;; Called outside the mutex. A waiter whose resume reports #f has
   ;; already synched, so move to the next; nothing is lost either way,
   ;; since a space waiter carries no value.
-  (define (%channel-wake-space! channel)
-    (let again ()
-      (let ((waiter
-             (with-mutex (flow-channel-mutex channel)
-               (and (%channel-room? channel)
-                    (let* ((waiters (flow-channel-space channel))
-                           (node (%dlist-first waiters)))
-                      (and node
-                           (begin
-                             (%dlist-unlink! waiters node)
-                             (%dnode-value node))))))))
-        (when waiter
-          ;; a dead run's putter is skipped, not woken: woken, it
-          ;; would push its stale value into this run's channel
-          (unless (and (unbox (cddr waiter)) ((cadr waiter) #t))
-            (again))))))
+  (define %channel-wake-space!
+    (lambda (channel)
+      (let again ()
+        (let ((waiter
+               (with-mutex (flow-channel-mutex channel)
+                 (and (%channel-room? channel)
+                      (let* ((waiters (flow-channel-space channel))
+                             (node (%dlist-first waiters)))
+                        (and node
+                             (begin
+                               (%dlist-unlink! waiters node)
+                               (%dnode-value node))))))))
+          (when waiter
+            ;; a dead run's putter is skipped, not woken: woken, it
+            ;; would push its stale value into this run's channel
+            (unless (and (unbox (cddr waiter)) ((cadr waiter) #t))
+              (again)))))))
 
-  (define (%channel-remove-space! channel node)
-    (with-mutex (flow-channel-mutex channel)
-      (%dlist-unlink! (flow-channel-space channel) node)))
+  (define %channel-remove-space!
+    (lambda (channel node)
+      (with-mutex (flow-channel-mutex channel)
+        (%dlist-unlink! (flow-channel-space channel) node))))
 
   ;; One line per saturation episode, not per blocked put. The flag is
   ;; set here and cleared by %channel-dequeue! at the half-bound
   ;; watermark, so a channel that stays pinned at its bound produces one
   ;; warning, and a channel that recovers and saturates again produces a
   ;; second — which is the signal you actually want.
-  (define (%channel-warn-saturated! channel)
-    (let ((warn?
-           (with-mutex (flow-channel-mutex channel)
-             (and (not (flow-channel-saturated? channel))
-                  (begin (flow-channel-saturated?! channel #t) #t)))))
-      (when warn?
-        (flow-log (list 'flow2 'channel-full
-                        (flow-channel-name channel)
-                        (flow-channel-bound channel))))))
+  (define %channel-warn-saturated!
+    (lambda (channel)
+      (let ((warn?
+             (with-mutex (flow-channel-mutex channel)
+               (and (not (flow-channel-saturated? channel))
+                    (begin (flow-channel-saturated?! channel #t) #t)))))
+        (when warn?
+          (flow-log (list 'flow2 'channel-full
+                          (flow-channel-name channel)
+                          (flow-channel-bound channel)))))))
 
   ;; Deliver OBJ to a parked getter, or enqueue it. The resume call
   ;; happens outside the mutex; if it reports the getter already synched
@@ -1377,54 +1425,56 @@
   ;; straight over and the slot stays free with nobody left to say so.
   ;; %channel-wake-space! rechecks the room under the mutex, so passing
   ;; the wake on when the slot did get filled is a no-op.
-  (define (%channel-put! channel obj)
-    (let try ((woken? #f))
-      (let ((entry
-             (with-mutex (flow-channel-mutex channel)
-               (let ((getter (%channel-pop-getter! channel)))
-                 (or getter
-                     ;; Handing a value straight to a parked getter does
-                     ;; not grow the queue, so the bound is only
-                     ;; consulted once there is nobody waiting for it.
-                     (if (not (%channel-room? channel))
-                         'full
-                         (begin
-                           (flow-channel-in!
-                            channel (cons obj (flow-channel-in channel)))
-                           (flow-channel-length!
-                            channel (fx+ (flow-channel-length channel) 1))
-                           #f)))))))
-        (cond
-         ((eq? entry 'full)
-          (%channel-await-space! channel)
-          ;; Room existed when we were woken, but another putter may
-          ;; have taken it in between, so this is a retry and not an
-          ;; assumption.
-          (try #t))
-         (entry
-          (if ((flow-getter-resume entry) obj)
-              (when woken? (%channel-wake-space! channel))
-              (try woken?)))
-         (else
-          (when woken? (%channel-wake-space! channel)))))))
+  (define %channel-put!
+    (lambda (channel obj)
+      (let try ((woken? #f))
+        (let ((entry
+               (with-mutex (flow-channel-mutex channel)
+                 (let ((getter (%channel-pop-getter! channel)))
+                   (or getter
+                       ;; Handing a value straight to a parked getter does
+                       ;; not grow the queue, so the bound is only
+                       ;; consulted once there is nobody waiting for it.
+                       (if (not (%channel-room? channel))
+                           'full
+                           (begin
+                             (flow-channel-in!
+                              channel (cons obj (flow-channel-in channel)))
+                             (flow-channel-length!
+                              channel (fx+ (flow-channel-length channel) 1))
+                             #f)))))))
+          (cond
+           ((eq? entry 'full)
+            (%channel-await-space! channel)
+            ;; Room existed when we were woken, but another putter may
+            ;; have taken it in between, so this is a retry and not an
+            ;; assumption.
+            (try #t))
+           (entry
+            (if ((flow-getter-resume entry) obj)
+                (when woken? (%channel-wake-space! channel))
+                (try woken?)))
+           (else
+            (when woken? (%channel-wake-space! channel))))))))
 
   ;; Park until the channel has room. Parking needs a scheduler: a
   ;; worker parks on its condition variable, a fiber parks on the loop.
   ;; With neither — a bare flow-put! outside flow-run — there is nothing
   ;; to park on, and pretending otherwise would hang the caller with no
   ;; diagnosis, so that case keeps the old behaviour and raises.
-  (define (%channel-await-space! channel)
-    (%channel-warn-saturated! channel)
-    (if (or (%worker-current?)
-            (let ((loop (loop-current)))
-              (and loop (loop-running? loop))))
-        (flow-perform (%flow-space channel))
-        (raise (make-flow-error
-                'overflow
-                "flow2: channel full and no scheduler to park on"
-                (list (flow-channel-name channel)
-                      (flow-channel-bound channel))
-                #f))))
+  (define %channel-await-space!
+    (lambda (channel)
+      (%channel-warn-saturated! channel)
+      (if (or (%worker-current?)
+              (let ((loop (loop-current)))
+                (and loop (loop-running? loop))))
+          (flow-perform (%flow-space channel))
+          (raise (make-flow-error
+                  'overflow
+                  "flow2: channel full and no scheduler to park on"
+                  (list (flow-channel-name channel)
+                        (flow-channel-bound channel))
+                  #f)))))
 
   ;; "There is room in this channel." Deliberately not exported and
   ;; never handed to a caller: flow-put! performs it internally, which
@@ -1432,37 +1482,38 @@
   ;; is the whole reason flow's same-channel-choice hazard stays
   ;; inexpressible here — the hazard needs a put EVENT to compose into a
   ;; choice, not a put that happens to suspend.
-  (define (%flow-space channel)
-    (make-flow% 'base (cons 'flow2-space channel)
-                (lambda (x) x)
-                (lambda ()
-                  (with-mutex (flow-channel-mutex channel)
-                    (and (%channel-room? channel)
-                         (lambda () #t))))
-                (lambda (state resume register-cancel!)
-                  (let ((node (%dnode-new
-                               (cons* state resume (%flow-waiter-token)))))
-                    ;; Armed before the waiter is reachable, with the
-                    ;; recheck below closing the rest of the window —
-                    ;; same discipline as flow-get's getter entry, and
-                    ;; for the same reason: off-loop, resume-from
-                    ;; snapshots the cancel list at resume time.
-                    (register-cancel!
-                     (lambda () (%channel-remove-space! channel node)))
-                    (let ((room?
-                           (with-mutex (flow-channel-mutex channel)
-                             (or (%channel-room? channel)
-                                 (begin
-                                   (%dlist-link! (flow-channel-space channel)
-                                                 node)
-                                   #f)))))
-                      (if room?
-                          ;; No value rides on this resume, so a #f
-                          ;; needs no recovery: the caller simply stays
-                          ;; committed to whichever base did win.
-                          (resume #t)
-                          (unless (eq? (unbox state) 'waiting)
-                            (%channel-remove-space! channel node))))))))
+  (define %flow-space
+    (lambda (channel)
+      (make-flow% 'base (cons 'flow2-space channel)
+                  (lambda (x) x)
+                  (lambda ()
+                    (with-mutex (flow-channel-mutex channel)
+                      (and (%channel-room? channel)
+                           (lambda () #t))))
+                  (lambda (state resume register-cancel!)
+                    (let ((node (%dnode-new
+                                 (cons* state resume (%flow-waiter-token)))))
+                      ;; Armed before the waiter is reachable, with the
+                      ;; recheck below closing the rest of the window —
+                      ;; same discipline as flow-get's getter entry, and
+                      ;; for the same reason: off-loop, resume-from
+                      ;; snapshots the cancel list at resume time.
+                      (register-cancel!
+                       (lambda () (%channel-remove-space! channel node)))
+                      (let ((room?
+                             (with-mutex (flow-channel-mutex channel)
+                               (or (%channel-room? channel)
+                                   (begin
+                                     (%dlist-link! (flow-channel-space channel)
+                                                   node)
+                                     #f)))))
+                        (if room?
+                            ;; No value rides on this resume, so a #f
+                            ;; needs no recovery: the caller simply stays
+                            ;; committed to whichever base did win.
+                            (resume #t)
+                            (unless (eq? (unbox state) 'waiting)
+                              (%channel-remove-space! channel node)))))))))
 
   ;; Return OBJ to CHANNEL after a getter that had already claimed and
   ;; dequeued it turned out to have synched on another base — the value
@@ -1476,111 +1527,117 @@
   ;; holds only because the dequeue that took it woke no putter -- see
   ;; flow-get, which wakes them after a successful resume and not
   ;; before.
-  (define (%channel-unget! channel obj)
-    (let try ()
-      (let ((entry
-             (with-mutex (flow-channel-mutex channel)
-               (or (%channel-pop-getter! channel)
-                   (begin
-                     (flow-channel-out!
-                      channel (cons obj (flow-channel-out channel)))
-                     (flow-channel-length!
-                      channel (fx+ (flow-channel-length channel) 1))
-                     #f)))))
-        (when entry
-          (unless ((flow-getter-resume entry) obj)
-            (try))))))
+  (define %channel-unget!
+    (lambda (channel obj)
+      (let try ()
+        (let ((entry
+               (with-mutex (flow-channel-mutex channel)
+                 (or (%channel-pop-getter! channel)
+                     (begin
+                       (flow-channel-out!
+                        channel (cons obj (flow-channel-out channel)))
+                       (flow-channel-length!
+                        channel (fx+ (flow-channel-length channel) 1))
+                       #f)))))
+          (when entry
+            (unless ((flow-getter-resume entry) obj)
+              (try)))))))
 
   ;; Drop ENTRY from CHANNEL's getters list. A concurrent deliverer may
   ;; already have popped it, in which case this is a no-op — that
   ;; deliverer's own resume returns #f and %channel-put! retries, so no
   ;; value rides on the race.
-  (define (%channel-remove-getter! channel node)
-    (with-mutex (flow-channel-mutex channel)
-      (%dlist-unlink! (flow-channel-getters channel) node)))
+  (define %channel-remove-getter!
+    (lambda (channel node)
+      (with-mutex (flow-channel-mutex channel)
+        (%dlist-unlink! (flow-channel-getters channel) node))))
 
-  (define (flow-put! channel obj)
-    (%flow-check-caller-thread! 'flow-put!)
-    (%channel-put! channel obj))
+  (define flow-put!
+    (lambda (channel obj)
+      (%flow-check-caller-thread! 'flow-put!)
+      (%channel-put! channel obj)))
 
   ;; try and block both hold the mutex, so there is no try/park gap
   ;; for a concurrent put to fall into: either the value is already
   ;; queued (try or block's own recheck takes it) or the getter is
   ;; registered before any later put can scan for it.
-  (define (flow-get channel)
-    (make-flow% 'base (cons 'flow2-get channel)
-                (lambda (x) x)
-                (lambda ()
-                  (let ((value
-                         (with-mutex (flow-channel-mutex channel)
-                           (and (fx>? (flow-channel-length channel) 0)
-                                (list (%channel-dequeue! channel))))))
-                    (and value
-                         (begin
-                           ;; outside the mutex: a resume runs
-                           ;; continuation code
-                           (%channel-wake-space! channel)
-                           (lambda () (car value))))))
-                (lambda (state resume register-cancel!)
-                  (let* ((entry (make-flow-getter state resume (box #f)
-                                                  (%flow-waiter-token)))
-                         (node (%dnode-new entry)))
-                    ;; Armed BEFORE the entry is reachable, and the
-                    ;; recheck below closes the remaining window. A get
-                    ;; that loses a choice must take its entry off the
-                    ;; list itself: the only other reaper runs from a
-                    ;; put, so a channel polled and never written --
-                    ;; (flow-choice (flow-get ch) (flow-timeout 0.1)) --
-                    ;; would grow without bound, each dead entry pinning
-                    ;; a captured continuation.
-                    (register-cancel!
-                     (lambda () (%channel-remove-getter! channel node)))
-                    (let ((immediate
+  (define flow-get
+    (lambda (channel)
+      (make-flow% 'base (cons 'flow2-get channel)
+                  (lambda (x) x)
+                  (lambda ()
+                    (let ((value
                            (with-mutex (flow-channel-mutex channel)
-                             (if (fx>? (flow-channel-length channel) 0)
-                                 (and (box-cas! (flow-getter-claimed entry) #f #t)
-                                      (cons #t (%channel-dequeue! channel)))
-                                 (begin
-                                   (%dlist-link! (flow-channel-getters channel)
-                                                 node)
-                                   #f)))))
-                      (if immediate
-                          ;; resume reports #f when an earlier base of
-                          ;; this same perform already won: registration
-                          ;; has no early exit, so every later base's
-                          ;; block still runs. The value is out of the
-                          ;; queue by then, so put it back.
-                          ;;
-                          ;; Putters are woken only once the value is
-                          ;; really taken: woken first, one could fill
-                          ;; the slot before the unget, which does not
-                          ;; consult the bound and would leave the
-                          ;; channel one past it.
-                          (if (resume (cdr immediate))
-                              (%channel-wake-space! channel)
-                              (%channel-unget! channel (cdr immediate)))
-                          ;; The entry only became reachable just now, so
-                          ;; a winner that fired the cancels before this
-                          ;; point missed it — off-loop, resume-from
-                          ;; snapshots the cancel list at resume time.
-                          (unless (eq? (unbox state) 'waiting)
-                            (%channel-remove-getter! channel node))))))))
+                             (and (fx>? (flow-channel-length channel) 0)
+                                  (list (%channel-dequeue! channel))))))
+                      (and value
+                           (begin
+                             ;; outside the mutex: a resume runs
+                             ;; continuation code
+                             (%channel-wake-space! channel)
+                             (lambda () (car value))))))
+                  (lambda (state resume register-cancel!)
+                    (let* ((entry (make-flow-getter state resume (box #f)
+                                                    (%flow-waiter-token)))
+                           (node (%dnode-new entry)))
+                      ;; Armed BEFORE the entry is reachable, and the
+                      ;; recheck below closes the remaining window. A get
+                      ;; that loses a choice must take its entry off the
+                      ;; list itself: the only other reaper runs from a
+                      ;; put, so a channel polled and never written --
+                      ;; (flow-choice (flow-get ch) (flow-timeout 0.1)) --
+                      ;; would grow without bound, each dead entry pinning
+                      ;; a captured continuation.
+                      (register-cancel!
+                       (lambda () (%channel-remove-getter! channel node)))
+                      (let ((immediate
+                             (with-mutex (flow-channel-mutex channel)
+                               (if (fx>? (flow-channel-length channel) 0)
+                                   (and (box-cas! (flow-getter-claimed entry) #f #t)
+                                        (cons #t (%channel-dequeue! channel)))
+                                   (begin
+                                     (%dlist-link! (flow-channel-getters channel)
+                                                   node)
+                                     #f)))))
+                        (if immediate
+                            ;; resume reports #f when an earlier base of
+                            ;; this same perform already won: registration
+                            ;; has no early exit, so every later base's
+                            ;; block still runs. The value is out of the
+                            ;; queue by then, so put it back.
+                            ;;
+                            ;; Putters are woken only once the value is
+                            ;; really taken: woken first, one could fill
+                            ;; the slot before the unget, which does not
+                            ;; consult the bound and would leave the
+                            ;; channel one past it.
+                            (if (resume (cdr immediate))
+                                (%channel-wake-space! channel)
+                                (%channel-unget! channel (cdr immediate)))
+                            ;; The entry only became reachable just now, so
+                            ;; a winner that fired the cancels before this
+                            ;; point missed it — off-loop, resume-from
+                            ;; snapshots the cancel list at resume time.
+                            (unless (eq? (unbox state) 'waiting)
+                              (%channel-remove-getter! channel node)))))))))
 
-  (define (flow-get! channel)
-    (flow-perform (flow-get channel)))
+  (define flow-get!
+    (lambda (channel)
+      (flow-perform (flow-get channel))))
 
-  (define (flow-get-try channel default)
-    (%flow-check-caller-thread! 'flow-get-try)
-    (let ((value
-           (with-mutex (flow-channel-mutex channel)
-             (and (fx>? (flow-channel-length channel) 0)
-                  (list (%channel-dequeue! channel))))))
-      (cond
-       (value
-        ;; outside the mutex: a resume runs continuation code
-        (%channel-wake-space! channel)
-        (car value))
-       (else default))))
+  (define flow-get-try
+    (lambda (channel default)
+      (%flow-check-caller-thread! 'flow-get-try)
+      (let ((value
+             (with-mutex (flow-channel-mutex channel)
+               (and (fx>? (flow-channel-length channel) 0)
+                    (list (%channel-dequeue! channel))))))
+        (cond
+         (value
+          ;; outside the mutex: a resume runs continuation code
+          (%channel-wake-space! channel)
+          (car value))
+         (else default)))))
 
   ;;------------------------------------------------------------
   ;; Latches: fire once, wake every waiter
@@ -1623,17 +1680,19 @@
 
   (define %flow-spin-pause (make-time 'time-duration 1000 0))
 
-  (define (%flow-spin-lock! lock)
-    (let spin ((tries 0))
-      (unless (box-cas! lock #f #t)
-        (if (fx<? tries 1000)
-            (spin (fx+ tries 1))
-            (begin (sleep %flow-spin-pause) (spin 0)))))
-    (memory-order-acquire))
+  (define %flow-spin-lock!
+    (lambda (lock)
+      (let spin ((tries 0))
+        (unless (box-cas! lock #f #t)
+          (if (fx<? tries 1000)
+              (spin (fx+ tries 1))
+              (begin (sleep %flow-spin-pause) (spin 0)))))
+      (memory-order-acquire)))
 
-  (define (%flow-spin-unlock! lock)
-    (memory-order-release)
-    (set-box! lock #f))
+  (define %flow-spin-unlock!
+    (lambda (lock)
+      (memory-order-release)
+      (set-box! lock #f)))
 
   (define-syntax with-latch-lock
     (syntax-rules ()
@@ -1644,76 +1703,83 @@
            (%flow-spin-unlock! lock)
            result)))))
 
-  (define (make-flow-latch)
-    (make-flow-latch% (box #f) %flow-latch-unfired (%dlist-new)))
+  (define make-flow-latch
+    (lambda ()
+      (make-flow-latch% (box #f) %flow-latch-unfired (%dlist-new))))
 
   ;; LATCH's value, read without the lock: %flow-latch-unfired, or the
   ;; value it fired with.
-  (define (%flow-latch-value-now latch)
-    (let ((value (flow-latch-value latch)))
-      (unless (eq? value %flow-latch-unfired)
-        (memory-order-acquire))
-      value))
+  (define %flow-latch-value-now
+    (lambda (latch)
+      (let ((value (flow-latch-value latch)))
+        (unless (eq? value %flow-latch-unfired)
+          (memory-order-acquire))
+        value)))
 
-  (define (flow-latch-fired? latch)
-    (not (eq? (%flow-latch-value-now latch) %flow-latch-unfired)))
+  (define flow-latch-fired?
+    (lambda (latch)
+      (not (eq? (%flow-latch-value-now latch) %flow-latch-unfired))))
 
   ;; #t when this call fired LATCH, #f when it had already fired, in
   ;; which case the first value stays. Like flow-put!, callable from the
   ;; loop thread and from a compute thread.
-  (define (flow-latch-fire! latch value)
-    (%flow-check-caller-thread! 'flow-latch-fire!)
-    (let ((waiters
-           (with-latch-lock latch
-             (and (eq? (flow-latch-value latch) %flow-latch-unfired)
-                  (begin
-                    (flow-latch-value! latch value)
-                    (%dlist-take-all! (flow-latch-waiters latch)))))))
-      (and waiters
-           (begin
-             ;; Outside the lock: a resume runs continuation code. A
-             ;; resume that reports #f lost to another base of its own
-             ;; choice, and since a latch wait consumes nothing there is
-             ;; nothing to put back.
-             (for-each (lambda (waiter)
-                         (when (unbox (cdr waiter)) ((car waiter) value)))
-                       waiters)
-             #t))))
+  (define flow-latch-fire!
+    (lambda (latch value)
+      (%flow-check-caller-thread! 'flow-latch-fire!)
+      (let ((waiters
+             (with-latch-lock latch
+               (and (eq? (flow-latch-value latch) %flow-latch-unfired)
+                    (begin
+                      (flow-latch-value! latch value)
+                      (%dlist-take-all! (flow-latch-waiters latch)))))))
+        (and waiters
+             (begin
+               ;; Outside the lock: a resume runs continuation code. A
+               ;; resume that reports #f lost to another base of its own
+               ;; choice, and since a latch wait consumes nothing there is
+               ;; nothing to put back.
+               (for-each (lambda (waiter)
+                           (when (unbox (cdr waiter)) ((car waiter) value)))
+                         waiters)
+               #t)))))
 
-  (define (%latch-remove-waiter! latch node)
-    (with-latch-lock latch
-      (%dlist-unlink! (flow-latch-waiters latch) node)))
+  (define %latch-remove-waiter!
+    (lambda (latch node)
+      (with-latch-lock latch
+        (%dlist-unlink! (flow-latch-waiters latch) node))))
 
-  (define (flow-latch-wait latch)
-    (make-flow% 'base (cons 'flow2-latch latch)
-                (lambda (x) x)
-                (lambda ()
-                  (let ((value (%flow-latch-value-now latch)))
-                    (and (not (eq? value %flow-latch-unfired))
-                         (lambda () value))))
-                (lambda (state resume register-cancel!)
-                  (define node (%dnode-new (cons resume (%flow-waiter-token))))
-                  ;; Armed before the waiter is reachable, with the
-                  ;; recheck below closing the rest of the window --
-                  ;; flow-get's discipline, for flow-get's reason: a
-                  ;; wait that loses a choice must not stay on the list
-                  ;; pinning its continuation until the latch fires,
-                  ;; which for a stop latch may be never.
-                  (register-cancel!
-                   (lambda () (%latch-remove-waiter! latch node)))
-                  (let ((value
-                         (with-latch-lock latch
-                           (let ((value (flow-latch-value latch)))
-                             (when (eq? value %flow-latch-unfired)
-                               (%dlist-link! (flow-latch-waiters latch) node))
-                             value))))
-                    (if (eq? value %flow-latch-unfired)
-                        (unless (eq? (unbox state) 'waiting)
-                          (%latch-remove-waiter! latch node))
-                        (resume value))))))
+  (define flow-latch-wait
+    (lambda (latch)
+      (make-flow% 'base (cons 'flow2-latch latch)
+                  (lambda (x) x)
+                  (lambda ()
+                    (let ((value (%flow-latch-value-now latch)))
+                      (and (not (eq? value %flow-latch-unfired))
+                           (lambda () value))))
+                  (lambda (state resume register-cancel!)
+                    (define node (%dnode-new (cons resume (%flow-waiter-token))))
+                    ;; Armed before the waiter is reachable, with the
+                    ;; recheck below closing the rest of the window --
+                    ;; flow-get's discipline, for flow-get's reason: a
+                    ;; wait that loses a choice must not stay on the list
+                    ;; pinning its continuation until the latch fires,
+                    ;; which for a stop latch may be never.
+                    (register-cancel!
+                     (lambda () (%latch-remove-waiter! latch node)))
+                    (let ((value
+                           (with-latch-lock latch
+                             (let ((value (flow-latch-value latch)))
+                               (when (eq? value %flow-latch-unfired)
+                                 (%dlist-link! (flow-latch-waiters latch) node))
+                               value))))
+                      (if (eq? value %flow-latch-unfired)
+                          (unless (eq? (unbox state) 'waiting)
+                            (%latch-remove-waiter! latch node))
+                          (resume value)))))))
 
-  (define (flow-latch-wait! latch)
-    (flow-perform (flow-latch-wait latch)))
+  (define flow-latch-wait!
+    (lambda (latch)
+      (flow-perform (flow-latch-wait latch))))
 
   ;;------------------------------------------------------------
   ;; Diagnostics: raw internal lengths
@@ -1730,23 +1796,26 @@
 
   ;; Values currently queued. The logical number: what a getter would
   ;; find.
-  (define (flow-channel-queue-length channel)
-    (with-mutex (flow-channel-mutex channel)
-      (flow-channel-length channel)))
+  (define flow-channel-queue-length
+    (lambda (channel)
+      (with-mutex (flow-channel-mutex channel)
+        (flow-channel-length channel))))
 
   ;; Entries on the getters list, dead ones included. Compare against
   ;; the number of fibers you believe are actually parked on this
   ;; channel; a gap that grows is a leak of dead getters.
-  (define (flow-channel-getters-length channel)
-    (with-mutex (flow-channel-mutex channel)
-      (%dlist-size (flow-channel-getters channel))))
+  (define flow-channel-getters-length
+    (lambda (channel)
+      (with-mutex (flow-channel-mutex channel)
+        (%dlist-size (flow-channel-getters channel)))))
 
   ;; Putters parked waiting for room. Persistently non-zero means
   ;; sustained backpressure — pair it with the (flow2 channel-full ...)
   ;; warning, which fires once per saturation episode.
-  (define (flow-channel-space-length channel)
-    (with-mutex (flow-channel-mutex channel)
-      (%dlist-size (flow-channel-space channel))))
+  (define flow-channel-space-length
+    (lambda (channel)
+      (with-mutex (flow-channel-mutex channel)
+        (%dlist-size (flow-channel-space channel)))))
 
   ;; Raises overflow right here when the channel already holds more
   ;; than N values: the bound is never observably violated, and the
@@ -1755,38 +1824,39 @@
   ;; unbounded. Zero is refused because nothing can enter a zero-bound
   ;; queue: put-then-get would deadlock while get-then-put worked, an
   ;; order-dependent hang.
-  (define (flow-channel-buffer-size! channel n)
-    ;; Growing a bound wakes the putters it admits, and a wake is a
-    ;; resume -- on a stray thread, the unsynchronized loop-spawn the
-    ;; guard exists to prevent.
-    (%flow-check-caller-thread! 'flow-channel-buffer-size!)
-    (unless (or (not n) (and (fixnum? n) (fx>? n 0)))
-      (error 'flow-channel-buffer-size!
-             "bound must be a positive fixnum, or #f for unbounded" n))
-    (let ((wake
-           (with-mutex (flow-channel-mutex channel)
-             (when (and n (fx>? (flow-channel-length channel) n))
-               (raise (make-flow-error 'overflow
-                                       "flow2: channel already over the requested bound"
-                                       (list n (flow-channel-length channel)) #f)))
-             (flow-channel-bound! channel n)
-             ;; Slots the new bound just opened, each owed one parked
-             ;; putter. %channel-wake-space! otherwise only runs after
-             ;; a dequeue, so growing the bound would leave putters
-             ;; parked despite the room until the next get — and a
-             ;; consumer that stopped consuming is exactly when an
-             ;; operator raises a bound to relieve the producers.
-             (let ((waiting (%dlist-size (flow-channel-space channel))))
-               (if n
-                   (fxmin waiting
-                          (fxmax 0 (fx- n (flow-channel-length channel))))
-                   waiting)))))
-      ;; Outside the mutex, one wake per opened slot: each call resumes
-      ;; at most one live waiter and rechecks the room itself, so a
-      ;; woken putter racing a slot away turns a later wake into a
-      ;; no-op rather than an over-admission.
-      (do ((i 0 (fx+ i 1))) ((fx>=? i wake))
-        (%channel-wake-space! channel))))
+  (define flow-channel-buffer-size!
+    (lambda (channel n)
+      ;; Growing a bound wakes the putters it admits, and a wake is a
+      ;; resume -- on a stray thread, the unsynchronized loop-spawn the
+      ;; guard exists to prevent.
+      (%flow-check-caller-thread! 'flow-channel-buffer-size!)
+      (unless (or (not n) (and (fixnum? n) (fx>? n 0)))
+        (error 'flow-channel-buffer-size!
+               "bound must be a positive fixnum, or #f for unbounded" n))
+      (let ((wake
+             (with-mutex (flow-channel-mutex channel)
+               (when (and n (fx>? (flow-channel-length channel) n))
+                 (raise (make-flow-error 'overflow
+                                         "flow2: channel already over the requested bound"
+                                         (list n (flow-channel-length channel)) #f)))
+               (flow-channel-bound! channel n)
+               ;; Slots the new bound just opened, each owed one parked
+               ;; putter. %channel-wake-space! otherwise only runs after
+               ;; a dequeue, so growing the bound would leave putters
+               ;; parked despite the room until the next get — and a
+               ;; consumer that stopped consuming is exactly when an
+               ;; operator raises a bound to relieve the producers.
+               (let ((waiting (%dlist-size (flow-channel-space channel))))
+                 (if n
+                     (fxmin waiting
+                            (fxmax 0 (fx- n (flow-channel-length channel))))
+                     waiting)))))
+        ;; Outside the mutex, one wake per opened slot: each call resumes
+        ;; at most one live waiter and rechecks the room itself, so a
+        ;; woken putter racing a slot away turns a later wake into a
+        ;; no-op rather than an over-admission.
+        (do ((i 0 (fx+ i 1))) ((fx>=? i wake))
+          (%channel-wake-space! channel)))))
 
   ;;------------------------------------------------------------
   ;; Timers: a heap above the ring
@@ -1808,96 +1878,106 @@
   (define %flow-timers (make-vector 64 #f))
   (define %flow-timers-size 0)
 
-  (define (%flow-timer-deadline entry) (vector-ref entry 0))
+  (define %flow-timer-deadline
+    (lambda (entry) (vector-ref entry 0)))
 
-  (define (%flow-timer-place! i entry)
-    (vector-set! %flow-timers i entry)
-    (vector-set! entry 1 i))
+  (define %flow-timer-place!
+    (lambda (i entry)
+      (vector-set! %flow-timers i entry)
+      (vector-set! entry 1 i)))
 
-  (define (%flow-timer-up! i)
-    (when (fx>? i 0)
-      (let* ((parent (fxsrl (fx- i 1) 1))
-             (entry (vector-ref %flow-timers i))
-             (above (vector-ref %flow-timers parent)))
-        (when (< (%flow-timer-deadline entry) (%flow-timer-deadline above))
-          (%flow-timer-place! parent entry)
-          (%flow-timer-place! i above)
-          (%flow-timer-up! parent)))))
+  (define %flow-timer-up!
+    (lambda (i)
+      (when (fx>? i 0)
+        (let* ((parent (fxsrl (fx- i 1) 1))
+               (entry (vector-ref %flow-timers i))
+               (above (vector-ref %flow-timers parent)))
+          (when (< (%flow-timer-deadline entry) (%flow-timer-deadline above))
+            (%flow-timer-place! parent entry)
+            (%flow-timer-place! i above)
+            (%flow-timer-up! parent))))))
 
-  (define (%flow-timer-down! i)
-    (let* ((left (fx+ (fx* 2 i) 1))
-           (right (fx+ left 1))
-           (least (if (and (fx<? left %flow-timers-size)
-                           (< (%flow-timer-deadline (vector-ref %flow-timers left))
-                              (%flow-timer-deadline (vector-ref %flow-timers i))))
-                      left
-                      i))
-           (least (if (and (fx<? right %flow-timers-size)
-                           (< (%flow-timer-deadline (vector-ref %flow-timers right))
-                              (%flow-timer-deadline (vector-ref %flow-timers least))))
-                      right
-                      least)))
-      (unless (fx=? least i)
-        (let ((entry (vector-ref %flow-timers i)))
-          (%flow-timer-place! i (vector-ref %flow-timers least))
-          (%flow-timer-place! least entry)
-          (%flow-timer-down! least)))))
+  (define %flow-timer-down!
+    (lambda (i)
+      (let* ((left (fx+ (fx* 2 i) 1))
+             (right (fx+ left 1))
+             (least (if (and (fx<? left %flow-timers-size)
+                             (< (%flow-timer-deadline (vector-ref %flow-timers left))
+                                (%flow-timer-deadline (vector-ref %flow-timers i))))
+                        left
+                        i))
+             (least (if (and (fx<? right %flow-timers-size)
+                             (< (%flow-timer-deadline (vector-ref %flow-timers right))
+                                (%flow-timer-deadline (vector-ref %flow-timers least))))
+                        right
+                        least)))
+        (unless (fx=? least i)
+          (let ((entry (vector-ref %flow-timers i)))
+            (%flow-timer-place! i (vector-ref %flow-timers least))
+            (%flow-timer-place! least entry)
+            (%flow-timer-down! least))))))
 
-  (define (%flow-timer-push! entry)
-    (when (fx=? %flow-timers-size (vector-length %flow-timers))
-      (let ((bigger (make-vector (fx* 2 %flow-timers-size) #f)))
-        (do ((i 0 (fx+ i 1))) ((fx=? i %flow-timers-size))
-          (vector-set! bigger i (vector-ref %flow-timers i)))
-        (set! %flow-timers bigger)))
-    (%flow-timer-place! %flow-timers-size entry)
-    (set! %flow-timers-size (fx+ %flow-timers-size 1))
-    (%flow-timer-up! (fx- %flow-timers-size 1)))
+  (define %flow-timer-push!
+    (lambda (entry)
+      (when (fx=? %flow-timers-size (vector-length %flow-timers))
+        (let ((bigger (make-vector (fx* 2 %flow-timers-size) #f)))
+          (do ((i 0 (fx+ i 1))) ((fx=? i %flow-timers-size))
+            (vector-set! bigger i (vector-ref %flow-timers i)))
+          (set! %flow-timers bigger)))
+      (%flow-timer-place! %flow-timers-size entry)
+      (set! %flow-timers-size (fx+ %flow-timers-size 1))
+      (%flow-timer-up! (fx- %flow-timers-size 1))))
 
   ;; Idempotent: an entry already out of the heap is left alone.
-  (define (%flow-timer-remove! entry)
-    (let ((i (vector-ref entry 1)))
-      (when (fx>=? i 0)
-        (let ((last (fx- %flow-timers-size 1)))
-          (vector-set! entry 1 -1)
-          (set! %flow-timers-size last)
-          (if (fx=? i last)
-              (vector-set! %flow-timers last #f)
-              (let ((moved (vector-ref %flow-timers last)))
+  (define %flow-timer-remove!
+    (lambda (entry)
+      (let ((i (vector-ref entry 1)))
+        (when (fx>=? i 0)
+          (let ((last (fx- %flow-timers-size 1)))
+            (vector-set! entry 1 -1)
+            (set! %flow-timers-size last)
+            (if (fx=? i last)
                 (vector-set! %flow-timers last #f)
-                (%flow-timer-place! i moved)
-                (%flow-timer-down! i)
-                (%flow-timer-up! (vector-ref moved 1))))))))
+                (let ((moved (vector-ref %flow-timers last)))
+                  (vector-set! %flow-timers last #f)
+                  (%flow-timer-place! i moved)
+                  (%flow-timer-down! i)
+                  (%flow-timer-up! (vector-ref moved 1)))))))))
 
   ;; Every tick, before its completions: resume every timeout that is
   ;; due, earliest first. One that raises is logged and the rest still
   ;; fire.
-  (define (%flow-timers-expire! now)
-    (let loop ()
-      (when (and (fx>? %flow-timers-size 0)
-                 (<= (%flow-timer-deadline (vector-ref %flow-timers 0)) now))
-        (let ((entry (vector-ref %flow-timers 0)))
-          (%flow-timer-remove! entry)
-          (guard (ex (#t (flow-log (list 'flow2 'timer-raised
-                                         (%flow-condition-sexp ex)))))
-            ((vector-ref entry 2) (void))))
-        (loop))))
+  (define %flow-timers-expire!
+    (lambda (now)
+      (let loop ()
+        (when (and (fx>? %flow-timers-size 0)
+                   (<= (%flow-timer-deadline (vector-ref %flow-timers 0)) now))
+          (let ((entry (vector-ref %flow-timers 0)))
+            (%flow-timer-remove! entry)
+            (guard (ex (#t (flow-log (list 'flow2 'timer-raised
+                                           (%flow-condition-sexp ex)))))
+              ((vector-ref entry 2) (void))))
+          (loop)))))
 
   ;; How long the loop may block: until the earliest deadline, or #f.
-  (define (%flow-timers-next-ns now)
-    (and (fx>? %flow-timers-size 0)
-         (- (%flow-timer-deadline (vector-ref %flow-timers 0)) now)))
+  (define %flow-timers-next-ns
+    (lambda (now)
+      (and (fx>? %flow-timers-size 0)
+           (- (%flow-timer-deadline (vector-ref %flow-timers 0)) now))))
 
   ;; A new run starts with no timers. Entries a stopped run left behind
   ;; are marked out of the heap, so a stray cancel of one cannot remove
   ;; whatever now sits in its old slot.
-  (define (%flow-timers-clear!)
-    (do ((i 0 (fx+ i 1))) ((fx=? i %flow-timers-size))
-      (vector-set! (vector-ref %flow-timers i) 1 -1)
-      (vector-set! %flow-timers i #f))
-    (set! %flow-timers-size 0)
-    (loop-timers! %flow-timers-expire! %flow-timers-next-ns))
+  (define %flow-timers-clear!
+    (lambda ()
+      (do ((i 0 (fx+ i 1))) ((fx=? i %flow-timers-size))
+        (vector-set! (vector-ref %flow-timers i) 1 -1)
+        (vector-set! %flow-timers i #f))
+      (set! %flow-timers-size 0)
+      (loop-timers! %flow-timers-expire! %flow-timers-next-ns)))
 
-  (define (%flow-timers-count) %flow-timers-size)
+  (define %flow-timers-count
+    (lambda () %flow-timers-size))
 
   ;; Armed when performed: the deadline is SECONDS from the moment the
   ;; perform blocks. A timeout is never ready at try time, even at 0
@@ -1990,91 +2070,101 @@
   (define %flow-fd-closes (make-eqv-hashtable))
   (define %flow-fd-closing (make-eqv-hashtable))
 
-  (define (%flow-fd-close-count fd)
-    (hashtable-ref %flow-fd-closes fd 0))
+  (define %flow-fd-close-count
+    (lambda (fd)
+      (hashtable-ref %flow-fd-closes fd 0)))
 
-  (define (%flow-fd-submit-count fd)
-    (and (not (hashtable-contains? %flow-fd-closing fd))
-         (%flow-fd-close-count fd)))
+  (define %flow-fd-submit-count
+    (lambda (fd)
+      (and (not (hashtable-contains? %flow-fd-closing fd))
+           (%flow-fd-close-count fd))))
 
-  (define (%flow-recv-current? fd r)
-    (eqv? (%flow-recv-closes r) (%flow-fd-submit-count fd)))
+  (define %flow-recv-current?
+    (lambda (fd r)
+      (eqv? (%flow-recv-closes r) (%flow-fd-submit-count fd))))
 
   ;; Called by flow-close's block before the prep, so a read registered
   ;; after it in the same perform already sees the fd as closing.
-  (define (%flow-fd-closing! fd)
-    (let ((n (fx+ (%flow-fd-close-count fd) 1)))
-      (hashtable-set! %flow-fd-closes fd n)
-      (hashtable-set! %flow-fd-closing fd n)
-      n))
+  (define %flow-fd-closing!
+    (lambda (fd)
+      (let ((n (fx+ (%flow-fd-close-count fd) 1)))
+        (hashtable-set! %flow-fd-closes fd n)
+        (hashtable-set! %flow-fd-closing fd n)
+        n)))
 
   ;; The close completed: the number is free for the kernel to reissue,
   ;; and a recv submitted from now on belongs to whatever gets it. A
   ;; later close of the same number, already begun, keeps its own mark.
-  (define (%flow-fd-closed! fd n)
-    (when (eqv? (hashtable-ref %flow-fd-closing fd #f) n)
-      (hashtable-delete! %flow-fd-closing fd)))
+  (define %flow-fd-closed!
+    (lambda (fd n)
+      (when (eqv? (hashtable-ref %flow-fd-closing fd #f) n)
+        (hashtable-delete! %flow-fd-closing fd))))
 
   ;; fd -> the <flow2-recv> left in flight by a reader that lost.
   ;; Loop thread only, like every ring event.
   (define %flow-recv-orphans (make-eqv-hashtable))
 
-  (define (%flow-recv-orphans-clear!)
-    (hashtable-clear! %flow-recv-orphans)
-    (hashtable-clear! %flow-fd-closes)
-    (hashtable-clear! %flow-fd-closing))
+  (define %flow-recv-orphans-clear!
+    (lambda ()
+      (hashtable-clear! %flow-recv-orphans)
+      (hashtable-clear! %flow-fd-closes)
+      (hashtable-clear! %flow-fd-closing)))
 
   ;; Still in flight means its handler is still registered. A close
   ;; deletes the handler at once, before its synthetic completion runs
   ;; a tick later, and the kernel may reissue the number in between --
   ;; so an orphan whose handler is gone belongs to the old fd and must
   ;; not be handed to a reader of the new one.
-  (define (%flow-recv-in-flight? r)
-    (hashtable-contains? (loop-handlers (loop-current)) (%flow-recv-id r)))
+  (define %flow-recv-in-flight?
+    (lambda (r)
+      (hashtable-contains? (loop-handlers (loop-current)) (%flow-recv-id r))))
 
-  (define (%flow-recv-adopt! fd)
-    (let ((r (hashtable-ref %flow-recv-orphans fd #f)))
-      (and r
-           (begin
-             (hashtable-delete! %flow-recv-orphans fd)
-             (and (%flow-recv-in-flight? r)
-                  (%flow-recv-current? fd r)
-                  r)))))
+  (define %flow-recv-adopt!
+    (lambda (fd)
+      (let ((r (hashtable-ref %flow-recv-orphans fd #f)))
+        (and r
+             (begin
+               (hashtable-delete! %flow-recv-orphans fd)
+               (and (%flow-recv-in-flight? r)
+                    (%flow-recv-current? fd r)
+                    r))))))
 
   ;; The losing reader's cancel. If its recv has already completed --
   ;; the same-tick race above -- the completion handled the bytes and
   ;; there is nothing left to hand over.
-  (define (%flow-recv-orphan! fd r resume)
-    (when (and (eq? (%flow-recv-owner r) resume)
-               (%flow-recv-in-flight? r))
-      (%flow-recv-owner! r #f)
-      (hashtable-set! %flow-recv-orphans fd r)))
+  (define %flow-recv-orphan!
+    (lambda (fd r resume)
+      (when (and (eq? (%flow-recv-owner r) resume)
+                 (%flow-recv-in-flight? r))
+        (%flow-recv-owner! r #f)
+        (hashtable-set! %flow-recv-orphans fd r))))
 
-  (define (%flow-recv-complete! fd r res)
-    (loop-fd-op-remove! fd (%flow-recv-id r))
-    (when (eq? (hashtable-ref %flow-recv-orphans fd #f) r)
-      (hashtable-delete! %flow-recv-orphans fd))
-    (let ((owner (%flow-recv-owner r))
-          (bv (loop-buf-data-take! (%flow-recv-id r))))
-      (%flow-recv-owner! r #f)
-      (cond
-       ((fx<? res 0)
-        ;; A failure nobody took is kept, like data: it is NOT
-        ;; level-triggered. Linux reports a socket error such as
-        ;; ECONNRESET once and clears it, and the next recv returns 0 --
-        ;; a clean EOF, the confusion flow-read's three results exist to
-        ;; prevent. -ECANCELED is the exception: it means the fd is
-        ;; closing, loop-close-prep! has already purged its backlog, and a
-        ;; marker left now would greet whatever reopens the number.
-        (unless (or (and owner (owner #f))
-                    (fx=? res (fx- 0 %flow-ecanceled))
-                    (not (%flow-recv-current? fd r)))
-          (loop-recv-backlog-put! fd %flow-recv-failed)))
-       ((fxzero? res) (when owner (owner #t)))
-       ((not (and owner (owner bv)))
-        ;; the fd it came from is closed: nobody is left to read it
-        (when (%flow-recv-current? fd r)
-          (loop-recv-backlog-put! fd bv))))))
+  (define %flow-recv-complete!
+    (lambda (fd r res)
+      (loop-fd-op-remove! fd (%flow-recv-id r))
+      (when (eq? (hashtable-ref %flow-recv-orphans fd #f) r)
+        (hashtable-delete! %flow-recv-orphans fd))
+      (let ((owner (%flow-recv-owner r))
+            (bv (loop-buf-data-take! (%flow-recv-id r))))
+        (%flow-recv-owner! r #f)
+        (cond
+         ((fx<? res 0)
+          ;; A failure nobody took is kept, like data: it is NOT
+          ;; level-triggered. Linux reports a socket error such as
+          ;; ECONNRESET once and clears it, and the next recv returns 0 --
+          ;; a clean EOF, the confusion flow-read's three results exist to
+          ;; prevent. -ECANCELED is the exception: it means the fd is
+          ;; closing, loop-close-prep! has already purged its backlog, and a
+          ;; marker left now would greet whatever reopens the number.
+          (unless (or (and owner (owner #f))
+                      (fx=? res (fx- 0 %flow-ecanceled))
+                      (not (%flow-recv-current? fd r)))
+            (loop-recv-backlog-put! fd %flow-recv-failed)))
+         ((fxzero? res) (when owner (owner #t)))
+         ((not (and owner (owner bv)))
+          ;; the fd it came from is closed: nobody is left to read it
+          (when (%flow-recv-current? fd r)
+            (loop-recv-backlog-put! fd bv)))))))
 
   (define %flow-ecanceled 125)
 
@@ -2112,43 +2202,45 @@
   ;; compute thread's id is never the owner's. It is needed because
   ;; loop-current is a process global, so nothing else here would stop
   ;; a compute thread from reading tables the loop thread mutates.
-  (define (flow-read-pending? fd)
-    (let ((owner (unbox %flow-loop-thread)))
-      (when (and owner (not (eqv? owner (get-thread-id))))
-        (%flow-wrong-thread 'flow-read-pending?)))
-    (or (loop-recv-backlog-pending? fd)
-        (let ((r (hashtable-ref %flow-recv-orphans fd #f)))
-          (and r
-               (%flow-recv-in-flight? r)
-               (%flow-recv-current? fd r)
-               #t))))
+  (define flow-read-pending?
+    (lambda (fd)
+      (let ((owner (unbox %flow-loop-thread)))
+        (when (and owner (not (eqv? owner (get-thread-id))))
+          (%flow-wrong-thread 'flow-read-pending?)))
+      (or (loop-recv-backlog-pending? fd)
+          (let ((r (hashtable-ref %flow-recv-orphans fd #f)))
+            (and r
+                 (%flow-recv-in-flight? r)
+                 (%flow-recv-current? fd r)
+                 #t)))))
 
-  (define (%flow-recv-submit! fd)
-    (let* ((ring (loop-ring (loop-current)))
-           (id   (loop-alloc-id!))
-           (sqe  (loop-get-sqe ring))
-           (r    (%make-flow-recv id #f (%flow-fd-submit-count fd))))
-      (io-uring-prep-recv sqe fd 0 (loop-buf-ring-buf-size) 0)
-      (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
-      (io-uring-sqe-set-buf-group sqe (loop-buf-ring-bgid))
-      (io-uring-sqe-set-data64 sqe id)
-      ;; In the fd's operation index, not just in loop-handlers, so that
-      ;; loop-close-prep!'s purge deletes the handler. Otherwise a recv
-      ;; completing with data between the cancel's submit and the kernel
-      ;; acting on it would put on the backlog of an fd just purged, and
-      ;; the next connection given that number would read the previous
-      ;; one's bytes. Registered, the late CQE finds nothing (the drain
-      ;; has already recycled its buffer and drops the orphan).
-      ;;
-      ;; flow-write deliberately does NOT register: its handler is what
-      ;; unlocks the pinned bytevector, and running it from the
-      ;; synthetic resume would unlock memory the kernel may not be done
-      ;; reading. It has no stash to corrupt, and its real -ECANCELED
-      ;; CQE releases the pin.
-      (loop-fd-op-add! fd id)
-      (hashtable-set! (loop-handlers (loop-current)) id
-                      (lambda (res) (%flow-recv-complete! fd r res)))
-      r))
+  (define %flow-recv-submit!
+    (lambda (fd)
+      (let* ((ring (loop-ring (loop-current)))
+             (id   (loop-alloc-id!))
+             (sqe  (loop-get-sqe ring))
+             (r    (%make-flow-recv id #f (%flow-fd-submit-count fd))))
+        (io-uring-prep-recv sqe fd 0 (loop-buf-ring-buf-size) 0)
+        (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
+        (io-uring-sqe-set-buf-group sqe (loop-buf-ring-bgid))
+        (io-uring-sqe-set-data64 sqe id)
+        ;; In the fd's operation index, not just in loop-handlers, so that
+        ;; loop-close-prep!'s purge deletes the handler. Otherwise a recv
+        ;; completing with data between the cancel's submit and the kernel
+        ;; acting on it would put on the backlog of an fd just purged, and
+        ;; the next connection given that number would read the previous
+        ;; one's bytes. Registered, the late CQE finds nothing (the drain
+        ;; has already recycled its buffer and drops the orphan).
+        ;;
+        ;; flow-write deliberately does NOT register: its handler is what
+        ;; unlocks the pinned bytevector, and running it from the
+        ;; synthetic resume would unlock memory the kernel may not be done
+        ;; reading. It has no stash to corrupt, and its real -ECANCELED
+        ;; CQE releases the pin.
+        (loop-fd-op-add! fd id)
+        (hashtable-set! (loop-handlers (loop-current)) id
+                        (lambda (res) (%flow-recv-complete! fd r res)))
+        r)))
 
   ;; One send, reporting what the kernel actually took: a positive
   ;; fixnum, or #f on failure. START defaults to 0 and lets a caller
@@ -2219,13 +2311,14 @@
   ;; point. Returns #t once everything is written, #f if a write
   ;; failed -- ask flow-write directly if you need to know how far it
   ;; got. An empty bytevector costs no syscall.
-  (define (flow-write-all! fd bv)
-    (let ((size (bytevector-length bv)))
-      (let loop ((start 0))
-        (if (fx=? start size)
-            #t
-            (let ((n (flow-perform (flow-write fd bv start))))
-              (and n (loop (fx+ start n))))))))
+  (define flow-write-all!
+    (lambda (fd bv)
+      (let ((size (bytevector-length bv)))
+        (let loop ((start 0))
+          (if (fx=? start size)
+              #t
+              (let ((n (flow-perform (flow-write fd bv start))))
+                (and n (loop (fx+ start n)))))))))
 
   ;; The cancel is not optional here, unlike the other events where it
   ;; only saves a wasted ring operation. loop-accept-block keys its
@@ -2274,8 +2367,9 @@
   ;; The IPv4 address of the peer connected on FD, as a string such as
   ;; "127.0.0.1", or #f when it has none (not connected, or already
   ;; gone). A plain syscall.
-  (define (flow-peer-address fd)
-    (loop-getpeername fd))
+  (define flow-peer-address
+    (lambda (fd)
+      (loop-getpeername fd)))
 
   (define O-RDONLY 0)
   (define O-WRONLY 1)
@@ -2424,10 +2518,11 @@
   ;; drained and asserted on by a test. loop-apply's catch-all, which
   ;; writes straight to stderr, stays as the last resort for a fiber
   ;; started below flow2, through the ring layer directly.
-  (define (%fiber-run thunk)
-    (guard (ex (#t (flow-log (list 'flow2 'uncaught 'fiber
-                                   (%flow-condition-sexp ex)))))
-      (thunk)))
+  (define %fiber-run
+    (lambda (thunk)
+      (guard (ex (#t (flow-log (list 'flow2 'uncaught 'fiber
+                                     (%flow-condition-sexp ex)))))
+        (thunk))))
 
   ;; Fire and forget: flow2 keeps no record of the fiber, so nothing
   ;; waits for it and nothing can stop it but its own code. A spawner
@@ -2438,10 +2533,11 @@
   ;; spawn; a thread the user forked is refused for the blunter reason
   ;; that loop-spawn is not synchronized against the loop's own
   ;; take-and-clear of that list.
-  (define (flow-spawn thunk)
-    (when (%worker-current?) (%flow-wrong-thread 'flow-spawn))
-    (%flow-check-caller-thread! 'flow-spawn)
-    (loop-spawn (lambda () (%fiber-run thunk))))
+  (define flow-spawn
+    (lambda (thunk)
+      (when (%worker-current?) (%flow-wrong-thread 'flow-spawn))
+      (%flow-check-caller-thread! 'flow-spawn)
+      (loop-spawn (lambda () (%fiber-run thunk)))))
 
   ;;------------------------------------------------------------
   ;; Lifecycle and compute threads
@@ -2454,12 +2550,13 @@
   ;; them, travel over channels the task itself writes to. A submit
   ;; parks when the request channel is full, which is the pool's
   ;; backpressure.
-  (define (flow-submit! worker-channel thunk)
-    ;; A submit reaches %channel-put! directly whenever the worker
-    ;; channel has room, so it never touches flow-perform's guard and
-    ;; needs its own.
-    (%flow-check-caller-thread! 'flow-submit!)
-    (%channel-put! worker-channel thunk))
+  (define flow-submit!
+    (lambda (worker-channel thunk)
+      ;; A submit reaches %channel-put! directly whenever the worker
+      ;; channel has room, so it never touches flow-perform's guard and
+      ;; needs its own.
+      (%flow-check-caller-thread! 'flow-submit!)
+      (%channel-put! worker-channel thunk)))
 
   ;; The per-worker framework loop: dequeue, run. A raise the task did
   ;; not handle itself is logged as (flow2 uncaught task WORKER
@@ -2467,19 +2564,20 @@
   ;; shrink because one task failed. Nothing is put on any channel for
   ;; the task: a reply, on success or failure, is the task's own to
   ;; send, with one guard of its own.
-  (define (%worker-body pool channel)
-    (%thread-own-set! %worker-pool pool)
-    (let loop ()
-      (let ((task (%flow-perform (flow-get channel))))
-        (unless (eq? task %flow-worker-stop)
-          (guard (ex (#t
-                      ;; Named by its request channel's (worker . i), so
-                      ;; the entry says WHERE.
-                      (flow-log (list 'flow2 'uncaught 'task
-                                      (flow-channel-name channel)
-                                      (%flow-condition-sexp ex)))))
-            (task))
-          (loop)))))
+  (define %worker-body
+    (lambda (pool channel)
+      (%thread-own-set! %worker-pool pool)
+      (let loop ()
+        (let ((task (%flow-perform (flow-get channel))))
+          (unless (eq? task %flow-worker-stop)
+            (guard (ex (#t
+                        ;; Named by its request channel's (worker . i), so
+                        ;; the entry says WHERE.
+                        (flow-log (list 'flow2 'uncaught 'task
+                                        (flow-channel-name channel)
+                                        (%flow-condition-sexp ex)))))
+              (task))
+            (loop))))))
 
   ;; A run's pool. Created per run and handed to the workers and the
   ;; collector as a closure, never through a global: a straggler from a
@@ -2490,27 +2588,29 @@
   ;; The eventfd first: it is the call that fails in practice, and the
   ;; buffer then never needs freeing on that path. The buffer is two
   ;; cells: the signal value, and the read target.
-  (define (%flow-pool-make)
-    (let* ((fd (%eventfd-create))
-           (buffer (foreign-alloc 16)))
-      (foreign-set! 'unsigned-64 buffer 0 1)
-      (foreign-set! 'unsigned-64 buffer 8 0)
-      (make-flow-pool% fd buffer (box '()) (make-mutex) (make-condition)
-                       0 #t (box #t))))
+  (define %flow-pool-make
+    (lambda ()
+      (let* ((fd (%eventfd-create))
+             (buffer (foreign-alloc 16)))
+        (foreign-set! 'unsigned-64 buffer 0 1)
+        (foreign-set! 'unsigned-64 buffer 8 0)
+        (make-flow-pool% fd buffer (box '()) (make-mutex) (make-condition)
+                         0 #t (box #t)))))
 
   ;; Fork the compute thread that serves CHANNEL. Counted live before
   ;; the fork, so a shutdown that runs after a failed fork still joins
   ;; every thread that did start.
-  (define (%flow-worker-fork! pool channel)
-    (with-mutex (%pool-mutex pool)
-      (%pool-live! pool (fx+ (%pool-live pool) 1)))
-    (guard (ex (#t (%flow-worker-exited! pool) (raise ex)))
-      (fork-thread
-       (lambda ()
-         (dynamic-wind
-           void
-           (lambda () (%worker-body pool channel))
-           (lambda () (%flow-worker-exited! pool)))))))
+  (define %flow-worker-fork!
+    (lambda (pool channel)
+      (with-mutex (%pool-mutex pool)
+        (%pool-live! pool (fx+ (%pool-live pool) 1)))
+      (guard (ex (#t (%flow-worker-exited! pool) (raise ex)))
+        (fork-thread
+         (lambda ()
+           (dynamic-wind
+             void
+             (lambda () (%worker-body pool channel))
+             (lambda () (%flow-worker-exited! pool))))))))
 
   ;; Start the loop on the calling thread — the main thread — and
   ;; spawn PROC as fiber zero with the list of worker request
@@ -2548,10 +2648,11 @@
          ;; and invoked from a fiber, or a REPL interrupt resetting to the
          ;; top level. Fibers switch inside loop-run, within this extent,
          ;; so they do not trip it.
-         (define (release!)
-           (unless released?
-             (set! released? #t)
-             (%flow-run-release! pool channels)))
+         (define release!
+           (lambda ()
+             (unless released?
+               (set! released? #t)
+               (%flow-run-release! pool channels))))
          (dynamic-wind
            void
            (lambda ()
@@ -2597,14 +2698,15 @@
   ;; worker finishing its task during the join must queue its reply,
   ;; not hand it to a fiber that is gone. The pool's die after the
   ;; join, which is why the stop sentinel still reaches the workers.
-  (define (%flow-run-release! pool channels)
-    (set-box! (unbox %flow-loop-token) #f)
-    (set-box! %flow-loop-token %flow-dead-token)
-    (when pool
-      (%flow-shutdown-pool! pool channels)
-      (set-box! (%pool-alive pool) #f))
-    (set-box! %flow-pool-current #f)
-    (set-box! %flow-loop-thread #f))
+  (define %flow-run-release!
+    (lambda (pool channels)
+      (set-box! (unbox %flow-loop-token) #f)
+      (set-box! %flow-loop-token %flow-dead-token)
+      (when pool
+        (%flow-shutdown-pool! pool channels)
+        (set-box! (%pool-alive pool) #f))
+      (set-box! %flow-pool-current #f)
+      (set-box! %flow-loop-thread #f)))
 
   ;; Stop the pool and, crucially, WAIT before dismantling what the
   ;; workers are still using.
@@ -2622,42 +2724,44 @@
   ;; never on the next run's (see <flow2-pool>).
   (define %flow-shutdown-join-seconds 2.0)
 
-  (define (%flow-shutdown-pool! pool channels)
-    (%pool-running?! pool #f)
-    ;; At the HEAD of each queue, past the bound, the way a value a
-    ;; losing get took is put back: a worker finishes the task it is
-    ;; running and exits, and tasks that never started are dropped with
-    ;; the channel. Appended, the sentinel would wait behind every queued
-    ;; task, and flow-run's join with it.
-    (for-each (lambda (channel)
-                (%channel-unget! channel %flow-worker-stop))
-              channels)
-    (%eventfd-signal! pool)
-    (let ((deadline (+ (real-time)
-                       (exact (round (* 1000 %flow-shutdown-join-seconds))))))
-      (let ((stragglers
-             (with-mutex (%pool-mutex pool)
-               (let wait ()
-                 (cond
-                  ((fxzero? (%pool-live pool)) 0)
-                  ((>= (real-time) deadline) (%pool-live pool))
-                  (else
-                   ;; Bounded, so a stuck worker cannot make flow-run
-                   ;; itself hang.
-                   (condition-wait (%pool-gone pool) (%pool-mutex pool)
-                                   (make-time 'time-duration 50000000 0))
-                   (wait)))))))
-        (cond
-         ((fxzero? stragglers)
-          (%eventfd-close (%pool-eventfd pool))
-          (foreign-free (%pool-buffer pool)))
-         (else
-          (flow-log (list 'flow2 'shutdown-workers-still-running stragglers))))))
-    (void))
+  (define %flow-shutdown-pool!
+    (lambda (pool channels)
+      (%pool-running?! pool #f)
+      ;; At the HEAD of each queue, past the bound, the way a value a
+      ;; losing get took is put back: a worker finishes the task it is
+      ;; running and exits, and tasks that never started are dropped with
+      ;; the channel. Appended, the sentinel would wait behind every queued
+      ;; task, and flow-run's join with it.
+      (for-each (lambda (channel)
+                  (%channel-unget! channel %flow-worker-stop))
+                channels)
+      (%eventfd-signal! pool)
+      (let ((deadline (+ (real-time)
+                         (exact (round (* 1000 %flow-shutdown-join-seconds))))))
+        (let ((stragglers
+               (with-mutex (%pool-mutex pool)
+                 (let wait ()
+                   (cond
+                    ((fxzero? (%pool-live pool)) 0)
+                    ((>= (real-time) deadline) (%pool-live pool))
+                    (else
+                     ;; Bounded, so a stuck worker cannot make flow-run
+                     ;; itself hang.
+                     (condition-wait (%pool-gone pool) (%pool-mutex pool)
+                                     (make-time 'time-duration 50000000 0))
+                     (wait)))))))
+          (cond
+           ((fxzero? stragglers)
+            (%eventfd-close (%pool-eventfd pool))
+            (foreign-free (%pool-buffer pool)))
+           (else
+            (flow-log (list 'flow2 'shutdown-workers-still-running stragglers))))))
+      (void)))
 
-  (define (flow-stop)
-    (when (%worker-current?) (%flow-wrong-thread 'flow-stop))
-    (%flow-check-caller-thread! 'flow-stop)
-    (loop-stop))
+  (define flow-stop
+    (lambda ()
+      (when (%worker-current?) (%flow-wrong-thread 'flow-stop))
+      (%flow-check-caller-thread! 'flow-stop)
+      (loop-stop)))
 
   (include "letloop/flow2.check.scm"))
