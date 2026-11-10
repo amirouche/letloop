@@ -591,7 +591,8 @@
     (assert (not straggler-done?))
     (let ((logged (filter (lambda (e)
                             (and (pair? e)
-                                 (eq? (cadr e) 'shutdown-workers-still-running)))
+                                 (eq? (cadr e)
+                                      'shutdown-workers-still-running)))
                           (map cdr (flow-log-drain!)))))
       (assert (= 1 (length logged))))
     ;; run 2, while the straggler is still alive and exits mid-run
@@ -1194,7 +1195,8 @@
 (define ~check-flow2-009/file-write-read-roundtrip
   (lambda ()
     (define path (flow2-check-path "flow2-009-roundtrip.bin"))
-    (define payload (string->utf8 "the quick brown fox jumps over the lazy dog"))
+    (define payload
+      (string->utf8 "the quick brown fox jumps over the lazy dog"))
     (define written #f)
     (define result #f)
     (flow2-check-remove! path)
@@ -1494,13 +1496,15 @@
                 (set! first-race
                       (flow-perform
                        (flow-choice
-                        (flow-wrap (flow-read client) (lambda (x) (list 'read x)))
+                        (flow-wrap (flow-read client)
+                                   (lambda (x) (list 'read x)))
                         (flow-wrap (flow-timeout 0.05) (lambda (x) 'timeout)))))
                 ;; whatever won above, the bytes must still be reachable
                 (set! second-read
                       (flow-perform
                        (flow-choice
-                        (flow-wrap (flow-read client) (lambda (x) (list 'read x)))
+                        (flow-wrap (flow-read client)
+                                   (lambda (x) (list 'read x)))
                         (flow-wrap (flow-timeout 0.5) (lambda (x) 'timeout)))))
                 (loop-close client)))
             (loop-close listen-fd)
@@ -1553,11 +1557,13 @@
        (fork-thread
         (lambda ()
           (set-box! put-outcome
-                    (guard (ex (#t (and (flow-error? ex) (flow-error-symbol ex))))
+                    (guard (ex (#t (and (flow-error? ex)
+                                        (flow-error-symbol ex))))
                       (flow-put! channel 'from-a-stray-thread)
                       'no-raise))
           (set-box! spawn-outcome
-                    (guard (ex (#t (and (flow-error? ex) (flow-error-symbol ex))))
+                    (guard (ex (#t (and (flow-error? ex)
+                                        (flow-error-symbol ex))))
                       (flow-spawn (lambda () (void)))
                       'no-raise))
           (set-box! done #t)))
@@ -1762,7 +1768,8 @@
                     ;; or the loop drains between the deadline and the
                     ;; send and there is no window left to aim at
                     (flow2-check-spin-until (+ t0 52))
-                    (%flow2-check-write2 fd payload (bytevector-length payload)))
+                    (%flow2-check-write2 fd payload
+                                         (bytevector-length payload)))
                   (flow-sleep 1.0)
                   (loop-close fd))))))))) 
     (assert closed-fd)
@@ -1889,7 +1896,9 @@
             (loop (cdr names)
                   (let find ((i 0))
                     (cond
-                     ((or (not info) (fx>? (fx+ i 14) (string-length info))) out)
+                     ((or (not info)
+                          (fx>? (fx+ i 14) (string-length info)))
+                      out)
                      ((string=? "eventfd-count:" (substring info i (fx+ i 14)))
                       (cons (count-after info i) out))
                      (else (find (fx+ i 1)))))))))))
@@ -1903,7 +1912,8 @@
      (lambda (ws)
        (let round ((r 0))
          (when (fx<? r rounds)
-           (let ((channels (map (lambda (i) (make-flow-channel (cons 'wake i) 4))
+           (let ((channels (map (lambda (i)
+                                  (make-flow-channel (cons 'wake i) 4))
                                 (iota workers)))
                  (arrived (box 0)))
              ;; one fiber parked per channel, so every worker put has to
@@ -1951,7 +1961,8 @@
       (flow-log-start! 0.01)
       (flow-log '(flow2-check captured-line))
       (flow-log-stop!))
-    (assert (flow2-check-substring? "captured-line" (get-output-string captured)))
+    (assert (flow2-check-substring? "captured-line"
+                                    (get-output-string captured)))
     ;; and an explicit port wins over the current one
     (let ((explicit (open-output-string)))
       (flow-log-start! 0.01 explicit)
@@ -2123,7 +2134,8 @@
              (flow-spawn
               (lambda ()
                 (set! completed
-                      (apply gather pages exits (append (cdr now) (list #f))))))))
+                      (apply gather pages exits
+                             (append (cdr now) (list #f))))))))
          (let wait ((n 0))
            (flow-sleep 0.01)
            (if (or (not (eq? completed 'not-set)) (fx>? n 100))
@@ -2202,7 +2214,8 @@
        (for-each (lambda (i)
                    (flow-spawn
                     (lambda ()
-                      (set! seen (cons (cons i (flow-latch-wait! latch)) seen)))))
+                      (set! seen
+                            (cons (cons i (flow-latch-wait! latch)) seen)))))
                  '(1 2 3))
        (flow-sleep 0.01)
        (assert (null? seen))
@@ -2281,7 +2294,8 @@
                  '(1 2 3))
        (flow-sleep 0.03)
        (flow-latch-fire! stop 'please)
-       (set! reasons (list (flow-get! exits) (flow-get! exits) (flow-get! exits)))
+       (set! reasons
+             (list (flow-get! exits) (flow-get! exits) (flow-get! exits)))
        (flow-stop)))
     (assert (equal? '(1 2 3) (list-sort < (map car reasons))))
     (assert (for-all (lambda (r) (eq? 'stopped (cadr r))) reasons))
@@ -2321,7 +2335,8 @@
       (flow-log-start! 0.01 good)
       (flow-log '(flow2-check after-restart))
       (flow-log-stop!)
-      (assert (flow2-check-substring? "after-restart" (get-output-string good))))
+      (assert (flow2-check-substring? "after-restart"
+                                      (get-output-string good))))
     #t))
 
 ;; The sink is where a program decides what flow2's own events mean to
@@ -2581,12 +2596,14 @@
     (define ch (make-flow-channel 'full 1))
     (define woken #f)
     ;; a parked putter's shape: (state resume . token)
-    (define probe (cons* (box 'waiting) (lambda (v) (set! woken #t) #t) (box #t)))
+    (define probe
+      (cons* (box 'waiting) (lambda (v) (set! woken #t) #t) (box #t)))
     (define result #f)
     (define winner (make-flow (lambda (x) x)
                               (lambda () #f)
                               (lambda (state resume register-cancel!)
-                                (flow-put! ch 'the-value)          ;; at the bound
+                                ;; at the bound
+                                (flow-put! ch 'the-value)
                                 (%dlist-link! (flow-channel-space ch)
                                               (%dnode-new probe))
                                 (resume 'winner))))
@@ -2620,7 +2637,8 @@
        "flow2-check-stderr"
        (lambda (str start count)
          (with-mutex mutex
-           (set! text (string-append text (substring str start (+ start count)))))
+           (set! text
+                 (string-append text (substring str start (+ start count)))))
          count)
        #f #f #f))
     (define contains?
@@ -2652,7 +2670,8 @@
     (flow-log '(flow2-check after-take-over))
     (do ((i 0 (+ i 1))) ((= i 20)) (nap))
     (assert (not (contains? (captured) "after-take-over")))
-    (assert (equal? (map cdr (flow-log-drain!)) '((flow2-check after-take-over))))
+    (assert (equal? (map cdr (flow-log-drain!))
+                    '((flow2-check after-take-over))))
     #t))
 
 ;; A procedure sink runs on the loop, so the README's "Route uncaught
@@ -2900,12 +2919,14 @@
                 (set! first-race
                       (flow-perform
                        (flow-choice
-                        (flow-wrap (flow-read client) (lambda (x) (list 'read x)))
+                        (flow-wrap (flow-read client)
+                                   (lambda (x) (list 'read x)))
                         (flow-wrap (flow-timeout 0.05) (lambda (x) 'timeout)))))
                 (set! second-read
                       (flow-perform
                        (flow-choice
-                        (flow-wrap (flow-read client) (lambda (x) (list 'read x)))
+                        (flow-wrap (flow-read client)
+                                   (lambda (x) (list 'read x)))
                         (flow-wrap (flow-timeout 0.5) (lambda (x) 'timeout)))))
                 (loop-close client)))
             (loop-close listen-fd)
@@ -2974,7 +2995,8 @@
 (define flow2-check-socketpair
   (lambda ()
     (let ((fds (make-bytevector 8 0)))
-      (assert (zero? (%flow2-check-socketpair 1 1 0 fds)))  ; AF_UNIX, SOCK_STREAM
+      ;; AF_UNIX, SOCK_STREAM
+      (assert (zero? (%flow2-check-socketpair 1 1 0 fds)))
       (values (bytevector-s32-native-ref fds 0)
               (bytevector-s32-native-ref fds 4)))))
 

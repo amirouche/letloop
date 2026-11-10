@@ -956,9 +956,10 @@
     (lambda (pending tag)
       (for-each (lambda (entry)
                   (unless (eq? (car entry) tag)
-                    (guard (ex (#t (flow-log (list 'flow2 'cancel-raised
-                                                   (%flow-base-name (cadr entry))
-                                                   (%flow-condition-sexp ex)))))
+                    (guard (ex (#t (flow-log
+                                    (list 'flow2 'cancel-raised
+                                          (%flow-base-name (cadr entry))
+                                          (%flow-condition-sexp ex)))))
                       ((cddr entry)))))
                 pending)))
 
@@ -1596,8 +1597,8 @@
                                    (and (box-cas! (flow-getter-claimed entry) #f #t)
                                         (cons #t (%channel-dequeue! channel)))
                                    (begin
-                                     (%dlist-link! (flow-channel-getters channel)
-                                                   node)
+                                     (%dlist-link!
+                                      (flow-channel-getters channel) node)
                                      #f)))))
                         (if immediate
                             ;; resume reports #f when an earlier base of
@@ -1757,7 +1758,8 @@
                       (and (not (eq? value %flow-latch-unfired))
                            (lambda () value))))
                   (lambda (state resume register-cancel!)
-                    (define node (%dnode-new (cons resume (%flow-waiter-token))))
+                    (define node
+                      (%dnode-new (cons resume (%flow-waiter-token))))
                     ;; Armed before the waiter is reachable, with the
                     ;; recheck below closing the rest of the window --
                     ;; flow-get's discipline, for flow-get's reason: a
