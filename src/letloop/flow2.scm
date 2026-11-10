@@ -1016,32 +1016,40 @@
              (lambda (tag value)
                (and (box-cas! state 'waiting 'synched)
                     (begin
-                      ;; k is spawned FIRST so that it runs LAST:
-                      ;; loop-spawn conses and loop-run-once walks the
-                      ;; list front to back, so the thunk queued last
-                      ;; runs first. The losers' cancels must land
-                      ;; before the resumed fiber does anything, because
-                      ;; a cancel can free a resource the fiber
-                      ;; immediately reuses — flow-accept's cancel
-                      ;; releases the multishot's single handler slot,
-                      ;; and a fiber that re-accepts before it runs gets
-                      ;; "concurrent accept on fd" instead. Still two
-                      ;; separate thunks, so a raising cancel is
-                      ;; confined by loop-apply's guard and k survives.
-                      (%flow-spawn-safe (lambda () (k value)))
-                      ;; The cancel pass is a second spawn, and a perform
-                      ;; with nothing to cancel -- a lone flow-read, the
-                      ;; commonest wait there is -- paid for it anyway.
-                      ;; Skip it when every registered cancel is the
+                      ;; ONE thunk: the losers' cancels, then k. The
+                      ;; cancels must land before the resumed fiber does
+                      ;; anything, because a cancel can free a resource
+                      ;; the fiber immediately reuses -- flow-accept's
+                      ;; cancel releases the multishot's single handler
+                      ;; slot, and a fiber that re-accepts before it runs
+                      ;; gets "concurrent accept on fd" instead.
+                      ;;
+                      ;; They used to be two spawns, k first so that the
+                      ;; loop's last-in-first-out walk ran it last. That
+                      ;; holds within one list, and a compute thread's
+                      ;; spawns reach the loop through a mailbox: the
+                      ;; collector could wake on the first and drain it
+                      ;; before the second was consed, so k ran a tick
+                      ;; ahead of its cancels -- once or twice in 20000
+                      ;; worker puts on a loaded machine. One thunk has
+                      ;; no between. A raising cancel still cannot lose
+                      ;; k: %flow-run-cancels! guards each one.
+                      ;;
+                      ;; A perform with nothing to cancel -- a lone
+                      ;; flow-read, the commonest wait there is -- skips
+                      ;; the pass: every registered cancel is the
                       ;; winner's own. Not during registration, though:
                       ;; a base that wins synchronously there is followed
                       ;; by bases whose cancels are not registered yet,
                       ;; and the pass reads CANCELS only when it runs.
-                      (when (or registering?
-                                (exists (lambda (entry) (not (eq? (car entry) tag)))
-                                        (unbox cancels)))
-                        (%flow-spawn-safe
-                         (lambda () (%flow-run-cancels! (unbox cancels) tag))))
+                      (%flow-spawn-safe
+                       (if (or registering?
+                               (exists (lambda (entry) (not (eq? (car entry) tag)))
+                                       (unbox cancels)))
+                           (lambda ()
+                             (%flow-run-cancels! (unbox cancels) tag)
+                             (k value))
+                           (lambda () (k value))))
                       #t))))
            ;; Registration runs on the scheduler's stack, so a raise
            ;; here cannot reach the fiber by unwinding — see
