@@ -371,18 +371,33 @@
       (flow-box-cons! (%flow-log-ensure-box!) (cons (%flow-log-now) sexp))
       ;; One unbox on the hot path; the CAS and the fork happen once per
       ;; process. The entry is consed first, so the printer's first drain
-      ;; sees it.
+      ;; sees it. The mode is read again under the mutex a take-over
+      ;; holds: one that came in after the CAS has made it 'owned, and
+      ;; the printer must not start behind its back.
       (when (and (eq? (unbox %flow-log-mode) 'auto)
                  (box-cas! %flow-log-mode 'auto 'default))
-        (%flow-log-start-thread! %flow-log-default-period
-                                 (current-error-port) #t))))
+        (with-mutex %flow-log-mode-mutex
+          (when (eq? (unbox %flow-log-mode) 'default)
+            (%flow-log-start-thread! %flow-log-default-period
+                                     (current-error-port) #t))))))
+
+  ;; Held to start the default printer and to take the log from it, so
+  ;; the two cannot interleave: either the take-over comes first and
+  ;; the printer never starts, or the printer is running by the time
+  ;; the take-over looks for it.
+  (define %flow-log-mode-mutex (make-mutex))
+
+  (define %flow-log-own!
+    (lambda ()
+      (with-mutex %flow-log-mode-mutex
+        (set-box! %flow-log-mode 'owned))))
 
   ;; The program has said where its entries go, so stop the default
   ;; printer if it runs. Its stop does a final drain-and-write, so
   ;; entries logged before this were printed, not dropped.
   (define %flow-log-take-over!
     (lambda ()
-      (set-box! %flow-log-mode 'owned)
+      (%flow-log-own!)
       (when (unbox %flow-log-default-running?)
         (%flow-log-stop-thread!))))
 
@@ -595,7 +610,7 @@
     (lambda ()
       (when (unbox %flow-log-sink)
         (%flow-check-loop-thread! 'flow-log-stop!))
-      (set-box! %flow-log-mode 'owned)
+      (%flow-log-own!)
       (when (unbox %flow-log-sink)
         (%flow-log-call-sink!)
         (set-box! %flow-log-sink #f)
