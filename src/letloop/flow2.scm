@@ -273,15 +273,9 @@
 
   ;; A value that belongs to the thread that set it. Chez's fork-thread
   ;; copies the parent's thread parameters into the child, so a plain
-  ;; thread parameter is inherited, and both per-thread identities here
-  ;; were: a thread the user forked inside a compute task held the
-  ;; worker's pool, passed every wrong-thread check as that worker, and
-  ;; -- after the run had closed the eventfd and freed its buffer --
-  ;; signalled the closed descriptor, writing eight bytes of freed heap
-  ;; into whatever file had since been given that number. A forked
-  ;; thread also shared its parent's log box, so its entries interleaved
-  ;; with the parent's and two threads CASed one box -- the contention
-  ;; the per-thread boxes exist to avoid.
+  ;; thread parameter is inherited: a thread the user forked inside a
+  ;; compute task would hold the worker's pool, pass every wrong-thread
+  ;; check as that worker, and share its log box.
   ;;
   ;; The cell records the owner's thread id, and a reader on any other
   ;; thread sees #f. The parent is alive when it forks, so the child's
@@ -326,12 +320,9 @@
   ;; flow-log-stop! makes it 'owned, and from then on the program alone
   ;; decides where entries go -- the default never restarts by itself.
   ;;
-  ;; The default exists because the alternative was an unbounded queue
-  ;; by omission: with no flusher started, entries -- uncaught errors
-  ;; included -- accumulated in memory for the life of the process and
-  ;; were written nowhere. That is the unbounded-mailbox failure the
-  ;; channels are bounded to avoid, reached by NOT configuring
-  ;; something, and the errors it hid were the ones most worth seeing.
+  ;; The default exists because a log nobody configured would otherwise
+  ;; be an unbounded queue: entries, uncaught errors included, kept in
+  ;; memory for the life of the process and written nowhere.
   (define %flow-log-mode (box 'auto))
 
   ;; #t while the running flush thread is the default printer, so a
@@ -362,9 +353,7 @@
   ;; boxes in registration order rather than globally sorted — a caller
   ;; wanting strict cross-thread order can sort on the timestamps. The
   ;; registry is read, not drained: it is a cons list, newest first, so
-  ;; reversing a snapshot IS registration order. It used to be drained
-  ;; and re-consed, which flipped the order on every call and made the
-  ;; documented order true only on alternate drains.
+  ;; reversing a snapshot IS registration order.
   ;;
   ;; A program that drains the log has taken it over, so this also
   ;; stops the default printer -- see %flow-log-mode.
@@ -385,15 +374,11 @@
       (flush-output-port port)))
 
   ;; The port is captured on the CALLING thread when the flusher
-  ;; starts, or passed explicitly. It used to be read at flush time on
-  ;; the flush thread, documented as "reparameterizing it is honored on
-  ;; the next cycle" -- but current-error-port is a thread parameter,
-  ;; and a thread forked before a parameterize keeps the value it
-  ;; inherited at fork time, so the documented shape (start the flusher
-  ;; at program start, redirect stderr later) wrote to the old port
-  ;; forever. Plain synchronous port I/O: this thread is not on the
-  ;; loop's critical path and does not run a ring at all, so routing it
-  ;; through io_uring would buy nothing and cost it a loop of its own.
+  ;; starts, or passed explicitly: current-error-port is a thread
+  ;; parameter, and a thread forked before a parameterize keeps the
+  ;; value it inherited, so reading it on the flush thread would miss
+  ;; every later redirection. Plain synchronous port I/O: this thread
+  ;; is not on the loop's critical path and does not run a ring at all.
   (define %flow-log-poll-interval 0.01)
   (define %flow-log-stop-requested? (box #f))
   (define %flow-log-stopped? (box #t))
@@ -404,11 +389,9 @@
   (define %flow-log-thread-port (box #f))
   (define %flow-log-write-mutex (make-mutex))
 
-  ;; Guarded against a second concurrent flusher, which flow left
-  ;; merely documented as unsupported. Draining stays correct either
-  ;; way — flow-box-drain! never double-delivers — but two flushers
-  ;; interleaving writes to the same port produce shuffled output at
-  ;; exactly the moment someone is reading it to diagnose something.
+  ;; Guarded against a second concurrent flusher. Draining stays
+  ;; correct either way — flow-box-drain! never double-delivers — but
+  ;; two flushers interleaving writes to one port shuffle the output.
   ;;
   ;; SINK is a textual output port, written one entry per line by a
   ;; dedicated flush thread, or a procedure, called with each non-empty
@@ -416,14 +399,9 @@
   ;; by a fiber, while a run is in progress. The procedure is where a
   ;; program decides what the library's own events mean to it, and
   ;; deciding usually means acting: fire a latch a supervising fiber
-  ;; waits on, put on a channel, stop the run. It used to run on the
-  ;; flush thread, which is neither the loop nor a compute thread, so
-  ;; every one of those raised wrong-thread -- the README's own
-  ;; "fire a latch" pattern killed the flusher on the first uncaught
-  ;; error it saw. Allowing them there was not an option: a resume from
-  ;; a thread flow2 does not own is the unsynchronized loop-spawn that
-  ;; check exists to prevent. The cost is that the sink runs on the
-  ;; loop, so a slow one delays every fiber.
+  ;; waits on, put on a channel, stop the run. Those need a thread
+  ;; flow2 owns, which the flush thread is not. The cost is that the
+  ;; sink runs on the loop, so a slow one delays every fiber.
   (define flow-log-start!
     (case-lambda
       ((period-seconds) (flow-log-start! period-seconds (current-error-port)))
@@ -521,13 +499,12 @@
                    (set-box! %flow-log-stopped? #t))))))))
     (void))
 
-  ;; One drain-and-write, #f when the write raised. A port that fails
-  ;; (a full disk, a closed pipe) used to kill the flush thread before
-  ;; it set %flow-log-stopped?, so flow-log-stop! spun forever and
-  ;; flow-log-start! refused to start another. Now the thread marks
-  ;; itself stopped and exits; the batch it could not write goes back
-  ;; into the log, followed by a (flow2 log-flush-raised CONDITION)
-  ;; entry, so a drain or the next flusher still sees all of it.
+  ;; One drain-and-write, #f when the write raised -- a full disk, a
+  ;; closed pipe. The caller then marks itself stopped, so
+  ;; flow-log-stop! does not wait on a thread that is gone; the batch
+  ;; that could not be written goes back into the log, followed by a
+  ;; (flow2 log-flush-raised CONDITION) entry, so a drain or the next
+  ;; flusher still sees all of it.
   (define (%flow-log-flush! write!)
     (let ((entries (%flow-log-drain-all!)))
       (guard (ex (#t (let ((b (%flow-log-ensure-box!)))
@@ -540,13 +517,12 @@
         #t)))
 
   ;; One drain-and-write into the flush thread's port, now, on the
-  ;; calling thread. flow-run calls it on its way out. The thread
-  ;; writes once per period -- 100ms for the default printer -- and
-  ;; nothing waits for it, so a program that ended within a period of
-  ;; its last entry exited with that entry unprinted: a fiber that
-  ;; raised in the tick its run stopped was logged and never seen, the
-  ;; error the default printer exists to show. A write that raises is
-  ;; handled as the thread's own would be: the batch goes back.
+  ;; calling thread. flow-run calls it on its way out: the thread
+  ;; writes once per period and nothing waits for it, so a program that
+  ;; ends within a period of its last entry -- a fiber raising in the
+  ;; tick its run stops -- would otherwise exit with it unprinted. A
+  ;; write that raises is handled as the thread's own would be: the
+  ;; batch goes back.
   (define (%flow-log-flush-thread-now!)
     (with-mutex %flow-log-write-mutex
       (let ((port (unbox %flow-log-thread-port)))
@@ -648,50 +624,37 @@
   ;;
   ;; block procs run inside loop-abort's thunk — on the SCHEDULER's
   ;; stack, after the prompt was already unwound — so the fiber's own
-  ;; guards are no longer in the dynamic extent. A raise there used to
-  ;; reach loop-apply's catch-all instead: the fiber died without its
-  ;; handlers ever seeing the error, and anything waiting on it waited
-  ;; forever. Not a synthetic worry —
-  ;; loop-get-sqe raises "submission queue full" once more than 256 ops
-  ;; are queued in a tick (flow-timeout, flow-read, flow-write,
-  ;; flow-open, flow-read-at, flow-write-at all reach it) and
-  ;; loop-accept-block raises "concurrent accept on fd".
+  ;; guards are no longer in the dynamic extent, and a raise there
+  ;; would reach loop-apply's catch-all: the fiber dies without its
+  ;; handlers seeing the error. Block procs do raise: loop-get-sqe with
+  ;; "submission queue full" once more than 256 ops are queued in a
+  ;; tick, loop-accept-block with "concurrent accept on fd".
   ;;
-  ;; (letloop flow)'s flow-block-and-wait-on-loop has the same shape and
-  ;; the same hole: its comment names loop-get-sqe as a raise source and
-  ;; hardens the CANCEL thunk against it, leaving the registration loop
-  ;; below exposed. The fix belongs there too.
+  ;; (letloop flow)'s flow-block-and-wait-on-loop has the same hole in
+  ;; its registration loop; the fix belongs there too.
   (define-record-type* <flow2-raise>
     (%make-flow-raise object)
     %flow-raise?
     (object %flow-raise-object))
 
   ;; A base's raw completion value, with the base whose wrap still has
-  ;; to be applied to it. The block path used to apply the wrap inside
-  ;; the base's resume -- on the stack of whoever completed the
-  ;; rendezvous, and BEFORE resume-from's CAS. That is the wrong stack
-  ;; twice over: a wrap that raised did so in the fiber calling
-  ;; flow-put! (or in a completion handler, where loop-apply's guard ate
-  ;; it), the getter was never resumed, and the value was gone; and when
-  ;; the deliverer was a compute thread the wrap RAN ON THE WORKER, so a
-  ;; wrap that touched the loop -- a flow-spawn, a ring event -- either
-  ;; raised wrong-thread into the worker's put or, if it touched loop
-  ;; state without going through a guarded entry point, corrupted it.
-  ;; The Rationale's "no API through which a compute thread can reach
-  ;; the loop's state" was false by exactly this much. The try path
-  ;; never had the problem: flow-poll applies the wrap on the
-  ;; performer. Now so does the block path, in %flow-settle.
+  ;; to be applied to it. The wrap runs in %flow-settle, on the
+  ;; performer's stack and after the commit, as flow-poll's does on the
+  ;; try path. Applied in the base's resume it would run on the stack
+  ;; of whoever completed the rendezvous, before resume-from's CAS: a
+  ;; wrap that raised would kill the putter and strand the getter, and
+  ;; a compute thread delivering to a fiber would run the fiber's wrap
+  ;; -- loop-side code -- on the worker.
   (define-record-type* <flow2-deferred>
     (%make-flow-deferred base raw)
     %flow-deferred?
     (base %flow-deferred-base)
     (raw  %flow-deferred-raw))
 
-  ;; What a parked fiber sees when it wakes: a block-proc raise comes
+  ;; What a parked fiber sees when it wakes. A block-proc raise comes
   ;; back as a value and is converted into a raise HERE, on the fiber's
-  ;; own stack, where its guards are -- and
-  ;; the winning base's wrap is applied here too, after the commit, for
-  ;; the same reason.
+  ;; own stack, where its guards are; the winning base's wrap is
+  ;; applied here too, after the commit, for the same reason.
   (define (%flow-settle result)
     (let ((result (if (%flow-deferred? result)
                       ((flow-wrap-proc (%flow-deferred-base result))
