@@ -27,6 +27,24 @@ Use [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/)
 Keep commits small and focused, one architectural change each. Do not push
 unless explicitly asked.
 
+## Scheme Style
+
+Define a procedure with an explicit `lambda`, never with the
+`(define (f ...) ...)` shorthand:
+
+```scheme
+(define flow-put!
+  (lambda (channel obj)
+    ...))
+```
+
+This holds for top-level and internal defines alike, and for
+`case-lambda` in the same position. `(letloop flow2)` — `flow2.scm` and
+`flow2.check.scm` — is fully converted. Other files still mix the two
+forms: write new code in the explicit form, and convert a file's
+remaining shorthand in a commit of its own, never mixed with a
+behaviour change.
+
 ## System Dependencies
 
 ### Optional shared objects (dlopen'd lazily, on first use)
