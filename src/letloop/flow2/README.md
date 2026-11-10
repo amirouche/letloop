@@ -15,21 +15,28 @@ other consumers.
 
 This document began as a draft specification and is now the library's
 reference, so where the two ever disagree the source wins. It was last
-reconciled against the implementation on 2026-11-10, after the ninth
-pass's findings were fixed. Before the seventh pass, nurseries were
-removed — the largest change to documented behaviour since the
-draft: `flow-nursery`, `flow-monitor`, scope cancellation and the
-compute-task error reply are gone, and `flow-submit!` takes a thunk
-only (see the last paragraphs of Issues, and Rationale). Two earlier
-reconciliations changed documented behaviour: channels became bounded
-by default with a full put parking (2026-08-17), and `flow-read-at`
-now reports a clean EOF as `#t` like `flow-read` rather than as `'eof`
-(2026-08-26).
-Decisions herein were resolved on 2026-08-14; the
-motivating failures are documented in `TODO.md` (sections "monitored
-trees with automatic timeout-and-cancel" and
-"flow-block-and-wait-off-loop registers ring events from the worker
-thread").
+reconciled against the implementation on 2026-11-10. How the design
+got here — nine adverse passes, and the removal of nurseries — is in
+History, at the end.
+
+## Contents
+
+- [Abstract](#abstract), [Issues](#issues), [Rationale](#rationale),
+  [Prior art](#prior-art)
+- [Specification](#specification):
+  [Errors](#errors),
+  [Starting and stopping](#starting-and-stopping),
+  [Fibers](#fibers),
+  [Events](#events),
+  [Channels](#channels),
+  [Timers](#timers),
+  [Network and file I/O](#network-and-file-io),
+  [Latches](#latches),
+  [Threads](#threads),
+  [Compute threads](#compute-threads),
+  [Diagnostics](#diagnostics)
+- [Patterns](#patterns)
+- [History](#history), [References](#references)
 
 ## Abstract
 
@@ -59,192 +66,20 @@ symbol — not R6RS conditions.
 
 ## Issues
 
-The passes recorded below were made against a design that still had
-nurseries, and they are kept as written: they are the history of how
-each guarantee was earned or lost. The last paragraphs say what the
-sixth pass found and why the nursery went.
+No known defect is open.
 
-The four issues raised by the first draft — whether the framework's
-error reply respects the response channel's buffer bound, a `stopped`
-error symbol for `flow-stop`, shrinking a bound below the current queue
-length, and wholesale `flow-scope-attach!` of a worker channel — were
-resolved on 2026-08-16 and their resolutions are specified inline (see
-`flow-stop`, `flow-channel-buffer-size!`, and Compute threads; the
-scope-tagging resolution went with nurseries).
+One behaviour is left unspecified on purpose: the order in which
+fibers made runnable in the same tick run (see `flow-spawn`).
 
-Every gap the 2026-08-17 adverse review found is closed. Its findings
-are recorded in the commits that fixed them, and the two design costs
-that came out of the fixes are stated where they apply rather than
-here: a full put parks, so deadlock is expressible (see `flow-put!`),
-and a cancelled scope drains before it propagates, so an uncancellable
-child holds its parent (see Nurseries).
+Four suspicions from the ninth pass were read in the source and never
+reproduced, so nothing was changed for them: the latch's spin lock is
+not released by a non-local exit from its critical section; the first
+`flow-log` racing a `flow-log-drain!` may leave the default printer
+running after the program took the log over; the log's registry gains
+one box per logging thread and never gives one back; and a raise that
+reaches the loop's own tick ends `flow-run` with no log entry.
 
-A second adverse pass on 2026-08-19 — run against the tree with every
-first-pass fix in — found six more, all closed the next day, and their
-pattern is worth keeping: each invariant had been proven on the loop
-thread and inherited, unverified, by the cross-thread and post-mortem
-paths. The worker-resume path inverted the cancels-before-continuation
-order the on-loop fix had established; a nursery opened inside an
-already-dead scope escaped cancellation entirely; the monitor's race
-skipped the drain the nursery's join performs; the pool's shared
-globals let a straggler worker corrupt the next `flow-run`. Their
-findings, too, live in the commits that fixed them, each with its
-regression check.
-
-A third pass on 2026-08-24 went after the **cleanup path** and after
-this document's own examples, and both gave way. All nine findings are
-closed, and their pattern is different again: the first two passes
-found invariants that were true somewhere and assumed everywhere, while
-this one found places where the *specification* and the code had drifted
-apart and nobody had re-run the example. `flow-close` inside a cancelled
-scope raised `cancelled` before reaching the ring, so the fd leaked on
-precisely the path described here as the one that releases it. The
-"Fan out, gather, and never hang" pattern below deadlocked past the
-default bound, on the page that states the rule it broke. A `flow-read`
-that lost its choice discarded bytes the kernel had already taken off
-the socket. "Callable from any thread" was true of exactly one
-procedure, and it was the one that said it was the only one.
-
-Two costs are stated where they apply rather than here: a write that
-loses a race cannot be recovered the way a read now can (see
-`flow-write`), and a bounded channel drained only after a join must be
-sized for the whole fan-out (see the pattern).
-
-A fourth pass on 2026-08-27 read the third pass's own fixes, and its
-six findings are what those fixes had left behind. The pattern this
-time is **where a fix was applied, not whether it was right**. The
-cross-thread guard was correct and went to the three procedures the
-finding named, while `flow-perform` — which every suspending operation
-funnels through, and which four more entry points bypass — went
-without: `flow-get!` from a thread the user forked did not raise
-`wrong-thread`, it succeeded, dequeuing off-loop and stranding the
-putter it "resumed". `flow-read`'s new backlog was purged on close by
-an index its own recv had never joined, so a late payload could
-re-create the stash under an fd number the kernel was about to reissue
-— the cross-connection leak the purge exists to prevent. And two
-examples still contradicted the reference sections this document had
-just reconciled: one read a clean EOF as falsy after the encoding was
-unified, the other used `#f` as both a sentinel and a legal reply.
-
-So the lesson the third pass drew has a second half. **A fix belongs at
-the choke point the finding passes through, and documentation that
-enumerates what is covered will drift to what was covered.** The three
-procedures named in the Threads section were the three that had the
-check; the guard lives in `flow-perform` now and the section states a
-rule. The reproducers are in `checks/repro-flow2-fourth-pass.scm`, and
-the two for the examples run the page's code as printed — which is the
-third pass's own lesson, applied to the pass that stated it.
-
-A fifth pass on 2026-09-03 went after what the earlier four had
-*certified* rather than what they had fixed — the pool, the CML core,
-the log — and found six defects and five drifts, all closed. Its
-pattern: **a property proven for the value was assumed for the
-vehicle.** The eventfd wake was a write of 1 in the source and, to the
-kernel, a write of whatever the last read had left in the shared cell,
-so coalesced wakes multiplied it to 2^64 and workers then blocked in
-`write(2)` one per loop tick. `flow-wrap`'s procedure ran on whichever
-thread delivered the value, before the commit, so a raising wrap
-killed the putter and stranded the getter, and a worker delivering to
-a loop fiber ran loop-side code on the compute thread — the one thing
-the Rationale says cannot be written. A straggler's isolation covered
-its own pool and not the channels it shares with the next run. The
-flush thread read `current-error-port` on its own thread, where a
-later `parameterize` never arrives. And `flow-channel-buffer-size!`
-was the fifth guarded-by-name entry point, one past the fourth pass's
-list of four. The reproducers are in
-`checks/repro-flow2-fifth-pass.scm`; each defect has a regression check.
-
-The lesson for this document specifically: **reconciling docs against
-code is only right when the code is the part that is right.** The
-2026-08-17 pass wrote a drifted `flow-write` implementation down as
-intent; this pass had to undo that. An example that is not executed
-somewhere is a claim, not a specification — the patterns below now have
-checks.
-
-A sixth pass on 2026-10-20 found eight more, and its pattern was
-**identity carried by a thread or a global, inherited or left stale**.
-`flow-run` had no guard against a second call, so one made from a
-fiber or a compute task freed the ring that was running. A thread
-forked inside a compute task inherited the worker's identity and was
-accepted where it should have been refused — and, outliving the run,
-wrote freed memory into a reused descriptor; the log's per-thread
-boxes were inherited the same way; a failed start left `flow-run`
-believing a run was in progress; a flush thread that died left
-`flow-log-stop!` waiting forever; and a read after a lost race could
-return the stream's bytes out of order. And the nursery's own current
-scope was a dynamically scoped variable faked with a global and
-reinstalled only on flow2's resume path, so a fiber that suspended
-through the ring layer directly came back in whatever scope ran last,
-and its nursery returned before its child had finished.
-
-That last one opened the design question rather than a fix. A nursery
-encodes one fan-out policy — the first failure cancels the siblings
-and nothing outlives the block — as the shape every fiber must take,
-and coordination that is not a tree cannot be written in it at all: a
-search that gathers results until a deadline, answers with what it
-has, and hands the same channels to a completer that outlives it and
-fills a cache for the next query is precisely "a child outlives its
-scope". On 2026-10-20 nurseries, monitors and scope cancellation were
-removed, with the compute-task error reply that existed to serve them;
-an uncaught error became a log entry; latches were added for
-broadcast; and the flush thread's death no longer hangs its stop. The
-remaining findings were fixed on 2026-10-21, each with a regression
-check: `flow-run` claims the loop and releases it on every way out,
-per-thread identity is no longer inherited by `fork-thread`, and a
-losing read hands its in-flight recv to the next reader instead of
-cancelling it. A suspicion from the same pass was confirmed and fixed
-too: a `flow-get` that put a value back could leave a channel one past
-its bound.
-
-A seventh pass on 2026-10-21 found five defects, all fixed on
-2026-10-28 with regression checks, and its pattern is the sixth's one
-level out: **what outlives the thing the design counts.** The sixth
-pass found identity carried by a thread or a global; this one found it
-carried by the waits a run leaves behind, and by a thread nobody
-listed. A channel or latch outlives the run that parked a fiber on it,
-and so did the fiber's wait: the next run's put resumed a fiber of the
-finished run, and priming a channel between runs fed the value to a
-continuation already thrown away. The stop sentinel waited behind the
-tasks it was meant to pre-empt. A recv failure that lost its race was
-dropped as level-triggered, and came back as a clean EOF. Waiter lists
-cost O(waiters) per join, so the stop-latch pattern made every read
-cost O(connections). And the log sink ran on the flush thread — a
-third kind of thread the Threads section does not admit — so this
-page's own "fire a latch from the sink" pattern raised `wrong-thread`
-and stopped the logger on the first uncaught error; its check never
-fired a latch. Procedure sinks run on the loop now, and the log prints
-to stderr until the program takes it over, instead of growing unread
-when nobody configured it.
-
-An eighth pass on 2026-10-29 read this page against the code and
-found the page wrong more often than the code: a choice takes a ready
-event at random, a losing read is left in flight rather than
-cancelled, a timeout's result is `(void)`. Three defects came with it
-and were fixed that day -- the gather pattern called itself complete
-with pages still queued, a recv submitted on a closing fd stashed its
-failure under a number the kernel reissued, and a run's last log
-entries were left unprinted. A fourth was found and left open: a
-worker's resume could run a tick ahead of the cancels meant to precede
-it.
-
-A ninth pass on 2026-11-10 went after what had changed since -- the
-timer heap, the latch's spin lock, the skipped cancel pass -- and
-found its one serious defect in none of them. Its pattern: **a
-wake-up counted against the wrong event.** A dequeue woke one parked
-putter, as if dequeues were the only way room appears; a woken put
-that met a parked getter handed its value over without touching the
-queue, and nobody woke the next putter. Producers stayed parked for
-room on an empty channel: the "fan out and gather" pattern below
-delivered 990 of 2000 replies on the default bound and hung, on the
-page that says the default bound is fine. A woken put now passes the
-wake on. The eighth pass's open race was the same shape seen from the
-mailbox -- two spawns counted as one event -- and a resume now carries
-its cancels in the same thunk. Three smaller ones: a run left by a
-continuation kept its claim on the loop, `flow-read-pending?` answered
-on a compute thread, and `(flow-timeout +inf.0)` raised from inside
-the perform. The heap itself held under churn. One thing found is
-documented rather than changed: fibers resumed in the same tick run
-newest first (see `flow-spawn`). Each fix has a regression check.
+The findings of every pass, and what each one taught, are in History.
 
 ## Rationale
 
@@ -280,7 +115,7 @@ reimplements.
 
 flow2's first answer was the **nursery**: every fiber spawned inside a
 scope, a join that waits for all of them, and a child's raise
-cancelling its siblings. It was removed on 2026-10-20 (see Issues),
+cancelling its siblings. It was removed on 2026-10-20 (see History),
 and the reasoning is worth keeping because it reverses this paragraph.
 
 A fan-out has many correct shapes — wait for all, take the first,
@@ -1412,6 +1247,206 @@ which flow2 refuses like any thread it does not own, and this page's
 `flow-latch-fire!` raised `wrong-thread` and stopped the logger on the
 first uncaught error — while the check named here never fired a latch.
 Run as printed by `~check-flow2-000/a-procedure-sink-runs-on-the-loop`.
+
+## History
+
+Decisions in the first draft were resolved on 2026-08-14; the failures
+that motivated it are in `TODO.md` (sections "monitored trees with
+automatic timeout-and-cancel" and "flow-block-and-wait-off-loop
+registers ring events from the worker thread"). Three changes to
+documented behaviour came after: channels became bounded by default
+with a full put parking (2026-08-17), `flow-read-at` reports a clean
+EOF as `#t` like `flow-read` rather than as `'eof` (2026-08-26), and
+nurseries were removed (2026-10-20) — `flow-nursery`, `flow-monitor`,
+scope cancellation and the compute-task error reply are gone, and
+`flow-submit!` takes a thunk only.
+
+The first five passes recorded below were made against a design that
+still had nurseries, and they are kept as written: they are the
+history of how each guarantee was earned or lost. The sixth pass's
+paragraphs say why the nursery went.
+
+The four issues raised by the first draft — whether the framework's
+error reply respects the response channel's buffer bound, a `stopped`
+error symbol for `flow-stop`, shrinking a bound below the current queue
+length, and wholesale `flow-scope-attach!` of a worker channel — were
+resolved on 2026-08-16 and their resolutions are specified inline (see
+`flow-stop`, `flow-channel-buffer-size!`, and Compute threads; the
+scope-tagging resolution went with nurseries).
+
+Every gap the 2026-08-17 adverse review found is closed. Its findings
+are recorded in the commits that fixed them, and the two design costs
+that came out of the fixes are stated where they apply rather than
+here: a full put parks, so deadlock is expressible (see `flow-put!`),
+and a cancelled scope drains before it propagates, so an uncancellable
+child holds its parent (see Nurseries, a section since removed).
+
+A second adverse pass on 2026-08-19 — run against the tree with every
+first-pass fix in — found six more, all closed the next day, and their
+pattern is worth keeping: each invariant had been proven on the loop
+thread and inherited, unverified, by the cross-thread and post-mortem
+paths. The worker-resume path inverted the cancels-before-continuation
+order the on-loop fix had established; a nursery opened inside an
+already-dead scope escaped cancellation entirely; the monitor's race
+skipped the drain the nursery's join performs; the pool's shared
+globals let a straggler worker corrupt the next `flow-run`. Their
+findings, too, live in the commits that fixed them, each with its
+regression check.
+
+A third pass on 2026-08-24 went after the **cleanup path** and after
+this document's own examples, and both gave way. All nine findings are
+closed, and their pattern is different again: the first two passes
+found invariants that were true somewhere and assumed everywhere, while
+this one found places where the *specification* and the code had drifted
+apart and nobody had re-run the example. `flow-close` inside a cancelled
+scope raised `cancelled` before reaching the ring, so the fd leaked on
+precisely the path described here as the one that releases it. The
+"Fan out, gather, and never hang" pattern deadlocked past the
+default bound, on the page that states the rule it broke. A `flow-read`
+that lost its choice discarded bytes the kernel had already taken off
+the socket. "Callable from any thread" was true of exactly one
+procedure, and it was the one that said it was the only one.
+
+Two costs are stated where they apply rather than here: a write that
+loses a race cannot be recovered the way a read now can (see
+`flow-write`), and a bounded channel drained only after a join must be
+sized for the whole fan-out (see the pattern).
+
+A fourth pass on 2026-08-27 read the third pass's own fixes, and its
+six findings are what those fixes had left behind. The pattern this
+time is **where a fix was applied, not whether it was right**. The
+cross-thread guard was correct and went to the three procedures the
+finding named, while `flow-perform` — which every suspending operation
+funnels through, and which four more entry points bypass — went
+without: `flow-get!` from a thread the user forked did not raise
+`wrong-thread`, it succeeded, dequeuing off-loop and stranding the
+putter it "resumed". `flow-read`'s new backlog was purged on close by
+an index its own recv had never joined, so a late payload could
+re-create the stash under an fd number the kernel was about to reissue
+— the cross-connection leak the purge exists to prevent. And two
+examples still contradicted the reference sections this document had
+just reconciled: one read a clean EOF as falsy after the encoding was
+unified, the other used `#f` as both a sentinel and a legal reply.
+
+So the lesson the third pass drew has a second half. **A fix belongs at
+the choke point the finding passes through, and documentation that
+enumerates what is covered will drift to what was covered.** The three
+procedures named in the Threads section were the three that had the
+check; the guard lives in `flow-perform` now and the section states a
+rule. The reproducers are in `checks/repro-flow2-fourth-pass.scm`, and
+the two for the examples run the page's code as printed — which is the
+third pass's own lesson, applied to the pass that stated it.
+
+A fifth pass on 2026-09-03 went after what the earlier four had
+*certified* rather than what they had fixed — the pool, the CML core,
+the log — and found six defects and five drifts, all closed. Its
+pattern: **a property proven for the value was assumed for the
+vehicle.** The eventfd wake was a write of 1 in the source and, to the
+kernel, a write of whatever the last read had left in the shared cell,
+so coalesced wakes multiplied it to 2^64 and workers then blocked in
+`write(2)` one per loop tick. `flow-wrap`'s procedure ran on whichever
+thread delivered the value, before the commit, so a raising wrap
+killed the putter and stranded the getter, and a worker delivering to
+a loop fiber ran loop-side code on the compute thread — the one thing
+the Rationale says cannot be written. A straggler's isolation covered
+its own pool and not the channels it shares with the next run. The
+flush thread read `current-error-port` on its own thread, where a
+later `parameterize` never arrives. And `flow-channel-buffer-size!`
+was the fifth guarded-by-name entry point, one past the fourth pass's
+list of four. The reproducers are in
+`checks/repro-flow2-fifth-pass.scm`; each defect has a regression check.
+
+The lesson for this document specifically: **reconciling docs against
+code is only right when the code is the part that is right.** The
+2026-08-17 pass wrote a drifted `flow-write` implementation down as
+intent; this pass had to undo that. An example that is not executed
+somewhere is a claim, not a specification — the patterns now have
+checks.
+
+A sixth pass on 2026-10-20 found eight more, and its pattern was
+**identity carried by a thread or a global, inherited or left stale**.
+`flow-run` had no guard against a second call, so one made from a
+fiber or a compute task freed the ring that was running. A thread
+forked inside a compute task inherited the worker's identity and was
+accepted where it should have been refused — and, outliving the run,
+wrote freed memory into a reused descriptor; the log's per-thread
+boxes were inherited the same way; a failed start left `flow-run`
+believing a run was in progress; a flush thread that died left
+`flow-log-stop!` waiting forever; and a read after a lost race could
+return the stream's bytes out of order. And the nursery's own current
+scope was a dynamically scoped variable faked with a global and
+reinstalled only on flow2's resume path, so a fiber that suspended
+through the ring layer directly came back in whatever scope ran last,
+and its nursery returned before its child had finished.
+
+That last one opened the design question rather than a fix. A nursery
+encodes one fan-out policy — the first failure cancels the siblings
+and nothing outlives the block — as the shape every fiber must take,
+and coordination that is not a tree cannot be written in it at all: a
+search that gathers results until a deadline, answers with what it
+has, and hands the same channels to a completer that outlives it and
+fills a cache for the next query is precisely "a child outlives its
+scope". On 2026-10-20 nurseries, monitors and scope cancellation were
+removed, with the compute-task error reply that existed to serve them;
+an uncaught error became a log entry; latches were added for
+broadcast; and the flush thread's death no longer hangs its stop. The
+remaining findings were fixed on 2026-10-21, each with a regression
+check: `flow-run` claims the loop and releases it on every way out,
+per-thread identity is no longer inherited by `fork-thread`, and a
+losing read hands its in-flight recv to the next reader instead of
+cancelling it. A suspicion from the same pass was confirmed and fixed
+too: a `flow-get` that put a value back could leave a channel one past
+its bound.
+
+A seventh pass on 2026-10-21 found five defects, all fixed on
+2026-10-28 with regression checks, and its pattern is the sixth's one
+level out: **what outlives the thing the design counts.** The sixth
+pass found identity carried by a thread or a global; this one found it
+carried by the waits a run leaves behind, and by a thread nobody
+listed. A channel or latch outlives the run that parked a fiber on it,
+and so did the fiber's wait: the next run's put resumed a fiber of the
+finished run, and priming a channel between runs fed the value to a
+continuation already thrown away. The stop sentinel waited behind the
+tasks it was meant to pre-empt. A recv failure that lost its race was
+dropped as level-triggered, and came back as a clean EOF. Waiter lists
+cost O(waiters) per join, so the stop-latch pattern made every read
+cost O(connections). And the log sink ran on the flush thread — a
+third kind of thread the Threads section does not admit — so this
+page's own "fire a latch from the sink" pattern raised `wrong-thread`
+and stopped the logger on the first uncaught error; its check never
+fired a latch. Procedure sinks run on the loop now, and the log prints
+to stderr until the program takes it over, instead of growing unread
+when nobody configured it.
+
+An eighth pass on 2026-10-29 read this page against the code and
+found the page wrong more often than the code: a choice takes a ready
+event at random, a losing read is left in flight rather than
+cancelled, a timeout's result is `(void)`. Three defects came with it
+and were fixed that day -- the gather pattern called itself complete
+with pages still queued, a recv submitted on a closing fd stashed its
+failure under a number the kernel reissued, and a run's last log
+entries were left unprinted. A fourth was found and left open: a
+worker's resume could run a tick ahead of the cancels meant to precede
+it.
+
+A ninth pass on 2026-11-10 went after what had changed since -- the
+timer heap, the latch's spin lock, the skipped cancel pass -- and
+found its one serious defect in none of them. Its pattern: **a
+wake-up counted against the wrong event.** A dequeue woke one parked
+putter, as if dequeues were the only way room appears; a woken put
+that met a parked getter handed its value over without touching the
+queue, and nobody woke the next putter. Producers stayed parked for
+room on an empty channel: the "fan out and gather" pattern
+delivered 990 of 2000 replies on the default bound and hung, on the
+page that says the default bound is fine. A woken put now passes the
+wake on. The eighth pass's open race was the same shape seen from the
+mailbox -- two spawns counted as one event -- and a resume now carries
+its cancels in the same thunk. Three smaller ones: a run left by a
+continuation kept its claim on the loop, `flow-read-pending?` answered
+on a compute thread, and `(flow-timeout +inf.0)` raised from inside
+the perform. The heap itself held under churn. One thing found is
+documented rather than changed: fibers resumed in the same tick run
+newest first (see `flow-spawn`). Each fix has a regression check.
 
 ## References
 
