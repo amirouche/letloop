@@ -3508,3 +3508,66 @@
     (assert (<= (- (length (unbox %flow-log-registry)) before) 1))
     (assert (= (length logged) (* runs count)))
     #t))
+
+;; A blocking connect(2) on the calling thread: back once the kernel has
+;; completed the handshake, as a client elsewhere would have while this
+;; tick was busy. Returns the client's fd.
+(define flow2-check-connect-now
+  (let ((connect (foreign-procedure "connect" (int void* int) int)))
+    (lambda (port)
+      (call-with-values (lambda () (make-sockaddr-in 127 0 0 1 port))
+        (lambda (addr addrlen)
+          (let ((fd (loop-socket-new AF-INET SOCK-STREAM 0)))
+            (connect fd addr addrlen)
+            (foreign-free addr)
+            fd))))))
+
+;; A client the kernel accepts in the tick its listener is closed
+;; completes AFTER the close has purged the listener's backlog. It used
+;; to be stashed under the closed fd's number all the same: never
+;; closed, and handed to the next listener given that number -- a
+;; connection to one port served by whatever listens on another. Twice:
+;; with nobody parked in accept, and with an acceptor that has just
+;; lost its choice and declines the client.
+(define ~check-flow2-006/a-closing-listener-hands-no-client-to-the-next
+  (lambda ()
+    (define trial
+      (lambda (port parked?)
+        (define got #f)
+        (flow-run
+         (lambda (workers)
+           (let ((first (flow-listen "127.0.0.1" port))
+                 (stop (make-flow-latch)))
+             (if parked?
+                 (begin
+                   (flow-spawn
+                    (lambda ()
+                      (flow-perform (flow-choice (flow-accept first)
+                                                 (flow-latch-wait stop)))))
+                   (flow-sleep 0.02)
+                   ;; the acceptor is committed to the latch, and its
+                   ;; handler is still in place for this tick
+                   (flow-latch-fire! stop #t))
+                 ;; arm the multishot accept, and lose it
+                 (flow-perform (flow-choice (flow-accept first)
+                                            (flow-timeout 0.02))))
+             ;; one tick: a client connects, and the listener is closed
+             (let ((peer (flow2-check-connect-now port)))
+               (flow-perform (flow-close first))
+               (flow-sleep 0.05)
+               (let ((second (flow-listen "127.0.0.1" (+ port 1))))
+                 ;; nobody ever connects to the second listener
+                 (set! got (flow-perform
+                            (flow-choice
+                             (flow-accept second)
+                             (flow-wrap (flow-timeout 0.1)
+                                        (lambda (_) 'nobody)))))
+                 (flow-perform (flow-close second)))
+               (flow-perform (flow-close peer))))
+           (flow-stop)))
+        got))
+    (define unparked (trial 18331 #f))
+    (define parked (trial 18333 #t))
+    (assert (eq? unparked 'nobody))
+    (assert (eq? parked 'nobody))
+    #t))

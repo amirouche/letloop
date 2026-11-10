@@ -1965,6 +1965,10 @@
   (define %loop #f)
   (define %multishots (make-eqv-hashtable))
   (define %multishot-ids (make-eqv-hashtable))
+  ;; ids of multishot accepts whose listener loop-close-prep! has begun
+  ;; closing, until their last completion: a client one of them still
+  ;; delivers belongs to no listener.
+  (define %multishot-closing (make-eqv-hashtable))
   (define %buf-ring-nentries 4096)
   (define %buf-ring-buf-size 4096)
   (define %buf-ring-bgid 0)
@@ -2237,10 +2241,14 @@
                    (res   (io-uring-cqe-get-res cqe))
                    (flags (io-uring-cqe-get-flags cqe)))
               (io-uring-cqe-seen ring cqe)
-              (let ((ms-fd (hashtable-ref %multishot-ids id #f)))
+              (let ((ms-fd (hashtable-ref %multishot-ids id #f))
+                    (ms-closing? (hashtable-contains? %multishot-closing id)))
                 (when (and ms-fd (fxzero? (fxlogand flags IORING-CQE-F-MORE)))
                   (hashtable-delete! %multishot-ids id)
                   (hashtable-delete! %multishots ms-fd))
+                (when (and ms-closing?
+                           (fxzero? (fxlogand flags IORING-CQE-F-MORE)))
+                  (hashtable-delete! %multishot-closing id))
                 (when (and (fx>? res 0)
                            (not (fxzero? (fxlogand flags IORING-CQE-F-BUFFER))))
                   (let* ((bid      (fxsrl (fxlogand flags #xFFFF0000) 16))
@@ -2257,6 +2265,14 @@
                   (cond
                    (handler
                     (loop-apply (lambda () (handler res))))
+                   ((and ms-closing? (fx>=? res 0))
+                    ;; A client of a listener that is being closed:
+                    ;; the kernel accepted it before the cancel landed,
+                    ;; and loop-close-prep! has already purged the
+                    ;; backlog it would have gone on. Stashed there it
+                    ;; would never be closed, and would be handed to
+                    ;; the next listener given that fd number.
+                    (%loop-close-forget! res))
                    ((and ms-fd (fx>=? res 0))
                     ;; Multishot-accept CQE with no waiter parked: the
                     ;; kernel already accepted this client, so queue the
@@ -2277,6 +2293,17 @@
 
         (when (not (fxzero? (io-uring-sq-ready ring)))
           (io-uring-submit ring)))))
+
+  ;; Close FD and wait for nothing. A full submission queue is retried
+  ;; next tick rather than raised: this runs from the drain, outside
+  ;; loop-apply, where a raise would stop the loop.
+  (define %loop-close-forget!
+    (lambda (fd)
+      (let retry ()
+        (guard (ex (else (loop-spawn retry)))
+          (let ((sqe (loop-get-sqe (loop-ring %loop))))
+            (io-uring-prep-close sqe fd)
+            (io-uring-sqe-set-data64 sqe (loop-alloc-id!)))))))
 
   (define loop-run
     (lambda ()
@@ -2328,6 +2355,7 @@
         (loop-timers! #f #f)
         (set! %multishots       (make-eqv-hashtable))
         (set! %multishot-ids    (make-eqv-hashtable))
+        (set! %multishot-closing (make-eqv-hashtable))
         (set! %buf-data         (make-eqv-hashtable))
         (set! %fd-handlers      (make-eqv-hashtable))
         (set! %active-connections (make-eqv-hashtable))
@@ -2426,6 +2454,16 @@
                     (io-uring-sqe-set-data64 sqe id)))
                 (hashtable-ref %accept-backlog fd '()))
       (hashtable-delete! %accept-backlog fd)
+      ;; A multishot accept on this fd is not over until its last CQE,
+      ;; and may still deliver clients the kernel accepted before the
+      ;; cancel below lands. It stops being this fd's multishot now --
+      ;; the number may be reissued before that CQE arrives -- and the
+      ;; drain closes whatever it still delivers.
+      (let ((mid (hashtable-ref %multishots fd #f)))
+        (when mid
+          (hashtable-delete! %multishots fd)
+          (hashtable-delete! %multishot-ids mid)
+          (hashtable-set! %multishot-closing mid #t)))
       ;; Payloads nobody claimed: dropping them here is correct and is
       ;; the whole reason the stash lives at this level. The fd is going
       ;; away, so there is no one left to deliver them to, and leaving
@@ -2592,9 +2630,18 @@
                   (handler #f))
                 (let ((client (loop-accept-client-setup! res)))
                   (unless (handler client)
-                    (hashtable-set! %accept-backlog fd
-                      (append (hashtable-ref %accept-backlog fd '())
-                              (list client))))))))
+                    ;; Declined. Kept for the next accept only while
+                    ;; this multishot is still the fd's: once
+                    ;; loop-close-prep! has begun closing the listener
+                    ;; the backlog is purged and the number may be
+                    ;; reissued, so the client is closed instead.
+                    (if (eqv? (hashtable-ref %multishots fd #f) active-id)
+                        (hashtable-set! %accept-backlog fd
+                          (append (hashtable-ref %accept-backlog fd '())
+                                  (list client)))
+                        (begin
+                          (hashtable-delete! %active-connections client)
+                          (%loop-close-forget! client))))))))
         active-id)))
 
   (define loop-accept
