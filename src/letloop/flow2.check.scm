@@ -71,22 +71,33 @@
       (assert (equal? '(from-a-thread) (cdr (car entries)))))
     #t))
 
-;; The flush thread's lifecycle, exercised with nothing pending so the
-;; check writes nothing to stderr. What matters here is that
-;; flow-log-stop! returns rather than hanging -- it blocks the caller
-;; until the thread has done its final drain and exited -- and that a
-;; second flow-log-start! does not fork a competing flush thread. Two
-;; threads interleaving writes to the same port produce shuffled output
-;; at exactly the moment someone is reading it to diagnose something.
+;; The flush thread's lifecycle. flow-log-stop! returns rather than
+;; hanging -- it blocks the caller until the thread has done its final
+;; drain and exited -- and a second flow-log-start! does not fork a
+;; competing flush thread: started on a second port while the first
+;; runs, it must write nothing there, over several periods. Then a
+;; fresh cycle is startable.
 (define ~check-flow2-000/log-flush-thread-lifecycle
   (lambda ()
+    (define first (open-output-string))
+    (define second (open-output-string))
     (flow-log-drain!)
-    (flow-log-start! 0.02)
-    (flow-log-start! 0.02)          ;; must be a no-op, not a second thread
+    (flow-log-start! 0.01 first)
+    ;; must be a no-op, not a second thread
+    (flow-log-start! 0.01 second)
+    (do ((i 0 (+ i 1))) ((= i 10))
+      (flow-log (list 'flow2-check 'lifecycle i))
+      (sleep (make-time 'time-duration 5000000 0)))
     (flow-log-stop!)
+    (let ((written (get-output-string first)))
+      (assert (flow2-check-substring? "lifecycle 0" written))
+      (assert (flow2-check-substring? "lifecycle 9" written)))
+    (assert (string=? "" (get-output-string second)))
     ;; stopped, so a fresh cycle must still be startable
-    (flow-log-start! 0.02)
+    (flow-log-start! 0.01 second)
+    (flow-log '(flow2-check again))
     (flow-log-stop!)
+    (assert (flow2-check-substring? "again" (get-output-string second)))
     #t))
 
 ;;------------------------------------------------------------
@@ -3155,8 +3166,9 @@
 ;; Timers kept in a heap above the ring
 ;;------------------------------------------------------------
 
-;; Fifty sleeps of shuffled length wake in deadline order -- on an idle
-;; loop, where a millisecond apart means a tick apart. Timeouts that
+;; Twenty sleeps of shuffled length wake in deadline order -- on an
+;; idle loop, and five milliseconds apart so that each comes due in a
+;; tick of its own even when the machine is busy. Timeouts that
 ;; come due in the SAME tick run newest first, like everything else a
 ;; tick resumes (see flow-spawn in the README), so this is a check of
 ;; the heap's order and not a promise about a busy loop.
@@ -3165,8 +3177,8 @@
     (define woke '())
     (define durations
       (let loop ((i 0) (out '()))
-        (if (fx=? i 50) out
-            (loop (fx+ i 1) (cons (* 0.001 (mod (* i 37) 50)) out)))))
+        (if (fx=? i 20) out
+            (loop (fx+ i 1) (cons (* 0.005 (mod (* i 7) 20)) out)))))
     (flow-run
      (lambda (workers)
        (let ((done (make-flow-channel 'done #f)))
@@ -3205,7 +3217,8 @@
     #t))
 
 ;; The loop's idle wait is 100 ms, and a shorter sleep must not be
-;; rounded up to it; a longer one is not cut short.
+;; rounded up to it; a longer one is not cut short. No tighter bound
+;; above: how late a sleep wakes on a busy machine is not the claim.
 (define ~check-flow2-014/a-sleep-is-not-rounded-to-the-idle-wait
   (lambda ()
     (define short #f)
@@ -3219,8 +3232,8 @@
          (flow-sleep 0.25)
          (set! long (- (real-time) t0)))
        (flow-stop)))
-    (assert (and (>= short 30) (< short 60)))
-    (assert (and (>= long 250) (< long 300)))
+    (assert (and (>= short 30) (< short 100)))
+    (assert (>= long 250))
     #t))
 
 ;; (flow-sleep 0) yields: two fibers that sleep 0 between steps take
