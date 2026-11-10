@@ -187,7 +187,8 @@
    ~check-flow2-002/a-woken-putter-passes-the-wake-on
    ~check-flow2-002/a-fan-out-past-the-bound-gathers-every-reply
    ~check-flow2-005/workers-putting-once-each-all-get-through
-   ~check-flow2-005/a-run-left-by-a-continuation-releases-the-loop)
+   ~check-flow2-005/a-run-left-by-a-continuation-releases-the-loop
+   ~check-flow2-005/read-pending-on-a-compute-thread-is-refused)
 
   (import (chezscheme)
           (letloop r999)
@@ -2237,7 +2238,17 @@
   ;; per read costs throughput: while this is #t, a plain read would
   ;; take bytes out of order or miss the kept ones, so read through
   ;; flow-read until it is #f. Loop thread only, like every ring event.
+  ;;
+  ;; The thread test is one compare, not %flow-check-loop-thread!: this
+  ;; is called per read on the path it exists to keep cheap, and a
+  ;; compute thread's id is never the owner's. Without it the call
+  ;; "worked" from a compute thread -- loop-current is a process global
+  ;; -- reading tables the loop thread mutates, where every other ring
+  ;; operation raises wrong-thread.
   (define (flow-read-pending? fd)
+    (let ((owner (unbox %flow-loop-thread)))
+      (when (and owner (not (eqv? owner (get-thread-id))))
+        (%flow-wrong-thread 'flow-read-pending?)))
     (or (loop-recv-backlog-pending? fd)
         (let ((r (hashtable-ref %flow-recv-orphans fd #f)))
           (and r

@@ -3236,3 +3236,26 @@
   (assert (unbox task-ended?))
   (assert (eq? second 'ran))
   #t)
+
+;; flow-read-pending? reads the loop's tables, and answered #f from a
+;; compute thread instead of refusing like every other ring operation.
+(define (~check-flow2-005/read-pending-on-a-compute-thread-is-refused)
+  (define saw #f)
+  (flow-log-drain!)
+  (flow-run
+   (lambda (workers)
+     (let ((out (make-flow-channel 'out)))
+       (flow-submit! (car workers)
+                     (lambda ()
+                       (flow-put! out
+                                  (guard (ex ((flow-error-wrong-thread? ex) 'wrong-thread)
+                                             (#t (list 'raised ex)))
+                                    (list 'returned (flow-read-pending? 0))))))
+       (set! saw (car (flow2-check-gather out 1 1.0)))
+       ;; and on the loop it still answers
+       (assert (not (flow-read-pending? 0)))
+       (flow-stop)))
+   1)
+  (flow-log-drain!)
+  (assert (eq? saw 'wrong-thread))
+  #t)
