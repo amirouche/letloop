@@ -3125,3 +3125,88 @@
   (assert (eqv? second-start 0))
   (assert slept)
   #t)
+
+;;------------------------------------------------------------
+;; Ninth adverse pass, 2026-11-10
+;;------------------------------------------------------------
+
+;; A get that could hang is raced against a timeout, so a regression
+;; fails its check instead of hanging `make check`.
+(define (flow2-check-gather ch n seconds)
+  (let loop ((n n) (out '()))
+    (if (zero? n)
+        (reverse out)
+        (let ((v (flow-perform
+                  (flow-choice (flow-get ch)
+                               (flow-wrap (flow-timeout seconds)
+                                          (lambda (_) 'hung))))))
+          (if (eq? v 'hung)
+              (reverse out)
+              (loop (- n 1) (cons v out)))))))
+
+;; A dequeue wakes one parked putter. When the consumer gets again
+;; before that putter has run, it parks as a getter and the woken put
+;; hands its value straight over -- no dequeue, so the wake has to be
+;; passed on by the put itself. It was not: the third producer stayed
+;; parked for room on an empty channel.
+(define (~check-flow2-002/a-woken-putter-passes-the-wake-on)
+  (define got '())
+  (define space #f)
+  (flow-log-drain!)
+  (flow-run
+   (lambda (workers)
+     (let ((ch (make-flow-channel 'one 1)))
+       (do ((i 0 (+ i 1))) ((= i 3))
+         (flow-spawn (lambda () (flow-put! ch i))))
+       (flow-sleep 0.01)                 ; one queued, two parked for room
+       (set! got (flow2-check-gather ch 3 0.5))
+       (set! space (flow-channel-space-length ch))
+       (flow-stop))))
+  (flow-log-drain!)
+  (assert (equal? (sort < got) '(0 1 2)))
+  (assert (eqv? space 0))
+  #t)
+
+;; The README's "Fan out and gather" at a size where the wakes used to
+;; run out: with bound b they covered b(b+1)/2 + b + 1 one-shot
+;; producers, 990 on the default bound.
+(define (~check-flow2-002/a-fan-out-past-the-bound-gathers-every-reply)
+  (define n 2000)
+  (define got 0)
+  (flow-log-drain!)
+  (flow-run
+   (lambda (workers)
+     (let ((replies (make-flow-channel 'replies)))
+       (do ((i 0 (+ i 1))) ((= i n))
+         (flow-spawn (lambda () (flow-put! replies (cons 'done i)))))
+       (set! got (length (flow2-check-gather replies n 1.0)))
+       (flow-stop))))
+  (flow-log-drain!)
+  (assert (eqv? got n))
+  #t)
+
+;; The same from compute threads: each task puts one value on a channel
+;; bounded at 1.
+(define (~check-flow2-005/workers-putting-once-each-all-get-through)
+  (define rounds 100)
+  (define count 4)
+  (define short 0)
+  (flow-log-drain!)
+  (flow-run
+   (lambda (workers)
+     (let loop ((round 0))
+       (when (fx<? round rounds)
+         (let ((ch (make-flow-channel 'one 1)))
+           (for-each (lambda (w) (flow-submit! w (lambda () (flow-put! ch round))))
+                     workers)
+           (flow-sleep 0.001)
+           (unless (fx=? count (length (flow2-check-gather ch count 0.5)))
+             (set! short (fx+ short 1))
+             ;; unpark whoever is stuck, so its worker takes the next task
+             (flow-channel-buffer-size! ch #f)))
+         (loop (fx+ round 1))))
+     (flow-stop))
+   count)
+  (flow-log-drain!)
+  (assert (fxzero? short))
+  #t)

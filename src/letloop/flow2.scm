@@ -181,7 +181,12 @@
    ~check-flow2-013/a-dead-runs-latch-waiter-stays-dead
    ~check-flow2-005/flow-stop-does-not-run-queued-tasks
    ~check-flow2-006/a-failure-losing-a-race-is-not-an-eof
-   ~check-flow2-002/waiting-costs-the-same-however-many-wait)
+   ~check-flow2-002/waiting-costs-the-same-however-many-wait
+
+   ;; ninth adverse pass
+   ~check-flow2-002/a-woken-putter-passes-the-wake-on
+   ~check-flow2-002/a-fan-out-past-the-bound-gathers-every-reply
+   ~check-flow2-005/workers-putting-once-each-all-get-through)
 
   (import (chezscheme)
           (letloop r999)
@@ -1458,8 +1463,21 @@
   ;; happens outside the mutex; if it reports the getter already synched
   ;; elsewhere (another base of its choice won the race), try the next
   ;; one.
+  ;;
+  ;; WOKEN? is #t once this put has parked for room and been woken. Such
+  ;; a put owes the wake it was given to the next parked putter. A
+  ;; dequeue wakes exactly one, on the assumption that the woken put
+  ;; then fills the slot -- but if a getter parked in the meantime, the
+  ;; woken put hands its value straight to it and the slot stays free
+  ;; with nobody left to say so. The remaining putters then sat parked
+  ;; for room on an EMPTY channel, beside a getter parked for a value:
+  ;; three one-shot producers on a channel bounded at 1 delivered two
+  ;; values, and the README's own fan-out, 2000 fibers on the default
+  ;; bound, delivered 990 and hung. Room is rechecked under the mutex by
+  ;; %channel-wake-space!, so passing the wake on when the slot did get
+  ;; filled is a no-op.
   (define (%channel-put! channel obj)
-    (let try ()
+    (let try ((woken? #f))
       (let ((entry
              (with-mutex (flow-channel-mutex channel)
                (let ((getter (%channel-pop-getter! channel)))
@@ -1481,11 +1499,13 @@
           ;; Room existed when we were woken, but another putter may
           ;; have taken it in between, so this is a retry and not an
           ;; assumption.
-          (try))
+          (try #t))
          (entry
-          (unless ((flow-getter-resume entry) obj)
-            (try)))
-         (else (void))))))
+          (if ((flow-getter-resume entry) obj)
+              (when woken? (%channel-wake-space! channel))
+              (try woken?)))
+         (else
+          (when woken? (%channel-wake-space! channel)))))))
 
   ;; Park until the channel has room. Parking needs a scheduler: a
   ;; worker parks on its condition variable, a fiber parks on the loop.
