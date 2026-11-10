@@ -3210,3 +3210,29 @@
   (flow-log-drain!)
   (assert (fxzero? short))
   #t)
+
+;; flow-run released its claim from a guard, which sees a raise and
+;; nothing else. A continuation captured outside the run and invoked
+;; from a fiber left with the claim held, and no flow-run could start
+;; again; the compute thread was never told to stop.
+(define (~check-flow2-005/a-run-left-by-a-continuation-releases-the-loop)
+  (define task-ended? (box #f))
+  (define first
+    (call/cc
+     (lambda (k)
+       (flow-run (lambda (workers)
+                   (flow-submit! (car workers)
+                                 (lambda () (set-box! task-ended? #t)))
+                   (flow-sleep 0.01)
+                   (k 'escaped))
+                 1)
+       'returned)))
+  (define second
+    (guard (ex (#t ex))
+      (flow-run (lambda (workers) (flow-stop)))
+      'ran))
+  (flow-log-drain!)
+  (assert (eq? first 'escaped))
+  (assert (unbox task-ended?))
+  (assert (eq? second 'ran))
+  #t)

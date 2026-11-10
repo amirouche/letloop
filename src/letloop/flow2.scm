@@ -186,7 +186,8 @@
    ;; ninth adverse pass
    ~check-flow2-002/a-woken-putter-passes-the-wake-on
    ~check-flow2-002/a-fan-out-past-the-bound-gathers-every-reply
-   ~check-flow2-005/workers-putting-once-each-all-get-through)
+   ~check-flow2-005/workers-putting-once-each-all-get-through
+   ~check-flow2-005/a-run-left-by-a-continuation-releases-the-loop)
 
   (import (chezscheme)
           (letloop r999)
@@ -2665,8 +2666,24 @@
        ;; used to leave it set, and every flow2 call from another thread
        ;; then raised wrong-thread against a run that did not exist.
        (set-box! %flow-loop-token (box #t))
-       (let ((pool #f) (channels '()))
-         (guard (ex (#t (%flow-run-release! pool channels) (raise ex)))
+       (let ((pool #f) (channels '()) (released? #f))
+         ;; Once, on whichever way out comes first. The guard releases
+         ;; before a raise travels on; the dynamic-wind is for the exits
+         ;; that are not raises. A continuation captured outside the run
+         ;; and invoked from a fiber -- an early exit, or a REPL interrupt
+         ;; resetting to the top level -- used to leave with the claim
+         ;; still held: every later flow-run raised "a flow-run is
+         ;; already in progress" for the life of the process, and the
+         ;; compute threads were never joined. Fibers switch inside
+         ;; loop-run, within this extent, so they do not trip it.
+         (define (release!)
+           (unless released?
+             (set! released? #t)
+             (%flow-run-release! pool channels)))
+         (dynamic-wind
+          void
+          (lambda ()
+         (guard (ex (#t (release!) (raise ex)))
            (loop-new)
            ;; orphaned recvs belong to the previous ring
            (%flow-recv-orphans-clear!)
@@ -2716,8 +2733,8 @@
            ;; the run sees what fiber zero logs from the first period
            (when (unbox %flow-log-sink)
              (%flow-log-spawn-fiber!))
-           (loop-run))
-         (%flow-run-release! pool channels)
+           (loop-run)))
+          release!)
          ;; What was logged since the last period -- the shutdown's own
          ;; entries included -- would otherwise wait for the next run.
          ;; Outside the run now, so on this thread is allowed.
