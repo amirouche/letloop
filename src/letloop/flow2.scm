@@ -951,18 +951,6 @@
   ;; Synchronization: poll, then park
   ;;------------------------------------------------------------
 
-  ;; Fire every registered cancel except the winner's. One thunk, so the
-  ;; whole batch lands before the resumed fiber does — that ordering is
-  ;; load-bearing — but one guard PER cancel, which is the part that was
-  ;; missing: most of these thunks call loop-get-sqe, which raises
-  ;; "submission queue full" when the kernel will not take more, and a
-  ;; raise from one aborted the walk and skipped every cancel after it.
-  ;; One transient SQ-full could therefore leave a read in the ring and
-  ;; a timeout armed with its continuation pinned until it fires, on
-  ;; bases that had nothing to do with the failure.
-  ;;
-  ;; TAG is the winner's; pass #f to fire all of them, since every real
-  ;; tag is a fresh pair.
   ;; Both reduce an object to something a log line can hold. A base's
   ;; data is (TAG . RECORD) for channel bases, so writing it
   ;; raw would dump a whole channel -- queue included -- into the log;
@@ -988,6 +976,19 @@
   (define (%flow-log-raise-after-win ex)
     (flow-log (list 'flow2 'block-raised-after-win (%flow-condition-sexp ex))))
 
+  ;; Fire every registered cancel except the winner's. One thunk, so the
+  ;; whole batch lands before the resumed fiber does — that ordering is
+  ;; load-bearing — but one guard PER cancel, which is the part that was
+  ;; missing: most of these thunks call loop-get-sqe, which raises
+  ;; "submission queue full" when the kernel will not take more, and a
+  ;; raise from one aborted the walk and skipped every cancel after it.
+  ;; One transient SQ-full could therefore leave a read in the ring and
+  ;; a timeout armed with its continuation pinned until it fires, on
+  ;; bases that had nothing to do with the failure.
+  ;;
+  ;; TAG is the winner's; pass #f to fire all of them, since every real
+  ;; tag is a fresh pair.
+  ;;
   ;; An entry is (TAG DATA . THUNK). DATA is the base's own, carried
   ;; only so that a raise here can say which base it came from: a bare
   ;; (flow2 cancel-raised) is what an operator reaches after an
@@ -2659,6 +2660,37 @@
             (task))
           (loop)))))
 
+  ;; A run's pool. Created per run and handed to the workers and the
+  ;; collector as a closure, never through a global: a straggler from a
+  ;; previous run therefore cannot touch this run's eventfd, mailbox, or
+  ;; live count (see <flow2-pool>) -- and is refused at every entry
+  ;; point, because it does not hold %flow-pool-current.
+  ;;
+  ;; The eventfd first: it is the call that fails in practice, and the
+  ;; buffer then never needs freeing on that path. The buffer is two
+  ;; cells: the signal value, and the read target.
+  (define (%flow-pool-make)
+    (let* ((fd (%eventfd-create))
+           (buffer (foreign-alloc 16)))
+      (foreign-set! 'unsigned-64 buffer 0 1)
+      (foreign-set! 'unsigned-64 buffer 8 0)
+      (make-flow-pool% fd buffer (box '()) (make-mutex) (make-condition)
+                       0 #t (box #t))))
+
+  ;; Fork the compute thread that serves CHANNEL. Counted live before
+  ;; the fork, so a shutdown that runs after a failed fork still joins
+  ;; every thread that did start.
+  (define (%flow-worker-fork! pool channel)
+    (with-mutex (%pool-mutex pool)
+      (%pool-live! pool (fx+ (%pool-live pool) 1)))
+    (guard (ex (#t (%flow-worker-exited! pool) (raise ex)))
+      (fork-thread
+       (lambda ()
+         (dynamic-wind
+           void
+           (lambda () (%worker-body pool channel))
+           (lambda () (%flow-worker-exited! pool)))))))
+
   ;; Start the loop on the calling thread — the main thread — and
   ;; spawn PROC as fiber zero with the list of worker request
   ;; channels (empty when COMPUTE-COUNT is zero, the default). The
@@ -2710,60 +2742,33 @@
              (set! released? #t)
              (%flow-run-release! pool channels)))
          (dynamic-wind
-          void
-          (lambda ()
-         (guard (ex (#t (release!) (raise ex)))
-           (loop-new)
-           ;; orphaned recvs belong to the previous ring
-           (%flow-recv-orphans-clear!)
-           ;; and so do pending timeouts; this also installs the timer
-           ;; table on the new loop, which loop-new cleared
-           (%flow-timers-clear!)
-           ;; The pool is created per run and handed to the workers and
-           ;; the collector as a closure, never through a global — a
-           ;; straggler from a previous run therefore cannot touch this
-           ;; run's eventfd, mailbox, or live count (see <flow2-pool>) --
-           ;; and is refused at every entry point, because it does not
-           ;; hold %flow-pool-current.
-           (unless (fxzero? compute-count)
-             ;; the eventfd first: it is the call that fails in practice,
-             ;; and the buffer then never needs freeing on that path.
-             ;; Two cells: the signal value, and the read target.
-             (let* ((fd (%eventfd-create))
-                    (buffer (foreign-alloc 16)))
-               (foreign-set! 'unsigned-64 buffer 0 1)
-               (foreign-set! 'unsigned-64 buffer 8 0)
-               (set! pool (make-flow-pool% fd buffer (box '())
-                                           (make-mutex) (make-condition)
-                                           0 #t (box #t)))))
-           (when pool
-             (set-box! %flow-pool-current pool)
-             (loop-spawn (lambda () (%collector pool)))
-             (let start ((i 0))
-               (unless (fx=? i compute-count)
-                 (let ((channel (make-flow-channel (cons 'worker i))))
-                   ;; counted before the fork, so a shutdown that runs
-                   ;; after a failed fork still joins every thread that
-                   ;; did start
-                   (with-mutex (%pool-mutex pool)
-                     (%pool-live! pool (fx+ (%pool-live pool) 1)))
-                   (set! channels (append channels (list channel)))
-                   (guard (ex (#t (%flow-worker-exited! pool) (raise ex)))
-                     (fork-thread
-                      (lambda ()
-                        (dynamic-wind
-                          void
-                          (lambda () (%worker-body pool channel))
-                          (lambda () (%flow-worker-exited! pool))))))
-                   (start (fx+ i 1))))))
-           (let ((channels channels))
-             (loop-spawn (lambda () (%fiber-run (lambda () (proc channels))))))
-           ;; spawned last so it runs first: a sink registered before
-           ;; the run sees what fiber zero logs from the first period
-           (when (unbox %flow-log-sink)
-             (%flow-log-spawn-fiber!))
-           (loop-run)))
-          release!)
+           void
+           (lambda ()
+             (guard (ex (#t (release!) (raise ex)))
+               (loop-new)
+               ;; orphaned recvs belong to the previous ring
+               (%flow-recv-orphans-clear!)
+               ;; and so do pending timeouts; this also installs the timer
+               ;; table on the new loop, which loop-new cleared
+               (%flow-timers-clear!)
+               ;; POOL and CHANNELS are set as they come into being, so
+               ;; a start that fails halfway releases what did start.
+               (unless (fxzero? compute-count)
+                 (set! pool (%flow-pool-make))
+                 (set-box! %flow-pool-current pool)
+                 (loop-spawn (lambda () (%collector pool)))
+                 (do ((i 0 (fx+ i 1))) ((fx=? i compute-count))
+                   (let ((channel (make-flow-channel (cons 'worker i))))
+                     (set! channels (append channels (list channel)))
+                     (%flow-worker-fork! pool channel))))
+               (let ((channels channels))
+                 (loop-spawn (lambda () (%fiber-run (lambda () (proc channels))))))
+               ;; spawned last so it runs first: a sink registered before
+               ;; the run sees what fiber zero logs from the first period
+               (when (unbox %flow-log-sink)
+                 (%flow-log-spawn-fiber!))
+               (loop-run)))
+           release!)
          ;; What was logged since the last period -- the shutdown's own
          ;; entries included -- would otherwise wait for the next run.
          ;; Outside the run now, so on this thread is allowed.
