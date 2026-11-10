@@ -276,14 +276,12 @@
     (assert (eq? 'sstable-writes (flow-channel-name named)))
     #t))
 
-;; Finding 7 of the 2026-08-17 review. flow-get's block proc, when it
-;; finds the channel non-empty at registration time, claims its entry
-;; and dequeues -- and then used to ignore resume's return value.
-;; resume reports #f when an earlier base of the same perform already
-;; won, and registration is a for-each with no early exit, so that is
-;; reachable: the value is out of the channel, the fiber is committed
-;; elsewhere, and nothing receives it. Silent, and the peer that was
-;; waiting for it looks like the culprit.
+;; flow-get's block proc, when it finds the channel non-empty at
+;; registration time, claims its entry and dequeues -- and must then heed
+;; resume's return value. resume reports #f when an earlier base of the
+;; same perform already won, and registration has no early exit, so that
+;; is reachable: the value is out of the channel, the fiber is committed
+;; elsewhere, and unless it is put back nothing receives it.
 ;;
 ;; FILLER makes the interleaving deterministic instead of waiting for a
 ;; compute thread to produce it: never ready at poll, and its block does
@@ -311,19 +309,15 @@
     (assert (eq? 'the-value (flow-get-try ch 'EMPTY)))
     #t))
 
-;; The getter-growth half of finding 4. flow-get registered no cancel
-;; thunk, so a get that LOSES a choice left its entry on the channel's
-;; getters list, and the only reaper -- %channel-pop-getter! -- runs
-;; only from a put. A channel that is polled and never written therefore
-;; grew by one entry per poll forever, each pinning a captured
-;; continuation through its resume: structurally flow's 44GB leak, whose
-;; regression check the fork had dropped.
+;; A get that LOSES a choice must take its entry off the channel's
+;; getters list. The only other reaper, %channel-pop-getter!, runs from a
+;; put, so a channel that is polled and never written would grow by one
+;; entry per poll, each pinning a captured continuation.
 ;;
 ;; Asserted on the list itself rather than on retained bytes, which is
 ;; what the checks can see from inside the library and is exact. The
 ;; bytes-per-round version, which is what an outside caller can observe,
-;; is checks/repro-flow2-getter-leak.scm: 378 bytes/round before the fix,
-;; flat after.
+;; is checks/repro-flow2-getter-leak.scm.
 (define ~check-flow2-002/losing-get-leaves-no-getter
   (lambda ()
     (define ch (make-flow-channel))
@@ -519,21 +513,14 @@
     (assert (guard (ex (#t #t)) (flow-write 0 payload 999) #f))
     #t))
 
-;; flow-run must not return until its workers are provably gone. It
-;; used to signal the eventfd, close it, and null the global handle
-;; with workers possibly still inside a task -- so a worker reaching
-;; %flow-spawn-safe afterwards either found no pool and raised from
-;; inside its own guard, or won the race and wrote eight bytes into
-;; whatever the next loop-new or socket call had since been given that
-;; fd number.
+;; flow-run must not return until its workers are provably gone: a worker
+;; still inside a task after the eventfd is closed would signal a
+;; descriptor number the process has since given to something else.
 ;;
-;; The task here deliberately outlives flow-stop: nothing in the
-;; program waits for it, so the only thing that can is the shutdown
-;; itself. FINISHED set at all is the
-;; evidence: without the join, flow-run returns while the worker is
-;; still asleep. The pool state itself is per-run now and unreachable
-;; once flow-run returns, which is the point -- there is no global left
-;; for this check to inspect, or for a straggler to corrupt.
+;; The task here deliberately outlives flow-stop: nothing in the program
+;; waits for it, so the only thing that can is the shutdown itself.
+;; FINISHED set at all is the evidence: without the join, flow-run
+;; returns while the worker is still asleep.
 (define ~check-flow2-005/shutdown-joins-the-worker-pool
   (lambda ()
     (define finished #f)
@@ -551,29 +538,24 @@
     #t))
 
 ;; A straggler worker -- one that outlived its run's bounded shutdown
-;; join -- must not corrupt the NEXT flow-run. The pool state used to
-;; be global, so the straggler's eventual exit decremented the new
-;; run's live count: the new shutdown undercounted, concluded all
-;; workers had exited while its own was still inside a task, and
-;; dismantled the pool under it -- flow-run returned early, and the
-;; eventfd closed with a live writer holding the fd number. The pool
-;; is per-run now, handed to workers as a closure, so a straggler can
-;; only ever touch the run that created it.
+;; join -- must not corrupt the NEXT flow-run. The pool is per-run and
+;; handed to workers as a closure, so a straggler's exit cannot decrement
+;; the new run's live count and let its shutdown dismantle the pool under
+;; a worker still inside a task.
 ;;
 ;; The differential: run 2's task takes 1.0s, and the run-1 straggler
-;; exits ~0.55s into run 2. With shared globals run 2's shutdown
-;; returned at the straggler's exit, before its own task finished;
-;; with per-run pools it waits the full 1.0s. Slow by check standards
-;; (~3s), and deliberately so -- the whole scenario IS the timing.
-;; Fifth pass: the pool record isolates the straggler's OWN state, not
-;; the objects it shares with the next run. A channel is a plain object;
-;; a straggler holding one the next run also uses (a global, as here)
-;; popped the new run's parked getter, consed its continuation into the
-;; dead run's mailbox, and returned normally -- the fiber was stranded
-;; past its own timeout, since the dead resume had already won the state
-;; CAS, and the value was gone. A straggler is now refused at every entry
-;; point like a stray thread, because from the live run's point of view
-;; that is what it is.
+;; exits ~0.55s into run 2. With shared state run 2's shutdown would
+;; return at the straggler's exit, before its own task finished; with
+;; per-run pools it waits the full 1.0s. Slow by check standards (~3s),
+;; and deliberately so -- the whole scenario IS the timing.
+;;
+;; The pool record isolates the straggler's OWN state, not the objects it
+;; shares with the next run. A channel is a plain object; a straggler
+;; putting to one the next run also uses (a global, as here) would pop
+;; the new run's parked getter and cons its continuation into the dead
+;; run's mailbox, stranding the fiber. So a straggler is refused at every
+;; entry point like a stray thread, which from the live run's point of
+;; view is what it is.
 (define ~check-flow2-005/straggler-does-not-corrupt-the-next-run
   (lambda ()
     (define straggler-done? #f)
@@ -642,17 +624,15 @@
     #t))
 
 ;; A raise from a base event's BLOCK procedure must reach the fiber --
-;; exactly as a raise from the fiber's body does. Before the fix, block
-;; procs ran inside loop-abort's thunk, on the scheduler's stack with
-;; the prompt already unwound, so the raise escaped to loop-apply's
-;; catch-all: the fiber's own guards never saw it (in a nursery, as
-;; flow2 had then, the join parked forever).
+;; exactly as a raise from the fiber's body does. Block procs run inside
+;; loop-abort's thunk, on the scheduler's stack with the prompt already
+;; unwound, so left alone the raise would escape to loop-apply's
+;; catch-all and the fiber's own guards would never see it.
 ;;
 ;; Not synthetic. loop-get-sqe raises "submission queue full" past 256
-;; queued ops in one tick, reachable from flow-timeout / flow-read /
-;; flow-write / flow-open / flow-read-at / flow-write-at; and
-;; loop-accept-block raises "concurrent accept on fd". Standalone
-;; reproducer: checks/repro-flow2-block-raise.scm.
+;; queued ops in one tick, reachable from flow-read / flow-write /
+;; flow-open / flow-read-at / flow-write-at; and loop-accept-block raises
+;; "concurrent accept on fd".
 (define ~check-flow2-003/block-raise-reaches-the-fiber
   (lambda ()
     ;; never ready, so flow-perform must call block -- and block raises
@@ -745,17 +725,14 @@
      1)
     (eqv? result 42)))
 
-;; resume-from's contract -- the losers' cancels land before the
-;; resumed fiber runs -- must hold when a WORKER completes the
-;; rendezvous, not only when the resume happens on-loop. The
-;; cross-thread path goes through %cross-thread-spawns, which drains
-;; newest-first; spawning that list without reversing it inverted the
-;; order, so a fiber that won a worker's put against a losing
-;; flow-accept re-accepted before the cancel had freed the multishot's
-;; handler slot and raised "concurrent accept on fd". The probe's
-;; cancel sets a flag; the fiber reads it as its first act after the
-;; resume, so this fails on the inversion itself rather than on any
-;; particular resource the cancel happens to free.
+;; resume-from's contract -- the losers' cancels land before the resumed
+;; fiber runs -- must hold when a WORKER completes the rendezvous, not
+;; only when the resume happens on-loop: a fiber that won a worker's put
+;; against a losing flow-accept would otherwise re-accept before the
+;; cancel had freed the multishot's handler slot, and raise "concurrent
+;; accept on fd". The probe's cancel sets a flag; the fiber reads it as
+;; its first act after the resume, so this fails on the order itself
+;; rather than on any particular resource the cancel happens to free.
 (define ~check-flow2-005/worker-resume-runs-cancels-first
   (lambda ()
     (define registered? #f)
@@ -793,11 +770,9 @@
 ;; Block-and-wait machinery
 ;;------------------------------------------------------------
 ;;
-;; Ported 2026-08-17 from (letloop flow)'s ~check-flow-011 series,
-;; which the fork had also dropped. These cover flow-block-and-wait-on-
-;; loop itself -- synchronous wins during registration, a raising cancel
-;; thunk, and which cancels fire -- i.e. exactly the procedure finding 1
-;; of the review lives in.
+;; Ported from (letloop flow)'s ~check-flow-011 series. These cover
+;; flow-block-and-wait-on-loop itself: synchronous wins during
+;; registration, a raising cancel thunk, and which cancels fire.
 ;;
 ;; They deliberately drive the loop with BOUNDED loop-run-once ticks
 ;; rather than flow-run, keeping flow's rationale verbatim: a buggy
@@ -936,12 +911,9 @@
 ;; Network and file I/O
 ;;------------------------------------------------------------
 ;;
-;; Ported 2026-08-17 from (letloop flow)'s ~check-flow-006/* and
-;; ~check-flow-009/*, which the flow2 fork dropped along with the other
-;; fd- and ring-touching checks (flow ships 40 checks, flow2 shipped
-;; 21, and all 11 I/O ones were on the missing side). The numbering is
-;; kept deliberately -- 006 for sockets, 009 for files -- so each check
-;; here is traceable to the flow original it came from.
+;; Ported from (letloop flow)'s ~check-flow-006/* and ~check-flow-009/*.
+;; The numbering is kept deliberately -- 006 for sockets, 009 for files
+;; -- so each check here is traceable to the flow original it came from.
 ;;
 ;; Two adaptations, no semantic changes: they drive the loop through
 ;; flow-run / flow-spawn / flow-stop rather than loop-new / loop-spawn /
@@ -1054,11 +1026,8 @@
 ;; must see the client's message once it actually arrives, proving the
 ;; cancelled/lost read did not consume or corrupt the connection.
 ;;
-;; This is the check whose accept-side analogue flow2 still lacks: see
-;; checks/repro-flow2-accept-cancel.scm, where a cancelled flow-accept
-;; leaves its handler registered and poisons the listening fd. flow-read
-;; passes here because it calls register-cancel! and flow-accept does
-;; not.
+;; Its accept-side analogue is accept-cancel-leaves-listener-usable,
+;; below.
 (define ~check-flow2-006/read-or-timeout-leaves-fd-usable
   (lambda ()
     (define PORT 18245)
@@ -1355,8 +1324,8 @@
 ;; at its baseline once the dust settles -- a leaked orphan would grow
 ;; it by one per round the timeout won.
 ;;
-;; flow-open is the ONE place flow2 kept this careful resume-returns-#f
-;; handling (flow2.scm:857); this is the check that keeps it honest.
+;; This is the check that keeps flow-open's resume-returns-#f handling
+;; honest.
 (define ~check-flow2-009/open-loses-choice-no-fd-leak
   (lambda ()
     (define path (flow2-check-path "flow2-009-open-choice.bin"))
@@ -1470,13 +1439,12 @@
 (define flow2-check-fd-open?
   (lambda (fd) (fx>=? (%flow2-check-fcntl fd 1) 0)))
 
-;; Third adverse pass, finding 3. A recv and the base that beat it can
-;; complete in the same tick -- the loop drains the completion queue in
-;; CQ order, so the timeout's handler wins the CAS and the recv's
-;; handler then finds its resume returning #f. Before the recv backlog
-;; those bytes were simply dropped, and the kernel had already taken
-;; them off the socket, so a second read on the same fd saw nothing:
-;; a truncated request with no error anywhere.
+;; A recv and the base that beat it can complete in the same tick -- the
+;; loop drains the completion queue in CQ order, so the timeout's handler
+;; wins the CAS and the recv's handler then finds its resume returning
+;; #f. The kernel has already taken those bytes off the socket, so they
+;; must be kept for the next read: dropped, the request is truncated with
+;; no error anywhere.
 ;;
 ;; Forcing the race needs the loop held busy across the window, which is
 ;; what the spin does: the peer fiber never yields between the write and
@@ -1590,14 +1558,12 @@
     (assert (eqv? 1 (flow-channel-queue-length channel)))
     #t))
 
-;; Third adverse pass, finding 8. The losers' cancels run in one thunk
-;; -- deliberately, so the whole batch lands before the resumed fiber
-;; does -- but they used to share one dynamic extent too, so a raise
-;; from any of them aborted the walk and skipped every cancel after it.
-;; Most of these thunks call loop-get-sqe, which raises "submission
-;; queue full" when the kernel will not take more, so one transient
-;; SQ-full could leave unrelated bases uncancelled: a read still in the
-;; ring, a timeout still armed with its continuation pinned.
+;; The losers' cancels run in one thunk -- deliberately, so the whole
+;; batch lands before the resumed fiber does -- but each under its own
+;; guard, so a raise from one does not skip the cancels after it. Most
+;; of these thunks call loop-get-sqe, which raises "submission queue
+;; full" when the kernel will not take more, and one transient SQ-full
+;; must not leave unrelated bases uncancelled.
 ;;
 ;; The registration order below is what makes this bite. Cancels are
 ;; consed as they register, so the walk runs them newest-first: the
@@ -1649,18 +1615,13 @@
       (assert (not (list-ref entry 3))))
     #t))
 
-;; Fourth adverse pass, finding 1. The third pass's own fix, applied at
-;; three call sites instead of at the choke point they all pass
-;; through. flow-perform went unguarded, so a stray thread took its
-;; ON-loop branch -- %worker-current? is #f there -- and flow-get! on a
-;; non-empty channel SUCCEEDED: it dequeued off-loop and resumed a
-;; parked putter through loop-spawn with no eventfd wake (the putter
-;; was still parked a second and a half later), while on an empty
-;; channel it died with "attempt to apply non-procedure #f" from
-;; loop-abort. flow-submit! and the four scope/lifecycle entry points
-;; checked only %worker-current?, which a user thread passes. (The
-;; nursery, monitor and scope-cancel entry points it also covered went
-;; with nurseries.)
+;; The thread guard lives at the choke point every suspending operation
+;; passes through, flow-perform, and at each entry point that bypasses
+;; it. On a stray thread %worker-current? is #f, so an unguarded
+;; operation would take the ON-loop branch: flow-get! on a non-empty
+;; channel would dequeue off-loop and resume a parked putter through
+;; loop-spawn with no eventfd wake, and on an empty one die inside
+;; loop-abort.
 ;;
 ;; One check over every entry point rather than one per procedure: the
 ;; failure mode was an ENUMERATION that fell behind, and a test shaped
@@ -1721,15 +1682,13 @@
     (assert (eqv? 1 (flow-channel-queue-length channel)))
     #t))
 
-;; Fourth adverse pass, finding 2. loop-close-prep! purges the fd's
-;; recv stash, but flow2's recv registered its handler in loop-handlers
-;; ONLY -- never in the per-fd operation index -- so the teardown pass
-;; skipped it and the handler outlived the close. A recv that completed
-;; with data in the window between the cancel submit and the kernel
-;; acting on it then ran loop-recv-backlog-put! AFTER the purge,
-;; re-creating a stash under a number the kernel was about to reissue:
-;; the next connection's first flow-read served the previous
-;; connection's bytes.
+;; loop-close-prep! purges the fd's recv stash, and deletes the handler
+;; of every recv registered in the per-fd operation index. flow2's recv
+;; must be in that index: a recv that completes with data between the
+;; cancel's submit and the kernel acting on it would otherwise run
+;; loop-recv-backlog-put! AFTER the purge, re-creating a stash under a
+;; number the kernel is about to reissue, and the next connection's
+;; first flow-read would be served the previous connection's bytes.
 ;;
 ;; The write is aimed at that window rather than guaranteed to land in
 ;; it -- whether the kernel takes the send or the cancel first is not
@@ -2593,9 +2552,9 @@
 
 ;; A flow-get that dequeued during registration and then lost to an
 ;; earlier base puts the value back -- and must not wake a putter for
-;; room it never made. It did: the wake came before the resume, and on
-;; a compute thread the woken putter could fill the slot before the
-;; unget, leaving the channel one past its bound.
+;; room it never made: woken before the resume, a putter on a compute
+;; thread could fill the slot before the unget, leaving the channel one
+;; past its bound.
 ;;
 ;; Made deterministic the way losing-get-does-not-eat-a-value is: the
 ;; winning base's block runs after the poll, fills the channel to its
