@@ -682,35 +682,23 @@
   ;; Everything one flow-run's compute pool shares — the eventfd, its
   ;; write/read buffer, the spawn mailbox, and the liveness bookkeeping
   ;; — lives in ONE record created by that flow-run, and every worker
-  ;; holds its own run's record through %worker-current?. These used to
-  ;; be globals, and a straggler worker that outlived its run's 2s
-  ;; shutdown join then corrupted the NEXT run through them: its exit
-  ;; decremented the new run's live count, so the new shutdown
-  ;; undercounted and closed the eventfd with one of its own workers
-  ;; still live — resurrecting exactly the close-while-a-writer-lives
-  ;; bug the join exists to prevent — and its spawn-safe calls consed a
-  ;; dead run's continuations into the new loop's mailbox. With the
-  ;; record, a straggler can only ever touch the run that created it:
-  ;; its signals land on its own leaked fd, its thunks in a mailbox
-  ;; nobody drains (a dead run's resumes SHOULD be dropped), and its
-  ;; exit wakes a join that has already given up on it.
+  ;; holds its own run's record through %worker-current?. Not globals:
+  ;; a straggler worker that outlives its run's shutdown join can then
+  ;; only touch the run that created it. Its signals land on its own
+  ;; leaked fd, its thunks in a mailbox nobody drains (a dead run's
+  ;; resumes SHOULD be dropped), and its exit wakes a join that has
+  ;; already given up on it.
   ;;
   ;; The buffer is TWO 8-byte cells, allocated with the eventfd. The
   ;; first holds the value 1 and is what every %eventfd-signal! writes,
-  ;; so a cross-thread wake-up is a bare write(2) instead of a
-  ;; foreign-alloc / foreign-free pair on the hottest path the pool has.
-  ;; The second is the collector's read target. They used to be one
-  ;; cell, on the theory that Scheme never wrote it again -- but an
-  ;; eventfd READ stores the counter into its buffer, so after the first
-  ;; wake the cell held whatever count that read returned, and every
-  ;; later signal added THAT instead of 1. Whenever several wakes
-  ;; coalesced inside one busy tick the cell was multiplied, it never
-  ;; shrank, and it reached 2^64 in about twenty windows; past 2^63 the
-  ;; kernel refuses a second addition per read cycle, and the fd is
-  ;; blocking, so the worker sat in write(2) until the loop's next tick
-  ;; -- one cross-thread wake per tick, every other worker stalled. The
-  ;; live count is guarded by the mutex rather than CAS'd because the
-  ;; shutdown join needs a condition variable anyway.
+  ;; so a cross-thread wake-up is a bare write(2) with no allocation.
+  ;; The second is the collector's read target. They must be separate:
+  ;; an eventfd READ stores the counter into its buffer, so a shared
+  ;; cell would hold whatever the last read returned and every later
+  ;; signal would add THAT instead of 1.
+  ;;
+  ;; The live count is guarded by the mutex rather than CAS'd because
+  ;; the shutdown join needs a condition variable anyway.
   (define-record-type* <flow2-pool>
     (make-flow-pool% eventfd buffer spawns mutex gone live running? alive)
     %flow-pool?
@@ -759,13 +747,10 @@
       (lambda (fd) (call-with-values (lambda () (func fd)) (lambda (r e) r)))))
 
   ;; Park the collector fiber on the pool's eventfd until a worker
-  ;; signals it. Reads into the pool's SECOND cell rather than one
-  ;; allocated per wait -- and not into the first, which is the value
-  ;; the signal writes (see <flow2-pool>). The collector parks here and,
-  ;; at shutdown, is simply never resumed -- the loop has stopped -- so
-  ;; a per-wait allocation was freed on every path except the one that
-  ;; always happens, and leaked eight bytes plus its header per
-  ;; flow-run.
+  ;; signals it. Reads into the pool's SECOND cell -- not the first,
+  ;; which is the value the signal writes (see <flow2-pool>) -- rather
+  ;; than one allocated per wait: at shutdown the collector is simply
+  ;; never resumed, so a per-wait allocation would never be freed.
   (define %eventfd-wait
     (lambda (pool)
       (let* ((sqe (loop-get-sqe (loop-ring (loop-current))))
@@ -778,41 +763,31 @@
            (hashtable-set! (loop-handlers (loop-current)) id k))))))
 
   ;; The thread flow-run is running the loop on, for the duration of
-  ;; that run and #f outside one. "Any thread" here has only ever meant
-  ;; the loop thread and this library's own compute threads: a thread
-  ;; the USER forked holds no pool, so it takes the loop-spawn branch of
-  ;; %flow-spawn-safe below and mutates loop-thunks with no
-  ;; synchronization against loop-run-once's take-and-clear, and sends
-  ;; no eventfd wake — a resume lost outright, or delayed by a whole
-  ;; wait timeout. The entry points that advertise cross-thread use
-  ;; check this and raise wrong-thread instead.
+  ;; that run and #f outside one. "Any thread" means the loop thread
+  ;; and this library's own compute threads only: a thread the USER
+  ;; forked holds no pool, so it would take the loop-spawn branch of
+  ;; %flow-spawn-safe below, mutate loop-thunks with no synchronization
+  ;; against loop-run-once's take-and-clear, and send no eventfd wake.
+  ;; The entry points check this and raise wrong-thread instead.
   (define %flow-loop-thread (box #f))
 
   ;; The pool of the run in progress, #f outside one. A worker is
   ;; recognised by holding THIS pool, not by holding any pool: a
-  ;; straggler from a previous run still holds its own, and everything
-  ;; it does with it lands on a dead run -- which is exactly right for
-  ;; the straggler's own state and exactly wrong for an object it shares
-  ;; with the live run. A straggler that put to a channel the next run's
-  ;; fiber was parked on popped that getter, consed its continuation
-  ;; into the dead mailbox, and returned normally: the fiber was
-  ;; stranded past its own deadline (the dead resume had already won the
-  ;; state CAS) and the value was gone. From the live run's point of
-  ;; view a straggler is a thread flow2 does not own, so it is refused
-  ;; like one.
+  ;; straggler from a previous run still holds its own, which is right
+  ;; for its own state and wrong for an object it shares with the live
+  ;; run -- putting to a channel a live fiber is parked on, it would
+  ;; cons that fiber's continuation into the dead mailbox and strand
+  ;; it. To the live run a straggler is a thread flow2 does not own, so
+  ;; it is refused like one.
   (define %flow-pool-current (box #f))
 
   ;; Which run a parked wait belongs to. A channel or a latch outlives
-  ;; the run that parked a fiber on it, and the wait used to outlive it
-  ;; too: flow-stop leaves parked fibers "never resumed", but their
-  ;; getter, putter and latch entries stayed on the shared object
-  ;; marked waiting. A put in the NEXT run then popped a dead run's
-  ;; getter and resumed that fiber inside the new loop -- the value
-  ;; went to a fiber of a finished run, and the new run's reader waited
-  ;; for it -- and a put between runs, which priming a channel is,
-  ;; handed the value to a continuation the next loop-new threw away.
-  ;; A dead putter, woken by a dequeue, pushed a stale value into the
-  ;; new run's channel.
+  ;; the run that parked a fiber on it, and flow-stop leaves parked
+  ;; fibers "never resumed" with their getter, putter and latch entries
+  ;; still on the shared object. Without this a put in the NEXT run
+  ;; would resume a fiber of the finished one, and a put between runs,
+  ;; which priming a channel is, would hand its value to a continuation
+  ;; the next loop-new throws away.
   ;;
   ;; So every wait carries a token, a box that is #t while its run can
   ;; still resume it, and a deliverer treats a wait whose token is #f
@@ -877,23 +852,15 @@
             (loop-spawn thunk)))))
 
   ;; The reverse is load-bearing. flow-box-drain! yields newest-first,
-  ;; and loop-spawn conses, so spawning the drained list as-is REVERSES
-  ;; it a second time relative to loop-run-once's front-to-back walk:
-  ;; two thunks a worker queued in order A, B would run B first. That
-  ;; silently broke resume-from's cancels-before-k ordering for every
-  ;; worker-completed rendezvous — the resumed fiber ran before the
-  ;; losers' cancels, and a fiber that re-performed flow-accept right
-  ;; after winning a worker's put against it raised "concurrent accept
-  ;; on fd", the exact regression the on-loop spawn order fix closed.
-  ;; Reversing restores cons order into loop-spawn's LIFO, so a
-  ;; worker's spawn-safe calls behave like the same calls made on-loop.
+  ;; and loop-spawn conses onto a list loop-run-once walks front to
+  ;; back, so spawning the drained list as-is would run a worker's
+  ;; thunks in the opposite order to the same calls made on the loop.
+  ;;
   ;; The wait is guarded because %eventfd-wait preps an SQE, and
   ;; loop-get-sqe raises "submission queue full" when the kernel
-  ;; refuses to take more — the same raise source the <flow2-raise>
-  ;; comment below calls realistic. Unguarded, that raise killed the
+  ;; refuses to take more. Unguarded, that raise would kill the
   ;; collector through loop-apply's catch-all, and every later
-  ;; worker→loop resume accumulated in a box nobody would ever drain:
-  ;; total, silent loss of all cross-thread traffic, presenting as a
+  ;; worker→loop resume would pile up in a box nobody drains: a
   ;; zero-CPU hang. The failure path drains what is already pending
   ;; (loop-spawn raises nothing) and retries on the next tick, by
   ;; which point loop-run-once's submit has freed SQ slots; the
@@ -935,30 +902,24 @@
 
   ;; A block proc raised after an earlier base of the same perform had
   ;; already won during registration: the fiber is committed to that
-  ;; value, so the raise has nowhere to go but here. It used to be
-  ;; written to stderr directly, the one library event that bypassed
-  ;; the logger.
+  ;; value, so the raise has nowhere to go but the log.
   (define (%flow-log-raise-after-win ex)
     (flow-log (list 'flow2 'block-raised-after-win (%flow-condition-sexp ex))))
 
   ;; Fire every registered cancel except the winner's. One thunk, so the
   ;; whole batch lands before the resumed fiber does — that ordering is
-  ;; load-bearing — but one guard PER cancel, which is the part that was
-  ;; missing: most of these thunks call loop-get-sqe, which raises
-  ;; "submission queue full" when the kernel will not take more, and a
-  ;; raise from one aborted the walk and skipped every cancel after it.
-  ;; One transient SQ-full could therefore leave a read in the ring and
-  ;; a timeout armed with its continuation pinned until it fires, on
-  ;; bases that had nothing to do with the failure.
+  ;; load-bearing — but one guard PER cancel: most of these thunks call
+  ;; loop-get-sqe, which raises "submission queue full" when the kernel
+  ;; will not take more, and a raise from one must not skip the cancels
+  ;; after it, on bases that had nothing to do with the failure.
   ;;
   ;; TAG is the winner's; pass #f to fire all of them, since every real
   ;; tag is a fresh pair.
   ;;
   ;; An entry is (TAG DATA . THUNK). DATA is the base's own, carried
-  ;; only so that a raise here can say which base it came from: a bare
-  ;; (flow2 cancel-raised) is what an operator reaches after an
-  ;; unexplained hang or fd leak, and it named neither the base nor the
-  ;; condition -- the two things that would end the investigation.
+  ;; only so that a (flow2 cancel-raised) entry can name the base and
+  ;; the condition -- what an operator needs after an unexplained hang
+  ;; or fd leak.
   (define (%flow-run-cancels! pending tag)
     (for-each (lambda (entry)
                 (unless (eq? (car entry) tag)
@@ -968,12 +929,11 @@
                     ((cddr entry)))))
               pending))
 
-  ;; flow's design unchanged: one shared
-  ;; state box CAS-elects a single winner, each base gets its own
-  ;; wrap-applying resume, the losers' register-cancel! thunks fire
-  ;; the instant any base wins, and both the cancels and the
-  ;; continuation defer through %flow-spawn-safe because the party
-  ;; completing the rendezvous may be a compute thread.
+  ;; flow's design: one shared state box CAS-elects a single winner,
+  ;; each base gets its own resume, the losers' register-cancel! thunks
+  ;; fire before the winner's continuation runs, and both defer through
+  ;; %flow-spawn-safe because the party completing the rendezvous may
+  ;; be a compute thread.
   (define flow-block-and-wait-on-loop
     (lambda (bases)
       (let ((state (box 'waiting))
@@ -985,32 +945,23 @@
              (lambda (tag value)
                (and (box-cas! state 'waiting 'synched)
                     (begin
-                      ;; ONE thunk: the losers' cancels, then k. The
-                      ;; cancels must land before the resumed fiber does
-                      ;; anything, because a cancel can free a resource
-                      ;; the fiber immediately reuses -- flow-accept's
-                      ;; cancel releases the multishot's single handler
-                      ;; slot, and a fiber that re-accepts before it runs
-                      ;; gets "concurrent accept on fd" instead.
+                      ;; ONE thunk: the losers' cancels, then k. The cancels
+                      ;; must land before the resumed fiber does anything,
+                      ;; because a cancel can free a resource the fiber
+                      ;; immediately reuses -- flow-accept's cancel releases
+                      ;; the multishot's single handler slot. Two spawns
+                      ;; would not do: a compute thread's reach the loop
+                      ;; through a mailbox the collector can drain between
+                      ;; them. A raising cancel cannot lose k:
+                      ;; %flow-run-cancels! guards each one.
                       ;;
-                      ;; They used to be two spawns, k first so that the
-                      ;; loop's last-in-first-out walk ran it last. That
-                      ;; holds within one list, and a compute thread's
-                      ;; spawns reach the loop through a mailbox: the
-                      ;; collector could wake on the first and drain it
-                      ;; before the second was consed, so k ran a tick
-                      ;; ahead of its cancels -- once or twice in 20000
-                      ;; worker puts on a loaded machine. One thunk has
-                      ;; no between. A raising cancel still cannot lose
-                      ;; k: %flow-run-cancels! guards each one.
-                      ;;
-                      ;; A perform with nothing to cancel -- a lone
-                      ;; flow-read, the commonest wait there is -- skips
-                      ;; the pass: every registered cancel is the
-                      ;; winner's own. Not during registration, though:
-                      ;; a base that wins synchronously there is followed
-                      ;; by bases whose cancels are not registered yet,
-                      ;; and the pass reads CANCELS only when it runs.
+                      ;; A perform with nothing to cancel -- a lone flow-read,
+                      ;; the commonest wait there is -- skips the pass: every
+                      ;; registered cancel is the winner's own. Not during
+                      ;; registration, though: a base that wins synchronously
+                      ;; there is followed by bases whose cancels are not
+                      ;; registered yet, and the pass reads CANCELS only when
+                      ;; it runs.
                       (%flow-spawn-safe
                        (if (or registering?
                                (exists (lambda (entry) (not (eq? (car entry) tag)))
@@ -1081,18 +1032,15 @@
                      (condition-broadcast ready))
                    #t))))
         ;; Registration runs on this thread's own stack, so unlike the
-        ;; on-loop case a raise here can propagate to the task's guard
-        ;; by itself. Whether it SHOULD depends on the same CAS the
-        ;; on-loop path consults: if this perform is still unclaimed,
-        ;; the raise wins it — fire whatever cancels were registered so
-        ;; no getter entry outlives a perform nobody will complete, and
-        ;; re-raise. But if an earlier base already won during
-        ;; registration, the caller is committed to that value — a
-        ;; channel get may already have DEQUEUED it — and re-raising
-        ;; would destroy it, the lost-value shape finding 7 was about.
-        ;; Report it exactly as the on-loop path does, and fall
-        ;; through to the wait, which the winner has already (or is
-        ;; about to) satisfy.
+        ;; on-loop case a raise here can propagate to the task's guard by
+        ;; itself. Whether it SHOULD depends on the same CAS the on-loop path
+        ;; consults. If this perform is still unclaimed, the raise wins it:
+        ;; fire whatever cancels were registered, so no getter entry outlives
+        ;; a perform nobody will complete, and re-raise. If an earlier base
+        ;; already won during registration, the caller is committed to that
+        ;; value -- a channel get may already have DEQUEUED it -- and
+        ;; re-raising would lose it: report it as the on-loop path does, and
+        ;; fall through to the wait, which the winner satisfies.
         (let ((raised
                (guard (ex (#t
                            (if (box-cas! state 'waiting 'synched)
@@ -1148,18 +1096,12 @@
                           (flow-block-and-wait-off-loop bases)
                           result)))))
 
-  ;; The guard belongs HERE, not at the handful of entry points that
-  ;; happened to be named when it was written. Every suspending
-  ;; operation funnels through flow-perform, and on a user-forked
-  ;; thread %worker-current? is #f, so the on-loop branch below is the
-  ;; one taken: it dequeues under the channel mutex, resumes a parked
-  ;; putter through
-  ;; %flow-spawn-safe -> loop-spawn with no eventfd wake, and parks on
-  ;; a loop-abort that is #f in that thread. flow-get! on a non-empty
-  ;; channel therefore SUCCEEDED off-loop and stranded the putter,
-  ;; while on an empty one it died with "attempt to apply
-  ;; non-procedure #f" — a corruption and a nonsense error where
-  ;; wrong-thread was documented.
+  ;; The guard belongs HERE, at the choke point: every suspending
+  ;; operation funnels through flow-perform. On a user-forked thread
+  ;; %worker-current? is #f, so the on-loop branch below would be the
+  ;; one taken -- dequeuing under the channel mutex, resuming a parked
+  ;; putter through loop-spawn with no eventfd wake, and parking on a
+  ;; loop-abort that is #f in that thread.
   (define flow-perform
     (lambda (event)
       (%flow-check-caller-thread! 'flow-perform)
@@ -1186,14 +1128,12 @@
   ;; Waiter lists: doubly linked, O(1) to join and to leave
   ;;------------------------------------------------------------
 
-  ;; Parked getters, parked putters and latch waiters used to be plain
-  ;; lists, joined with append and left with remq -- both linear in the
-  ;; number already parked, under the object's mutex. A wait that loses
-  ;; its choice joins and leaves every time, so with 20000 fibers parked
-  ;; on one channel each such get cost about seven times what it did
-  ;; with 100, and the README's own stop-a-fan-out shape -- every
-  ;; connection fiber racing (flow-latch-wait stop) on each read -- made
-  ;; every read cost O(connections).
+  ;; Parked getters, parked putters and latch waiters join and leave in
+  ;; O(1). A wait that loses its choice joins and leaves every time, so
+  ;; with plain lists -- append to join, remq to leave -- the README's
+  ;; stop-a-fan-out shape, every connection fiber racing
+  ;; (flow-latch-wait stop) on each read, made every read cost
+  ;; O(connections).
   ;;
   ;; A node is created unlinked when its wait registers its cancel, and
   ;; linked once the wait is reachable; unlinking is idempotent, so a
