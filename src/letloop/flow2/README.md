@@ -9,7 +9,7 @@ Amirouche A. BOUBEKKI
 ## Status
 
 `(letloop flow2)` is **implemented**, in `src/letloop/flow2.scm`, with
-97 checks in `src/letloop/flow2.check.scm`. `(letloop http server)`
+99 checks in `src/letloop/flow2.check.scm`. `(letloop http server)`
 runs on it; `(letloop flow)` stays untouched and keeps serving its
 other consumers.
 
@@ -71,13 +71,9 @@ No known defect is open.
 One behaviour is left unspecified on purpose: the order in which
 fibers made runnable in the same tick run (see `flow-spawn`).
 
-Four suspicions from the ninth pass were read in the source and never
-reproduced, so nothing was changed for them: the latch's spin lock is
-not released by a non-local exit from its critical section; the first
-`flow-log` racing a `flow-log-drain!` may leave the default printer
-running after the program took the log over; the log's registry gains
-one box per logging thread and never gives one back; and a raise that
-reaches the loop's own tick ends `flow-run` with no log entry.
+One small leak is known and left: a thread the program forks itself,
+and that logs, keeps its log accumulator registered after it exits —
+flow2 has no way to see it go. Compute threads retire theirs.
 
 The findings of every pass, and what each one taught, are in History.
 
@@ -1447,6 +1443,19 @@ on a compute thread, and `(flow-timeout +inf.0)` raised from inside
 the perform. The heap itself held under churn. One thing found is
 documented rather than changed: fibers resumed in the same tick run
 newest first (see `flow-spawn`). Each fix has a regression check.
+
+Four suspicions were read in the source that day and not reproduced,
+and were taken up afterwards with probes that reach inside the
+library. Three gave way and were fixed: an interrupt that escaped by a
+continuation from inside a latch's critical section left its spin lock
+held for good; the log kept an accumulator for every compute thread
+that had ever logged, a hundred after fifty runs of two workers; and a
+take-over landing between the first `flow-log`'s claim and its fork
+let the default printer start behind it, four times in a hundred
+thousand. The fourth — a raise in the loop's own tick ending
+`flow-run` silently — is not reachable through flow2: every thunk and
+handler runs under the ring layer's guard, and the timer pass has its
+own.
 
 ## References
 
