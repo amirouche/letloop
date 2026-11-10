@@ -3441,3 +3441,36 @@
     (assert (flow? (flow-timeout -1)))
     (assert (flow? (flow-timeout 1/3)))
     #t))
+
+;;------------------------------------------------------------
+;; Ninth adverse pass, the suspicions reproduced afterwards
+;;------------------------------------------------------------
+
+;; A latch's lock is a box, and a box has no owner to release it for.
+;; A timer interrupt whose handler leaves by a continuation -- what a
+;; REPL interrupt resetting to the top level does -- is delivered at
+;; every tick count from 1 to 399, so some land inside the critical
+;; section if anything can. No latch may be left locked.
+(define ~check-flow2-013/an-escaping-interrupt-leaves-no-latch-locked
+  (lambda ()
+    (define held 0)
+    (define escapes 0)
+    (define old (timer-interrupt-handler))
+    (do ((ticks 1 (+ ticks 1))) ((= ticks 400))
+      (let ((latch (make-flow-latch)))
+        (call/cc
+         (lambda (k)
+           (timer-interrupt-handler
+            (lambda () (set! escapes (+ escapes 1)) (k 'escaped)))
+           (set-timer ticks)
+           (flow-latch-fire! latch 'value)
+           (flow-latch-fired? latch)
+           (set-timer 0)))
+        (set-timer 0)
+        (when (unbox (flow-latch-lock latch))
+          (set! held (+ held 1)))))
+    (timer-interrupt-handler old)
+    ;; the interrupt did fire and escape, or this proved nothing
+    (assert (positive? escapes))
+    (assert (zero? held))
+    #t))

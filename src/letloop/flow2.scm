@@ -184,6 +184,7 @@
    ~check-flow2-013/latch-crosses-threads
    ~check-flow2-013/latch-as-a-stop-event
    ~check-flow2-013/a-dead-runs-latch-waiter-stays-dead
+   ~check-flow2-013/an-escaping-interrupt-leaves-no-latch-locked
 
    ;; 014: timers
    ~check-flow2-014/timeouts-fire-in-deadline-order
@@ -1695,14 +1696,22 @@
       (memory-order-release)
       (set-box! lock #f)))
 
+  ;; With interrupts disabled from before the lock is taken until after
+  ;; it is given back. A spin lock has no owner the system can release
+  ;; it for, so nothing may leave between the two: a timer or keyboard
+  ;; interrupt whose handler escapes by a continuation -- a REPL
+  ;; interrupt resetting to the top level -- would leave the box #t and
+  ;; every later operation on the latch spinning. The bodies are list
+  ;; surgery and raise nothing.
   (define-syntax with-latch-lock
     (syntax-rules ()
       ((_ latch body ...)
        (let ((lock (flow-latch-lock latch)))
-         (%flow-spin-lock! lock)
-         (let ((result (begin body ...)))
-           (%flow-spin-unlock! lock)
-           result)))))
+         (with-interrupts-disabled
+          (%flow-spin-lock! lock)
+          (let ((result (begin body ...)))
+            (%flow-spin-unlock! lock)
+            result))))))
 
   (define make-flow-latch
     (lambda ()
