@@ -71,12 +71,30 @@
    flow-channel-queue-length flow-channel-getters-length
    flow-channel-space-length flow-channel-bound
 
-   ;; checks
+   ;; checks, by subject; flow2.check.scm keeps them in the order they
+   ;; were written
+
+   ;; 000: errors and the log
    ~check-flow2-000/error-symbol-dispatch
    ~check-flow2-000/error-predicates
+   ~check-flow2-000/log-is-nonblocking-and-drains
+   ~check-flow2-000/log-flush-thread-lifecycle
+   ~check-flow2-000/log-flush-writes-to-the-port-current-at-start
+   ~check-flow2-000/a-failing-flush-stops-cleanly-and-keeps-its-batch
+   ~check-flow2-000/log-sink-can-be-a-procedure
+   ~check-flow2-000/a-forked-thread-logs-to-its-own-box
+   ~check-flow2-000/log-prints-to-stderr-by-default
+   ~check-flow2-000/a-procedure-sink-runs-on-the-loop
+   ~check-flow2-000/a-raising-procedure-sink-keeps-its-batch
+   ~check-flow2-000/a-run-flushes-the-printer-on-its-way-out
+
+   ;; 001: events
    ~check-flow2-001/always-ready
    ~check-flow2-001/wrap-order
    ~check-flow2-001/a-raising-cancel-does-not-skip-the-others
+   ~check-flow2-001/wrap-runs-on-the-performer-after-commit
+
+   ;; 002: channels
    ~check-flow2-002/channel-buffered-fifo
    ~check-flow2-002/channel-get-parks-until-put
    ~check-flow2-002/channel-bound-overflow
@@ -85,8 +103,6 @@
    ~check-flow2-002/raising-bound-wakes-parked-putters
    ~check-flow2-002/channel-get-try-default
    ~check-flow2-002/channel-get-or-timeout
-   ~check-flow2-000/log-is-nonblocking-and-drains
-   ~check-flow2-000/log-flush-thread-lifecycle
    ~check-flow2-002/channel-name
    ~check-flow2-002/diagnostics-see-what-leaks
    ~check-flow2-002/default-bound-is-finite
@@ -94,7 +110,18 @@
    ~check-flow2-002/channel-full-warns-once
    ~check-flow2-002/losing-get-does-not-eat-a-value
    ~check-flow2-002/losing-get-leaves-no-getter
+   ~check-flow2-002/a-losing-get-wakes-no-putter
+   ~check-flow2-002/a-dead-runs-getter-takes-nothing
+   ~check-flow2-002/priming-between-runs-is-not-eaten
+   ~check-flow2-002/a-dead-runs-putter-pushes-nothing
+   ~check-flow2-002/waiting-costs-the-same-however-many-wait
+   ~check-flow2-002/a-woken-putter-passes-the-wake-on
+   ~check-flow2-002/a-fan-out-past-the-bound-gathers-every-reply
+
+   ;; 003: a raising block procedure
    ~check-flow2-003/block-raise-reaches-the-fiber
+
+   ;; 005: runs, compute threads and the thread rule
    ~check-flow2-005/shutdown-joins-the-worker-pool
    ~check-flow2-005/straggler-does-not-corrupt-the-next-run
    ~check-flow2-005/worker-task-replies
@@ -103,24 +130,31 @@
    ~check-flow2-005/worker-resume-runs-cancels-first
    ~check-flow2-005/a-thread-the-user-forked-is-refused
    ~check-flow2-005/every-entry-point-refuses-a-stray-thread
-   ~check-flow2-009/a-closed-fd-does-not-hand-on-a-stash
+   ~check-flow2-005/wrap-runs-on-the-loop-when-a-worker-delivers
+   ~check-flow2-005/coalesced-wakes-do-not-inflate-the-eventfd
+   ~check-flow2-005/compute-count-is-validated
+   ~check-flow2-005/flow-run-refuses-to-nest
+   ~check-flow2-005/a-failed-start-releases-the-loop
+   ~check-flow2-005/a-thread-forked-in-a-task-is-refused
+   ~check-flow2-005/flow-stop-does-not-run-queued-tasks
+   ~check-flow2-005/workers-putting-once-each-all-get-through
+   ~check-flow2-005/a-run-left-by-a-continuation-releases-the-loop
+   ~check-flow2-005/read-pending-on-a-compute-thread-is-refused
 
-   ;; block-and-wait machinery, ported from (letloop flow)'s
-   ;; ~check-flow-011 series, plus the branch finding 1's fix added
-   ~check-flow2-011/sync-resume-runs-later-cancels
-   ~check-flow2-011/raising-cancel-does-not-lose-fiber
-   ~check-flow2-011/winner-own-cancel-not-fired
-   ~check-flow2-011/raise-after-sync-win-keeps-winner
-
-   ;; network and file I/O, ported from (letloop flow)'s ~check-flow-006
-   ;; and ~check-flow-009 series -- the 11 fd- and ring-touching checks
-   ;; the fork had dropped
+   ;; 006: network I/O
    ~check-flow2-006/write-reports-its-count
    ~check-flow2-006/echo-pair
    ~check-flow2-006/accept-cancel-leaves-listener-usable
    ~check-flow2-006/read-or-timeout-leaves-fd-usable
    ~check-flow2-006/request-loop-idle-timeout
    ~check-flow2-006/read-losing-a-same-tick-race-keeps-its-bytes
+   ~check-flow2-006/read-pending-sees-what-a-losing-read-left
+   ~check-flow2-006/listen-accept-and-name-the-peer
+   ~check-flow2-006/reads-after-a-lost-race-keep-stream-order
+   ~check-flow2-006/a-failure-losing-a-race-is-not-an-eof
+
+   ;; 009: file I/O
+   ~check-flow2-009/a-closed-fd-does-not-hand-on-a-stash
    ~check-flow2-009/file-write-read-roundtrip
    ~check-flow2-009/chunked-read-until-eof
    ~check-flow2-009/nonzero-offset
@@ -130,65 +164,33 @@
    ~check-flow2-009/close-under-choice-fd-actually-closed
    ~check-flow2-009/close-while-read-in-flight
    ~check-flow2-009/a-read-composed-with-its-close-leaves-nothing-behind
-   ~check-flow2-006/read-pending-sees-what-a-losing-read-left
-   ~check-flow2-006/listen-accept-and-name-the-peer
-   ~check-flow2-013/latch-under-contention
-   ~check-flow2-014/timeouts-fire-in-deadline-order
-   ~check-flow2-014/a-losing-timeout-leaves-the-heap-at-once
-   ~check-flow2-014/a-sleep-is-not-rounded-to-the-idle-wait
-   ~check-flow2-014/sleep-zero-yields
-   ~check-flow2-014/no-timer-crosses-runs
 
-   ;; fifth adverse pass, 2026-09-03
-   ~check-flow2-001/wrap-runs-on-the-performer-after-commit
-   ~check-flow2-005/wrap-runs-on-the-loop-when-a-worker-delivers
-   ~check-flow2-005/coalesced-wakes-do-not-inflate-the-eventfd
-   ~check-flow2-000/log-flush-writes-to-the-port-current-at-start
-   ~check-flow2-000/a-failing-flush-stops-cleanly-and-keeps-its-batch
-   ~check-flow2-000/log-sink-can-be-a-procedure
-   ~check-flow2-005/compute-count-is-validated
+   ;; 011: block-and-wait
+   ~check-flow2-011/sync-resume-runs-later-cancels
+   ~check-flow2-011/raising-cancel-does-not-lose-fiber
+   ~check-flow2-011/winner-own-cancel-not-fired
+   ~check-flow2-011/raise-after-sync-win-keeps-winner
 
-   ;; sixth adverse pass
-   ~check-flow2-005/flow-run-refuses-to-nest
-   ~check-flow2-005/a-failed-start-releases-the-loop
-   ~check-flow2-005/a-thread-forked-in-a-task-is-refused
-   ~check-flow2-000/a-forked-thread-logs-to-its-own-box
-   ~check-flow2-006/reads-after-a-lost-race-keep-stream-order
-   ~check-flow2-002/a-losing-get-wakes-no-putter
-
-   ;; uncaught errors are log entries
+   ;; 012: uncaught errors, and the gather patterns
    ~check-flow2-012/uncaught-raise-in-a-fiber-is-logged
    ~check-flow2-012/uncaught-raise-in-a-task-is-logged
    ~check-flow2-012/fan-out-gather-until-a-deadline-then-hand-off
    ~check-flow2-012/gather-counts-every-page-before-the-last-exit
 
-   ;; latches
+   ;; 013: latches
+   ~check-flow2-013/latch-under-contention
    ~check-flow2-013/latch-wakes-every-waiter-once
    ~check-flow2-013/losing-latch-wait-leaves-no-waiter
    ~check-flow2-013/latch-crosses-threads
    ~check-flow2-013/latch-as-a-stop-event
-
-   ;; the default printer
-   ~check-flow2-000/log-prints-to-stderr-by-default
-   ~check-flow2-000/a-procedure-sink-runs-on-the-loop
-   ~check-flow2-000/a-raising-procedure-sink-keeps-its-batch
-   ~check-flow2-000/a-run-flushes-the-printer-on-its-way-out
-
-   ;; seventh adverse pass
-   ~check-flow2-002/a-dead-runs-getter-takes-nothing
-   ~check-flow2-002/priming-between-runs-is-not-eaten
-   ~check-flow2-002/a-dead-runs-putter-pushes-nothing
    ~check-flow2-013/a-dead-runs-latch-waiter-stays-dead
-   ~check-flow2-005/flow-stop-does-not-run-queued-tasks
-   ~check-flow2-006/a-failure-losing-a-race-is-not-an-eof
-   ~check-flow2-002/waiting-costs-the-same-however-many-wait
 
-   ;; ninth adverse pass
-   ~check-flow2-002/a-woken-putter-passes-the-wake-on
-   ~check-flow2-002/a-fan-out-past-the-bound-gathers-every-reply
-   ~check-flow2-005/workers-putting-once-each-all-get-through
-   ~check-flow2-005/a-run-left-by-a-continuation-releases-the-loop
-   ~check-flow2-005/read-pending-on-a-compute-thread-is-refused
+   ;; 014: timers
+   ~check-flow2-014/timeouts-fire-in-deadline-order
+   ~check-flow2-014/a-losing-timeout-leaves-the-heap-at-once
+   ~check-flow2-014/a-sleep-is-not-rounded-to-the-idle-wait
+   ~check-flow2-014/sleep-zero-yields
+   ~check-flow2-014/no-timer-crosses-runs
    ~check-flow2-014/an-infinite-timeout-never-fires)
 
   (import (chezscheme)
