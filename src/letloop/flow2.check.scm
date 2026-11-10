@@ -3543,3 +3543,45 @@
     (assert (eq? unparked 'nobody))
     (assert (eq? parked 'nobody))
     #t))
+
+;; A listener closed with an acceptor still parked on it, and a new
+;; listener given the same fd number before the old multishot's last
+;; completion is drained. That completion reaches the parked acceptor's
+;; handler, whose error path forgets "the fd's multishot" -- and must
+;; not forget the NEW listener's: its next client would then arrive for
+;; a multishot nobody knows, and be dropped unclosed. The window needs
+;; the closer to run inside the drain, which the ring layer's loop-close
+;; does and flow-close does not.
+(define ~check-flow2-006/an-old-listeners-last-word-spares-the-new-one
+  (lambda ()
+    (define PORT 18335)
+    (define old 'not-set)
+    (define got #f)
+    (flow-run
+     (lambda (workers)
+       (let ((first (flow-listen "127.0.0.1" PORT)))
+         (flow-spawn
+          (lambda () (set! old (flow-perform (flow-accept first)))))
+         (flow-sleep 0.02)
+         (loop-close first)
+         ;; at once: the number is free, and the new listener arms its
+         ;; own multishot, then loses the accept
+         (let ((second (flow-listen "127.0.0.1" (+ PORT 1))))
+           (flow-perform (flow-choice (flow-accept second)
+                                      (flow-timeout 0.02)))
+           (flow-sleep 0.05)
+           ;; a client for the new listener, with nobody parked
+           (let ((peer (flow2-check-connect-now (+ PORT 1))))
+             (flow-sleep 0.05)
+             (set! got (flow-perform
+                        (flow-choice (flow-accept second)
+                                     (flow-wrap (flow-timeout 0.3)
+                                                (lambda (_) 'nobody)))))
+             (when (fixnum? got) (flow-perform (flow-close got)))
+             (flow-perform (flow-close peer)))
+           (flow-perform (flow-close second))))
+       (flow-stop)))
+    ;; the acceptor parked on the closed listener was told so
+    (assert (eq? old #f))
+    (assert (fixnum? got))
+    #t))

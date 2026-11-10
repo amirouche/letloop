@@ -2623,10 +2623,13 @@
           (lambda (res)
             (if (fx<? res 0)
                 (begin
-                  (let ((mid (hashtable-ref %multishots fd #f)))
-                    (when mid
-                      (hashtable-delete! %multishots fd)
-                      (hashtable-delete! %multishot-ids mid)))
+                  ;; Only if the fd's multishot is still THIS one. After
+                  ;; a close the number may already belong to a new
+                  ;; listener with a multishot of its own, armed before
+                  ;; this one's last completion was drained.
+                  (when (eqv? (hashtable-ref %multishots fd #f) active-id)
+                    (hashtable-delete! %multishots fd)
+                    (hashtable-delete! %multishot-ids active-id))
                   (handler #f))
                 (let ((client (loop-accept-client-setup! res)))
                   (unless (handler client)

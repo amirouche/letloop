@@ -152,6 +152,7 @@
    ~check-flow2-006/read-pending-sees-what-a-losing-read-left
    ~check-flow2-006/listen-accept-and-name-the-peer
    ~check-flow2-006/a-closing-listener-hands-no-client-to-the-next
+   ~check-flow2-006/an-old-listeners-last-word-spares-the-new-one
    ~check-flow2-006/reads-after-a-lost-race-keep-stream-order
    ~check-flow2-006/a-failure-losing-a-race-is-not-an-eof
 

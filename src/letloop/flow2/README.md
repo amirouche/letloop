@@ -9,7 +9,7 @@ Amirouche A. BOUBEKKI
 ## Status
 
 `(letloop flow2)` is **implemented**, in `src/letloop/flow2.scm`, with
-100 checks in `src/letloop/flow2.check.scm`. `(letloop http server)`
+101 checks in `src/letloop/flow2.check.scm`. `(letloop http server)`
 runs on it; `(letloop flow)` stays untouched and keeps serving its
 other consumers.
 
