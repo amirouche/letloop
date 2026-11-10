@@ -3474,3 +3474,37 @@
     (assert (positive? escapes))
     (assert (zero? held))
     #t))
+
+;; Every compute thread that logs registers a box, and the registry
+;; kept it after the thread had exited: one box per worker per run, for
+;; the life of the process, all of them walked by every drain. A worker
+;; now retires its box on the way out, and loses no entry doing it.
+(define ~check-flow2-000/a-compute-thread-takes-its-log-box-with-it
+  (lambda ()
+    (define runs 50)
+    (define count 2)
+    (define before #f)
+    (define logged '())
+    (flow-log-drain!)
+    (set! before (length (unbox %flow-log-registry)))
+    (do ((i 0 (+ i 1))) ((= i runs))
+      (flow-run
+       (lambda (workers)
+         (let ((done (make-flow-channel 'done)))
+           (for-each (lambda (w)
+                       (flow-submit! w (lambda ()
+                                         (flow-log (list 'flow2-check 'box i))
+                                         (flow-put! done #t))))
+                     workers)
+           (for-each (lambda (w) (flow-get! done)) workers)
+           (flow-stop)))
+       count))
+    (set! logged
+          (filter (lambda (x)
+                    (and (pair? x) (pair? (cdr x))
+                         (equal? (list-head x 2) '(flow2-check box))))
+                  (map cdr (flow-log-drain!))))
+    ;; the loop thread may have registered its own in the meantime
+    (assert (<= (- (length (unbox %flow-log-registry)) before) 1))
+    (assert (= (length logged) (* runs count)))
+    #t))

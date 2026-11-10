@@ -916,9 +916,9 @@ program down.
 Every pending entry as a list of `(timestamp . sexp)` — except on the
 first drain while the default printer runs, which stops the printer
 first, and the printer prints what it holds as it stops; see below.
-Entries are oldest first
-within each thread's own accumulator, threads concatenated in
-registration order rather than globally sorted — sort on the
+Entries are oldest first within each thread's own accumulator: those
+of compute threads that have exited come first, then the live threads
+in registration order rather than globally sorted — sort on the
 timestamps if you need strict cross-thread order. Draining empties.
 
 A drain also takes the log over from the default printer (see below),

@@ -87,6 +87,7 @@
    ~check-flow2-000/a-procedure-sink-runs-on-the-loop
    ~check-flow2-000/a-raising-procedure-sink-keeps-its-batch
    ~check-flow2-000/a-run-flushes-the-printer-on-its-way-out
+   ~check-flow2-000/a-compute-thread-takes-its-log-box-with-it
 
    ;; 001: events
    ~check-flow2-001/always-ready
@@ -249,6 +250,12 @@
             lst
             (flow-box-drain! box)))))
 
+  (define flow-box-remove!
+    (lambda (box item)
+      (let ((lst (unbox box)))
+        (unless (box-cas! box lst (remq item lst))
+          (flow-box-remove! box item)))))
+
   (define flow-box-increment!
     (lambda (box)
       (let ((n (unbox box)))
@@ -312,6 +319,25 @@
             (flow-box-cons! %flow-log-registry b)
             b))))
 
+  ;; Entries of threads that have exited, newest first like any box.
+  (define %flow-log-retired (box '()))
+
+  ;; Called by a thread flow2 forked, on its way out: its box leaves the
+  ;; registry, and what it still holds moves to the one retired box, in
+  ;; order. The registry would otherwise keep a box for every compute
+  ;; thread of every run, and every drain walks all of it. An entry is
+  ;; in exactly one place throughout -- flow-box-drain! never delivers
+  ;; twice -- so a drain racing this sees it now or next time. A thread
+  ;; the user forked has no such hook, and its box stays.
+  (define %flow-log-retire-box!
+    (lambda ()
+      (let ((b (%thread-own-ref %flow-log-box)))
+        (when b
+          (%thread-own-set! %flow-log-box #f)
+          (for-each (lambda (entry) (flow-box-cons! %flow-log-retired entry))
+                    (reverse (flow-box-drain! b)))
+          (flow-box-remove! %flow-log-registry b)))))
+
   ;; The loop's cached per-tick jiffy, or 0 before there is a loop. A
   ;; plain read of an already-computed field — no syscall on the
   ;; logging path — and the only loop state a compute thread ever
@@ -361,8 +387,9 @@
         (%flow-log-stop-thread!))))
 
   ;; Every pending entry: oldest-first within each thread's own box,
-  ;; boxes in registration order rather than globally sorted — a caller
-  ;; wanting strict cross-thread order can sort on the timestamps. The
+  ;; exited threads' entries first, then the live boxes in registration
+  ;; order rather than globally sorted — a caller wanting strict
+  ;; cross-thread order can sort on the timestamps. The
   ;; registry is read, not drained: it is a cons list, newest first, so
   ;; reversing a snapshot IS registration order.
   ;;
@@ -378,7 +405,10 @@
   (define %flow-log-drain-all!
     (lambda ()
       (let ((boxes (reverse (unbox %flow-log-registry))))
-        (apply append (map (lambda (b) (reverse (flow-box-drain! b))) boxes)))))
+        (append (reverse (flow-box-drain! %flow-log-retired))
+                (apply append
+                       (map (lambda (b) (reverse (flow-box-drain! b)))
+                            boxes))))))
 
   (define %flow-log-write!
     (lambda (entries port)
@@ -513,6 +543,8 @@
                         (not (unbox %flow-log-stop-requested?)))
                    (lp)
                    (begin
+                     ;; a failed flush logged from this thread
+                     (%flow-log-retire-box!)
                      (set-box! %flow-log-default-running? #f)
                      (set-box! %flow-log-stopped? #t))))))))
       (void)))
@@ -2621,7 +2653,11 @@
            (dynamic-wind
              void
              (lambda () (%worker-body pool channel))
-             (lambda () (%flow-worker-exited! pool))))))))
+             (lambda ()
+               ;; before the join can see this thread gone, so the
+               ;; run's last flush finds its entries
+               (%flow-log-retire-box!)
+               (%flow-worker-exited! pool))))))))
 
   ;; Start the loop on the calling thread — the main thread — and
   ;; spawn PROC as fiber zero with the list of worker request
