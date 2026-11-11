@@ -94,6 +94,7 @@
    ~check-flow2-001/wrap-order
    ~check-flow2-001/a-raising-cancel-does-not-skip-the-others
    ~check-flow2-001/wrap-runs-on-the-performer-after-commit
+   ~check-flow2-001/a-wait-outside-a-run-says-so
 
    ;; 002: channels
    ~check-flow2-002/channel-buffered-fifo
@@ -1218,11 +1219,18 @@
           (%flow-perform-off-loop event)
           (let* ((bases (flow-flatten event))
                  (result (flow-poll bases)))
-            (if (eq? result %flow-not-ready)
-                ;; %flow-settle, not a bare return: a block-proc raise
-                ;; comes back as a value and must raise on this stack.
-                (%flow-settle (flow-block-and-wait-on-loop bases))
-                result)))))
+            (cond
+             ((not (eq? result %flow-not-ready)) result)
+             ;; Nothing is ready, and waiting takes a fiber, which takes
+             ;; a run. Said here, before anything registers: further on
+             ;; the wait reaches for a scheduler that is not there, and
+             ;; the caller was told "attempt to apply non-procedure #f".
+             ((not (loop-in-fiber?))
+              (error 'flow-perform
+                     "nothing is ready and no flow-run is in progress to wait in"))
+             ;; %flow-settle, not a bare return: a block-proc raise
+             ;; comes back as a value and must raise on this stack.
+             (else (%flow-settle (flow-block-and-wait-on-loop bases))))))))
 
   ;;------------------------------------------------------------
   ;; Waiter lists: doubly linked, O(1) to join and to leave

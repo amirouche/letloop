@@ -3717,3 +3717,33 @@
                 #f)))
     #t))
 
+;; A perform with nothing ready has to park, and outside a run there is
+;; no fiber to park. It used to get as far as the ring layer's abort
+;; and die there with "attempt to apply non-procedure #f". It is
+;; refused by name now, before any base registers, so nothing is left
+;; on the channel; and an event that is ready still performs, since
+;; that takes no fiber.
+(define ~check-flow2-001/a-wait-outside-a-run-says-so
+  (lambda ()
+    (define ch (make-flow-channel 'outside))
+    (define said
+      (lambda (thunk)
+        (guard (ex ((and (condition? ex) (who-condition? ex))
+                    (condition-who ex))
+                   (#t 'something-else))
+          (thunk)
+          'returned)))
+    (assert (eq? 'flow-perform (said (lambda () (flow-get! ch)))))
+    (assert (eq? 'flow-perform (said (lambda () (flow-sleep 0.01)))))
+    (assert (fxzero? (flow-channel-getters-length ch)))
+    (flow-put! ch 'primed)
+    (assert (eq? 'primed (flow-get! ch)))
+    ;; and a run afterwards is none the worse for it
+    (assert (eq? 'ok (let ((out #f))
+                       (flow-run (lambda (workers)
+                                   (flow-sleep 0.01)
+                                   (set! out 'ok)
+                                   (flow-stop)))
+                       out)))
+    #t))
+

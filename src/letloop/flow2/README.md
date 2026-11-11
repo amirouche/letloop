@@ -434,6 +434,11 @@ the withdrawal runs on the loop, so the thread can resume before its
 losing channel and latch waits are unlinked; until then they show in
 the raw diagnostics. That is the only cancellation flow2 has.
 
+Parking takes a fiber, so it takes a run. Outside `flow-run` an event
+that is ready still performs — a `flow-get!` on a channel that was
+primed, say — and one that is not raises an error from `flow-perform`
+saying so, before anything is registered.
+
 ### Channels
 
 A flow2 channel is a buffered many-producer many-consumer queue, and
