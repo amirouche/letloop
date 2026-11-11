@@ -475,6 +475,12 @@
 ;; %idle-timeout-seconds. A connection's fiber parked in flow-read
 ;; sees the read fail and cleans up; the closed? mark keeps it from
 ;; closing the number a second time.
+;;
+;; The sweep walks a snapshot and parks on every close, so by the time
+;; it reaches a connection that one may have closed itself, and the
+;; kernel may have given its number to a new connection. The closed?
+;; mark is read again after each park for that reason, and the table
+;; entry is deleted only while it is still this connection's.
 (define (%idle-reaper server)
   (let ((idle-sweeps (quotient %idle-timeout-seconds %idle-sweep-interval))
         (connections (%server-connections server)))
@@ -484,9 +490,11 @@
       (let-values (((fds entries) (hashtable-entries connections)))
         (vector-for-each
           (lambda (fd connection)
-            (when (> (- (%server-sweeps server) (vector-ref connection 0))
-                     idle-sweeps)
-              (hashtable-delete! connections fd)
+            (when (and (not (%connection-closed? connection))
+                       (> (- (%server-sweeps server) (vector-ref connection 0))
+                          idle-sweeps))
+              (when (eq? (hashtable-ref connections fd #f) connection)
+                (hashtable-delete! connections fd))
               (vector-set! connection 1 #t)
               (flow-perform (flow-close fd))))
           fds entries))
