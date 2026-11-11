@@ -49,7 +49,8 @@
           ~check-http-server-003
           ~check-http-server-004
           ~check-http-server-005
-          ~check-http-server-006)
+          ~check-http-server-006
+          ~check-http-server-007)
 
   (import (chezscheme)
           (letloop aql shims)

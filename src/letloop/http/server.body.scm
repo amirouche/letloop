@@ -53,6 +53,20 @@
 (define %hdr-connection (string->utf8 "connection"))
 (define %hdr-content-length (string->utf8 "content-length"))
 (define %val-close (string->utf8 "close"))
+(define %hdr-transfer-encoding (string->utf8 "transfer-encoding"))
+
+;; How many of REQ's headers are named NAME, a lowercase string.
+(define %header-occurrences
+  (lambda (req name)
+    (let ((count (phr-request-header-count req)))
+      (let loop ((i 0) (found 0))
+        (if (fx=? i count)
+            found
+            (let ((header (phr-request-header-name req i)))
+              (loop (fx+ i 1)
+                    (if (and header (string-ci=? header name))
+                        (fx+ found 1)
+                        found))))))))
 
 ;; RFC 9110 IMF-fixdate for the Date header every response carries
 ;; (§6.6.1 says a server with a clock MUST send it, and the reference
@@ -204,6 +218,13 @@
 ;; (values req remainder) once the head and the whole content-length
 ;; body are buffered, (values #f #f) when more bytes are needed, and
 ;; (values 'bad-request #f) on a definite parse error.
+;;
+;; A request whose body length could be read two ways is a parse error
+;; too: any Transfer-Encoding, which this server does not implement,
+;; and more than one Content-Length. Taking one reading and carrying on
+;; is how a server ends up disagreeing with the proxy in front of it
+;; about where a request ends, and the bytes in between are then a
+;; request the proxy never saw (RFC 9112, 6.3).
 (define try-parse-http-request
   (lambda (buf out . rest)
     (let ((req-vec (if (pair? rest) (car rest) #f)))
@@ -220,9 +241,14 @@
                       (content-length (phr-request-header-ref-as-integer req %hdr-content-length))
                       (body-len (or content-length 0)))
                  ;; Content-length header present but unparsable
-                 ;; (non-digit, or fixnum overflow): bad request.
-                 (if (and (not content-length)
-                          (phr-request-header-ref/bv req %hdr-content-length))
+                 ;; (non-digit, or fixnum overflow): bad request. The
+                 ;; count is taken only when there is a Content-Length
+                 ;; at all, so a request without a body pays nothing.
+                 (if (or (and (not content-length)
+                              (phr-request-header-ref/bv req %hdr-content-length))
+                         (phr-request-header-ref/bv req %hdr-transfer-encoding)
+                         (and content-length
+                              (fx>? (%header-occurrences req "content-length") 1)))
                      (values 'bad-request #f)
                      (let ((total (fx+ consumed body-len))
                            (have (bytevector-length buf)))

@@ -106,3 +106,28 @@
                 (%dispatch-adapt (opaque '(lambda (a b c) a)))
                 #f))
       #t)))
+
+;; A request whose body length can be read two ways is refused, not
+;; resolved: chunked, which is not implemented; Content-Length with
+;; Transfer-Encoding; and two Content-Lengths. One Content-Length still
+;; parses.
+(define ~check-http-server-007
+  (lambda ()
+    (define parse
+      (lambda (text)
+        (let ((out (make-phr-out)))
+          (let-values (((req remainder)
+                        (try-parse-http-request (string->utf8 text) out)))
+            (unlock-object out)
+            req))))
+    (assert (eq? 'bad-request
+                 (parse "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n")))
+    (assert (eq? 'bad-request
+                 (parse "POST / HTTP/1.1\r\nContent-Length: 4\r\ntransfer-encoding: chunked\r\n\r\n0\r\n\r\n")))
+    (assert (eq? 'bad-request
+                 (parse "POST / HTTP/1.1\r\nContent-Length: 0\r\ncontent-length: 5\r\n\r\nhello")))
+    (assert (eq? 'bad-request
+                 (parse "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\nhello")))
+    (assert (not (symbol? (parse "POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello"))))
+    (assert (not (symbol? (parse "GET / HTTP/1.1\r\nHost: x\r\n\r\n"))))
+    #t))

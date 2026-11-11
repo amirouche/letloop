@@ -193,8 +193,12 @@ an idle connection is closed 30 to 35 seconds after it went quiet. The
 dispatch deadline (28 s) is shorter on purpose, so a slow request gets
 a 504 and not a silent reset from the reaper.
 
-**Request bodies** need `Content-Length`. Chunked request bodies
-(`Transfer-Encoding: chunked`) are not supported.
+**Request bodies** need `Content-Length`, exactly one. Chunked request
+bodies are not implemented: a request with any `Transfer-Encoding`
+header, or with more than one `Content-Length`, gets `400 Bad Request`
+and the connection closes, because a body whose length can be read two
+ways is how a server and the proxy in front of it come to disagree
+about where a request ends.
 
 **Malformed requests** get `400 Bad Request`, and the connection
 closes.
