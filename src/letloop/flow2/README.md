@@ -1490,6 +1490,23 @@ program forked itself, since flow2 cannot see such a thread exit.
 Those threads now share one accumulator, and only the threads flow2
 runs — which it does see end — have their own.
 
+The tenth pass (2026-11-11) read flow2, the ring layer and the HTTP
+server together, and its three flow2 findings were all at the seam
+with the ring: **what the ring says about itself was taken for
+something about the program.** `-ENOBUFS`, the ring out of recv
+buffers for a tick, was reported as a failed connection — 104 of 4200
+parked readers read `#f` from healthy sockets; the recv is submitted
+again now, in `flow-read` and in the ring layer's `loop-read`. The
+loop's running flag, cleared by `flow-stop`, was read as "no fiber
+here", so a full put later in that tick raised `overflow` from inside
+a run. And a perform that had to wait outside a run fell through to
+the ring's abort and died with "attempt to apply non-procedure #f"; it
+is refused by name. Forty thousand values sent across four compute
+threads over channels bounded at 1, 2 and 3, their consumers losing a
+get to a timeout some 1500 times, each arrived once. Each fix has a
+regression check; the reproducers are
+`checks/repro-flow2-tenth-pass.scm`.
+
 ## References
 
 - John Reppy, *Concurrent Programming in ML*, Cambridge University
