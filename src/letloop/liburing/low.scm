@@ -416,6 +416,7 @@
    ~check-low-002/non-suspending-fibers-run-once
    ~check-low-003/resumed-return-does-not-rerun-late-spawn
    ~check-low-004/handlerless-buffered-cqe-not-retained
+   ~check-low-005/more-readers-than-buffers-all-get-their-bytes
    )
 
   (import (chezscheme)
@@ -1992,6 +1993,7 @@
   ;; hand a stale payload to whatever reopens that number.
   (define %recv-backlog (make-eqv-hashtable))
   (define ECANCELED 125)
+  (define ENOBUFS 105)
   (define %read-timeout-seconds 5)
   (define %read-timeout-ts #f)
   (define %wait-timeout #f)
@@ -2654,31 +2656,41 @@
            (lambda (k)
              (loop-accept-block fd (lambda (client) (k client) #t)))))))
 
+  ;; -ENOBUFS is not a failed read. The buffer ring has
+  ;; %buf-ring-nentries buffers, each given back as the drain handles
+  ;; its completion, so when more recvs than that complete between two
+  ;; drains the kernel has none left for the rest -- and the bytes are
+  ;; still in the socket. The read is submitted again: by the time this
+  ;; fiber runs, the drain that saw the failure has refilled the ring.
   (define loop-read
     (lambda (fd)
-      (let* ((sqe (loop-get-sqe (loop-ring %loop)))
-             (id  (loop-alloc-id!)))
-        (io-uring-prep-recv sqe fd 0 %buf-ring-buf-size 0)
-        (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
-        (io-uring-sqe-set-buf-group sqe %buf-ring-bgid)
-        (io-uring-sqe-set-data64 sqe id)
-        (loop-fd-op-add! fd id)
-        (let ((res (loop-abort
-                     (lambda (k)
-                       (hashtable-set! (loop-handlers %loop) id k)))))
-          (loop-fd-op-remove! fd id)
-          (cond
-           ((fx<? res 0)
-            (hashtable-delete! %buf-data id)
-            #f)
-           ((fxzero? res)
-            (hashtable-delete! %buf-data id)
-            #t)
-           (else
-            (hashtable-set! %active-connections fd (jiffy-current))
-            (let ((bv (hashtable-ref %buf-data id #f)))
+      (let retry ()
+        (let* ((sqe (loop-get-sqe (loop-ring %loop)))
+               (id  (loop-alloc-id!)))
+          (io-uring-prep-recv sqe fd 0 %buf-ring-buf-size 0)
+          (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
+          (io-uring-sqe-set-buf-group sqe %buf-ring-bgid)
+          (io-uring-sqe-set-data64 sqe id)
+          (loop-fd-op-add! fd id)
+          (let ((res (loop-abort
+                       (lambda (k)
+                         (hashtable-set! (loop-handlers %loop) id k)))))
+            (loop-fd-op-remove! fd id)
+            (cond
+             ((fx=? res (fx- 0 ENOBUFS))
               (hashtable-delete! %buf-data id)
-              bv)))))))
+              (retry))
+             ((fx<? res 0)
+              (hashtable-delete! %buf-data id)
+              #f)
+             ((fxzero? res)
+              (hashtable-delete! %buf-data id)
+              #t)
+             (else
+              (hashtable-set! %active-connections fd (jiffy-current))
+              (let ((bv (hashtable-ref %buf-data id #f)))
+                (hashtable-delete! %buf-data id)
+                bv))))))))
 
   (define loop-write
     (lambda (fd bv)

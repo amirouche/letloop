@@ -140,3 +140,65 @@
            (loop-stop))))))
   (loop-run)
   (and done (fxzero? (hashtable-size %buf-data))))
+
+;; More readers parked in loop-read than the buffer ring has buffers,
+;; and a byte for every one of them before the next drain: written
+;; with plain syscalls from one fiber, so no tick runs in between. The
+;; kernel answers the surplus with -ENOBUFS, which loop-read used to
+;; return as #f, a failed read on a healthy socket with its byte still
+;; in it -- 104 of 4200.
+;;
+;; Needs two descriptors a reader; with a limit too low for that it
+;; says so and passes.
+(define ~check-low-005/more-readers-than-buffers-all-get-their-bytes
+  (lambda ()
+    (define socketpair (foreign-procedure "socketpair" (int int int u8*) int))
+    (define write2 (foreign-procedure "write" (int u8* size_t) ssize_t))
+    (define close2 (foreign-procedure "close" (int) int))
+    (define n (fx+ %buf-ring-nentries 104))
+    (define pairs
+      (let loop ((i 0) (out '()))
+        (if (fx=? i n)
+            out
+            (let ((fds (make-bytevector 8 0)))
+              ;; AF_UNIX, SOCK_STREAM
+              (if (zero? (socketpair 1 1 0 fds))
+                  (loop (fx+ i 1)
+                        (cons (cons (bytevector-s32-native-ref fds 0)
+                                    (bytevector-s32-native-ref fds 4))
+                              out))
+                  out)))))
+    (define close-pairs!
+      (lambda ()
+        (for-each (lambda (pair) (close2 (car pair)) (close2 (cdr pair)))
+                  pairs)))
+    (define bytes 0)
+    (define other 0)
+    (cond
+     ((fx<? (length pairs) n)
+      (close-pairs!)
+      (format #t "** SKIP: ~a socket pairs wanted, the descriptor limit allows ~a\n"
+              n (length pairs))
+      #t)
+     (else
+      (loop-new)
+      (for-each
+       (lambda (pair)
+         (loop-spawn
+          (lambda ()
+            (if (bytevector? (loop-read (car pair)))
+                (set! bytes (fx+ bytes 1))
+                (set! other (fx+ other 1))))))
+       pairs)
+      (loop-spawn
+       (lambda ()
+         ;; every recv is in the ring
+         (loop-sleep 0.3)
+         (for-each (lambda (pair) (write2 (cdr pair) (bytevector 120) 1))
+                   pairs)
+         (loop-sleep 0.5)
+         (loop-stop)))
+      (loop-run)
+      (close-pairs!)
+      (and (fx=? bytes n) (fxzero? other))))))
+
