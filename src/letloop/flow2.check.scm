@@ -3688,3 +3688,32 @@
         (assert (for-all bytevector? got))
         #t)))))
 
+;; Two fibers runnable in the same tick: one stops the run, the other
+;; then puts on a full channel. flow-stop clears the loop's running
+;; flag at once, and the put asked that flag whether there was a
+;; scheduler to park on: it raised overflow, the error of a put outside
+;; any run, from inside one. A put there parks and is never resumed.
+;; Reproducer: checks/repro-flow2-tenth-pass.scm.
+(define ~check-flow2-002/a-full-put-after-flow-stop-parks
+  (lambda ()
+    (define seen 'nothing)
+    (flow-run
+     (lambda (workers)
+       (let ((ch (make-flow-channel 'full 1)))
+         (flow-put! ch 'a)
+         ;; spawned first, so it runs second
+         (flow-spawn
+          (lambda ()
+            (guard (ex (#t (set! seen ex)))
+              (flow-put! ch 'b)
+              (set! seen 'returned))))
+         (flow-spawn (lambda () (flow-stop))))))
+    (assert (eq? seen 'nothing))
+    ;; outside a run the same put still raises
+    (assert (guard (ex (#t (flow-error-overflow? ex)))
+              (let ((ch (make-flow-channel 'full 1)))
+                (flow-put! ch 'a)
+                (flow-put! ch 'b)
+                #f)))
+    #t))
+

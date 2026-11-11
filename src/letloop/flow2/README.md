@@ -508,7 +508,9 @@ Parking needs a scheduler. On a fiber it parks on the loop, on a
 compute thread on its condition variable, and with neither — a bare
 `flow-put!` outside `flow-run` — a full channel raises `overflow`
 instead, because there is nothing to park on and hanging with no
-diagnosis would be worse.
+diagnosis would be worse. A fiber is a fiber until its run returns: a
+full put made after `flow-stop`, by a fiber still to run in that tick,
+parks like any other and is never resumed.
 
 The first put to park on a given channel logs one
 `(flow2 channel-full NAME BOUND)` warning through `flow-log`, re-armed

@@ -118,6 +118,7 @@
    ~check-flow2-002/waiting-costs-the-same-however-many-wait
    ~check-flow2-002/a-woken-putter-passes-the-wake-on
    ~check-flow2-002/a-fan-out-past-the-bound-gathers-every-reply
+   ~check-flow2-002/a-full-put-after-flow-stop-parks
 
    ;; 003: a raising block procedure
    ~check-flow2-003/block-raise-reaches-the-fiber
@@ -1530,9 +1531,15 @@
     (lambda (channel)
       (%channel-warn-saturated! channel)
       (if (or (%worker-current?)
-              (let ((loop (loop-current)))
-                (and loop (loop-running? loop))))
+              (loop-in-fiber?))
           (flow-perform (%flow-space channel))
+  ;;
+  ;; "A fiber" is asked of the ring layer, not of the loop's running
+  ;; flag: flow-stop clears that flag at once, and the fibers still to
+  ;; run in that tick are fibers all the same. Asked of the flag, a
+  ;; full put after a flow-stop raised overflow, and a pipeline's
+  ;; producers each logged an uncaught error on the way down. Such a
+  ;; put parks and is never resumed, as any wait a stopped run leaves.
           (raise (make-flow-error
                   'overflow
                   "flow2: channel full and no scheduler to park on"
