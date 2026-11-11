@@ -11,6 +11,19 @@
               (bytevector-copy! bv 0 out offset (bytevector-length bv))
               (loop (cdr bvs) (fx+ offset (bytevector-length bv)))))))))
 
+;; The bytevectors of the list BVS joined, TOTAL bytes in all. A list
+;; and a known length, where bytevector-append takes its pieces as
+;; arguments: a large body arrives as thousands of them.
+(define bytevector-concatenate
+  (lambda (bvs total)
+    (let ((out (make-bytevector total)))
+      (let loop ((bvs bvs) (offset 0))
+        (if (null? bvs)
+            out
+            (let ((n (bytevector-length (car bvs))))
+              (bytevector-copy! (car bvs) 0 out offset n)
+              (loop (cdr bvs) (fx+ offset n))))))))
+
 ;; The bytes of BV from START to END, as a fresh bytevector.
 (define (subbytevector bv start end)
   (let ((out (make-bytevector (fx- end start))))
@@ -227,37 +240,48 @@
 ;; request the proxy never saw (RFC 9112, 6.3).
 (define try-parse-http-request
   (lambda (buf out . rest)
-    (let ((req-vec (if (pair? rest) (car rest) #f)))
-      (if (fxzero? (bytevector-length buf))
-          (values #f #f)
-          (let ((req (if req-vec
-                         (phr-parse-request buf out req-vec)
-                         (phr-parse-request buf out))))
-            (cond
-              ((eq? req 'incomplete) (values #f #f))
-              ((not req) (values 'bad-request #f))
-              (else
-               (let* ((consumed (phr-request-bytes-consumed req))
-                      (content-length (phr-request-header-ref-as-integer req %hdr-content-length))
-                      (body-len (or content-length 0)))
-                 ;; Content-length header present but unparsable
-                 ;; (non-digit, or fixnum overflow): bad request. The
-                 ;; count is taken only when there is a Content-Length
-                 ;; at all, so a request without a body pays nothing.
-                 (if (or (and (not content-length)
-                              (phr-request-header-ref/bv req %hdr-content-length))
-                         (phr-request-header-ref/bv req %hdr-transfer-encoding)
-                         (and content-length
-                              (fx>? (%header-occurrences req "content-length") 1)))
-                     (values 'bad-request #f)
-                     (let ((total (fx+ consumed body-len))
-                           (have (bytevector-length buf)))
-                       (if (fx<? have total)
-                           (values #f #f)
-                           (let ((remainder (if (fx>=? total have)
-                                                (bytevector)
-                                                (subbytevector buf total have))))
-                             (values req remainder)))))))))))))
+    (let-values (((req remainder need)
+                  (%try-parse-http-request buf out
+                                           (if (pair? rest) (car rest) #f))))
+      (values req remainder))))
+
+;; The same, with a third value: when more bytes are needed and the
+;; head is already in, how long BUF has to be before the request is
+;; whole; #f otherwise. The caller can then read that many bytes and
+;; parse once, where parsing after every read copies and re-reads
+;; everything received so far.
+(define %try-parse-http-request
+  (lambda (buf out req-vec)
+    (if (fxzero? (bytevector-length buf))
+        (values #f #f #f)
+        (let ((req (if req-vec
+                       (phr-parse-request buf out req-vec)
+                       (phr-parse-request buf out))))
+          (cond
+            ((eq? req 'incomplete) (values #f #f #f))
+            ((not req) (values 'bad-request #f #f))
+            (else
+             (let* ((consumed (phr-request-bytes-consumed req))
+                    (content-length (phr-request-header-ref-as-integer req %hdr-content-length))
+                    (body-len (or content-length 0)))
+               ;; Content-length header present but unparsable
+               ;; (non-digit, or fixnum overflow): bad request. The
+               ;; count is taken only when there is a Content-Length
+               ;; at all, so a request without a body pays nothing.
+               (if (or (and (not content-length)
+                            (phr-request-header-ref/bv req %hdr-content-length))
+                       (phr-request-header-ref/bv req %hdr-transfer-encoding)
+                       (and content-length
+                            (fx>? (%header-occurrences req "content-length") 1)))
+                   (values 'bad-request #f #f)
+                   (let ((total (fx+ consumed body-len))
+                         (have (bytevector-length buf)))
+                     (if (fx<? have total)
+                         (values #f #f total)
+                         (let ((remainder (if (fx>=? total have)
+                                              (bytevector)
+                                              (subbytevector buf total have))))
+                           (values req remainder #f))))))))))))
 
 (define http-response-write*
   (lambda (write-proc status reason headers body-bv)
@@ -338,14 +362,33 @@
           (vector-set! connection 1 #t)
           (flow-perform (flow-close fd)))))
 
+    ;; BUF holds a request's head and the start of its body, and the
+    ;; whole request is NEED bytes long: read until that many are in
+    ;; hand, keeping the pieces, and join them once. Joined and parsed
+    ;; again after every read, a body cost its length squared: 16 MB
+    ;; took 6.9 s, twice that four times as long.
+    (define (read-body buf need)
+      (let fill ((pieces (list buf)) (have (bytevector-length buf)))
+        (if (fx>=? have need)
+            (handle-loop (bytevector-concatenate (reverse pieces) have))
+            (let ((data (connection-read)))
+              (if (bytevector? data)
+                  (fill (cons data pieces)
+                        (fx+ have (bytevector-length data)))
+                  ;; read error, or the peer gave up mid-body
+                  (cleanup))))))
+
     (define (handle-loop buf)
-      (let-values (((req remainder) (try-parse-http-request buf out req-vec)))
+      (let-values (((req remainder need)
+                    (%try-parse-http-request buf out req-vec)))
         (cond
           ((eq? req 'bad-request)
            ;; Definite parse error: best-effort 400, then close, so
            ;; garbage is not buffered and re-parsed forever.
            (write %response-400)
            (cleanup))
+          ((and (not req) need)
+           (read-body buf need))
           ((not req)
             ;; No per-read deadline: racing every read against a timer
             ;; cost ~45% of throughput (ec70498). An idle connection is

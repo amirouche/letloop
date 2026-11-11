@@ -131,3 +131,26 @@
     (assert (not (symbol? (parse "POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello"))))
     (assert (not (symbol? (parse "GET / HTTP/1.1\r\nHost: x\r\n\r\n"))))
     #t))
+
+;; A request whose head is in and whose body is not says how long it
+;; will be, so the server can read that much and parse once; before
+;; the head is in there is nothing to say. Given exactly that many
+;; bytes, it parses.
+(define ~check-http-server-008
+  (lambda ()
+    (define head "POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\n")
+    (define parse
+      (lambda (text)
+        (let ((out (make-phr-out)))
+          (let-values (((req remainder need)
+                        (%try-parse-http-request (string->utf8 text) out #f)))
+            (unlock-object out)
+            (list (and req #t) need)))))
+    (assert (equal? '(#f #f) (parse "POST / HTTP/1.1\r\nContent-Le")))
+    (assert (equal? (list #f (+ (string-length head) 10))
+                    (parse (string-append head "0123"))))
+    (assert (equal? '(#t #f) (parse (string-append head "0123456789"))))
+    (assert (equal? (string->utf8 "abcdef")
+                    (bytevector-concatenate
+                     (map string->utf8 '("ab" "" "cde" "f")) 6)))
+    #t))

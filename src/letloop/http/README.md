@@ -289,6 +289,9 @@ alone measured 249k before those.
 - **`status-code->reason` knows 12 codes.** Any other status, 503 for
   instance, goes out as `503 OK`.
 - **No compute pool.** A handler has nowhere to send CPU-bound work.
+- **No limit on request size.** A body is buffered whole, whatever its
+  `Content-Length`, and a request head that never ends is buffered
+  until it does.
 
 ## Tests
 
