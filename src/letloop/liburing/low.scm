@@ -367,6 +367,7 @@
    ;; operations (e.g. (letloop dns)): current loop, its ring, the
    ;; completion-handler table, id allocation, coroutine abort
    loop-current loop-ring loop-handlers loop-alloc-id! loop-abort
+   loop-in-fiber?
    loop-running? loop-active-connections loop-get-sqe
 
    ;; provided-buffer-ring accessors, for libraries (e.g. (letloop
@@ -2160,6 +2161,15 @@
          (let ((prompt loop-prompt-current))
            (set! loop-prompt-current #f)
            (apply prompt (cons loop-prompt-singleton (cons k args))))))))
+
+  ;; #t while the caller runs inside a fiber, where loop-abort has a
+  ;; prompt to abort to. Anywhere else -- no loop, between runs, the
+  ;; scheduler's own stack -- loop-abort applies #f, and the caller is
+  ;; told only that. For a library to ask before it parks, so that it
+  ;; can say what was wrong in its own terms.
+  (define loop-in-fiber?
+    (lambda ()
+      (and loop-prompt-current #t)))
 
   ;; The catch-all guard keeps a fiber's crash from killing the whole
   ;; scheduler, but swallowing it *silently* turns any unguarded-fiber
