@@ -558,11 +558,22 @@
     (application)))
 
 
+;; How long the accept loop waits after an accept that failed.
+(define %accept-retry-seconds 0.1)
+
 ;; Accept until STOP fires, one fiber per connection. Then close the
 ;; listener, so a later server on the same port (SO_REUSEPORT) does
 ;; not share it with a socket nobody accepts on, and end the run.
+;;
+;; An accept fails when the process is out of file descriptors, and
+;; goes on failing until a connection closes: the kernel refuses the
+;; client at the head of the queue again as soon as the accept is
+;; re-armed. So a failure waits before the next try -- retried at once
+;; it took a whole core to do nothing -- and is logged, once for each
+;; run of failures, as (http accept-failed). The wait is raced against
+;; STOP, so a shutdown is not kept waiting.
 (define (%accept-loop server listen-fd stop app-state context dispatch)
-  (let loop ()
+  (let loop ((failing? #f))
     (let ((client (guard (ex (else #f))
                     (flow-perform
                      (flow-choice (flow-accept listen-fd)
@@ -572,14 +583,20 @@
        ((eq? client 'stop)
         (flow-perform (flow-close listen-fd))
         (flow-stop))
+       (client
+        (let ((peer-ip (flow-peer-address client)))
+          (flow-spawn
+           (lambda ()
+             (handle-connection server app-state context dispatch
+                                peer-ip client))))
+        (loop #f))
        (else
-        (when client
-          (let ((peer-ip (flow-peer-address client)))
-            (flow-spawn
-             (lambda ()
-               (handle-connection server app-state context dispatch
-                                  peer-ip client)))))
-        (loop))))))
+        (unless failing?
+          (flow-log '(http accept-failed)))
+        (flow-perform
+         (flow-choice (flow-latch-wait stop)
+                      (flow-timeout %accept-retry-seconds)))
+        (loop #t))))))
 
 (define transparent**
   (lambda (port-number bind-address application context dispatch)

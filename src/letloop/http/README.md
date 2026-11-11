@@ -207,6 +207,10 @@ closes.
 out with the headers `dispatch` produced, `Content-Length` included,
 and no body.
 
+**Out of file descriptors**, the server stops accepting and tries
+again every 100 ms until a connection closes. The first failed accept
+of each such episode is logged as `(http accept-failed)`.
+
 ## Errors and logging
 
 The server logs through flow2's log. Unless the program has taken the
