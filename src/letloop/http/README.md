@@ -189,7 +189,10 @@ after it.
 
 **Idle connections** are reaped. A sweep every 5 seconds closes any
 connection with no read or write activity in the last 30 seconds, so
-an idle connection is closed 30 to 35 seconds after it went quiet. The
+an idle connection is closed 30 to 35 seconds after it went quiet.
+Activity is bytes moving: a response that takes minutes to deliver to
+a slow client is not idle while the client keeps reading, and one
+whose client has stopped reading is. The
 dispatch deadline (28 s) is shorter on purpose, so a slow request gets
 a 504 and not a silent reset from the reaper.
 

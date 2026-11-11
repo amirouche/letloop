@@ -304,11 +304,26 @@
 
     ;; #f when the write failed or the reaper already closed the fd: a
     ;; closed number may have been reissued to another connection.
+    ;;
+    ;; One send at a time rather than flow-write-all!, so that every
+    ;; send the kernel takes counts as activity. Noted only once the
+    ;; whole response had gone, a body that takes longer than the idle
+    ;; timeout to deliver looked idle throughout, and the reaper cut it
+    ;; off with the client still reading: a 48 MB response read at
+    ;; 1 MB/s ended after 33 s and 31 MB. A client that stops reading
+    ;; completes no send, and is still reaped.
     (define (write bv)
-      (and (not (%connection-closed? connection))
-           (let ((ok? (flow-write-all! fd bv)))
-             (when ok? (%connection-touch! server connection))
-             ok?)))
+      (let ((size (bytevector-length bv)))
+        (let loop ((start 0))
+          (cond
+           ((%connection-closed? connection) #f)
+           ((fx=? start size) #t)
+           (else
+            (let ((n (flow-perform (flow-write fd bv start))))
+              (and n
+                   (begin
+                     (%connection-touch! server connection)
+                     (loop (fx+ start n))))))))))
 
     ;; Idempotent: also called from the guard below when the request
     ;; path raises after the normal-path cleanup already ran.
