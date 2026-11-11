@@ -154,3 +154,85 @@
                     (bytevector-concatenate
                      (map string->utf8 '("ab" "" "cde" "f")) 6)))
     #t))
+
+;; One connection, over a socket pair, served by handle-connection as
+;; the accept loop would: the request goes in with a plain write, and
+;; the reply is read back by a fiber. Returns the reply as a string,
+;; "" when the server closed without one, and the log entries the run
+;; left.
+(define %check-serve-one
+  (lambda (context dispatch request)
+    (define socketpair (foreign-procedure "socketpair" (int int int u8*) int))
+    (define write2 (foreign-procedure "write" (int u8* size_t) ssize_t))
+    (define fds (make-bytevector 8 0))
+    (define reply "")
+    (flow-log-drain!)
+    ;; AF_UNIX, SOCK_STREAM
+    (assert (zero? (socketpair 1 1 0 fds)))
+    (let ((server-end (bytevector-s32-native-ref fds 0))
+          (client-end (bytevector-s32-native-ref fds 4))
+          (bytes (string->utf8 request)))
+      (flow-run
+       (lambda (workers)
+         (flow-spawn
+          (lambda ()
+            (handle-connection (make-%server) #f context
+                               (%dispatch-adapt dispatch)
+                               "peer" server-end)))
+         (write2 client-end bytes (bytevector-length bytes))
+         (let ((data (flow-perform
+                      (flow-choice (flow-read client-end)
+                                   (flow-timeout 2)))))
+           (when (bytevector? data)
+             (set! reply (utf8->string data))))
+         (flow-perform (flow-close client-end))
+         ;; a tick for the connection fiber to finish dying in
+         (flow-sleep 0.05)
+         (flow-stop))))
+    (values reply (map cdr (flow-log-drain!)))))
+
+(define %check-prefix?
+  (lambda (prefix string)
+    (and (fx>=? (string-length string) (string-length prefix))
+         (string=? prefix (substring string 0 (string-length prefix))))))
+
+;; A DISPATCH that raises: the client gets a 500 with no body and
+;; nothing of the condition in it, and the log says which request and
+;; why. It used to be an empty reply and an empty log.
+(define ~check-http-server-009
+  (lambda ()
+    (let-values (((reply log)
+                  (%check-serve-one
+                   (lambda (application peer req) peer)
+                   (lambda (application state method path params req)
+                     (error 'dispatch "boom, with a secret"))
+                   "GET /a/b?token=hidden HTTP/1.1\r\nHost: x\r\n\r\n")))
+      (assert (%check-prefix? "HTTP/1.1 500 Internal Server Error\r\n" reply))
+      (assert (string=? reply (utf8->string %response-500)))
+      (let ((entry (find (lambda (entry)
+                           (and (pair? entry) (eq? (car entry) 'http)))
+                         log)))
+        (assert entry)
+        (assert (equal? (list-head entry 4)
+                        '(http dispatch-raised GET ("a" "b"))))
+        (assert (string? (list-ref entry 4))))
+      #t)))
+
+;; A raise anywhere else in the connection fiber -- here CONTEXT --
+;; closes the connection and reaches flow2's log as an uncaught fiber,
+;; as the README says. The connection's guard used to stop it.
+(define ~check-http-server-010
+  (lambda ()
+    (let-values (((reply log)
+                  (%check-serve-one
+                   (lambda (application peer req) (error 'context "no state"))
+                   (lambda (application state method path params req)
+                     (values 200 (response 'text "ok") '()))
+                   "GET / HTTP/1.1\r\nHost: x\r\n\r\n")))
+      (assert (string=? reply ""))
+      (assert (find (lambda (entry)
+                      (and (pair? entry)
+                           (equal? (list-head entry 3) '(flow2 uncaught fiber))))
+                    log))
+      #t)))
+

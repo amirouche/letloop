@@ -124,6 +124,22 @@
   (string->utf8
    "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"))
 
+;; Canned response for a request whose DISPATCH raised. No body: what
+;; went wrong is the operator's to read, in the log, and not the
+;; client's.
+(define %response-500
+  (string->utf8
+   "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"))
+
+;; What was raised, as something a log line can hold: a condition
+;; writes as #<condition> and says nothing.
+(define %raised->datum
+  (lambda (ex)
+    (if (condition? ex)
+        (call-with-string-output-port
+         (lambda (port) (display-condition ex port)))
+        ex)))
+
 ;; Canned response for a request DISPATCH did not finish within
 ;; %dispatch-timeout-seconds. See the request-context/handle-connection
 ;; comments below for the full mechanism.
@@ -500,9 +516,16 @@
                                                   remainder))
                                  (cleanup))))
                           ((and (pair? outcome) (eq? (car outcome) 'dispatch-raised))
+                           ;; A real 500, and a log entry that says
+                           ;; which request: the client used to get an
+                           ;; empty reply and the operator nothing. PATH
+                           ;; is the segments DISPATCH was given, so a
+                           ;; query string is not copied into the log.
                            (request-context-cancel! rctx)
-                           (cleanup)
-                           (raise (cdr outcome)))
+                           (flow-log (list 'http 'dispatch-raised method path
+                                           (%raised->datum (cdr outcome))))
+                           (write %response-500)
+                           (cleanup))
                           ((eq? outcome (void))
                            ;; flow-timeout won: DISPATCH is taking too
                            ;; long. A real 504, not a bare reset.
@@ -522,7 +545,13 @@
     ;; unpinning OUT while it is still in use. GUARD only fires on
     ;; raise, so suspending and resuming across it is safe; without it
     ;; a raise would leak the GC-pinned OUT and the fd.
-    (guard (ex (else (cleanup)))
+    ;;
+    ;; The raise goes on once the connection is cleaned up, to end the
+    ;; fiber and be logged by flow2 as (flow2 uncaught fiber ...).
+    ;; Stopped here, as it used to be, a raising CONTEXT or a DISPATCH
+    ;; that returned the wrong shape closed its connection and left no
+    ;; trace anywhere.
+    (guard (ex (else (cleanup) (raise ex)))
       (handle-loop (bytevector)))))
 
 ;; Idle connection reaping

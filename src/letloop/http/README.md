@@ -222,9 +222,12 @@ flow2's *Diagnostics*). A connection fiber that dies on an error
 nothing caught appears as `(flow2 uncaught fiber CONDITION)`, and the
 server carries on.
 
-A **raising `dispatch`** closes its connection without a response, and
-nothing is logged; see [Known issues](#known-issues). Catch inside the
-handler and return a 500 yourself:
+A **raising `dispatch`** gets `500 Internal Server Error` with no
+body, and the connection closes. Nothing about the error goes to the
+client. It is logged as
+`(http dispatch-raised METHOD PATH CONDITION)`, where `PATH` is the
+list of segments `dispatch` was given, so a query string is not copied
+into the log. To send a body of your own, catch inside the handler:
 
 ```scheme
 (define (dispatch application state method path params req)
@@ -284,8 +287,6 @@ alone measured 249k before those.
 
 ## Known issues
 
-- **A raising `dispatch` is silent.** The connection closes with no
-  response and no log entry. Guard in the handler, as shown above.
 - **`status-code->reason` knows 12 codes.** Any other status, 503 for
   instance, goes out as `503 OK`.
 - **No compute pool.** A handler has nowhere to send CPU-bound work.
