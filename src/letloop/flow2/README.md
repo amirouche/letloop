@@ -644,6 +644,12 @@ The losing recv is left in flight rather than cancelled, and the next
 read adopts it; a completion nobody is waiting for goes on a per-fd
 backlog. `flow-read-pending?` reports either.
 
+`#f` is about the connection, never about the loop. The ring lends
+recv 4096 buffers and takes each back as its completion is handled, so
+a tick in which more reads than that complete leaves the kernel
+without one for the rest; those reads are submitted again and complete
+a tick later, with their bytes.
+
 #### `(flow-read-pending? fd)`
 
 `#t` when a `flow-read` on `FD` would not start a fresh recv: a payload

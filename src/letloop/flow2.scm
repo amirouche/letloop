@@ -155,6 +155,7 @@
    ~check-flow2-006/an-old-listeners-last-word-spares-the-new-one
    ~check-flow2-006/reads-after-a-lost-race-keep-stream-order
    ~check-flow2-006/a-failure-losing-a-race-is-not-an-eof
+   ~check-flow2-006/more-readers-than-recv-buffers-all-get-their-bytes
 
    ;; 009: file I/O
    ~check-flow2-009/a-closed-fd-does-not-hand-on-a-stash
@@ -2115,7 +2116,9 @@
   (define-record-type* <flow2-recv>
     (%make-flow-recv id owner closes)
     %flow-recv?
-    (id     %flow-recv-id)
+    ;; Mutable: a recv the kernel had no buffer for is submitted again
+    ;; under a new id; see %flow-recv-complete!.
+    (id     %flow-recv-id %flow-recv-id!)
     (owner  %flow-recv-owner %flow-recv-owner!)
     ;; The fd's close count when this recv was submitted; see
     ;; %flow-fd-closes.
@@ -2211,7 +2214,34 @@
         (%flow-recv-owner! r #f)
         (hashtable-set! %flow-recv-orphans fd r))))
 
+  ;; -ENOBUFS says nothing about the connection. The ring lends recv a
+  ;; fixed number of buffers and takes each back as the loop drains its
+  ;; completion, so when more recvs complete between two drains than
+  ;; there are buffers -- a tick that ran long, on a server holding more
+  ;; connections than that -- the kernel has none left for the rest. The
+  ;; bytes are still in the socket. Reported as a failure, a healthy
+  ;; connection was closed for having been busy at the wrong moment.
+  ;;
+  ;; So the recv is submitted again, for the same reader or as the same
+  ;; orphan: by the time the drain reaches this completion, every one
+  ;; ahead of it has given its buffer back. A recv that is no longer
+  ;; its fd's is not retried, and one whose resubmission raises fails
+  ;; as it used to.
+  (define %flow-recv-retry?
+    (lambda (fd r res)
+      (and (fx=? res (fx- 0 %flow-enobufs))
+           (%flow-recv-current? fd r)
+           (guard (ex (#t #f))
+             (loop-fd-op-remove! fd (%flow-recv-id r))
+             (%flow-recv-prep! fd r)
+             #t))))
+
   (define %flow-recv-complete!
+    (lambda (fd r res)
+      (unless (%flow-recv-retry? fd r res)
+        (%flow-recv-settle! fd r res))))
+
+  (define %flow-recv-settle!
     (lambda (fd r res)
       (loop-fd-op-remove! fd (%flow-recv-id r))
       (when (eq? (hashtable-ref %flow-recv-orphans fd #f) r)
@@ -2239,6 +2269,7 @@
             (loop-recv-backlog-put! fd bv)))))))
 
   (define %flow-ecanceled 125)
+  (define %flow-enobufs 105)
 
   ;; On a backlog, a failed recv nobody took; see %flow-recv-complete!.
   (define %flow-recv-failed (list 'recv-failed))
@@ -2288,10 +2319,18 @@
 
   (define %flow-recv-submit!
     (lambda (fd)
+      (let ((r (%make-flow-recv #f #f (%flow-fd-submit-count fd))))
+        (%flow-recv-prep! fd r)
+        r)))
+
+  ;; Put R in the ring, under a new id. Called once for each recv, and
+  ;; again each time the kernel had no buffer for it.
+  (define %flow-recv-prep!
+    (lambda (fd r)
       (let* ((ring (loop-ring (loop-current)))
              (id   (loop-alloc-id!))
-             (sqe  (loop-get-sqe ring))
-             (r    (%make-flow-recv id #f (%flow-fd-submit-count fd))))
+             (sqe  (loop-get-sqe ring)))
+        (%flow-recv-id! r id)
         (io-uring-prep-recv sqe fd 0 (loop-buf-ring-buf-size) 0)
         (io-uring-sqe-set-flags sqe IOSQE-BUFFER-SELECT)
         (io-uring-sqe-set-buf-group sqe (loop-buf-ring-bgid))
@@ -2311,8 +2350,7 @@
         ;; CQE releases the pin.
         (loop-fd-op-add! fd id)
         (hashtable-set! (loop-handlers (loop-current)) id
-                        (lambda (res) (%flow-recv-complete! fd r res)))
-        r)))
+                        (lambda (res) (%flow-recv-complete! fd r res))))))
 
   ;; One send, reporting what the kernel actually took: a positive
   ;; fixnum, or #f on failure. START defaults to 0 and lets a caller

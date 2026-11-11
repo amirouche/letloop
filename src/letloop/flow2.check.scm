@@ -3627,3 +3627,64 @@
     (assert (eq? old #f))
     (assert (fixnum? got))
     #t))
+
+;; The ring lends recv 4096 buffers and takes each back when the loop
+;; drains its completion. With more readers than that parked, and a
+;; byte arriving for every one of them before the next drain -- written
+;; here with plain syscalls, so no tick runs in between -- the kernel
+;; answered the surplus with -ENOBUFS, and flow-read reported each as a
+;; failed connection: 104 of 4200 readers read #f from a healthy socket
+;; with its byte still in it. Reproducer:
+;; checks/repro-flow2-tenth-pass.scm.
+;;
+;; Needs two descriptors a reader; with a limit too low for that it
+;; says so and passes.
+(define ~check-flow2-006/more-readers-than-recv-buffers-all-get-their-bytes
+  (lambda ()
+    (define n 4200)
+    (define pairs
+      (let loop ((i 0) (out '()))
+        (if (fx=? i n)
+            out
+            (let ((fds (make-bytevector 8 0)))
+              (if (zero? (%flow2-check-socketpair 1 1 0 fds))
+                  (loop (fx+ i 1)
+                        (cons (cons (bytevector-s32-native-ref fds 0)
+                                    (bytevector-s32-native-ref fds 4))
+                              out))
+                  out)))))
+    (define close-pairs!
+      (lambda ()
+        (for-each (lambda (pair)
+                    (%flow2-check-close (car pair))
+                    (%flow2-check-close (cdr pair)))
+                  pairs)))
+    (cond
+     ((fx<? (length pairs) n)
+      (close-pairs!)
+      (format #t "** SKIP: ~a socket pairs wanted, the descriptor limit allows ~a\n"
+              n (length pairs))
+      #t)
+     (else
+      (let ((got '()))
+        (flow-run
+         (lambda (workers)
+           (let ((results (make-flow-channel 'results #f)))
+             (for-each
+              (lambda (pair)
+                (flow-spawn
+                 (lambda ()
+                   (flow-put! results (flow-perform (flow-read (car pair)))))))
+              pairs)
+             ;; every recv is in the ring
+             (flow-sleep 0.3)
+             (for-each (lambda (pair)
+                         (%flow2-check-write2 (cdr pair) (bytevector 120) 1))
+                       pairs)
+             (set! got (flow2-check-gather results n 5))
+             (flow-stop))))
+        (close-pairs!)
+        (assert (fx=? (length got) n))
+        (assert (for-all bytevector? got))
+        #t)))))
+
