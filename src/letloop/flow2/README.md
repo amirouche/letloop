@@ -66,7 +66,8 @@ symbol — not R6RS conditions.
 
 ## Issues
 
-No known defect is open.
+No defect that has been reproduced is open. Four suspicions from the
+tenth pass are; see the end of History.
 
 One behaviour is left unspecified on purpose: the order in which
 fibers made runnable in the same tick run (see `flow-spawn`).
@@ -520,7 +521,11 @@ parks like any other and is never resumed.
 The first put to park on a given channel logs one
 `(flow2 channel-full NAME BOUND)` warning through `flow-log`, re-armed
 once the queue drains to half the bound. One line per saturation
-episode, not per blocked put.
+episode, not per blocked put. On a bound of 1, 2 or 3 half the bound
+is next to nothing, so a channel that runs full as a matter of course
+starts an episode every few items: three such channels logged twenty
+thousand lines in two seconds. Take the log over, or raise the bound,
+where a channel is meant to run full.
 
 Callable from the loop thread or from a **compute** thread — see
 [Threads](#threads). Put is a procedure, not an event — see Rationale.
@@ -1506,6 +1511,22 @@ threads over channels bounded at 1, 2 and 3, their consumers losing a
 get to a timeout some 1500 times, each arrived once. Each fix has a
 regression check; the reproducers are
 `checks/repro-flow2-tenth-pass.scm`.
+
+The HTTP server's share of that pass, and of the eighth's, is in its
+own README: a reaper that closed connections it had not checked, three
+ways to make the server and a proxy disagree about where a request
+ends, an accept loop that spun when the process ran out of
+descriptors, and a raising handler that left no trace.
+
+Four things were read in the ring layer that day and not reproduced,
+and are open. A straggler's thread check and the put that follows it
+are not one step, so a put could pass the check between runs and
+deliver to a fiber of the next run through its own dead mailbox. A
+client declined on a multishot accept's last completion is closed
+rather than kept for the next accept. `loop-run` ends the run on any
+raise that escapes a tick, and says nothing. And a listener nobody is
+accepting on goes on accepting: the kernel hands the ring a client for
+every connection, and they wait in a list with no bound.
 
 ## References
 
