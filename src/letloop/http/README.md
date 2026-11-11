@@ -203,6 +203,10 @@ about where a request ends.
 **Malformed requests** get `400 Bad Request`, and the connection
 closes.
 
+**`HEAD`** is dispatched like any other method, and the response goes
+out with the headers `dispatch` produced, `Content-Length` included,
+and no body.
+
 ## Errors and logging
 
 The server logs through flow2's log. Unless the program has taken the

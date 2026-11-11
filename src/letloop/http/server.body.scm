@@ -425,7 +425,17 @@
                                      (if (and (pair? chunks) (null? (cdr chunks)))
                                          (car chunks)
                                          (apply bytevector-append (reverse chunks))))))
-                             (if (and (write response-bv)
+                             ;; A HEAD response is the head of the GET's,
+                             ;; Content-Length included, and stops there
+                             ;; (RFC 9110, 9.3.2). The body is the tail of
+                             ;; RESPONSE-BV, so it is cut rather than never
+                             ;; rendered: the headers must not differ.
+                             (if (and (write (if (eq? method 'HEAD)
+                                                 (subbytevector
+                                                  response-bv 0
+                                                  (fx- (bytevector-length response-bv)
+                                                       (bytevector-length body-bv)))
+                                                 response-bv))
                                       (not (phr-request-header-value-ci=? req %hdr-connection %val-close)))
                                  (handle-loop (if extra
                                                   (bytevector-append remainder extra)
