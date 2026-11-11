@@ -192,16 +192,17 @@ connection with no read or write activity in the last 30 seconds, so
 an idle connection is closed 30 to 35 seconds after it went quiet.
 Activity is bytes moving: a response that takes minutes to deliver to
 a slow client is not idle while the client keeps reading, and one
-whose client has stopped reading is. The
-dispatch deadline (28 s) is shorter on purpose, so a slow request gets
-a 504 and not a silent reset from the reaper.
+whose client has stopped reading is. The dispatch deadline (28 s) is
+shorter on purpose, so a slow request gets a 504 and not a silent
+reset from the reaper.
 
 **Request bodies** need `Content-Length`, exactly one. Chunked request
 bodies are not implemented: a request with any `Transfer-Encoding`
 header, or with more than one `Content-Length`, gets `400 Bad Request`
 and the connection closes, because a body whose length can be read two
 ways is how a server and the proxy in front of it come to disagree
-about where a request ends.
+about where a request ends. A body is read whole before `dispatch`
+runs, at a cost linear in its length.
 
 **Malformed requests** get `400 Bad Request`, and the connection
 closes.
@@ -220,7 +221,16 @@ The server logs through flow2's log. Unless the program has taken the
 log over, that is stderr, one `(TIMESTAMP . ENTRY)` per line (see
 flow2's *Diagnostics*). A connection fiber that dies on an error
 nothing caught appears as `(flow2 uncaught fiber CONDITION)`, and the
-server carries on.
+server carries on. A raising `context` is one such error, and so is a
+`dispatch` that returns something other than the three values: the
+connection closes with no response.
+
+The server's own entries:
+
+| entry | when |
+|---|---|
+| `(http dispatch-raised METHOD PATH CONDITION)` | `dispatch` raised; the client got a 500 |
+| `(http accept-failed)` | an accept failed, once for each run of failures |
 
 A **raising `dispatch`** gets `500 Internal Server Error` with no
 body, and the connection closes. Nothing about the error goes to the
@@ -257,8 +267,8 @@ Absolute numbers depend on the machine. To compare two versions, build
 both and run them back to back on the same machine.
 
 The server is written against flow2's exports alone: it reads with
-`flow-read`, writes with `flow-write-all!`, closes with `flow-close`,
-and listens with `flow-listen`. Nothing reaches under flow2 into the
+`flow-read`, writes with `flow-write`, closes with `flow-close`, and
+listens with `flow-listen`. Nothing reaches under flow2 into the
 ring layer. That costs throughput on this benchmark, whose handler
 answers without waiting. Before, the server read with the ring layer's
 `loop-read`, and let `dispatch` run before arming the deadline and the
@@ -292,13 +302,32 @@ alone measured 249k before those.
 - **No compute pool.** A handler has nowhere to send CPU-bound work.
 - **No limit on request size.** A body is buffered whole, whatever its
   `Content-Length`, and a request head that never ends is buffered
-  until it does.
+  until it does, parsed again from its first byte after every read.
+- **An HTTP/1.0 request is answered like an HTTP/1.1 one.** The
+  connection stays open afterwards unless the request says
+  `Connection: close`.
+- **A request target in absolute form is read as a path.**
+  `GET http://host/a/b` reaches `dispatch` with the path
+  `("http:" "" "host" "a" "b")`.
+- **The numbers under Performance predate the changes of 2026-11-11**
+  and have not been measured again.
 
 ## Tests
 
 | what | how |
 |---|---|
-| unit checks | `letloop check src/ src/letloop/http/server.scm` |
+| unit checks, two of them serving a connection over a socket pair | `letloop check src/ src/letloop/http/server.scm` |
 | half-close and pipelining, end to end | `./venv $(pwd)/local/ bash checks/check-http-keepalive-semantics.sh` |
 | the example app, end to end (installed copy) | `checks/check-transparenturing.sh` |
 | load and leaks | `checks/stress-transparenturing.sh` |
+
+Three scripts from the review of 2026-11-11 run against a live
+`letloop http serve ./src/ ./checks/ ./checks/repro-http-tenth-pass-lib.scm`.
+They print what they saw; the last two exit non-zero or show the
+defect in what they print, and none is part of `make check`.
+
+| what | how |
+|---|---|
+| request framing, `HEAD`, odd targets: one raw request each | `python3 checks/repro-http-tenth-pass-probe.py PORT` |
+| the idle reaper against connections that close themselves mid-sweep (45 s, wants `ulimit -n 100000`) | `python3 checks/repro-http-tenth-pass-reaper.py PORT 6000` |
+| the accept loop out of file descriptors (start the server under `ulimit -n 64`) | `python3 checks/repro-http-tenth-pass-emfile.py PORT SERVER_PID` |
