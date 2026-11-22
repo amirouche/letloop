@@ -2966,72 +2966,83 @@
   ;; ASCII helpers shared by every later layer.  HTML markup matching is
   ;; ASCII case-insensitive, never Unicode case-insensitive.
 
-  (define (char-ascii-alphabetic? c)
-    (or (and (char<=? #\a c) (char<=? c #\z))
-        (and (char<=? #\A c) (char<=? c #\Z))))
+  (define char-ascii-alphabetic?
+    (lambda (c)
+      (or (and (char<=? #\a c) (char<=? c #\z))
+          (and (char<=? #\A c) (char<=? c #\Z)))))
 
-  (define (char-ascii-digit? c)
-    (and (char<=? #\0 c) (char<=? c #\9)))
+  (define char-ascii-digit?
+    (lambda (c)
+      (and (char<=? #\0 c) (char<=? c #\9))))
 
-  (define (char-ascii-alphanumeric? c)
-    (or (char-ascii-alphabetic? c) (char-ascii-digit? c)))
+  (define char-ascii-alphanumeric?
+    (lambda (c)
+      (or (char-ascii-alphabetic? c) (char-ascii-digit? c))))
 
-  (define (char-ascii-hexadecimal-digit? c)
-    (or (char-ascii-digit? c)
-        (and (char<=? #\a c) (char<=? c #\f))
-        (and (char<=? #\A c) (char<=? c #\F))))
+  (define char-ascii-hexadecimal-digit?
+    (lambda (c)
+      (or (char-ascii-digit? c)
+          (and (char<=? #\a c) (char<=? c #\f))
+          (and (char<=? #\A c) (char<=? c #\F)))))
 
-  (define (char-ascii-lowercase c)
-    (if (and (char<=? #\A c) (char<=? c #\Z))
-      (integer->char (fx+ (char->integer c) 32))
-      c))
+  (define char-ascii-lowercase
+    (lambda (c)
+      (if (and (char<=? #\A c) (char<=? c #\Z))
+        (integer->char (fx+ (char->integer c) 32))
+        c)))
 
-  (define (string-ascii-lowercase text)
-    (let* ((size (string-length text))
-           (result (make-string size)))
-      (let loop ((i 0))
-        (if (fx= i size)
-          result
-          (begin
-            (string-set! result i (char-ascii-lowercase (string-ref text i)))
-            (loop (fx+ i 1)))))))
+  (define string-ascii-lowercase
+    (lambda (text)
+      (let* ((size (string-length text))
+             (result (make-string size)))
+        (let loop ((i 0))
+          (if (fx= i size)
+            result
+            (begin
+              (string-set! result i (char-ascii-lowercase (string-ref text i)))
+              (loop (fx+ i 1))))))))
 
-  (define (string-ascii-equal? a b)
-    (and (fx= (string-length a) (string-length b))
-         (let loop ((i 0))
-           (or (fx= i (string-length a))
-               (and (char=? (char-ascii-lowercase (string-ref a i))
-                            (char-ascii-lowercase (string-ref b i)))
-                    (loop (fx+ i 1)))))))
+  (define string-ascii-equal?
+    (lambda (a b)
+      (and (fx= (string-length a) (string-length b))
+           (let loop ((i 0))
+             (or (fx= i (string-length a))
+                 (and (char=? (char-ascii-lowercase (string-ref a i))
+                              (char-ascii-lowercase (string-ref b i)))
+                      (loop (fx+ i 1))))))))
 
-  (define (string-ascii-prefix? prefix text)
-    (and (fx<= (string-length prefix) (string-length text))
-         (let loop ((i 0))
-           (or (fx= i (string-length prefix))
-               (and (char=? (char-ascii-lowercase (string-ref prefix i))
-                            (char-ascii-lowercase (string-ref text i)))
-                    (loop (fx+ i 1)))))))
+  (define string-ascii-prefix?
+    (lambda (prefix text)
+      (and (fx<= (string-length prefix) (string-length text))
+           (let loop ((i 0))
+             (or (fx= i (string-length prefix))
+                 (and (char=? (char-ascii-lowercase (string-ref prefix i))
+                              (char-ascii-lowercase (string-ref text i)))
+                      (loop (fx+ i 1))))))))
 
-  (define (string-char-find text c start end)
-    (let loop ((i start))
-      (cond
-        ((fx>= i end) #f)
-        ((char=? (string-ref text i) c) i)
-        (else (loop (fx+ i 1))))))
+  (define string-char-find
+    (lambda (text c start end)
+      (let loop ((i start))
+        (cond
+          ((fx>= i end) #f)
+          ((char=? (string-ref text i) c) i)
+          (else (loop (fx+ i 1)))))))
 
   ;; Table access
 
-  (define (vector-pairs->hashtable entries)
-    (let ((table (make-hashtable string-hash string=?)))
-      (vector-for-each
-        (lambda (entry) (hashtable-set! table (car entry) (cdr entry)))
-        entries)
-      table))
+  (define vector-pairs->hashtable
+    (lambda (entries)
+      (let ((table (make-hashtable string-hash string=?)))
+        (vector-for-each
+          (lambda (entry) (hashtable-set! table (car entry) (cdr entry)))
+          entries)
+        table)))
 
-  (define (vector-strings->hashtable entries)
-    (let ((table (make-hashtable string-hash string=?)))
-      (vector-for-each (lambda (entry) (hashtable-set! table entry #t)) entries)
-      table))
+  (define vector-strings->hashtable
+    (lambda (entries)
+      (let ((table (make-hashtable string-hash string=?)))
+        (vector-for-each (lambda (entry) (hashtable-set! table entry #t)) entries)
+        table)))
 
   (define html-entity-named-table
     (vector-pairs->hashtable html-entity-named-entries))
@@ -3047,12 +3058,13 @@
         html-entity-numeric-replacement-entries)
       table))
 
-  (define (vector-maximum-string-length entries selector)
-    (let loop ((i 0) (best 0))
-      (if (fx= i (vector-length entries))
-        best
-        (loop (fx+ i 1)
-              (fxmax best (string-length (selector (vector-ref entries i))))))))
+  (define vector-maximum-string-length
+    (lambda (entries selector)
+      (let loop ((i 0) (best 0))
+        (if (fx= i (vector-length entries))
+          best
+          (loop (fx+ i 1)
+                (fxmax best (string-length (selector (vector-ref entries i)))))))))
 
   (define html-entity-named-maximum-length
     (vector-maximum-string-length html-entity-named-entries car))
@@ -3060,162 +3072,170 @@
   (define html-entity-legacy-maximum-length
     (vector-maximum-string-length html-entity-legacy-names values))
 
-  (define (html-entity-named-ref name)
-    (hashtable-ref html-entity-named-table name #f))
+  (define html-entity-named-ref
+    (lambda (name)
+      (hashtable-ref html-entity-named-table name #f)))
 
-  (define (html-entity-legacy-name? name)
-    (hashtable-ref html-entity-legacy-table name #f))
+  (define html-entity-legacy-name?
+    (lambda (name)
+      (hashtable-ref html-entity-legacy-table name #f)))
 
   ;; Numeric character references
 
-  (define (string-leading-zeros-strip text)
-    (let ((size (string-length text)))
-      (let loop ((i 0))
-        (cond
-          ((fx= i size) "0")
-          ((char=? (string-ref text i) #\0) (loop (fx+ i 1)))
-          (else (substring text i size))))))
-
-  (define (html-entity-numeric-decode digits hexadecimal?)
-    (let ((stripped (string-leading-zeros-strip digits)))
-      ;; A reference this long already exceeds the Unicode range; do not
-      ;; convert an attacker-controlled digit run to a bignum.
-      (if (fx> (string-length stripped) 16)
-        replacement-character-string
-        (let ((codepoint (string->number stripped (if hexadecimal? 16 10))))
+  (define string-leading-zeros-strip
+    (lambda (text)
+      (let ((size (string-length text)))
+        (let loop ((i 0))
           (cond
-            ((not codepoint) replacement-character-string)
-            ((> codepoint #x10FFFF) replacement-character-string)
-            ((and (>= codepoint #xD800) (<= codepoint #xDFFF))
-             replacement-character-string)
-            (else
-             (or (hashtable-ref html-entity-numeric-replacement-table codepoint #f)
-                 (string (integer->char codepoint)))))))))
+            ((fx= i size) "0")
+            ((char=? (string-ref text i) #\0) (loop (fx+ i 1)))
+            (else (substring text i size)))))))
+
+  (define html-entity-numeric-decode
+    (lambda (digits hexadecimal?)
+      (let ((stripped (string-leading-zeros-strip digits)))
+        ;; A reference this long already exceeds the Unicode range; do not
+        ;; convert an attacker-controlled digit run to a bignum.
+        (if (fx> (string-length stripped) 16)
+          replacement-character-string
+          (let ((codepoint (string->number stripped (if hexadecimal? 16 10))))
+            (cond
+              ((not codepoint) replacement-character-string)
+              ((> codepoint #x10FFFF) replacement-character-string)
+              ((and (>= codepoint #xD800) (<= codepoint #xDFFF))
+               replacement-character-string)
+              (else
+               (or (hashtable-ref html-entity-numeric-replacement-table codepoint #f)
+                   (string (integer->char codepoint))))))))))
 
   ;; Named character references
 
   ;; Longest legacy name that is a prefix of the entity name starting at
   ;; (start + 1).  Returns (value . length) or #false.
-  (define (html-entity-legacy-prefix-match text start entity-length)
-    (let loop ((k (fxmin entity-length html-entity-legacy-maximum-length)))
-      (if (fx< k 1)
-        #f
-        (let ((prefix (substring text (fx+ start 1) (fx+ start 1 k))))
-          (if (html-entity-legacy-name? prefix)
-            (let ((value (html-entity-named-ref prefix)))
-              (if value (cons value k) (loop (fx- k 1))))
-            (loop (fx- k 1)))))))
+  (define html-entity-legacy-prefix-match
+    (lambda (text start entity-length)
+      (let loop ((k (fxmin entity-length html-entity-legacy-maximum-length)))
+        (if (fx< k 1)
+          #f
+          (let ((prefix (substring text (fx+ start 1) (fx+ start 1 k))))
+            (if (html-entity-legacy-name? prefix)
+              (let ((value (html-entity-named-ref prefix)))
+                (if value (cons value k) (loop (fx- k 1))))
+              (loop (fx- k 1))))))))
 
-  (define (html-entity-text-decode text in-attribute?)
-    (let ((text-length (string-length text))
-          (port (open-output-string)))
-      (define (emit string) (put-string port string))
-      (let loop ((i 0))
-        (if (fx>= i text-length)
-          (get-output-string port)
-          (let ((next-ampersand (string-char-find text #\& i text-length)))
-            (cond
-              ((not next-ampersand)
-               (emit (substring text i text-length))
-               (get-output-string port))
-              (else
-               (when (fx> next-ampersand i)
-                 (emit (substring text i next-ampersand)))
-               (let* ((start next-ampersand)
-                      (after (fx+ start 1)))
-                 (if (and (fx< after text-length)
-                          (char=? (string-ref text after) #\#))
-                   (html-numeric-reference-step text start after text-length emit loop)
-                   (html-named-reference-step text start after text-length
-                                              in-attribute? emit loop))))))))))
+  (define html-entity-text-decode
+    (lambda (text in-attribute?)
+      (let ((text-length (string-length text))
+            (port (open-output-string)))
+        (define emit (lambda (string) (put-string port string)))
+        (let loop ((i 0))
+          (if (fx>= i text-length)
+            (get-output-string port)
+            (let ((next-ampersand (string-char-find text #\& i text-length)))
+              (cond
+                ((not next-ampersand)
+                 (emit (substring text i text-length))
+                 (get-output-string port))
+                (else
+                 (when (fx> next-ampersand i)
+                   (emit (substring text i next-ampersand)))
+                 (let* ((start next-ampersand)
+                        (after (fx+ start 1)))
+                   (if (and (fx< after text-length)
+                            (char=? (string-ref text after) #\#))
+                     (html-numeric-reference-step text start after text-length emit loop)
+                     (html-named-reference-step text start after text-length
+                                                in-attribute? emit loop)))))))))))
 
-  (define (html-numeric-reference-step text start after text-length emit loop)
-    (let* ((j (fx+ after 1))
-           (hexadecimal?
-            (and (fx< j text-length)
-                 (let ((c (string-ref text j)))
-                   (or (char=? c #\x) (char=? c #\X)))))
-           (j (if hexadecimal? (fx+ j 1) j))
-           (digit-start j)
-           (j (let scan ((j j))
-                (if (and (fx< j text-length)
-                         (if hexadecimal?
-                           (char-ascii-hexadecimal-digit? (string-ref text j))
-                           (char-ascii-digit? (string-ref text j))))
-                  (scan (fx+ j 1))
-                  j)))
-           (semicolon? (and (fx< j text-length)
-                            (char=? (string-ref text j) #\;)))
-           (next (if semicolon? (fx+ j 1) j))
-           (digits (substring text digit-start j)))
-      (cond
-        ((fx> (string-length digits) 0)
-         (emit (html-entity-numeric-decode digits hexadecimal?))
-         (loop next))
-        (else
-         ;; Not a numeric reference at all; keep the source text as-is.
-         (emit (substring text start next))
-         (loop next)))))
+  (define html-numeric-reference-step
+    (lambda (text start after text-length emit loop)
+      (let* ((j (fx+ after 1))
+             (hexadecimal?
+              (and (fx< j text-length)
+                   (let ((c (string-ref text j)))
+                     (or (char=? c #\x) (char=? c #\X)))))
+             (j (if hexadecimal? (fx+ j 1) j))
+             (digit-start j)
+             (j (let scan ((j j))
+                  (if (and (fx< j text-length)
+                           (if hexadecimal?
+                             (char-ascii-hexadecimal-digit? (string-ref text j))
+                             (char-ascii-digit? (string-ref text j))))
+                    (scan (fx+ j 1))
+                    j)))
+             (semicolon? (and (fx< j text-length)
+                              (char=? (string-ref text j) #\;)))
+             (next (if semicolon? (fx+ j 1) j))
+             (digits (substring text digit-start j)))
+        (cond
+          ((fx> (string-length digits) 0)
+           (emit (html-entity-numeric-decode digits hexadecimal?))
+           (loop next))
+          (else
+           ;; Not a numeric reference at all; keep the source text as-is.
+           (emit (substring text start next))
+           (loop next))))))
 
-  (define (html-named-reference-step text start after text-length in-attribute? emit loop)
-    (let* ((j (let scan ((j after))
-                (if (and (fx< j text-length)
-                         (char-ascii-alphanumeric? (string-ref text j)))
-                  (scan (fx+ j 1))
-                  j)))
-           (entity-length (fx- j after))
-           (entity-name (if (fx<= entity-length html-entity-named-maximum-length)
-                          (substring text after j)
-                          ""))
-           (semicolon? (and (fx< j text-length)
-                            (char=? (string-ref text j) #\;))))
-      (cond
-        ((fx= entity-length 0)
-         (emit "&")
-         (loop (fx+ start 1)))
-        ;; Exact match, semicolon terminated.
-        ((and semicolon? (html-entity-named-ref entity-name))
-         => (lambda (value)
-              (emit value)
-              (loop (fx+ j 1))))
-        (else
-         (let ((prefix-match
-                (and semicolon?
-                     (not in-attribute?)
-                     (html-entity-legacy-prefix-match text start entity-length))))
-           (cond
-             ;; Semicolon present but no exact match: longest legacy prefix
-             ;; wins outside attributes ("&notit;" -> "\xAC;it;").
-             (prefix-match
-              (emit (car prefix-match))
-              (loop (fx+ start 1 (cdr prefix-match))))
-             ((and (html-entity-legacy-name? entity-name)
-                   (html-entity-named-ref entity-name))
-              => (lambda (value)
-                   (let ((next-char (and (fx< j text-length) (string-ref text j))))
-                     (if (and in-attribute?
-                              next-char
-                              (or (char-ascii-alphanumeric? next-char)
-                                  (char=? next-char #\=)))
-                       (begin (emit "&") (loop (fx+ start 1)))
-                       (begin (emit value) (loop j))))))
-             (else
-              (let ((prefix-match
-                     (html-entity-legacy-prefix-match text start entity-length)))
-                (cond
-                  ((and prefix-match in-attribute?)
-                   ;; Ambiguous ampersand inside an attribute value: leave it.
-                   (emit "&")
-                   (loop (fx+ start 1)))
-                  (prefix-match
-                   (emit (car prefix-match))
-                   (loop (fx+ start 1 (cdr prefix-match))))
-                  (semicolon?
-                   (emit (substring text start (fx+ j 1)))
-                   (loop (fx+ j 1)))
-                  (else
-                   (emit "&")
-                   (loop (fx+ start 1))))))))))))
+  (define html-named-reference-step
+    (lambda (text start after text-length in-attribute? emit loop)
+      (let* ((j (let scan ((j after))
+                  (if (and (fx< j text-length)
+                           (char-ascii-alphanumeric? (string-ref text j)))
+                    (scan (fx+ j 1))
+                    j)))
+             (entity-length (fx- j after))
+             (entity-name (if (fx<= entity-length html-entity-named-maximum-length)
+                            (substring text after j)
+                            ""))
+             (semicolon? (and (fx< j text-length)
+                              (char=? (string-ref text j) #\;))))
+        (cond
+          ((fx= entity-length 0)
+           (emit "&")
+           (loop (fx+ start 1)))
+          ;; Exact match, semicolon terminated.
+          ((and semicolon? (html-entity-named-ref entity-name))
+           => (lambda (value)
+                (emit value)
+                (loop (fx+ j 1))))
+          (else
+           (let ((prefix-match
+                  (and semicolon?
+                       (not in-attribute?)
+                       (html-entity-legacy-prefix-match text start entity-length))))
+             (cond
+               ;; Semicolon present but no exact match: longest legacy prefix
+               ;; wins outside attributes ("&notit;" -> "\xAC;it;").
+               (prefix-match
+                (emit (car prefix-match))
+                (loop (fx+ start 1 (cdr prefix-match))))
+               ((and (html-entity-legacy-name? entity-name)
+                     (html-entity-named-ref entity-name))
+                => (lambda (value)
+                     (let ((next-char (and (fx< j text-length) (string-ref text j))))
+                       (if (and in-attribute?
+                                next-char
+                                (or (char-ascii-alphanumeric? next-char)
+                                    (char=? next-char #\=)))
+                         (begin (emit "&") (loop (fx+ start 1)))
+                         (begin (emit value) (loop j))))))
+               (else
+                (let ((prefix-match
+                       (html-entity-legacy-prefix-match text start entity-length)))
+                  (cond
+                    ((and prefix-match in-attribute?)
+                     ;; Ambiguous ampersand inside an attribute value: leave it.
+                     (emit "&")
+                     (loop (fx+ start 1)))
+                    (prefix-match
+                     (emit (car prefix-match))
+                     (loop (fx+ start 1 (cdr prefix-match))))
+                    (semicolon?
+                     (emit (substring text start (fx+ j 1)))
+                     (loop (fx+ j 1)))
+                    (else
+                     (emit "&")
+                     (loop (fx+ start 1)))))))))))))
 
   ;; ====================================================================
   ;; Section 3 -- scanner
@@ -3226,143 +3246,152 @@
   ;; Every procedure takes explicit start/end bounds into the input string
   ;; and returns an index or #false; nothing here holds state.
 
-  (define (html-space-character? c)
-    (or (char=? c #\space) (char=? c #\tab) (char=? c #\newline)
-        (char=? c #\page) (char=? c #\return)))
+  (define html-space-character?
+    (lambda (c)
+      (or (char=? c #\space) (char=? c #\tab) (char=? c #\newline)
+          (char=? c #\page) (char=? c #\return))))
 
   ;; TAG_END_NAME_STOP = SPACE + "/>"
-  (define (html-tag-end-name-stop-character? c)
-    (or (html-space-character? c) (char=? c #\/) (char=? c #\>)))
+  (define html-tag-end-name-stop-character?
+    (lambda (c)
+      (or (html-space-character? c) (char=? c #\/) (char=? c #\>))))
 
-  (define (html-scanner-ascii-startswith? text needle start end)
-    (let ((stop (fx+ start (string-length needle))))
-      (and (fx<= stop end)
-           (let loop ((i 0))
-             (or (fx= i (string-length needle))
-                 (and (char=? (char-ascii-lowercase (string-ref text (fx+ start i)))
-                              (char-ascii-lowercase (string-ref needle i)))
-                      (loop (fx+ i 1))))))))
+  (define html-scanner-ascii-startswith?
+    (lambda (text needle start end)
+      (let ((stop (fx+ start (string-length needle))))
+        (and (fx<= stop end)
+             (let loop ((i 0))
+               (or (fx= i (string-length needle))
+                   (and (char=? (char-ascii-lowercase (string-ref text (fx+ start i)))
+                                (char-ascii-lowercase (string-ref needle i)))
+                        (loop (fx+ i 1)))))))))
 
   ;; Case-insensitive forward search; index of the first match or #false.
-  (define (html-scanner-ascii-find text needle start end)
-    (let ((needle-length (string-length needle)))
-      (let loop ((i start))
-        (cond
-          ((fx> (fx+ i needle-length) end) #f)
-          ((html-scanner-ascii-startswith? text needle i end) i)
-          (else (loop (fx+ i 1)))))))
+  (define html-scanner-ascii-find
+    (lambda (text needle start end)
+      (let ((needle-length (string-length needle)))
+        (let loop ((i start))
+          (cond
+            ((fx> (fx+ i needle-length) end) #f)
+            ((html-scanner-ascii-startswith? text needle i end) i)
+            (else (loop (fx+ i 1))))))))
 
   ;; Case-insensitive backward search; index of the last match or #false.
-  (define (html-scanner-ascii-rfind text needle start end)
-    (let ((needle-length (string-length needle)))
-      (let loop ((i (fx- end needle-length)))
-        (cond
-          ((fx< i start) #f)
-          ((html-scanner-ascii-startswith? text needle i end) i)
-          (else (loop (fx- i 1)))))))
+  (define html-scanner-ascii-rfind
+    (lambda (text needle start end)
+      (let ((needle-length (string-length needle)))
+        (let loop ((i (fx- end needle-length)))
+          (cond
+            ((fx< i start) #f)
+            ((html-scanner-ascii-startswith? text needle i end) i)
+            (else (loop (fx- i 1))))))))
 
   ;; Index of the ">" that ends a tag, skipping ">" inside quoted attribute
   ;; values, or #false when the tag is unterminated.
-  (define (html-scanner-tag-end-find text position end)
-    (let loop ((position position) (quote-character #f))
-      (if (fx>= position end)
-        #f
-        (let ((c (string-ref text position)))
-          (cond
-            (quote-character
-             (loop (fx+ position 1)
-                   (if (char=? c quote-character) #f quote-character)))
-            ((or (char=? c #\") (char=? c #\'))
-             (loop (fx+ position 1) c))
-            ((char=? c #\>) position)
-            (else (loop (fx+ position 1) #f)))))))
+  (define html-scanner-tag-end-find
+    (lambda (text position end)
+      (let loop ((position position) (quote-character #f))
+        (if (fx>= position end)
+          #f
+          (let ((c (string-ref text position)))
+            (cond
+              (quote-character
+               (loop (fx+ position 1)
+                     (if (char=? c quote-character) #f quote-character)))
+              ((or (char=? c #\") (char=? c #\'))
+               (loop (fx+ position 1) c))
+              ((char=? c #\>) position)
+              (else (loop (fx+ position 1) #f))))))))
 
   ;; Find "</name" terminated by a space, "/" or ">".  Returns two values:
   ;; the index of "<" (or #false when no end tag is present) and the
   ;; position at which parsing resumes.
-  (define (html-scanner-rawtext-end-tag-find text name position end)
-    (let* ((needle (string-append "</" name))
-           (needle-length (string-length needle)))
-      (let loop ((search position))
-        (let ((close (html-scanner-ascii-find text needle search end)))
-          (cond
-            ((not close) (values #f end))
-            (else
-             (let ((after-name (fx+ close needle-length)))
-               (cond
-                 ((and (fx< after-name end)
-                       (not (html-tag-end-name-stop-character?
-                             (string-ref text after-name))))
-                  (loop after-name))
-                 (else
-                  (let ((tag-end (html-scanner-tag-end-find text after-name end)))
-                    (cond
-                      (tag-end (values close (fx+ tag-end 1)))
-                      ;; At EOF the end tag is still emitted with its
-                      ;; attributes dropped, so the raw text ends here.  Only
-                      ;; a bare "</name" at EOF stays raw text.
-                      ((fx< after-name end) (values close end))
-                      (else (loop after-name)))))))))))))
+  (define html-scanner-rawtext-end-tag-find
+    (lambda (text name position end)
+      (let* ((needle (string-append "</" name))
+             (needle-length (string-length needle)))
+        (let loop ((search position))
+          (let ((close (html-scanner-ascii-find text needle search end)))
+            (cond
+              ((not close) (values #f end))
+              (else
+               (let ((after-name (fx+ close needle-length)))
+                 (cond
+                   ((and (fx< after-name end)
+                         (not (html-tag-end-name-stop-character?
+                               (string-ref text after-name))))
+                    (loop after-name))
+                   (else
+                    (let ((tag-end (html-scanner-tag-end-find text after-name end)))
+                      (cond
+                        (tag-end (values close (fx+ tag-end 1)))
+                        ;; At EOF the end tag is still emitted with its
+                        ;; attributes dropped, so the raw text ends here.  Only
+                        ;; a bare "</name" at EOF stays raw text.
+                        ((fx< after-name end) (values close end))
+                        (else (loop after-name))))))))))))))
 
   ;; Find the "</script" that ends script data, honouring the
   ;; script-data-escaped and script-data-double-escaped states.
-  (define (html-scanner-script-end-tag-find text position end)
-    (let loop ((search position) (escaped? #f) (double-escaped? #f))
-      (call-with-values
-        (lambda () (html-scanner-rawtext-end-tag-find text "script" search end))
-        (lambda (close next-position)
-          (cond
-            ((not close) (values #f end))
-            ((not escaped?)
-             (let ((comment-start (html-scanner-ascii-find text "<!--" search close)))
-               (if (not comment-start)
-                 (values close next-position)
-                 ;; After "<!--" the tokenizer sits in
-                 ;; script-data-escaped-dash-dash, so the two trailing dashes
-                 ;; already count toward a closing "-->".
-                 (loop (fx+ comment-start 2) #t #f))))
-            (else
-             (let* ((script-start
-                     (and (not double-escaped?)
-                          (html-scanner-script-start-marker-find text search close end)))
-                    (comment-end (html-scanner-ascii-find text "-->" search close)))
-               (cond
-                 ((and comment-end
-                       (fx< comment-end close)
-                       (or double-escaped?
-                           (not script-start)
-                           (fx< comment-end script-start)))
-                  (loop (fx+ comment-end 3) #f #f))
-                 ((and script-start (fx< script-start close))
-                  (loop (fx+ script-start 7) #t #t))
-                 (double-escaped?
-                  (let ((later-end (html-scanner-ascii-find
-                                    text "</script" (fx+ close 8) next-position)))
-                    (if (and later-end
-                             (let ((after-name (fx+ later-end 8)))
-                               (or (fx>= after-name end)
-                                   (html-tag-end-name-stop-character?
-                                    (string-ref text after-name)))))
-                      (loop (fx+ close 8) #t #f)
-                      (loop next-position #t #f))))
-                 (else (values close next-position))))))))))
+  (define html-scanner-script-end-tag-find
+    (lambda (text position end)
+      (let loop ((search position) (escaped? #f) (double-escaped? #f))
+        (call-with-values
+          (lambda () (html-scanner-rawtext-end-tag-find text "script" search end))
+          (lambda (close next-position)
+            (cond
+              ((not close) (values #f end))
+              ((not escaped?)
+               (let ((comment-start (html-scanner-ascii-find text "<!--" search close)))
+                 (if (not comment-start)
+                   (values close next-position)
+                   ;; After "<!--" the tokenizer sits in
+                   ;; script-data-escaped-dash-dash, so the two trailing dashes
+                   ;; already count toward a closing "-->".
+                   (loop (fx+ comment-start 2) #t #f))))
+              (else
+               (let* ((script-start
+                       (and (not double-escaped?)
+                            (html-scanner-script-start-marker-find text search close end)))
+                      (comment-end (html-scanner-ascii-find text "-->" search close)))
+                 (cond
+                   ((and comment-end
+                         (fx< comment-end close)
+                         (or double-escaped?
+                             (not script-start)
+                             (fx< comment-end script-start)))
+                    (loop (fx+ comment-end 3) #f #f))
+                   ((and script-start (fx< script-start close))
+                    (loop (fx+ script-start 7) #t #t))
+                   (double-escaped?
+                    (let ((later-end (html-scanner-ascii-find
+                                      text "</script" (fx+ close 8) next-position)))
+                      (if (and later-end
+                               (let ((after-name (fx+ later-end 8)))
+                                 (or (fx>= after-name end)
+                                     (html-tag-end-name-stop-character?
+                                      (string-ref text after-name)))))
+                        (loop (fx+ close 8) #t #f)
+                        (loop next-position #t #f))))
+                   (else (values close next-position)))))))))))
 
   ;; Index of a "<script" marker terminated by a space, "/" or ">".
   ;; `end` bounds where the marker may start, `text-end` bounds the real
   ;; input so the terminator is checked against the actual next character.
-  (define (html-scanner-script-start-marker-find text position end text-end)
-    (let ((needle "<script"))
-      (let loop ((search position))
-        (let ((start (html-scanner-ascii-find text needle search end)))
-          (cond
-            ((not start) #f)
-            (else
-             (let ((after-name (fx+ start 7)))
-               (if (or (fx>= after-name text-end)
-                       (html-tag-end-name-stop-character?
-                        (string-ref text after-name)))
-                 start
-                 (loop after-name)))))))))
+  (define html-scanner-script-start-marker-find
+    (lambda (text position end text-end)
+      (let ((needle "<script"))
+        (let loop ((search position))
+          (let ((start (html-scanner-ascii-find text needle search end)))
+            (cond
+              ((not start) #f)
+              (else
+               (let ((after-name (fx+ start 7)))
+                 (if (or (fx>= after-name text-end)
+                         (html-tag-end-name-stop-character?
+                          (string-ref text after-name)))
+                   start
+                   (loop after-name))))))))))
 
   ;; ====================================================================
   ;; Section 4 -- tokenizer
@@ -3416,27 +3445,28 @@
   ;; Input preprocessing (spec 13.2.3.5): drop a leading BOM, normalize CRLF
   ;; and lone CR to LF.
 
-  (define (html-source-preprocess text)
-    (let* ((size (string-length text))
-           (start (if (and (fx> size 0)
-                           (char=? (string-ref text 0) (integer->char #xFEFF)))
-                    1
-                    0))
-           (port (open-output-string)))
-      (let loop ((i start))
-        (if (fx>= i size)
-          (get-output-string port)
-          (let ((c (string-ref text i)))
-            (cond
-              ((char=? c #\return)
-               (write-char #\newline port)
-               (if (and (fx< (fx+ i 1) size)
-                        (char=? (string-ref text (fx+ i 1)) #\newline))
-                 (loop (fx+ i 2))
-                 (loop (fx+ i 1))))
-              (else
-               (write-char c port)
-               (loop (fx+ i 1)))))))))
+  (define html-source-preprocess
+    (lambda (text)
+      (let* ((size (string-length text))
+             (start (if (and (fx> size 0)
+                             (char=? (string-ref text 0) (integer->char #xFEFF)))
+                      1
+                      0))
+             (port (open-output-string)))
+        (let loop ((i start))
+          (if (fx>= i size)
+            (get-output-string port)
+            (let ((c (string-ref text i)))
+              (cond
+                ((char=? c #\return)
+                 (write-char #\newline port)
+                 (if (and (fx< (fx+ i 1) size)
+                          (char=? (string-ref text (fx+ i 1)) #\newline))
+                   (loop (fx+ i 2))
+                   (loop (fx+ i 1))))
+                (else
+                 (write-char c port)
+                 (loop (fx+ i 1))))))))))
 
   ;; Tokenizer state
 
@@ -3462,1076 +3492,1157 @@
             (mutable doctype-system tk-doctype-system tk-doctype-system-set!)
             (mutable doctype-quirks? tk-doctype-quirks? tk-doctype-quirks-set!)))
 
-  (define (html-tokenizer-make text)
-    (html-tokenizer-new text (string-length text) 0 'data '() #f #f #f #t
-                        #f #f #f '() #f #f #f #f #f #f #f))
+  (define html-tokenizer-make
+    (lambda (text)
+      (html-tokenizer-new text (string-length text) 0 'data '() #f #f #f #t
+                          #f #f #f '() #f #f #f #f #f #f #f)))
 
-  (define (html-tokenizer-state-set! tokenizer state)
-    (tk-state-set! tokenizer state))
+  (define html-tokenizer-state-set!
+    (lambda (tokenizer state)
+      (tk-state-set! tokenizer state)))
 
-  (define (html-tokenizer-last-start-tag-set! tokenizer name)
-    (tk-last-start-tag-set! tokenizer name))
+  (define html-tokenizer-last-start-tag-set!
+    (lambda (tokenizer name)
+      (tk-last-start-tag-set! tokenizer name)))
 
-  (define (html-tokenizer-foreign-set! tokenizer foreign?)
-    (tk-foreign-set! tokenizer foreign?))
+  (define html-tokenizer-foreign-set!
+    (lambda (tokenizer foreign?)
+      (tk-foreign-set! tokenizer foreign?)))
 
-  (define (html-tokenizer-scripting-set! tokenizer scripting?)
-    (tk-scripting-set! tokenizer scripting?))
+  (define html-tokenizer-scripting-set!
+    (lambda (tokenizer scripting?)
+      (tk-scripting-set! tokenizer scripting?)))
 
-  (define (token-emit! tokenizer token)
-    (tk-queue-set! tokenizer (append (tk-queue tokenizer) (list token))))
+  (define token-emit!
+    (lambda (tokenizer token)
+      (tk-queue-set! tokenizer (append (tk-queue tokenizer) (list token)))))
 
-  (define (character-emit! tokenizer text)
-    (unless (fx= (string-length text) 0)
-      (token-emit! tokenizer (token-character-make text))))
+  (define character-emit!
+    (lambda (tokenizer text)
+      (unless (fx= (string-length text) 0)
+        (token-emit! tokenizer (token-character-make text)))))
 
-  (define (end-of-file-emit! tokenizer)
-    (token-emit! tokenizer (token-end-of-file-make))
-    (tk-finished-set! tokenizer #t))
+  (define end-of-file-emit!
+    (lambda (tokenizer)
+      (token-emit! tokenizer (token-end-of-file-make))
+      (tk-finished-set! tokenizer #t)))
 
   ;; Return the next token, or #false once the end-of-file token has been
   ;; consumed.
-  (define (html-tokenizer-next tokenizer)
-    (let loop ()
-      (let ((queue (tk-queue tokenizer)))
-        (cond
-          ((pair? queue)
-           (tk-queue-set! tokenizer (cdr queue))
-           (car queue))
-          ((tk-finished? tokenizer) #f)
-          (else
-           (tokenizer-step tokenizer)
-           (loop))))))
+  (define html-tokenizer-next
+    (lambda (tokenizer)
+      (let loop ()
+        (let ((queue (tk-queue tokenizer)))
+          (cond
+            ((pair? queue)
+             (tk-queue-set! tokenizer (cdr queue))
+             (car queue))
+            ((tk-finished? tokenizer) #f)
+            (else
+             (tokenizer-step tokenizer)
+             (loop)))))))
 
   ;; Content model of a start tag name (justhtml engine.py lines 78-80).
-  (define (html-tokenizer-content-state-for-tag name scripting?)
-    (cond
-      ((or (string=? name "title") (string=? name "textarea")) 'rcdata)
-      ((string=? name "script") 'script-data)
-      ((or (string=? name "style") (string=? name "xmp")
-           (string=? name "iframe") (string=? name "noembed")
-           (string=? name "noframes"))
-       'rawtext)
-      ((string=? name "noscript") (if scripting? 'rawtext 'data))
-      ((string=? name "plaintext") 'plaintext)
-      (else 'data)))
+  (define html-tokenizer-content-state-for-tag
+    (lambda (name scripting?)
+      (cond
+        ((or (string=? name "title") (string=? name "textarea")) 'rcdata)
+        ((string=? name "script") 'script-data)
+        ((or (string=? name "style") (string=? name "xmp")
+             (string=? name "iframe") (string=? name "noembed")
+             (string=? name "noframes"))
+         'rawtext)
+        ((string=? name "noscript") (if scripting? 'rawtext 'data))
+        ((string=? name "plaintext") 'plaintext)
+        (else 'data))))
 
   ;; Current-token accumulators
 
-  (define (tag-start! tokenizer end?)
-    (tk-tag-name-set! tokenizer (open-output-string))
-    (tk-tag-end-set! tokenizer end?)
-    (tk-tag-self-closing-set! tokenizer #f)
-    (tk-attributes-set! tokenizer '())
-    (tk-attribute-name-set! tokenizer #f)
-    (tk-attribute-value-set! tokenizer #f))
-
-  (define (tag-name-append! tokenizer c)
-    (write-char c (tk-tag-name tokenizer)))
-
-  (define (attribute-finish! tokenizer)
-    (let ((name-port (tk-attribute-name tokenizer)))
-      (when name-port
-        (let* ((name (get-output-string name-port))
-               (value-port (tk-attribute-value tokenizer))
-               (raw (if value-port (get-output-string value-port) "")))
-          ;; First attribute wins on duplicates.
-          (unless (assoc name (tk-attributes tokenizer))
-            (tk-attributes-set!
-              tokenizer
-              (append (tk-attributes tokenizer)
-                      (list (cons name (html-entity-text-decode raw #t))))))))
+  (define tag-start!
+    (lambda (tokenizer end?)
+      (tk-tag-name-set! tokenizer (open-output-string))
+      (tk-tag-end-set! tokenizer end?)
+      (tk-tag-self-closing-set! tokenizer #f)
+      (tk-attributes-set! tokenizer '())
       (tk-attribute-name-set! tokenizer #f)
       (tk-attribute-value-set! tokenizer #f)))
 
-  (define (attribute-start! tokenizer)
-    (attribute-finish! tokenizer)
-    (tk-attribute-name-set! tokenizer (open-output-string))
-    (tk-attribute-value-set! tokenizer #f))
+  (define tag-name-append!
+    (lambda (tokenizer c)
+      (write-char c (tk-tag-name tokenizer))))
 
-  (define (attribute-name-append! tokenizer c)
-    (write-char c (tk-attribute-name tokenizer)))
+  (define attribute-finish!
+    (lambda (tokenizer)
+      (let ((name-port (tk-attribute-name tokenizer)))
+        (when name-port
+          (let* ((name (get-output-string name-port))
+                 (value-port (tk-attribute-value tokenizer))
+                 (raw (if value-port (get-output-string value-port) "")))
+            ;; First attribute wins on duplicates.
+            (unless (assoc name (tk-attributes tokenizer))
+              (tk-attributes-set!
+                tokenizer
+                (append (tk-attributes tokenizer)
+                        (list (cons name (html-entity-text-decode raw #t))))))))
+        (tk-attribute-name-set! tokenizer #f)
+        (tk-attribute-value-set! tokenizer #f))))
 
-  (define (attribute-value-port tokenizer)
-    (or (tk-attribute-value tokenizer)
-        (let ((port (open-output-string)))
-          (tk-attribute-value-set! tokenizer port)
-          port)))
+  (define attribute-start!
+    (lambda (tokenizer)
+      (attribute-finish! tokenizer)
+      (tk-attribute-name-set! tokenizer (open-output-string))
+      (tk-attribute-value-set! tokenizer #f)))
 
-  (define (attribute-value-append! tokenizer c)
-    (write-char c (attribute-value-port tokenizer)))
+  (define attribute-name-append!
+    (lambda (tokenizer c)
+      (write-char c (tk-attribute-name tokenizer))))
 
-  (define (tag-emit! tokenizer)
-    (attribute-finish! tokenizer)
-    (let ((name (get-output-string (tk-tag-name tokenizer))))
-      (cond
-        ((tk-tag-end? tokenizer)
-         ;; End tags carry neither attributes nor a self-closing flag.
-         (token-emit! tokenizer (token-end-tag-make name))
-         (tk-state-set! tokenizer 'data))
-        (else
-         (token-emit! tokenizer
-                      (token-start-tag-make name
-                                            (tk-attributes tokenizer)
-                                            (tk-tag-self-closing? tokenizer)))
-         (tk-last-start-tag-set! tokenizer name)
-         (tk-state-set! tokenizer
-                        (if (tk-foreign? tokenizer)
-                          'data
-                          (html-tokenizer-content-state-for-tag
-                            name (tk-scripting? tokenizer))))))))
+  (define attribute-value-port
+    (lambda (tokenizer)
+      (or (tk-attribute-value tokenizer)
+          (let ((port (open-output-string)))
+            (tk-attribute-value-set! tokenizer port)
+            port))))
 
-  (define (comment-start! tokenizer)
-    (tk-comment-set! tokenizer (open-output-string)))
+  (define attribute-value-append!
+    (lambda (tokenizer c)
+      (write-char c (attribute-value-port tokenizer))))
 
-  (define (comment-append! tokenizer c)
-    (write-char c (tk-comment tokenizer)))
+  (define tag-emit!
+    (lambda (tokenizer)
+      (attribute-finish! tokenizer)
+      (let ((name (get-output-string (tk-tag-name tokenizer))))
+        (cond
+          ((tk-tag-end? tokenizer)
+           ;; End tags carry neither attributes nor a self-closing flag.
+           (token-emit! tokenizer (token-end-tag-make name))
+           (tk-state-set! tokenizer 'data))
+          (else
+           (token-emit! tokenizer
+                        (token-start-tag-make name
+                                              (tk-attributes tokenizer)
+                                              (tk-tag-self-closing? tokenizer)))
+           (tk-last-start-tag-set! tokenizer name)
+           (tk-state-set! tokenizer
+                          (if (tk-foreign? tokenizer)
+                            'data
+                            (html-tokenizer-content-state-for-tag
+                              name (tk-scripting? tokenizer)))))))))
 
-  (define (comment-append-string! tokenizer text)
-    (put-string (tk-comment tokenizer) text))
+  (define comment-start!
+    (lambda (tokenizer)
+      (tk-comment-set! tokenizer (open-output-string))))
 
-  (define (comment-emit! tokenizer)
-    (token-emit! tokenizer
-                 (token-comment-make (get-output-string (tk-comment tokenizer)))))
+  (define comment-append!
+    (lambda (tokenizer c)
+      (write-char c (tk-comment tokenizer))))
 
-  (define (doctype-start! tokenizer)
-    (tk-doctype-name-set! tokenizer #f)
-    (tk-doctype-public-set! tokenizer #f)
-    (tk-doctype-system-set! tokenizer #f)
-    (tk-doctype-quirks-set! tokenizer #f))
+  (define comment-append-string!
+    (lambda (tokenizer text)
+      (put-string (tk-comment tokenizer) text)))
 
-  (define (doctype-emit! tokenizer)
-    (token-emit! tokenizer
-                 (token-doctype-make
-                   (let ((port (tk-doctype-name tokenizer)))
-                     (and port (get-output-string port)))
-                   (let ((port (tk-doctype-public tokenizer)))
-                     (and port (get-output-string port)))
-                   (let ((port (tk-doctype-system tokenizer)))
-                     (and port (get-output-string port)))
-                   (tk-doctype-quirks? tokenizer))))
+  (define comment-emit!
+    (lambda (tokenizer)
+      (token-emit! tokenizer
+                   (token-comment-make (get-output-string (tk-comment tokenizer))))))
+
+  (define doctype-start!
+    (lambda (tokenizer)
+      (tk-doctype-name-set! tokenizer #f)
+      (tk-doctype-public-set! tokenizer #f)
+      (tk-doctype-system-set! tokenizer #f)
+      (tk-doctype-quirks-set! tokenizer #f)))
+
+  (define doctype-emit!
+    (lambda (tokenizer)
+      (token-emit! tokenizer
+                   (token-doctype-make
+                     (let ((port (tk-doctype-name tokenizer)))
+                       (and port (get-output-string port)))
+                     (let ((port (tk-doctype-public tokenizer)))
+                       (and port (get-output-string port)))
+                     (let ((port (tk-doctype-system tokenizer)))
+                       (and port (get-output-string port)))
+                     (tk-doctype-quirks? tokenizer)))))
 
   ;; Character classification used by the tag states
 
-  (define (space-character? c)
-    (or (char=? c #\tab) (char=? c #\newline)
-        (char=? c #\page) (char=? c #\space)))
+  (define space-character?
+    (lambda (c)
+      (or (char=? c #\tab) (char=? c #\newline)
+          (char=? c #\page) (char=? c #\space))))
 
-  (define (nul->replacement c)
-    (if (char=? c #\nul) replacement-character c))
+  (define nul->replacement
+    (lambda (c)
+      (if (char=? c #\nul) replacement-character c)))
 
-  (define (string-nul-replace text)
-    (if (let loop ((i 0))
-          (cond ((fx>= i (string-length text)) #f)
-                ((char=? (string-ref text i) #\nul) #t)
-                (else (loop (fx+ i 1)))))
-      (list->string (map nul->replacement (string->list text)))
-      text))
+  (define string-nul-replace
+    (lambda (text)
+      (if (let loop ((i 0))
+            (cond ((fx>= i (string-length text)) #f)
+                  ((char=? (string-ref text i) #\nul) #t)
+                  (else (loop (fx+ i 1)))))
+        (list->string (map nul->replacement (string->list text)))
+        text)))
 
   ;; The state machine
 
-  (define (tokenizer-step tokenizer)
-    (case (tk-state tokenizer)
-      ((data) (state-data tokenizer))
-      ((rcdata) (state-text-content tokenizer 'rcdata))
-      ((rawtext) (state-text-content tokenizer 'rawtext))
-      ((script-data) (state-text-content tokenizer 'script-data))
-      ((plaintext) (state-plaintext tokenizer))
-      ((tag-open) (state-tag-open tokenizer))
-      ((end-tag-open) (state-end-tag-open tokenizer))
-      ((tag-name) (state-tag-name tokenizer))
-      ((before-attribute-name) (state-before-attribute-name tokenizer))
-      ((attribute-name) (state-attribute-name tokenizer))
-      ((after-attribute-name) (state-after-attribute-name tokenizer))
-      ((before-attribute-value) (state-before-attribute-value tokenizer))
-      ((attribute-value-double-quoted)
-       (state-attribute-value-quoted tokenizer #\"))
-      ((attribute-value-single-quoted)
-       (state-attribute-value-quoted tokenizer #\'))
-      ((attribute-value-unquoted) (state-attribute-value-unquoted tokenizer))
-      ((after-attribute-value-quoted) (state-after-attribute-value-quoted tokenizer))
-      ((self-closing-start-tag) (state-self-closing-start-tag tokenizer))
-      ((bogus-comment) (state-bogus-comment tokenizer))
-      ((processing-instruction) (state-processing-instruction tokenizer))
-      ((markup-declaration-open) (state-markup-declaration-open tokenizer))
-      ((comment-start) (state-comment-start tokenizer))
-      ((comment-start-dash) (state-comment-start-dash tokenizer))
-      ((comment) (state-comment tokenizer))
-      ((comment-less-than-sign) (state-comment-less-than-sign tokenizer))
-      ((comment-less-than-sign-bang) (state-comment-less-than-sign-bang tokenizer))
-      ((comment-less-than-sign-bang-dash)
-       (state-comment-less-than-sign-bang-dash tokenizer))
-      ((comment-less-than-sign-bang-dash-dash)
-       (state-comment-less-than-sign-bang-dash-dash tokenizer))
-      ((comment-end-dash) (state-comment-end-dash tokenizer))
-      ((comment-end) (state-comment-end tokenizer))
-      ((comment-end-bang) (state-comment-end-bang tokenizer))
-      ((doctype) (state-doctype tokenizer))
-      ((before-doctype-name) (state-before-doctype-name tokenizer))
-      ((doctype-name) (state-doctype-name tokenizer))
-      ((after-doctype-name) (state-after-doctype-name tokenizer))
-      ((after-doctype-public-keyword) (state-after-doctype-keyword tokenizer 'public))
-      ((after-doctype-system-keyword) (state-after-doctype-keyword tokenizer 'system))
-      ((before-doctype-public-identifier)
-       (state-before-doctype-identifier tokenizer 'public))
-      ((before-doctype-system-identifier)
-       (state-before-doctype-identifier tokenizer 'system))
-      ((doctype-public-identifier-double-quoted)
-       (state-doctype-identifier tokenizer 'public #\"))
-      ((doctype-public-identifier-single-quoted)
-       (state-doctype-identifier tokenizer 'public #\'))
-      ((doctype-system-identifier-double-quoted)
-       (state-doctype-identifier tokenizer 'system #\"))
-      ((doctype-system-identifier-single-quoted)
-       (state-doctype-identifier tokenizer 'system #\'))
-      ((after-doctype-public-identifier)
-       (state-after-doctype-public-identifier tokenizer))
-      ((between-doctype-public-and-system-identifiers)
-       (state-between-doctype-identifiers tokenizer))
-      ((after-doctype-system-identifier)
-       (state-after-doctype-system-identifier tokenizer))
-      ((bogus-doctype) (state-bogus-doctype tokenizer))
-      ((cdata-section) (state-cdata-section tokenizer))
-      (else (error 'tokenizer-step "unknown tokenizer state" (tk-state tokenizer)))))
+  (define tokenizer-step
+    (lambda (tokenizer)
+      (case (tk-state tokenizer)
+        ((data) (state-data tokenizer))
+        ((rcdata) (state-text-content tokenizer 'rcdata))
+        ((rawtext) (state-text-content tokenizer 'rawtext))
+        ((script-data) (state-text-content tokenizer 'script-data))
+        ((plaintext) (state-plaintext tokenizer))
+        ((tag-open) (state-tag-open tokenizer))
+        ((end-tag-open) (state-end-tag-open tokenizer))
+        ((tag-name) (state-tag-name tokenizer))
+        ((before-attribute-name) (state-before-attribute-name tokenizer))
+        ((attribute-name) (state-attribute-name tokenizer))
+        ((after-attribute-name) (state-after-attribute-name tokenizer))
+        ((before-attribute-value) (state-before-attribute-value tokenizer))
+        ((attribute-value-double-quoted)
+         (state-attribute-value-quoted tokenizer #\"))
+        ((attribute-value-single-quoted)
+         (state-attribute-value-quoted tokenizer #\'))
+        ((attribute-value-unquoted) (state-attribute-value-unquoted tokenizer))
+        ((after-attribute-value-quoted) (state-after-attribute-value-quoted tokenizer))
+        ((self-closing-start-tag) (state-self-closing-start-tag tokenizer))
+        ((bogus-comment) (state-bogus-comment tokenizer))
+        ((processing-instruction) (state-processing-instruction tokenizer))
+        ((markup-declaration-open) (state-markup-declaration-open tokenizer))
+        ((comment-start) (state-comment-start tokenizer))
+        ((comment-start-dash) (state-comment-start-dash tokenizer))
+        ((comment) (state-comment tokenizer))
+        ((comment-less-than-sign) (state-comment-less-than-sign tokenizer))
+        ((comment-less-than-sign-bang) (state-comment-less-than-sign-bang tokenizer))
+        ((comment-less-than-sign-bang-dash)
+         (state-comment-less-than-sign-bang-dash tokenizer))
+        ((comment-less-than-sign-bang-dash-dash)
+         (state-comment-less-than-sign-bang-dash-dash tokenizer))
+        ((comment-end-dash) (state-comment-end-dash tokenizer))
+        ((comment-end) (state-comment-end tokenizer))
+        ((comment-end-bang) (state-comment-end-bang tokenizer))
+        ((doctype) (state-doctype tokenizer))
+        ((before-doctype-name) (state-before-doctype-name tokenizer))
+        ((doctype-name) (state-doctype-name tokenizer))
+        ((after-doctype-name) (state-after-doctype-name tokenizer))
+        ((after-doctype-public-keyword) (state-after-doctype-keyword tokenizer 'public))
+        ((after-doctype-system-keyword) (state-after-doctype-keyword tokenizer 'system))
+        ((before-doctype-public-identifier)
+         (state-before-doctype-identifier tokenizer 'public))
+        ((before-doctype-system-identifier)
+         (state-before-doctype-identifier tokenizer 'system))
+        ((doctype-public-identifier-double-quoted)
+         (state-doctype-identifier tokenizer 'public #\"))
+        ((doctype-public-identifier-single-quoted)
+         (state-doctype-identifier tokenizer 'public #\'))
+        ((doctype-system-identifier-double-quoted)
+         (state-doctype-identifier tokenizer 'system #\"))
+        ((doctype-system-identifier-single-quoted)
+         (state-doctype-identifier tokenizer 'system #\'))
+        ((after-doctype-public-identifier)
+         (state-after-doctype-public-identifier tokenizer))
+        ((between-doctype-public-and-system-identifiers)
+         (state-between-doctype-identifiers tokenizer))
+        ((after-doctype-system-identifier)
+         (state-after-doctype-system-identifier tokenizer))
+        ((bogus-doctype) (state-bogus-doctype tokenizer))
+        ((cdata-section) (state-cdata-section tokenizer))
+        (else (error 'tokenizer-step "unknown tokenizer state" (tk-state tokenizer))))))
 
-  (define (at-end? tokenizer)
-    (fx>= (tk-position tokenizer) (tk-size tokenizer)))
+  (define at-end?
+    (lambda (tokenizer)
+      (fx>= (tk-position tokenizer) (tk-size tokenizer))))
 
-  (define (peek tokenizer)
-    (string-ref (tk-text tokenizer) (tk-position tokenizer)))
+  (define peek
+    (lambda (tokenizer)
+      (string-ref (tk-text tokenizer) (tk-position tokenizer))))
 
-  (define (advance! tokenizer)
-    (tk-position-set! tokenizer (fx+ (tk-position tokenizer) 1)))
+  (define advance!
+    (lambda (tokenizer)
+      (tk-position-set! tokenizer (fx+ (tk-position tokenizer) 1))))
 
-  (define (consume! tokenizer)
-    (let ((c (peek tokenizer)))
-      (advance! tokenizer)
-      c))
+  (define consume!
+    (lambda (tokenizer)
+      (let ((c (peek tokenizer)))
+        (advance! tokenizer)
+        c)))
 
   ;; 13.2.5.1 data state
 
-  (define (state-data tokenizer)
-    (if (at-end? tokenizer)
-      (end-of-file-emit! tokenizer)
-      (let* ((text (tk-text tokenizer))
-             (size (tk-size tokenizer))
-             (start (tk-position tokenizer))
-             (stop (let loop ((i start))
-                     (cond
-                       ((fx>= i size) size)
-                       ((char=? (string-ref text i) #\<) i)
-                       (else (loop (fx+ i 1)))))))
-        (cond
-          ((fx> stop start)
-           ;; U+0000 is passed through unchanged in the data state; the tree
-           ;; construction stage drops it.
-           (character-emit! tokenizer
-                            (html-entity-text-decode (substring text start stop) #f))
-           (tk-position-set! tokenizer stop))
-          (else
-           (advance! tokenizer)
-           (tk-state-set! tokenizer 'tag-open))))))
+  (define state-data
+    (lambda (tokenizer)
+      (if (at-end? tokenizer)
+        (end-of-file-emit! tokenizer)
+        (let* ((text (tk-text tokenizer))
+               (size (tk-size tokenizer))
+               (start (tk-position tokenizer))
+               (stop (let loop ((i start))
+                       (cond
+                         ((fx>= i size) size)
+                         ((char=? (string-ref text i) #\<) i)
+                         (else (loop (fx+ i 1)))))))
+          (cond
+            ((fx> stop start)
+             ;; U+0000 is passed through unchanged in the data state; the tree
+             ;; construction stage drops it.
+             (character-emit! tokenizer
+                              (html-entity-text-decode (substring text start stop) #f))
+             (tk-position-set! tokenizer stop))
+            (else
+             (advance! tokenizer)
+             (tk-state-set! tokenizer 'tag-open)))))))
 
   ;; RCDATA / RAWTEXT / script data, driven by the layer 2 scanner.
 
-  (define (state-text-content tokenizer kind)
-    (let* ((text (tk-text tokenizer))
-           (size (tk-size tokenizer))
-           (start (tk-position tokenizer))
-           (name (tk-last-start-tag tokenizer)))
-      (call-with-values
-        (lambda ()
-          ;; Without a last start tag -- fragment parsing seeded directly into
-          ;; a text-content state -- no end tag is ever the appropriate one.
-          (cond
-            ((not name) (values #f size))
-            ((eq? kind 'script-data)
-             (html-scanner-script-end-tag-find text start size))
-            (else (html-scanner-rawtext-end-tag-find text name start size))))
-        (lambda (close next)
-          (let* ((stop (or close size))
-                 (raw (substring text start stop))
-                 (content (if (eq? kind 'rcdata)
-                            (html-entity-text-decode (string-nul-replace raw) #f)
-                            (string-nul-replace raw))))
-            (character-emit! tokenizer content)
+  (define state-text-content
+    (lambda (tokenizer kind)
+      (let* ((text (tk-text tokenizer))
+             (size (tk-size tokenizer))
+             (start (tk-position tokenizer))
+             (name (tk-last-start-tag tokenizer)))
+        (call-with-values
+          (lambda ()
+            ;; Without a last start tag -- fragment parsing seeded directly into
+            ;; a text-content state -- no end tag is ever the appropriate one.
             (cond
-              (close
-               ;; Let the ordinary tag states tokenize the end tag itself.
-               (tk-position-set! tokenizer close)
-               (tk-state-set! tokenizer 'data))
-              (else
-               (tk-position-set! tokenizer size)
-               (tk-state-set! tokenizer 'data))))))))
+              ((not name) (values #f size))
+              ((eq? kind 'script-data)
+               (html-scanner-script-end-tag-find text start size))
+              (else (html-scanner-rawtext-end-tag-find text name start size))))
+          (lambda (close next)
+            (let* ((stop (or close size))
+                   (raw (substring text start stop))
+                   (content (if (eq? kind 'rcdata)
+                              (html-entity-text-decode (string-nul-replace raw) #f)
+                              (string-nul-replace raw))))
+              (character-emit! tokenizer content)
+              (cond
+                (close
+                 ;; Let the ordinary tag states tokenize the end tag itself.
+                 (tk-position-set! tokenizer close)
+                 (tk-state-set! tokenizer 'data))
+                (else
+                 (tk-position-set! tokenizer size)
+                 (tk-state-set! tokenizer 'data)))))))))
 
-  (define (state-plaintext tokenizer)
-    (let* ((text (tk-text tokenizer))
-           (size (tk-size tokenizer))
-           (start (tk-position tokenizer)))
-      (if (fx>= start size)
-        (end-of-file-emit! tokenizer)
-        (begin
-          (character-emit! tokenizer (string-nul-replace (substring text start size)))
-          (tk-position-set! tokenizer size)))))
+  (define state-plaintext
+    (lambda (tokenizer)
+      (let* ((text (tk-text tokenizer))
+             (size (tk-size tokenizer))
+             (start (tk-position tokenizer)))
+        (if (fx>= start size)
+          (end-of-file-emit! tokenizer)
+          (begin
+            (character-emit! tokenizer (string-nul-replace (substring text start size)))
+            (tk-position-set! tokenizer size))))))
 
   ;; 13.2.5.6 tag open state
 
-  (define (state-tag-open tokenizer)
-    (cond
-      ((at-end? tokenizer)
-       (character-emit! tokenizer "<")
-       (end-of-file-emit! tokenizer))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((char=? c #\!)
-            (advance! tokenizer)
-            (tk-state-set! tokenizer 'markup-declaration-open))
-           ((char=? c #\/)
-            (advance! tokenizer)
-            (tk-state-set! tokenizer 'end-tag-open))
-           ((char-ascii-alphabetic? c)
-            (tag-start! tokenizer #f)
-            (tk-state-set! tokenizer 'tag-name))
-           ((char=? c #\?)
-            (tk-state-set! tokenizer 'processing-instruction))
-           ((char=? c #\nul)
-            ;; justhtml emits "<" plus the replacement character here rather
-            ;; than reconsuming the NUL in the data state.
-            (advance! tokenizer)
-            (character-emit! tokenizer (string #\< replacement-character))
-            (tk-state-set! tokenizer 'data))
-           (else
-            (character-emit! tokenizer "<")
-            (tk-state-set! tokenizer 'data)))))))
+  (define state-tag-open
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer)
+         (character-emit! tokenizer "<")
+         (end-of-file-emit! tokenizer))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((char=? c #\!)
+              (advance! tokenizer)
+              (tk-state-set! tokenizer 'markup-declaration-open))
+             ((char=? c #\/)
+              (advance! tokenizer)
+              (tk-state-set! tokenizer 'end-tag-open))
+             ((char-ascii-alphabetic? c)
+              (tag-start! tokenizer #f)
+              (tk-state-set! tokenizer 'tag-name))
+             ((char=? c #\?)
+              (tk-state-set! tokenizer 'processing-instruction))
+             ((char=? c #\nul)
+              ;; justhtml emits "<" plus the replacement character here rather
+              ;; than reconsuming the NUL in the data state.
+              (advance! tokenizer)
+              (character-emit! tokenizer (string #\< replacement-character))
+              (tk-state-set! tokenizer 'data))
+             (else
+              (character-emit! tokenizer "<")
+              (tk-state-set! tokenizer 'data))))))))
 
   ;; 13.2.5.7 end tag open state
 
-  (define (state-end-tag-open tokenizer)
-    (cond
-      ((at-end? tokenizer)
-       (character-emit! tokenizer "</")
-       (end-of-file-emit! tokenizer))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((char-ascii-alphabetic? c)
-            (tag-start! tokenizer #t)
-            (tk-state-set! tokenizer 'tag-name))
-           ((char=? c #\>)
-            (advance! tokenizer)
-            (tk-state-set! tokenizer 'data))
-           (else
-            (comment-start! tokenizer)
-            (tk-state-set! tokenizer 'bogus-comment)))))))
+  (define state-end-tag-open
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer)
+         (character-emit! tokenizer "</")
+         (end-of-file-emit! tokenizer))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((char-ascii-alphabetic? c)
+              (tag-start! tokenizer #t)
+              (tk-state-set! tokenizer 'tag-name))
+             ((char=? c #\>)
+              (advance! tokenizer)
+              (tk-state-set! tokenizer 'data))
+             (else
+              (comment-start! tokenizer)
+              (tk-state-set! tokenizer 'bogus-comment))))))))
 
   ;; 13.2.5.8 tag name state
 
-  (define (state-tag-name tokenizer)
-    (cond
-      ((at-end? tokenizer) (end-of-file-emit! tokenizer))
-      (else
-       (let ((c (consume! tokenizer)))
-         (cond
-           ((space-character? c) (tk-state-set! tokenizer 'before-attribute-name))
-           ((char=? c #\/) (tk-state-set! tokenizer 'self-closing-start-tag))
-           ((char=? c #\>) (tag-emit! tokenizer))
-           (else (tag-name-append! tokenizer
-                                   (char-ascii-lowercase (nul->replacement c)))))))))
+  (define state-tag-name
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer) (end-of-file-emit! tokenizer))
+        (else
+         (let ((c (consume! tokenizer)))
+           (cond
+             ((space-character? c) (tk-state-set! tokenizer 'before-attribute-name))
+             ((char=? c #\/) (tk-state-set! tokenizer 'self-closing-start-tag))
+             ((char=? c #\>) (tag-emit! tokenizer))
+             (else (tag-name-append! tokenizer
+                                     (char-ascii-lowercase (nul->replacement c))))))))))
 
   ;; 13.2.5.32 before attribute name state
 
-  (define (state-before-attribute-name tokenizer)
-    (cond
-      ((at-end? tokenizer) (tk-state-set! tokenizer 'after-attribute-name))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((space-character? c) (advance! tokenizer))
-           ((or (char=? c #\/) (char=? c #\>))
-            (tk-state-set! tokenizer 'after-attribute-name))
-           ((char=? c #\=)
-            (advance! tokenizer)
-            (attribute-start! tokenizer)
-            (attribute-name-append! tokenizer c)
-            (tk-state-set! tokenizer 'attribute-name))
-           (else
-            (attribute-start! tokenizer)
-            (tk-state-set! tokenizer 'attribute-name)))))))
+  (define state-before-attribute-name
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer) (tk-state-set! tokenizer 'after-attribute-name))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((space-character? c) (advance! tokenizer))
+             ((or (char=? c #\/) (char=? c #\>))
+              (tk-state-set! tokenizer 'after-attribute-name))
+             ((char=? c #\=)
+              (advance! tokenizer)
+              (attribute-start! tokenizer)
+              (attribute-name-append! tokenizer c)
+              (tk-state-set! tokenizer 'attribute-name))
+             (else
+              (attribute-start! tokenizer)
+              (tk-state-set! tokenizer 'attribute-name))))))))
 
   ;; 13.2.5.33 attribute name state
 
-  (define (state-attribute-name tokenizer)
-    (cond
-      ((at-end? tokenizer) (tk-state-set! tokenizer 'after-attribute-name))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((or (space-character? c) (char=? c #\/) (char=? c #\>))
-            (tk-state-set! tokenizer 'after-attribute-name))
-           ((char=? c #\=)
-            (advance! tokenizer)
-            (tk-state-set! tokenizer 'before-attribute-value))
-           (else
-            (advance! tokenizer)
-            (attribute-name-append! tokenizer
-                                    (char-ascii-lowercase (nul->replacement c)))))))))
+  (define state-attribute-name
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer) (tk-state-set! tokenizer 'after-attribute-name))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((or (space-character? c) (char=? c #\/) (char=? c #\>))
+              (tk-state-set! tokenizer 'after-attribute-name))
+             ((char=? c #\=)
+              (advance! tokenizer)
+              (tk-state-set! tokenizer 'before-attribute-value))
+             (else
+              (advance! tokenizer)
+              (attribute-name-append! tokenizer
+                                      (char-ascii-lowercase (nul->replacement c))))))))))
 
   ;; 13.2.5.34 after attribute name state
 
-  (define (state-after-attribute-name tokenizer)
-    (cond
-      ((at-end? tokenizer) (end-of-file-emit! tokenizer))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((space-character? c) (advance! tokenizer))
-           ((char=? c #\/)
-            (advance! tokenizer)
-            (tk-state-set! tokenizer 'self-closing-start-tag))
-           ((char=? c #\=)
-            (advance! tokenizer)
-            (tk-state-set! tokenizer 'before-attribute-value))
-           ((char=? c #\>)
-            (advance! tokenizer)
-            (tag-emit! tokenizer))
-           (else
-            (attribute-start! tokenizer)
-            (tk-state-set! tokenizer 'attribute-name)))))))
+  (define state-after-attribute-name
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer) (end-of-file-emit! tokenizer))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((space-character? c) (advance! tokenizer))
+             ((char=? c #\/)
+              (advance! tokenizer)
+              (tk-state-set! tokenizer 'self-closing-start-tag))
+             ((char=? c #\=)
+              (advance! tokenizer)
+              (tk-state-set! tokenizer 'before-attribute-value))
+             ((char=? c #\>)
+              (advance! tokenizer)
+              (tag-emit! tokenizer))
+             (else
+              (attribute-start! tokenizer)
+              (tk-state-set! tokenizer 'attribute-name))))))))
 
   ;; 13.2.5.35 before attribute value state
 
-  (define (state-before-attribute-value tokenizer)
-    (cond
-      ((at-end? tokenizer) (tk-state-set! tokenizer 'attribute-value-unquoted))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((space-character? c) (advance! tokenizer))
-           ((char=? c #\")
-            (advance! tokenizer)
-            (attribute-value-port tokenizer)
-            (tk-state-set! tokenizer 'attribute-value-double-quoted))
-           ((char=? c #\')
-            (advance! tokenizer)
-            (attribute-value-port tokenizer)
-            (tk-state-set! tokenizer 'attribute-value-single-quoted))
-           ((char=? c #\>)
-            (advance! tokenizer)
-            (tag-emit! tokenizer))
-           (else
-            (attribute-value-port tokenizer)
-            (tk-state-set! tokenizer 'attribute-value-unquoted)))))))
+  (define state-before-attribute-value
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer) (tk-state-set! tokenizer 'attribute-value-unquoted))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((space-character? c) (advance! tokenizer))
+             ((char=? c #\")
+              (advance! tokenizer)
+              (attribute-value-port tokenizer)
+              (tk-state-set! tokenizer 'attribute-value-double-quoted))
+             ((char=? c #\')
+              (advance! tokenizer)
+              (attribute-value-port tokenizer)
+              (tk-state-set! tokenizer 'attribute-value-single-quoted))
+             ((char=? c #\>)
+              (advance! tokenizer)
+              (tag-emit! tokenizer))
+             (else
+              (attribute-value-port tokenizer)
+              (tk-state-set! tokenizer 'attribute-value-unquoted))))))))
 
   ;; 13.2.5.36/37 attribute value (double|single) quoted states
 
-  (define (state-attribute-value-quoted tokenizer quote-character)
-    (cond
-      ((at-end? tokenizer) (end-of-file-emit! tokenizer))
-      (else
-       (let ((c (consume! tokenizer)))
-         (cond
-           ((char=? c quote-character)
-            (tk-state-set! tokenizer 'after-attribute-value-quoted))
-           (else (attribute-value-append! tokenizer (nul->replacement c))))))))
+  (define state-attribute-value-quoted
+    (lambda (tokenizer quote-character)
+      (cond
+        ((at-end? tokenizer) (end-of-file-emit! tokenizer))
+        (else
+         (let ((c (consume! tokenizer)))
+           (cond
+             ((char=? c quote-character)
+              (tk-state-set! tokenizer 'after-attribute-value-quoted))
+             (else (attribute-value-append! tokenizer (nul->replacement c)))))))))
 
   ;; 13.2.5.38 attribute value (unquoted) state
 
-  (define (state-attribute-value-unquoted tokenizer)
-    (cond
-      ((at-end? tokenizer) (end-of-file-emit! tokenizer))
-      (else
-       (let ((c (consume! tokenizer)))
-         (cond
-           ((space-character? c) (tk-state-set! tokenizer 'before-attribute-name))
-           ((char=? c #\>) (tag-emit! tokenizer))
-           (else (attribute-value-append! tokenizer (nul->replacement c))))))))
+  (define state-attribute-value-unquoted
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer) (end-of-file-emit! tokenizer))
+        (else
+         (let ((c (consume! tokenizer)))
+           (cond
+             ((space-character? c) (tk-state-set! tokenizer 'before-attribute-name))
+             ((char=? c #\>) (tag-emit! tokenizer))
+             (else (attribute-value-append! tokenizer (nul->replacement c)))))))))
 
   ;; 13.2.5.39 after attribute value (quoted) state
 
-  (define (state-after-attribute-value-quoted tokenizer)
-    (cond
-      ((at-end? tokenizer) (end-of-file-emit! tokenizer))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((space-character? c)
-            (advance! tokenizer)
-            (tk-state-set! tokenizer 'before-attribute-name))
-           ((char=? c #\/)
-            (advance! tokenizer)
-            (tk-state-set! tokenizer 'self-closing-start-tag))
-           ((char=? c #\>)
-            (advance! tokenizer)
-            (tag-emit! tokenizer))
-           (else (tk-state-set! tokenizer 'before-attribute-name)))))))
+  (define state-after-attribute-value-quoted
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer) (end-of-file-emit! tokenizer))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((space-character? c)
+              (advance! tokenizer)
+              (tk-state-set! tokenizer 'before-attribute-name))
+             ((char=? c #\/)
+              (advance! tokenizer)
+              (tk-state-set! tokenizer 'self-closing-start-tag))
+             ((char=? c #\>)
+              (advance! tokenizer)
+              (tag-emit! tokenizer))
+             (else (tk-state-set! tokenizer 'before-attribute-name))))))))
 
   ;; 13.2.5.40 self-closing start tag state
 
-  (define (state-self-closing-start-tag tokenizer)
-    (cond
-      ((at-end? tokenizer) (end-of-file-emit! tokenizer))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((char=? c #\>)
-            (advance! tokenizer)
-            (tk-tag-self-closing-set! tokenizer #t)
-            (tag-emit! tokenizer))
-           (else (tk-state-set! tokenizer 'before-attribute-name)))))))
+  (define state-self-closing-start-tag
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer) (end-of-file-emit! tokenizer))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((char=? c #\>)
+              (advance! tokenizer)
+              (tk-tag-self-closing-set! tokenizer #t)
+              (tag-emit! tokenizer))
+             (else (tk-state-set! tokenizer 'before-attribute-name))))))))
 
   ;; 13.2.5.41 bogus comment state
 
-  (define (state-bogus-comment tokenizer)
-    (cond
-      ((at-end? tokenizer)
-       (comment-emit! tokenizer)
-       (end-of-file-emit! tokenizer))
-      (else
-       (let ((c (consume! tokenizer)))
-         (cond
-           ((char=? c #\>)
-            (comment-emit! tokenizer)
-            (tk-state-set! tokenizer 'data))
-           (else (comment-append! tokenizer (nul->replacement c))))))))
+  (define state-bogus-comment
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer)
+         (comment-emit! tokenizer)
+         (end-of-file-emit! tokenizer))
+        (else
+         (let ((c (consume! tokenizer)))
+           (cond
+             ((char=? c #\>)
+              (comment-emit! tokenizer)
+              (tk-state-set! tokenizer 'data))
+             (else (comment-append! tokenizer (nul->replacement c)))))))))
 
   ;; Processing instructions.  The spec makes "<?" a bogus comment; justhtml
   ;; recognises an XML-style processing instruction instead when the content
   ;; starts with a name and the tag is terminated, and otherwise falls back to
   ;; a comment or to no token at all (engine.py, _processing_instruction_data).
 
-  (define (pi-name-start? c)
-    (or (char=? c #\_) (char-ascii-alphabetic? c)))
+  (define pi-name-start?
+    (lambda (c)
+      (or (char=? c #\_) (char-ascii-alphabetic? c))))
 
-  (define (pi-name-char? c)
-    (or (char=? c #\_) (char=? c #\-) (char-ascii-alphanumeric? c)))
+  (define pi-name-char?
+    (lambda (c)
+      (or (char=? c #\_) (char=? c #\-) (char-ascii-alphanumeric? c))))
 
-  (define (pi-target-scan text start end)
-    (let loop ((i start))
-      (if (and (fx< i end) (pi-name-char? (string-ref text i)))
-        (loop (fx+ i 1))
-        i)))
+  (define pi-target-scan
+    (lambda (text start end)
+      (let loop ((i start))
+        (if (and (fx< i end) (pi-name-char? (string-ref text i)))
+          (loop (fx+ i 1))
+          i))))
 
-  (define (pi-xml-target? target)
-    (and (fx>= (string-length target) 3)
-         (string-ascii-equal? (substring target 0 3) "xml")))
+  (define pi-xml-target?
+    (lambda (target)
+      (and (fx>= (string-length target) 3)
+           (string-ascii-equal? (substring target 0 3) "xml"))))
 
   ;; Returns (values target data) or (values #false #false).
-  (define (pi-content-parse text content-start content-end)
-    (cond
-      ((fx>= content-start content-end) (values #f #f))
-      ((not (pi-name-start? (string-ref text content-start))) (values #f #f))
-      (else
-       (let* ((after (pi-target-scan text (fx+ content-start 1) content-end))
-              (target (substring text content-start after)))
-         (cond
-           ((pi-xml-target? target) (values #f #f))
-           ((fx= after content-end) (values target ""))
-           (else
-            (let ((c (string-ref text after)))
-              (cond
-                ((char=? c #\?) (values target (pi-data-take text after content-end)))
-                ((html-space-character? c)
-                 (let loop ((i (fx+ after 1)))
-                   (if (and (fx< i content-end)
-                            (html-space-character? (string-ref text i)))
-                     (loop (fx+ i 1))
-                     (values target (pi-data-take text i content-end)))))
-                (else (values #f #f))))))))))
-
-  (define (pi-data-take text start end)
-    (let* ((raw (substring text start end))
-           (size (string-length raw))
-           (trimmed (if (and (fx> size 0) (char=? (string-ref raw (fx- size 1)) #\?))
-                      (substring raw 0 (fx- size 1))
-                      raw)))
-      (string-nul-replace trimmed)))
-
-  (define (state-processing-instruction tokenizer)
-    (let* ((text (tk-text tokenizer))
-           (size (tk-size tokenizer))
-           (start (tk-position tokenizer))
-           (close (let loop ((i (fx+ start 1)))
-                    (cond
-                      ((fx>= i size) #f)
-                      ((char=? (string-ref text i) #\>) i)
-                      (else (loop (fx+ i 1)))))))
+  (define pi-content-parse
+    (lambda (text content-start content-end)
       (cond
-        ((not close)
-         (cond
-           ((fx>= (fx+ start 1) size) #f)
-           (else
-            (let ((c (string-ref text (fx+ start 1))))
-              (cond
-                ((pi-name-start? c)
-                 (let ((target (substring text (fx+ start 1)
-                                          (pi-target-scan text (fx+ start 2) size))))
-                   (when (pi-xml-target? target)
+        ((fx>= content-start content-end) (values #f #f))
+        ((not (pi-name-start? (string-ref text content-start))) (values #f #f))
+        (else
+         (let* ((after (pi-target-scan text (fx+ content-start 1) content-end))
+                (target (substring text content-start after)))
+           (cond
+             ((pi-xml-target? target) (values #f #f))
+             ((fx= after content-end) (values target ""))
+             (else
+              (let ((c (string-ref text after)))
+                (cond
+                  ((char=? c #\?) (values target (pi-data-take text after content-end)))
+                  ((html-space-character? c)
+                   (let loop ((i (fx+ after 1)))
+                     (if (and (fx< i content-end)
+                              (html-space-character? (string-ref text i)))
+                       (loop (fx+ i 1))
+                       (values target (pi-data-take text i content-end)))))
+                  (else (values #f #f)))))))))))
+
+  (define pi-data-take
+    (lambda (text start end)
+      (let* ((raw (substring text start end))
+             (size (string-length raw))
+             (trimmed (if (and (fx> size 0) (char=? (string-ref raw (fx- size 1)) #\?))
+                        (substring raw 0 (fx- size 1))
+                        raw)))
+        (string-nul-replace trimmed))))
+
+  (define state-processing-instruction
+    (lambda (tokenizer)
+      (let* ((text (tk-text tokenizer))
+             (size (tk-size tokenizer))
+             (start (tk-position tokenizer))
+             (close (let loop ((i (fx+ start 1)))
+                      (cond
+                        ((fx>= i size) #f)
+                        ((char=? (string-ref text i) #\>) i)
+                        (else (loop (fx+ i 1)))))))
+        (cond
+          ((not close)
+           (cond
+             ((fx>= (fx+ start 1) size) #f)
+             (else
+              (let ((c (string-ref text (fx+ start 1))))
+                (cond
+                  ((pi-name-start? c)
+                   (let ((target (substring text (fx+ start 1)
+                                            (pi-target-scan text (fx+ start 2) size))))
+                     (when (pi-xml-target? target)
+                       (token-emit! tokenizer
+                                    (token-comment-make
+                                      (string-nul-replace (substring text start size)))))))
+                  ((not (html-space-character? c))
+                   (when (char=? c #\#)
                      (token-emit! tokenizer
                                   (token-comment-make
-                                    (string-nul-replace (substring text start size)))))))
-                ((not (html-space-character? c))
-                 (when (char=? c #\#)
+                                    (string-nul-replace (substring text start size))))))
+                  (else
                    (token-emit! tokenizer
                                 (token-comment-make
-                                  (string-nul-replace (substring text start size))))))
-                (else
+                                  (string-nul-replace (substring text start size)))))))))
+           (tk-position-set! tokenizer size)
+           (tk-state-set! tokenizer 'data))
+          (else
+           (call-with-values
+             (lambda () (pi-content-parse text (fx+ start 1) close))
+             (lambda (target data)
+               (if target
+                 (token-emit! tokenizer (token-processing-instruction-make target data))
                  (token-emit! tokenizer
                               (token-comment-make
-                                (string-nul-replace (substring text start size)))))))))
-         (tk-position-set! tokenizer size)
-         (tk-state-set! tokenizer 'data))
-        (else
-         (call-with-values
-           (lambda () (pi-content-parse text (fx+ start 1) close))
-           (lambda (target data)
-             (if target
-               (token-emit! tokenizer (token-processing-instruction-make target data))
-               (token-emit! tokenizer
-                            (token-comment-make
-                              (string-nul-replace (substring text start close)))))))
-         (tk-position-set! tokenizer (fx+ close 1))
-         (tk-state-set! tokenizer 'data)))))
+                                (string-nul-replace (substring text start close)))))))
+           (tk-position-set! tokenizer (fx+ close 1))
+           (tk-state-set! tokenizer 'data))))))
 
   ;; 13.2.5.42 markup declaration open state
 
-  (define (state-markup-declaration-open tokenizer)
-    (let ((text (tk-text tokenizer))
-          (size (tk-size tokenizer))
-          (position (tk-position tokenizer)))
-      (cond
-        ((html-scanner-ascii-startswith? text "--" position size)
-         (tk-position-set! tokenizer (fx+ position 2))
-         (comment-start! tokenizer)
-         (tk-state-set! tokenizer 'comment-start))
-        ((html-scanner-ascii-startswith? text "doctype" position size)
-         (tk-position-set! tokenizer (fx+ position 7))
-         (tk-state-set! tokenizer 'doctype))
-        ((html-scanner-ascii-startswith? text "[CDATA[" position size)
-         (cond
-           ((tk-foreign? tokenizer)
-            (tk-position-set! tokenizer (fx+ position 7))
-            (tk-state-set! tokenizer 'cdata-section))
-           (else
-            (tk-position-set! tokenizer (fx+ position 7))
-            (comment-start! tokenizer)
-            (comment-append-string! tokenizer "[CDATA[")
-            (tk-state-set! tokenizer 'bogus-comment))))
-        (else
-         (comment-start! tokenizer)
-         (tk-state-set! tokenizer 'bogus-comment)))))
+  (define state-markup-declaration-open
+    (lambda (tokenizer)
+      (let ((text (tk-text tokenizer))
+            (size (tk-size tokenizer))
+            (position (tk-position tokenizer)))
+        (cond
+          ((html-scanner-ascii-startswith? text "--" position size)
+           (tk-position-set! tokenizer (fx+ position 2))
+           (comment-start! tokenizer)
+           (tk-state-set! tokenizer 'comment-start))
+          ((html-scanner-ascii-startswith? text "doctype" position size)
+           (tk-position-set! tokenizer (fx+ position 7))
+           (tk-state-set! tokenizer 'doctype))
+          ((html-scanner-ascii-startswith? text "[CDATA[" position size)
+           (cond
+             ((tk-foreign? tokenizer)
+              (tk-position-set! tokenizer (fx+ position 7))
+              (tk-state-set! tokenizer 'cdata-section))
+             (else
+              (tk-position-set! tokenizer (fx+ position 7))
+              (comment-start! tokenizer)
+              (comment-append-string! tokenizer "[CDATA[")
+              (tk-state-set! tokenizer 'bogus-comment))))
+          (else
+           (comment-start! tokenizer)
+           (tk-state-set! tokenizer 'bogus-comment))))))
 
   ;; 13.2.5.43-51 comment states
 
-  (define (state-comment-start tokenizer)
-    (cond
-      ((at-end? tokenizer) (tk-state-set! tokenizer 'comment))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((char=? c #\-)
-            (advance! tokenizer)
-            (tk-state-set! tokenizer 'comment-start-dash))
-           ((char=? c #\>)
-            (advance! tokenizer)
-            (comment-emit! tokenizer)
-            (tk-state-set! tokenizer 'data))
-           (else (tk-state-set! tokenizer 'comment)))))))
+  (define state-comment-start
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer) (tk-state-set! tokenizer 'comment))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((char=? c #\-)
+              (advance! tokenizer)
+              (tk-state-set! tokenizer 'comment-start-dash))
+             ((char=? c #\>)
+              (advance! tokenizer)
+              (comment-emit! tokenizer)
+              (tk-state-set! tokenizer 'data))
+             (else (tk-state-set! tokenizer 'comment))))))))
 
-  (define (state-comment-start-dash tokenizer)
-    (cond
-      ((at-end? tokenizer)
-       (comment-emit! tokenizer)
-       (end-of-file-emit! tokenizer))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((char=? c #\-)
-            (advance! tokenizer)
-            (tk-state-set! tokenizer 'comment-end))
-           ((char=? c #\>)
-            (advance! tokenizer)
-            (comment-emit! tokenizer)
-            (tk-state-set! tokenizer 'data))
-           (else
-            (comment-append! tokenizer #\-)
-            (tk-state-set! tokenizer 'comment)))))))
+  (define state-comment-start-dash
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer)
+         (comment-emit! tokenizer)
+         (end-of-file-emit! tokenizer))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((char=? c #\-)
+              (advance! tokenizer)
+              (tk-state-set! tokenizer 'comment-end))
+             ((char=? c #\>)
+              (advance! tokenizer)
+              (comment-emit! tokenizer)
+              (tk-state-set! tokenizer 'data))
+             (else
+              (comment-append! tokenizer #\-)
+              (tk-state-set! tokenizer 'comment))))))))
 
-  (define (state-comment tokenizer)
-    (cond
-      ((at-end? tokenizer)
-       (comment-emit! tokenizer)
-       (end-of-file-emit! tokenizer))
-      (else
-       (let ((c (consume! tokenizer)))
-         (cond
-           ((char=? c #\<)
-            (comment-append! tokenizer c)
-            (tk-state-set! tokenizer 'comment-less-than-sign))
-           ((char=? c #\-) (tk-state-set! tokenizer 'comment-end-dash))
-           (else (comment-append! tokenizer (nul->replacement c))))))))
+  (define state-comment
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer)
+         (comment-emit! tokenizer)
+         (end-of-file-emit! tokenizer))
+        (else
+         (let ((c (consume! tokenizer)))
+           (cond
+             ((char=? c #\<)
+              (comment-append! tokenizer c)
+              (tk-state-set! tokenizer 'comment-less-than-sign))
+             ((char=? c #\-) (tk-state-set! tokenizer 'comment-end-dash))
+             (else (comment-append! tokenizer (nul->replacement c)))))))))
 
-  (define (state-comment-less-than-sign tokenizer)
-    (cond
-      ((at-end? tokenizer) (tk-state-set! tokenizer 'comment))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((char=? c #\!)
-            (advance! tokenizer)
-            (comment-append! tokenizer c)
-            (tk-state-set! tokenizer 'comment-less-than-sign-bang))
-           ((char=? c #\<)
-            (advance! tokenizer)
-            (comment-append! tokenizer c))
-           (else (tk-state-set! tokenizer 'comment)))))))
+  (define state-comment-less-than-sign
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer) (tk-state-set! tokenizer 'comment))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((char=? c #\!)
+              (advance! tokenizer)
+              (comment-append! tokenizer c)
+              (tk-state-set! tokenizer 'comment-less-than-sign-bang))
+             ((char=? c #\<)
+              (advance! tokenizer)
+              (comment-append! tokenizer c))
+             (else (tk-state-set! tokenizer 'comment))))))))
 
-  (define (state-comment-less-than-sign-bang tokenizer)
-    (cond
-      ((at-end? tokenizer) (tk-state-set! tokenizer 'comment))
-      ((char=? (peek tokenizer) #\-)
-       (advance! tokenizer)
-       (tk-state-set! tokenizer 'comment-less-than-sign-bang-dash))
-      (else (tk-state-set! tokenizer 'comment))))
+  (define state-comment-less-than-sign-bang
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer) (tk-state-set! tokenizer 'comment))
+        ((char=? (peek tokenizer) #\-)
+         (advance! tokenizer)
+         (tk-state-set! tokenizer 'comment-less-than-sign-bang-dash))
+        (else (tk-state-set! tokenizer 'comment)))))
 
-  (define (state-comment-less-than-sign-bang-dash tokenizer)
-    (cond
-      ((at-end? tokenizer) (tk-state-set! tokenizer 'comment-end-dash))
-      ((char=? (peek tokenizer) #\-)
-       (advance! tokenizer)
-       (tk-state-set! tokenizer 'comment-less-than-sign-bang-dash-dash))
-      (else (tk-state-set! tokenizer 'comment-end-dash))))
+  (define state-comment-less-than-sign-bang-dash
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer) (tk-state-set! tokenizer 'comment-end-dash))
+        ((char=? (peek tokenizer) #\-)
+         (advance! tokenizer)
+         (tk-state-set! tokenizer 'comment-less-than-sign-bang-dash-dash))
+        (else (tk-state-set! tokenizer 'comment-end-dash)))))
 
-  (define (state-comment-less-than-sign-bang-dash-dash tokenizer)
-    (tk-state-set! tokenizer 'comment-end))
+  (define state-comment-less-than-sign-bang-dash-dash
+    (lambda (tokenizer)
+      (tk-state-set! tokenizer 'comment-end)))
 
-  (define (state-comment-end-dash tokenizer)
-    (cond
-      ((at-end? tokenizer)
-       (comment-emit! tokenizer)
-       (end-of-file-emit! tokenizer))
-      ((char=? (peek tokenizer) #\-)
-       (advance! tokenizer)
-       (tk-state-set! tokenizer 'comment-end))
-      (else
-       (comment-append! tokenizer #\-)
-       (tk-state-set! tokenizer 'comment))))
+  (define state-comment-end-dash
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer)
+         (comment-emit! tokenizer)
+         (end-of-file-emit! tokenizer))
+        ((char=? (peek tokenizer) #\-)
+         (advance! tokenizer)
+         (tk-state-set! tokenizer 'comment-end))
+        (else
+         (comment-append! tokenizer #\-)
+         (tk-state-set! tokenizer 'comment)))))
 
-  (define (state-comment-end tokenizer)
-    (cond
-      ((at-end? tokenizer)
-       (comment-emit! tokenizer)
-       (end-of-file-emit! tokenizer))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((char=? c #\>)
-            (advance! tokenizer)
-            (comment-emit! tokenizer)
-            (tk-state-set! tokenizer 'data))
-           ((char=? c #\!)
-            (advance! tokenizer)
-            (tk-state-set! tokenizer 'comment-end-bang))
-           ((char=? c #\-)
-            (advance! tokenizer)
-            (comment-append! tokenizer #\-))
-           (else
-            (comment-append-string! tokenizer "--")
-            (tk-state-set! tokenizer 'comment)))))))
+  (define state-comment-end
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer)
+         (comment-emit! tokenizer)
+         (end-of-file-emit! tokenizer))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((char=? c #\>)
+              (advance! tokenizer)
+              (comment-emit! tokenizer)
+              (tk-state-set! tokenizer 'data))
+             ((char=? c #\!)
+              (advance! tokenizer)
+              (tk-state-set! tokenizer 'comment-end-bang))
+             ((char=? c #\-)
+              (advance! tokenizer)
+              (comment-append! tokenizer #\-))
+             (else
+              (comment-append-string! tokenizer "--")
+              (tk-state-set! tokenizer 'comment))))))))
 
-  (define (state-comment-end-bang tokenizer)
-    (cond
-      ((at-end? tokenizer)
-       (comment-append-string! tokenizer "--!")
-       (comment-emit! tokenizer)
-       (end-of-file-emit! tokenizer))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((char=? c #\-)
-            (advance! tokenizer)
-            (comment-append-string! tokenizer "--!")
-            (tk-state-set! tokenizer 'comment-end-dash))
-           ((char=? c #\>)
-            (advance! tokenizer)
-            (comment-emit! tokenizer)
-            (tk-state-set! tokenizer 'data))
-           (else
-            (comment-append-string! tokenizer "--!")
-            (tk-state-set! tokenizer 'comment)))))))
+  (define state-comment-end-bang
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer)
+         (comment-append-string! tokenizer "--!")
+         (comment-emit! tokenizer)
+         (end-of-file-emit! tokenizer))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((char=? c #\-)
+              (advance! tokenizer)
+              (comment-append-string! tokenizer "--!")
+              (tk-state-set! tokenizer 'comment-end-dash))
+             ((char=? c #\>)
+              (advance! tokenizer)
+              (comment-emit! tokenizer)
+              (tk-state-set! tokenizer 'data))
+             (else
+              (comment-append-string! tokenizer "--!")
+              (tk-state-set! tokenizer 'comment))))))))
 
   ;; 13.2.5.53-68 DOCTYPE states
 
-  (define (doctype-emit-quirks-at-end! tokenizer)
-    (tk-doctype-quirks-set! tokenizer #t)
-    (doctype-emit! tokenizer)
-    (end-of-file-emit! tokenizer))
+  (define doctype-emit-quirks-at-end!
+    (lambda (tokenizer)
+      (tk-doctype-quirks-set! tokenizer #t)
+      (doctype-emit! tokenizer)
+      (end-of-file-emit! tokenizer)))
 
-  (define (state-doctype tokenizer)
-    (cond
-      ((at-end? tokenizer)
-       (doctype-start! tokenizer)
-       (doctype-emit-quirks-at-end! tokenizer))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((space-character? c)
-            (advance! tokenizer)
-            (doctype-start! tokenizer)
-            (tk-state-set! tokenizer 'before-doctype-name))
-           ((char=? c #\>)
-            (doctype-start! tokenizer)
-            (tk-state-set! tokenizer 'before-doctype-name))
-           (else
-            (doctype-start! tokenizer)
-            (tk-state-set! tokenizer 'before-doctype-name)))))))
+  (define state-doctype
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer)
+         (doctype-start! tokenizer)
+         (doctype-emit-quirks-at-end! tokenizer))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((space-character? c)
+              (advance! tokenizer)
+              (doctype-start! tokenizer)
+              (tk-state-set! tokenizer 'before-doctype-name))
+             ((char=? c #\>)
+              (doctype-start! tokenizer)
+              (tk-state-set! tokenizer 'before-doctype-name))
+             (else
+              (doctype-start! tokenizer)
+              (tk-state-set! tokenizer 'before-doctype-name))))))))
 
-  (define (state-before-doctype-name tokenizer)
-    (cond
-      ((at-end? tokenizer) (doctype-emit-quirks-at-end! tokenizer))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((space-character? c) (advance! tokenizer))
-           ((char=? c #\>)
-            (advance! tokenizer)
-            (tk-doctype-quirks-set! tokenizer #t)
-            (doctype-emit! tokenizer)
-            (tk-state-set! tokenizer 'data))
-           (else
-            (advance! tokenizer)
-            (tk-doctype-name-set! tokenizer (open-output-string))
-            (write-char (char-ascii-lowercase (nul->replacement c))
-                        (tk-doctype-name tokenizer))
-            (tk-state-set! tokenizer 'doctype-name)))))))
+  (define state-before-doctype-name
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer) (doctype-emit-quirks-at-end! tokenizer))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((space-character? c) (advance! tokenizer))
+             ((char=? c #\>)
+              (advance! tokenizer)
+              (tk-doctype-quirks-set! tokenizer #t)
+              (doctype-emit! tokenizer)
+              (tk-state-set! tokenizer 'data))
+             (else
+              (advance! tokenizer)
+              (tk-doctype-name-set! tokenizer (open-output-string))
+              (write-char (char-ascii-lowercase (nul->replacement c))
+                          (tk-doctype-name tokenizer))
+              (tk-state-set! tokenizer 'doctype-name))))))))
 
-  (define (state-doctype-name tokenizer)
-    (cond
-      ((at-end? tokenizer) (doctype-emit-quirks-at-end! tokenizer))
-      (else
-       (let ((c (consume! tokenizer)))
-         (cond
-           ((space-character? c) (tk-state-set! tokenizer 'after-doctype-name))
-           ((char=? c #\>)
-            (doctype-emit! tokenizer)
-            (tk-state-set! tokenizer 'data))
-           (else
-            (write-char (char-ascii-lowercase (nul->replacement c))
-                        (tk-doctype-name tokenizer))))))))
+  (define state-doctype-name
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer) (doctype-emit-quirks-at-end! tokenizer))
+        (else
+         (let ((c (consume! tokenizer)))
+           (cond
+             ((space-character? c) (tk-state-set! tokenizer 'after-doctype-name))
+             ((char=? c #\>)
+              (doctype-emit! tokenizer)
+              (tk-state-set! tokenizer 'data))
+             (else
+              (write-char (char-ascii-lowercase (nul->replacement c))
+                          (tk-doctype-name tokenizer)))))))))
 
-  (define (state-after-doctype-name tokenizer)
-    (cond
-      ((at-end? tokenizer) (doctype-emit-quirks-at-end! tokenizer))
-      (else
-       (let ((c (peek tokenizer))
-             (text (tk-text tokenizer))
-             (size (tk-size tokenizer))
-             (position (tk-position tokenizer)))
-         (cond
-           ((space-character? c) (advance! tokenizer))
-           ((char=? c #\>)
-            (advance! tokenizer)
-            (doctype-emit! tokenizer)
-            (tk-state-set! tokenizer 'data))
-           ((html-scanner-ascii-startswith? text "public" position size)
-            (tk-position-set! tokenizer (fx+ position 6))
-            (tk-state-set! tokenizer 'after-doctype-public-keyword))
-           ((html-scanner-ascii-startswith? text "system" position size)
-            (tk-position-set! tokenizer (fx+ position 6))
-            (tk-state-set! tokenizer 'after-doctype-system-keyword))
-           (else
-            (tk-doctype-quirks-set! tokenizer #t)
-            (tk-state-set! tokenizer 'bogus-doctype)))))))
+  (define state-after-doctype-name
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer) (doctype-emit-quirks-at-end! tokenizer))
+        (else
+         (let ((c (peek tokenizer))
+               (text (tk-text tokenizer))
+               (size (tk-size tokenizer))
+               (position (tk-position tokenizer)))
+           (cond
+             ((space-character? c) (advance! tokenizer))
+             ((char=? c #\>)
+              (advance! tokenizer)
+              (doctype-emit! tokenizer)
+              (tk-state-set! tokenizer 'data))
+             ((html-scanner-ascii-startswith? text "public" position size)
+              (tk-position-set! tokenizer (fx+ position 6))
+              (tk-state-set! tokenizer 'after-doctype-public-keyword))
+             ((html-scanner-ascii-startswith? text "system" position size)
+              (tk-position-set! tokenizer (fx+ position 6))
+              (tk-state-set! tokenizer 'after-doctype-system-keyword))
+             (else
+              (tk-doctype-quirks-set! tokenizer #t)
+              (tk-state-set! tokenizer 'bogus-doctype))))))))
 
-  (define (doctype-identifier-port-set! tokenizer which)
-    (let ((port (open-output-string)))
+  (define doctype-identifier-port-set!
+    (lambda (tokenizer which)
+      (let ((port (open-output-string)))
+        (if (eq? which 'public)
+          (tk-doctype-public-set! tokenizer port)
+          (tk-doctype-system-set! tokenizer port))
+        port)))
+
+  (define doctype-identifier-port
+    (lambda (tokenizer which)
       (if (eq? which 'public)
-        (tk-doctype-public-set! tokenizer port)
-        (tk-doctype-system-set! tokenizer port))
-      port))
+        (tk-doctype-public tokenizer)
+        (tk-doctype-system tokenizer))))
 
-  (define (doctype-identifier-port tokenizer which)
-    (if (eq? which 'public)
-      (tk-doctype-public tokenizer)
-      (tk-doctype-system tokenizer)))
+  (define state-after-doctype-keyword
+    (lambda (tokenizer which)
+      (cond
+        ((at-end? tokenizer) (doctype-emit-quirks-at-end! tokenizer))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((space-character? c)
+              (advance! tokenizer)
+              (tk-state-set! tokenizer (if (eq? which 'public)
+                                         'before-doctype-public-identifier
+                                         'before-doctype-system-identifier)))
+             ((char=? c #\")
+              (advance! tokenizer)
+              (doctype-identifier-port-set! tokenizer which)
+              (tk-state-set! tokenizer (if (eq? which 'public)
+                                         'doctype-public-identifier-double-quoted
+                                         'doctype-system-identifier-double-quoted)))
+             ((char=? c #\')
+              (advance! tokenizer)
+              (doctype-identifier-port-set! tokenizer which)
+              (tk-state-set! tokenizer (if (eq? which 'public)
+                                         'doctype-public-identifier-single-quoted
+                                         'doctype-system-identifier-single-quoted)))
+             ((char=? c #\>)
+              (advance! tokenizer)
+              (tk-doctype-quirks-set! tokenizer #t)
+              (doctype-emit! tokenizer)
+              (tk-state-set! tokenizer 'data))
+             (else
+              (tk-doctype-quirks-set! tokenizer #t)
+              (tk-state-set! tokenizer 'bogus-doctype))))))))
 
-  (define (state-after-doctype-keyword tokenizer which)
-    (cond
-      ((at-end? tokenizer) (doctype-emit-quirks-at-end! tokenizer))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((space-character? c)
-            (advance! tokenizer)
-            (tk-state-set! tokenizer (if (eq? which 'public)
-                                       'before-doctype-public-identifier
-                                       'before-doctype-system-identifier)))
-           ((char=? c #\")
-            (advance! tokenizer)
-            (doctype-identifier-port-set! tokenizer which)
-            (tk-state-set! tokenizer (if (eq? which 'public)
-                                       'doctype-public-identifier-double-quoted
-                                       'doctype-system-identifier-double-quoted)))
-           ((char=? c #\')
-            (advance! tokenizer)
-            (doctype-identifier-port-set! tokenizer which)
-            (tk-state-set! tokenizer (if (eq? which 'public)
-                                       'doctype-public-identifier-single-quoted
-                                       'doctype-system-identifier-single-quoted)))
-           ((char=? c #\>)
-            (advance! tokenizer)
-            (tk-doctype-quirks-set! tokenizer #t)
-            (doctype-emit! tokenizer)
-            (tk-state-set! tokenizer 'data))
-           (else
-            (tk-doctype-quirks-set! tokenizer #t)
-            (tk-state-set! tokenizer 'bogus-doctype)))))))
+  (define state-before-doctype-identifier
+    (lambda (tokenizer which)
+      (cond
+        ((at-end? tokenizer) (doctype-emit-quirks-at-end! tokenizer))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((space-character? c) (advance! tokenizer))
+             ((char=? c #\")
+              (advance! tokenizer)
+              (doctype-identifier-port-set! tokenizer which)
+              (tk-state-set! tokenizer (if (eq? which 'public)
+                                         'doctype-public-identifier-double-quoted
+                                         'doctype-system-identifier-double-quoted)))
+             ((char=? c #\')
+              (advance! tokenizer)
+              (doctype-identifier-port-set! tokenizer which)
+              (tk-state-set! tokenizer (if (eq? which 'public)
+                                         'doctype-public-identifier-single-quoted
+                                         'doctype-system-identifier-single-quoted)))
+             ((char=? c #\>)
+              (advance! tokenizer)
+              (tk-doctype-quirks-set! tokenizer #t)
+              (doctype-emit! tokenizer)
+              (tk-state-set! tokenizer 'data))
+             (else
+              (tk-doctype-quirks-set! tokenizer #t)
+              (tk-state-set! tokenizer 'bogus-doctype))))))))
 
-  (define (state-before-doctype-identifier tokenizer which)
-    (cond
-      ((at-end? tokenizer) (doctype-emit-quirks-at-end! tokenizer))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((space-character? c) (advance! tokenizer))
-           ((char=? c #\")
-            (advance! tokenizer)
-            (doctype-identifier-port-set! tokenizer which)
-            (tk-state-set! tokenizer (if (eq? which 'public)
-                                       'doctype-public-identifier-double-quoted
-                                       'doctype-system-identifier-double-quoted)))
-           ((char=? c #\')
-            (advance! tokenizer)
-            (doctype-identifier-port-set! tokenizer which)
-            (tk-state-set! tokenizer (if (eq? which 'public)
-                                       'doctype-public-identifier-single-quoted
-                                       'doctype-system-identifier-single-quoted)))
-           ((char=? c #\>)
-            (advance! tokenizer)
-            (tk-doctype-quirks-set! tokenizer #t)
-            (doctype-emit! tokenizer)
-            (tk-state-set! tokenizer 'data))
-           (else
-            (tk-doctype-quirks-set! tokenizer #t)
-            (tk-state-set! tokenizer 'bogus-doctype)))))))
+  (define state-doctype-identifier
+    (lambda (tokenizer which quote-character)
+      (cond
+        ((at-end? tokenizer) (doctype-emit-quirks-at-end! tokenizer))
+        (else
+         (let ((c (consume! tokenizer)))
+           (cond
+             ((char=? c quote-character)
+              (tk-state-set! tokenizer (if (eq? which 'public)
+                                         'after-doctype-public-identifier
+                                         'after-doctype-system-identifier)))
+             ((char=? c #\>)
+              (tk-doctype-quirks-set! tokenizer #t)
+              (doctype-emit! tokenizer)
+              (tk-state-set! tokenizer 'data))
+             (else
+              (write-char (nul->replacement c)
+                          (doctype-identifier-port tokenizer which)))))))))
 
-  (define (state-doctype-identifier tokenizer which quote-character)
-    (cond
-      ((at-end? tokenizer) (doctype-emit-quirks-at-end! tokenizer))
-      (else
-       (let ((c (consume! tokenizer)))
-         (cond
-           ((char=? c quote-character)
-            (tk-state-set! tokenizer (if (eq? which 'public)
-                                       'after-doctype-public-identifier
-                                       'after-doctype-system-identifier)))
-           ((char=? c #\>)
-            (tk-doctype-quirks-set! tokenizer #t)
-            (doctype-emit! tokenizer)
-            (tk-state-set! tokenizer 'data))
-           (else
-            (write-char (nul->replacement c)
-                        (doctype-identifier-port tokenizer which))))))))
+  (define state-after-doctype-public-identifier
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer) (doctype-emit-quirks-at-end! tokenizer))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((space-character? c)
+              (advance! tokenizer)
+              (tk-state-set! tokenizer 'between-doctype-public-and-system-identifiers))
+             ((char=? c #\>)
+              (advance! tokenizer)
+              (doctype-emit! tokenizer)
+              (tk-state-set! tokenizer 'data))
+             ((char=? c #\")
+              (advance! tokenizer)
+              (doctype-identifier-port-set! tokenizer 'system)
+              (tk-state-set! tokenizer 'doctype-system-identifier-double-quoted))
+             ((char=? c #\')
+              (advance! tokenizer)
+              (doctype-identifier-port-set! tokenizer 'system)
+              (tk-state-set! tokenizer 'doctype-system-identifier-single-quoted))
+             (else
+              (tk-doctype-quirks-set! tokenizer #t)
+              (tk-state-set! tokenizer 'bogus-doctype))))))))
 
-  (define (state-after-doctype-public-identifier tokenizer)
-    (cond
-      ((at-end? tokenizer) (doctype-emit-quirks-at-end! tokenizer))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((space-character? c)
-            (advance! tokenizer)
-            (tk-state-set! tokenizer 'between-doctype-public-and-system-identifiers))
-           ((char=? c #\>)
-            (advance! tokenizer)
-            (doctype-emit! tokenizer)
-            (tk-state-set! tokenizer 'data))
-           ((char=? c #\")
-            (advance! tokenizer)
-            (doctype-identifier-port-set! tokenizer 'system)
-            (tk-state-set! tokenizer 'doctype-system-identifier-double-quoted))
-           ((char=? c #\')
-            (advance! tokenizer)
-            (doctype-identifier-port-set! tokenizer 'system)
-            (tk-state-set! tokenizer 'doctype-system-identifier-single-quoted))
-           (else
-            (tk-doctype-quirks-set! tokenizer #t)
-            (tk-state-set! tokenizer 'bogus-doctype)))))))
+  (define state-between-doctype-identifiers
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer) (doctype-emit-quirks-at-end! tokenizer))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((space-character? c) (advance! tokenizer))
+             ((char=? c #\>)
+              (advance! tokenizer)
+              (doctype-emit! tokenizer)
+              (tk-state-set! tokenizer 'data))
+             ((char=? c #\")
+              (advance! tokenizer)
+              (doctype-identifier-port-set! tokenizer 'system)
+              (tk-state-set! tokenizer 'doctype-system-identifier-double-quoted))
+             ((char=? c #\')
+              (advance! tokenizer)
+              (doctype-identifier-port-set! tokenizer 'system)
+              (tk-state-set! tokenizer 'doctype-system-identifier-single-quoted))
+             (else
+              (tk-doctype-quirks-set! tokenizer #t)
+              (tk-state-set! tokenizer 'bogus-doctype))))))))
 
-  (define (state-between-doctype-identifiers tokenizer)
-    (cond
-      ((at-end? tokenizer) (doctype-emit-quirks-at-end! tokenizer))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((space-character? c) (advance! tokenizer))
-           ((char=? c #\>)
-            (advance! tokenizer)
-            (doctype-emit! tokenizer)
-            (tk-state-set! tokenizer 'data))
-           ((char=? c #\")
-            (advance! tokenizer)
-            (doctype-identifier-port-set! tokenizer 'system)
-            (tk-state-set! tokenizer 'doctype-system-identifier-double-quoted))
-           ((char=? c #\')
-            (advance! tokenizer)
-            (doctype-identifier-port-set! tokenizer 'system)
-            (tk-state-set! tokenizer 'doctype-system-identifier-single-quoted))
-           (else
-            (tk-doctype-quirks-set! tokenizer #t)
-            (tk-state-set! tokenizer 'bogus-doctype)))))))
+  (define state-after-doctype-system-identifier
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer) (doctype-emit-quirks-at-end! tokenizer))
+        (else
+         (let ((c (peek tokenizer)))
+           (cond
+             ((space-character? c) (advance! tokenizer))
+             ((char=? c #\>)
+              (advance! tokenizer)
+              (doctype-emit! tokenizer)
+              (tk-state-set! tokenizer 'data))
+             (else (tk-state-set! tokenizer 'bogus-doctype))))))))
 
-  (define (state-after-doctype-system-identifier tokenizer)
-    (cond
-      ((at-end? tokenizer) (doctype-emit-quirks-at-end! tokenizer))
-      (else
-       (let ((c (peek tokenizer)))
-         (cond
-           ((space-character? c) (advance! tokenizer))
-           ((char=? c #\>)
-            (advance! tokenizer)
-            (doctype-emit! tokenizer)
-            (tk-state-set! tokenizer 'data))
-           (else (tk-state-set! tokenizer 'bogus-doctype)))))))
-
-  (define (state-bogus-doctype tokenizer)
-    (cond
-      ((at-end? tokenizer)
-       (doctype-emit! tokenizer)
-       (end-of-file-emit! tokenizer))
-      (else
-       (let ((c (consume! tokenizer)))
-         (when (char=? c #\>)
-           (doctype-emit! tokenizer)
-           (tk-state-set! tokenizer 'data))))))
+  (define state-bogus-doctype
+    (lambda (tokenizer)
+      (cond
+        ((at-end? tokenizer)
+         (doctype-emit! tokenizer)
+         (end-of-file-emit! tokenizer))
+        (else
+         (let ((c (consume! tokenizer)))
+           (when (char=? c #\>)
+             (doctype-emit! tokenizer)
+             (tk-state-set! tokenizer 'data)))))))
 
   ;; 13.2.5.69-71 CDATA section states
 
-  (define (state-cdata-section tokenizer)
-    (let* ((text (tk-text tokenizer))
-           (size (tk-size tokenizer))
-           (start (tk-position tokenizer))
-           (close (html-scanner-ascii-find text "]]>" start size)))
-      (cond
-        (close
-         (character-emit! tokenizer (substring text start close))
-         (tk-position-set! tokenizer (fx+ close 3))
-         (tk-state-set! tokenizer 'data))
-        (else
-         (character-emit! tokenizer (substring text start size))
-         (tk-position-set! tokenizer size)
-         (end-of-file-emit! tokenizer)))))
+  (define state-cdata-section
+    (lambda (tokenizer)
+      (let* ((text (tk-text tokenizer))
+             (size (tk-size tokenizer))
+             (start (tk-position tokenizer))
+             (close (html-scanner-ascii-find text "]]>" start size)))
+        (cond
+          (close
+           (character-emit! tokenizer (substring text start close))
+           (tk-position-set! tokenizer (fx+ close 3))
+           (tk-state-set! tokenizer 'data))
+          (else
+           (character-emit! tokenizer (substring text start size))
+           (tk-position-set! tokenizer size)
+           (end-of-file-emit! tokenizer))))))
 
   ;; Convenience: tokenize a whole string (used by the tests).
 
-  (define (html-tokenize text)
-    (let ((tokenizer (html-tokenizer-make (html-source-preprocess text))))
-      (let loop ((tokens '()))
-        (let ((token (html-tokenizer-next tokenizer)))
-          (cond
-            ((not token) (reverse tokens))
-            ((token-end-of-file? token) (reverse tokens))
-            (else (loop (cons token tokens))))))))
+  (define html-tokenize
+    (lambda (text)
+      (let ((tokenizer (html-tokenizer-make (html-source-preprocess text))))
+        (let loop ((tokens '()))
+          (let ((token (html-tokenizer-next tokenizer)))
+            (cond
+              ((not token) (reverse tokens))
+              ((token-end-of-file? token) (reverse tokens))
+              (else (loop (cons token tokens)))))))))
 
   ;; ====================================================================
   ;; Section 5 -- tree construction, SXML, entry point
@@ -4544,20 +4655,23 @@
   ;; Static sets
   ;; ------------------------------------------------------------------
 
-  (define (strings->hashtable entries)
-    (let ((table (make-hashtable string-hash string=?)))
-      (vector-for-each (lambda (entry) (hashtable-set! table entry #t)) entries)
-      table))
+  (define strings->hashtable
+    (lambda (entries)
+      (let ((table (make-hashtable string-hash string=?)))
+        (vector-for-each (lambda (entry) (hashtable-set! table entry #t)) entries)
+        table)))
 
-  (define (pairs->hashtable entries)
-    (let ((table (make-hashtable string-hash string=?)))
-      (vector-for-each
-        (lambda (entry) (hashtable-set! table (car entry) (cdr entry)))
-        entries)
-      table))
+  (define pairs->hashtable
+    (lambda (entries)
+      (let ((table (make-hashtable string-hash string=?)))
+        (vector-for-each
+          (lambda (entry) (hashtable-set! table (car entry) (cdr entry)))
+          entries)
+        table)))
 
-  (define (string-set-member? table name)
-    (hashtable-ref table name #f))
+  (define string-set-member?
+    (lambda (table name)
+      (hashtable-ref table name #f)))
 
   (define special-elements (strings->hashtable html-special-element-names))
   (define formatting-elements (strings->hashtable html-formatting-element-names))
@@ -4574,8 +4688,9 @@
   (define foreign-attribute-adjustments
     (pairs->hashtable html-foreign-attribute-adjustment-entries))
 
-  (define (names->hashtable names)
-    (strings->hashtable (list->vector names)))
+  (define names->hashtable
+    (lambda (names)
+      (strings->hashtable (list->vector names))))
 
   ;; Scope terminators (13.2.6.2).  The HTML-namespace names come from
   ;; justhtml's constants; the MathML and SVG ones are the spec's.
@@ -4636,144 +4751,164 @@
             (mutable data html-node-data html-node-data-set!)
             (mutable content html-node-content html-node-content-set!)))
 
-  (define (element-node-make name namespace attributes)
-    (html-node-new 'element name namespace attributes '() #f #f #f))
+  (define element-node-make
+    (lambda (name namespace attributes)
+      (html-node-new 'element name namespace attributes '() #f #f #f)))
 
-  (define (text-node-make text)
-    (html-node-new 'text #f #f '() '() #f text #f))
+  (define text-node-make
+    (lambda (text)
+      (html-node-new 'text #f #f '() '() #f text #f)))
 
-  (define (comment-node-make text)
-    (html-node-new 'comment #f #f '() '() #f text #f))
+  (define comment-node-make
+    (lambda (text)
+      (html-node-new 'comment #f #f '() '() #f text #f)))
 
-  (define (processing-instruction-node-make target data)
-    (html-node-new 'processing-instruction target #f '() '() #f data #f))
+  (define processing-instruction-node-make
+    (lambda (target data)
+      (html-node-new 'processing-instruction target #f '() '() #f data #f)))
 
-  (define (doctype-node-make name public-id system-id)
-    (html-node-new 'doctype #f #f '() '() #f (list name public-id system-id) #f))
+  (define doctype-node-make
+    (lambda (name public-id system-id)
+      (html-node-new 'doctype #f #f '() '() #f (list name public-id system-id) #f)))
 
-  (define (document-node-make)
-    (html-node-new 'document #f #f '() '() #f #f #f))
+  (define document-node-make
+    (lambda ()
+      (html-node-new 'document #f #f '() '() #f #f #f)))
 
-  (define (fragment-node-make)
-    (html-node-new 'fragment #f #f '() '() #f #f #f))
+  (define fragment-node-make
+    (lambda ()
+      (html-node-new 'fragment #f #f '() '() #f #f #f)))
 
-  (define (node-element? node) (eq? (html-node-kind node) 'element))
-  (define (node-text? node) (eq? (html-node-kind node) 'text))
+  (define node-element? (lambda (node) (eq? (html-node-kind node) 'element)))
+  (define node-text? (lambda (node) (eq? (html-node-kind node) 'text)))
 
-  (define (node-html-element? node name)
-    (and (node-element? node)
-         (eq? (html-node-namespace node) 'html)
-         (string=? (html-node-name node) name)))
+  (define node-html-element?
+    (lambda (node name)
+      (and (node-element? node)
+           (eq? (html-node-namespace node) 'html)
+           (string=? (html-node-name node) name))))
 
-  (define (node-detach! node)
-    (let ((parent (html-node-parent node)))
-      (when parent
-        (html-node-children-set! parent (remq node (html-node-children parent)))
-        (html-node-parent-set! node #f))))
+  (define node-detach!
+    (lambda (node)
+      (let ((parent (html-node-parent node)))
+        (when parent
+          (html-node-children-set! parent (remq node (html-node-children parent)))
+          (html-node-parent-set! node #f)))))
 
-  (define (node-append-child! parent child)
-    (node-detach! child)
-    (html-node-children-set! parent
-                             (append (html-node-children parent) (list child)))
-    (html-node-parent-set! child parent))
+  (define node-append-child!
+    (lambda (parent child)
+      (node-detach! child)
+      (html-node-children-set! parent
+                               (append (html-node-children parent) (list child)))
+      (html-node-parent-set! child parent)))
 
-  (define (node-insert-before! parent child reference)
-    (node-detach! child)
-    (html-node-children-set!
-      parent
-      (let loop ((children (html-node-children parent)))
+  (define node-insert-before!
+    (lambda (parent child reference)
+      (node-detach! child)
+      (html-node-children-set!
+        parent
+        (let loop ((children (html-node-children parent)))
+          (cond
+            ((null? children) (list child))
+            ((eq? (car children) reference) (cons child children))
+            (else (cons (car children) (loop (cdr children)))))))
+      (html-node-parent-set! child parent)))
+
+  (define node-last-child
+    (lambda (parent)
+      (let loop ((children (html-node-children parent)) (last #f))
+        (if (null? children) last (loop (cdr children) (car children))))))
+
+  (define node-previous-sibling
+    (lambda (parent reference)
+      (let loop ((children (html-node-children parent)) (previous #f))
         (cond
-          ((null? children) (list child))
-          ((eq? (car children) reference) (cons child children))
-          (else (cons (car children) (loop (cdr children)))))))
-    (html-node-parent-set! child parent))
-
-  (define (node-last-child parent)
-    (let loop ((children (html-node-children parent)) (last #f))
-      (if (null? children) last (loop (cdr children) (car children)))))
-
-  (define (node-previous-sibling parent reference)
-    (let loop ((children (html-node-children parent)) (previous #f))
-      (cond
-        ((null? children) #f)
-        ((eq? (car children) reference) previous)
-        (else (loop (cdr children) (car children))))))
+          ((null? children) #f)
+          ((eq? (car children) reference) previous)
+          (else (loop (cdr children) (car children)))))))
 
   ;; ------------------------------------------------------------------
   ;; List helpers (the two spec "stacks" are plain lists in spec order:
   ;; the root/oldest entry first, the current node/newest entry last)
   ;; ------------------------------------------------------------------
 
-  (define (list-index-of items item)
-    (let loop ((items items) (index 0))
-      (cond
-        ((null? items) #f)
-        ((eq? (car items) item) index)
-        (else (loop (cdr items) (fx+ index 1))))))
+  (define list-index-of
+    (lambda (items item)
+      (let loop ((items items) (index 0))
+        (cond
+          ((null? items) #f)
+          ((eq? (car items) item) index)
+          (else (loop (cdr items) (fx+ index 1)))))))
 
-  (define (list-remove-at items index)
-    (if (fx= index 0)
-      (cdr items)
-      (cons (car items) (list-remove-at (cdr items) (fx- index 1)))))
+  (define list-remove-at
+    (lambda (items index)
+      (if (fx= index 0)
+        (cdr items)
+        (cons (car items) (list-remove-at (cdr items) (fx- index 1))))))
 
-  (define (list-insert-at items index item)
-    (if (fx= index 0)
-      (cons item items)
-      (cons (car items) (list-insert-at (cdr items) (fx- index 1) item))))
+  (define list-insert-at
+    (lambda (items index item)
+      (if (fx= index 0)
+        (cons item items)
+        (cons (car items) (list-insert-at (cdr items) (fx- index 1) item)))))
 
-  (define (list-replace-at items index item)
-    (if (fx= index 0)
-      (cons item (cdr items))
-      (cons (car items) (list-replace-at (cdr items) (fx- index 1) item))))
+  (define list-replace-at
+    (lambda (items index item)
+      (if (fx= index 0)
+        (cons item (cdr items))
+        (cons (car items) (list-replace-at (cdr items) (fx- index 1) item)))))
 
-  (define (list-last items)
-    (let loop ((items items) (last #f))
-      (if (null? items) last (loop (cdr items) (car items)))))
+  (define list-last
+    (lambda (items)
+      (let loop ((items items) (last #f))
+        (if (null? items) last (loop (cdr items) (car items))))))
 
   ;; ------------------------------------------------------------------
   ;; Quirks mode (port of justhtml core/doctype.py)
   ;; ------------------------------------------------------------------
 
-  (define (vector-any-prefix? prefixes text)
-    (let loop ((i 0))
-      (cond
-        ((fx= i (vector-length prefixes)) #f)
-        ((let ((prefix (vector-ref prefixes i)))
-           (and (fx<= (string-length prefix) (string-length text))
-                (string=? prefix (substring text 0 (string-length prefix)))))
-         #t)
-        (else (loop (fx+ i 1))))))
+  (define vector-any-prefix?
+    (lambda (prefixes text)
+      (let loop ((i 0))
+        (cond
+          ((fx= i (vector-length prefixes)) #f)
+          ((let ((prefix (vector-ref prefixes i)))
+             (and (fx<= (string-length prefix) (string-length text))
+                  (string=? prefix (substring text 0 (string-length prefix)))))
+           #t)
+          (else (loop (fx+ i 1)))))))
 
-  (define (vector-any-match? matches text)
-    (let loop ((i 0))
-      (cond
-        ((fx= i (vector-length matches)) #f)
-        ((string=? (vector-ref matches i) text) #t)
-        (else (loop (fx+ i 1))))))
+  (define vector-any-match?
+    (lambda (matches text)
+      (let loop ((i 0))
+        (cond
+          ((fx= i (vector-length matches)) #f)
+          ((string=? (vector-ref matches i) text) #t)
+          (else (loop (fx+ i 1)))))))
 
   ;; Pure function of the DOCTYPE token; returns 'quirks, 'limited-quirks or
   ;; 'no-quirks.
-  (define (html-doctype-quirks-mode name public-id system-id force-quirks?
-                                    iframe-srcdoc?)
-    (let ((lowered-name (and name (string-ascii-lowercase name)))
-          (public-lower (and public-id (string-ascii-lowercase public-id)))
-          (system-lower (and system-id (string-ascii-lowercase system-id))))
-      (cond
-        (force-quirks? 'quirks)
-        (iframe-srcdoc? 'no-quirks)
-        ((not (and lowered-name (string=? lowered-name "html"))) 'quirks)
-        ((and public-lower (vector-any-match? html-quirky-public-matches public-lower))
-         'quirks)
-        ((and system-lower (vector-any-match? html-quirky-system-matches system-lower))
-         'quirks)
-        ((and public-lower (vector-any-prefix? html-quirky-public-prefixes public-lower))
-         'quirks)
-        ((and public-lower
-              (vector-any-prefix? html-limited-quirky-public-prefixes public-lower))
-         'limited-quirks)
-        ((and public-lower (vector-any-prefix? html4-public-prefixes public-lower))
-         (if system-lower 'limited-quirks 'quirks))
-        (else 'no-quirks))))
+  (define html-doctype-quirks-mode
+    (lambda (name public-id system-id force-quirks? iframe-srcdoc?)
+      (let ((lowered-name (and name (string-ascii-lowercase name)))
+            (public-lower (and public-id (string-ascii-lowercase public-id)))
+            (system-lower (and system-id (string-ascii-lowercase system-id))))
+        (cond
+          (force-quirks? 'quirks)
+          (iframe-srcdoc? 'no-quirks)
+          ((not (and lowered-name (string=? lowered-name "html"))) 'quirks)
+          ((and public-lower (vector-any-match? html-quirky-public-matches public-lower))
+           'quirks)
+          ((and system-lower (vector-any-match? html-quirky-system-matches system-lower))
+           'quirks)
+          ((and public-lower (vector-any-prefix? html-quirky-public-prefixes public-lower))
+           'quirks)
+          ((and public-lower
+                (vector-any-prefix? html-limited-quirky-public-prefixes public-lower))
+           'limited-quirks)
+          ((and public-lower (vector-any-prefix? html4-public-prefixes public-lower))
+           (if system-lower 'limited-quirks 'quirks))
+          (else 'no-quirks)))))
 
   ;; ------------------------------------------------------------------
   ;; Parser state
@@ -4802,1071 +4937,1146 @@
             (mutable done? parser-done? parser-done-set!)
             (mutable coerce? parser-coerce? parser-coerce-set!)))
 
-  (define (parser-make text scripting? iframe-srcdoc? coerce?)
-    (let ((tokenizer (html-tokenizer-make text)))
-      (html-tokenizer-scripting-set! tokenizer scripting?)
-      (html-parser-new tokenizer (document-node-make) 'initial 'initial
-                       '() '() #f #f #t scripting? iframe-srcdoc?
-                       'no-quirks '() #f '() #f #f #f #f coerce?)))
+  (define parser-make
+    (lambda (text scripting? iframe-srcdoc? coerce?)
+      (let ((tokenizer (html-tokenizer-make text)))
+        (html-tokenizer-scripting-set! tokenizer scripting?)
+        (html-parser-new tokenizer (document-node-make) 'initial 'initial
+                         '() '() #f #f #t scripting? iframe-srcdoc?
+                         'no-quirks '() #f '() #f #f #f #f coerce?))))
 
-  (define (parser-current parser)
-    (list-last (parser-stack parser)))
+  (define parser-current
+    (lambda (parser)
+      (list-last (parser-stack parser))))
 
-  (define (parser-fragment? parser)
-    (and (parser-fragment-context parser) #t))
+  (define parser-fragment?
+    (lambda (parser)
+      (and (parser-fragment-context parser) #t)))
 
-  (define (parser-adjusted-current parser)
-    (let ((stack (parser-stack parser)))
-      (cond
-        ((null? stack) #f)
-        ((and (parser-fragment? parser) (fx= (length stack) 1))
-         (parser-fragment-context parser))
-        (else (list-last stack)))))
-
-  (define (stack-push! parser node)
-    (parser-stack-set! parser (append (parser-stack parser) (list node))))
-
-  (define (stack-pop! parser)
-    (let* ((stack (parser-stack parser))
-           (size (length stack)))
-      (parser-stack-set! parser (list-remove-at stack (fx- size 1)))))
-
-  (define (stack-remove! parser node)
-    (parser-stack-set! parser (remq node (parser-stack parser))))
-
-  (define (stack-contains? parser node)
-    (and (memq node (parser-stack parser)) #t))
-
-  (define (stack-pop-until-name! parser name)
-    (let loop ()
-      (let ((current (parser-current parser)))
+  (define parser-adjusted-current
+    (lambda (parser)
+      (let ((stack (parser-stack parser)))
         (cond
-          ((not current) #f)
-          ((node-html-element? current name) (stack-pop! parser))
-          (else (stack-pop! parser) (loop))))))
+          ((null? stack) #f)
+          ((and (parser-fragment? parser) (fx= (length stack) 1))
+           (parser-fragment-context parser))
+          (else (list-last stack))))))
 
-  (define (stack-pop-until-node! parser node)
-    (let loop ()
-      (let ((current (parser-current parser)))
+  (define stack-push!
+    (lambda (parser node)
+      (parser-stack-set! parser (append (parser-stack parser) (list node)))))
+
+  (define stack-pop!
+    (lambda (parser)
+      (let* ((stack (parser-stack parser))
+             (size (length stack)))
+        (parser-stack-set! parser (list-remove-at stack (fx- size 1))))))
+
+  (define stack-remove!
+    (lambda (parser node)
+      (parser-stack-set! parser (remq node (parser-stack parser)))))
+
+  (define stack-contains?
+    (lambda (parser node)
+      (and (memq node (parser-stack parser)) #t)))
+
+  (define stack-pop-until-name!
+    (lambda (parser name)
+      (let loop ()
+        (let ((current (parser-current parser)))
+          (cond
+            ((not current) #f)
+            ((node-html-element? current name) (stack-pop! parser))
+            (else (stack-pop! parser) (loop)))))))
+
+  (define stack-pop-until-node!
+    (lambda (parser node)
+      (let loop ()
+        (let ((current (parser-current parser)))
+          (cond
+            ((not current) #f)
+            ((eq? current node) (stack-pop! parser))
+            (else (stack-pop! parser) (loop)))))))
+
+  (define stack-find-name
+    (lambda (parser name)
+      (let loop ((items (reverse (parser-stack parser))))
         (cond
-          ((not current) #f)
-          ((eq? current node) (stack-pop! parser))
-          (else (stack-pop! parser) (loop))))))
-
-  (define (stack-find-name parser name)
-    (let loop ((items (reverse (parser-stack parser))))
-      (cond
-        ((null? items) #f)
-        ((node-html-element? (car items) name) (car items))
-        (else (loop (cdr items))))))
+          ((null? items) #f)
+          ((node-html-element? (car items) name) (car items))
+          (else (loop (cdr items)))))))
 
   ;; ------------------------------------------------------------------
   ;; Scope algorithms
   ;; ------------------------------------------------------------------
 
-  (define (scope-terminator? node extra-html)
-    (let ((namespace (html-node-namespace node))
-          (name (html-node-name node)))
-      (case namespace
-        ((html) (or (string-set-member? default-scope-html name)
-                    (and extra-html (string-set-member? extra-html name))))
-        ((math) (string-set-member? default-scope-mathml name))
-        ((svg) (string-set-member? default-scope-svg name))
-        (else #f))))
+  (define scope-terminator?
+    (lambda (node extra-html)
+      (let ((namespace (html-node-namespace node))
+            (name (html-node-name node)))
+        (case namespace
+          ((html) (or (string-set-member? default-scope-html name)
+                      (and extra-html (string-set-member? extra-html name))))
+          ((math) (string-set-member? default-scope-mathml name))
+          ((svg) (string-set-member? default-scope-svg name))
+          (else #f)))))
 
-  (define (element-in-scope? parser names extra-html)
-    (let loop ((items (reverse (parser-stack parser))))
-      (cond
-        ((null? items) #f)
-        ((and (eq? (html-node-namespace (car items)) 'html)
-              (member (html-node-name (car items)) names))
-         #t)
-        ((scope-terminator? (car items) extra-html) #f)
-        (else (loop (cdr items))))))
+  (define element-in-scope?
+    (lambda (parser names extra-html)
+      (let loop ((items (reverse (parser-stack parser))))
+        (cond
+          ((null? items) #f)
+          ((and (eq? (html-node-namespace (car items)) 'html)
+                (member (html-node-name (car items)) names))
+           #t)
+          ((scope-terminator? (car items) extra-html) #f)
+          (else (loop (cdr items)))))))
 
-  (define (element-in-default-scope? parser name)
-    (element-in-scope? parser (list name) #f))
+  (define element-in-default-scope?
+    (lambda (parser name)
+      (element-in-scope? parser (list name) #f)))
 
-  (define (element-in-button-scope? parser name)
-    (element-in-scope? parser (list name) button-scope-html))
+  (define element-in-button-scope?
+    (lambda (parser name)
+      (element-in-scope? parser (list name) button-scope-html)))
 
-  (define (element-in-list-item-scope? parser name)
-    (element-in-scope? parser (list name) list-item-scope-html))
+  (define element-in-list-item-scope?
+    (lambda (parser name)
+      (element-in-scope? parser (list name) list-item-scope-html)))
 
-  (define (element-in-table-scope? parser names)
-    (let loop ((items (reverse (parser-stack parser))))
-      (cond
-        ((null? items) #f)
-        ((and (eq? (html-node-namespace (car items)) 'html)
-              (member (html-node-name (car items)) names))
-         #t)
-        ((and (eq? (html-node-namespace (car items)) 'html)
-              (string-set-member? table-scope-html (html-node-name (car items))))
-         #f)
-        (else (loop (cdr items))))))
+  (define element-in-table-scope?
+    (lambda (parser names)
+      (let loop ((items (reverse (parser-stack parser))))
+        (cond
+          ((null? items) #f)
+          ((and (eq? (html-node-namespace (car items)) 'html)
+                (member (html-node-name (car items)) names))
+           #t)
+          ((and (eq? (html-node-namespace (car items)) 'html)
+                (string-set-member? table-scope-html (html-node-name (car items))))
+           #f)
+          (else (loop (cdr items)))))))
 
-  (define (element-in-select-scope? parser name)
-    (let loop ((items (reverse (parser-stack parser))))
-      (cond
-        ((null? items) #f)
-        ((node-html-element? (car items) name) #t)
-        ((or (node-html-element? (car items) "option")
-             (node-html-element? (car items) "optgroup"))
-         (loop (cdr items)))
-        (else #f))))
+  (define element-in-select-scope?
+    (lambda (parser name)
+      (let loop ((items (reverse (parser-stack parser))))
+        (cond
+          ((null? items) #f)
+          ((node-html-element? (car items) name) #t)
+          ((or (node-html-element? (car items) "option")
+               (node-html-element? (car items) "optgroup"))
+           (loop (cdr items)))
+          (else #f)))))
 
   ;; ------------------------------------------------------------------
   ;; Active formatting elements
   ;; ------------------------------------------------------------------
 
-  (define (formatting-marker? entry) (eq? entry 'marker))
+  (define formatting-marker? (lambda (entry) (eq? entry 'marker)))
 
-  (define (formatting-marker-insert! parser)
-    (parser-formatting-set! parser (append (parser-formatting parser) '(marker))))
+  (define formatting-marker-insert!
+    (lambda (parser)
+      (parser-formatting-set! parser (append (parser-formatting parser) '(marker)))))
 
-  (define (formatting-clear-to-marker! parser)
-    (let loop ((items (reverse (parser-formatting parser))))
-      (cond
-        ((null? items) (parser-formatting-set! parser '()))
-        ((formatting-marker? (car items))
-         (parser-formatting-set! parser (reverse (cdr items))))
-        (else (loop (cdr items))))))
+  (define formatting-clear-to-marker!
+    (lambda (parser)
+      (let loop ((items (reverse (parser-formatting parser))))
+        (cond
+          ((null? items) (parser-formatting-set! parser '()))
+          ((formatting-marker? (car items))
+           (parser-formatting-set! parser (reverse (cdr items))))
+          (else (loop (cdr items)))))))
 
-  (define (attributes-equal? a b)
-    (and (fx= (length a) (length b))
-         (let loop ((a a))
-           (or (null? a)
-               (let ((pair (assoc (car (car a)) b)))
-                 (and pair
-                      (string=? (cdr pair) (cdr (car a)))
-                      (loop (cdr a))))))))
+  (define attributes-equal?
+    (lambda (a b)
+      (and (fx= (length a) (length b))
+           (let loop ((a a))
+             (or (null? a)
+                 (let ((pair (assoc (car (car a)) b)))
+                   (and pair
+                        (string=? (cdr pair) (cdr (car a)))
+                        (loop (cdr a)))))))))
 
   ;; Push onto the list of active formatting elements, applying the Noah's
   ;; Ark clause: at most three entries with the same name, namespace and
   ;; attributes may follow the last marker.
-  (define (formatting-push! parser node)
-    (let* ((items (parser-formatting parser))
-           (after-marker
-            (let loop ((items (reverse items)) (result '()))
-              (cond
-                ((null? items) result)
-                ((formatting-marker? (car items)) result)
-                (else (loop (cdr items) (cons (car items) result))))))
-           (matches
-            (let loop ((items after-marker) (result '()))
-              (cond
-                ((null? items) (reverse result))
-                ((and (string=? (html-node-name (car items)) (html-node-name node))
-                      (eq? (html-node-namespace (car items))
-                           (html-node-namespace node))
-                      (attributes-equal? (html-node-attributes (car items))
-                                         (html-node-attributes node)))
-                 (loop (cdr items) (cons (car items) result)))
-                (else (loop (cdr items) result))))))
-      (when (fx>= (length matches) 3)
-        (parser-formatting-set! parser (remq (car matches) (parser-formatting parser))))
-      (parser-formatting-set! parser
-                              (append (parser-formatting parser) (list node)))))
+  (define formatting-push!
+    (lambda (parser node)
+      (let* ((items (parser-formatting parser))
+             (after-marker
+              (let loop ((items (reverse items)) (result '()))
+                (cond
+                  ((null? items) result)
+                  ((formatting-marker? (car items)) result)
+                  (else (loop (cdr items) (cons (car items) result))))))
+             (matches
+              (let loop ((items after-marker) (result '()))
+                (cond
+                  ((null? items) (reverse result))
+                  ((and (string=? (html-node-name (car items)) (html-node-name node))
+                        (eq? (html-node-namespace (car items))
+                             (html-node-namespace node))
+                        (attributes-equal? (html-node-attributes (car items))
+                                           (html-node-attributes node)))
+                   (loop (cdr items) (cons (car items) result)))
+                  (else (loop (cdr items) result))))))
+        (when (fx>= (length matches) 3)
+          (parser-formatting-set! parser (remq (car matches) (parser-formatting parser))))
+        (parser-formatting-set! parser
+                                (append (parser-formatting parser) (list node))))))
 
-  (define (formatting-find-after-marker parser name)
-    (let loop ((items (reverse (parser-formatting parser))))
-      (cond
-        ((null? items) #f)
-        ((formatting-marker? (car items)) #f)
-        ((string=? (html-node-name (car items)) name) (car items))
-        (else (loop (cdr items))))))
+  (define formatting-find-after-marker
+    (lambda (parser name)
+      (let loop ((items (reverse (parser-formatting parser))))
+        (cond
+          ((null? items) #f)
+          ((formatting-marker? (car items)) #f)
+          ((string=? (html-node-name (car items)) name) (car items))
+          (else (loop (cdr items)))))))
 
-  (define (formatting-reconstruct! parser)
-    (let ((items (parser-formatting parser)))
-      (unless (null? items)
-        (let ((last-entry (list-last items)))
-          (unless (or (formatting-marker? last-entry)
-                      (stack-contains? parser last-entry))
-            ;; Rewind to the first entry that must be recreated.
-            (let* ((size (length items))
-                   (start
-                    (let loop ((index (fx- size 1)))
-                      (let ((entry (list-ref items index)))
-                        (cond
-                          ((fx= index 0) 0)
-                          ((or (formatting-marker? entry)
-                               (stack-contains? parser entry))
-                           (fx+ index 1))
-                          (else (loop (fx- index 1))))))))
-              (let loop ((index start))
-                (when (fx< index (length (parser-formatting parser)))
-                  (let* ((entry (list-ref (parser-formatting parser) index))
-                         (node (element-node-make (html-node-name entry)
-                                                  (html-node-namespace entry)
-                                                  (html-node-attributes entry))))
-                    (node-insert! parser node)
-                    (stack-push! parser node)
-                    (parser-formatting-set!
-                      parser
-                      (list-replace-at (parser-formatting parser) index node))
-                    (loop (fx+ index 1)))))))))))
+  (define formatting-reconstruct!
+    (lambda (parser)
+      (let ((items (parser-formatting parser)))
+        (unless (null? items)
+          (let ((last-entry (list-last items)))
+            (unless (or (formatting-marker? last-entry)
+                        (stack-contains? parser last-entry))
+              ;; Rewind to the first entry that must be recreated.
+              (let* ((size (length items))
+                     (start
+                      (let loop ((index (fx- size 1)))
+                        (let ((entry (list-ref items index)))
+                          (cond
+                            ((fx= index 0) 0)
+                            ((or (formatting-marker? entry)
+                                 (stack-contains? parser entry))
+                             (fx+ index 1))
+                            (else (loop (fx- index 1))))))))
+                (let loop ((index start))
+                  (when (fx< index (length (parser-formatting parser)))
+                    (let* ((entry (list-ref (parser-formatting parser) index))
+                           (node (element-node-make (html-node-name entry)
+                                                    (html-node-namespace entry)
+                                                    (html-node-attributes entry))))
+                      (node-insert! parser node)
+                      (stack-push! parser node)
+                      (parser-formatting-set!
+                        parser
+                        (list-replace-at (parser-formatting parser) index node))
+                      (loop (fx+ index 1))))))))))))
 
   ;; ------------------------------------------------------------------
   ;; Insertion locations
   ;; ------------------------------------------------------------------
 
   ;; Returns (values parent reference) where reference is #false to append.
-  (define (insertion-location parser override-target)
-    (let ((target (or override-target (parser-current parser))))
-      (cond
-        ((and (parser-foster? parser)
-              target
-              (node-element? target)
-              (eq? (html-node-namespace target) 'html)
-              (member (html-node-name target) '("table" "tbody" "tfoot" "thead" "tr")))
-         (foster-parent-location parser))
-        ((and target (node-html-element? target "template") (html-node-content target))
-         (values (html-node-content target) #f))
-        (else (values target #f)))))
+  (define insertion-location
+    (lambda (parser override-target)
+      (let ((target (or override-target (parser-current parser))))
+        (cond
+          ((and (parser-foster? parser)
+                target
+                (node-element? target)
+                (eq? (html-node-namespace target) 'html)
+                (member (html-node-name target) '("table" "tbody" "tfoot" "thead" "tr")))
+           (foster-parent-location parser))
+          ((and target (node-html-element? target "template") (html-node-content target))
+           (values (html-node-content target) #f))
+          (else (values target #f))))))
 
-  (define (foster-parent-location parser)
-    (let* ((stack (parser-stack parser))
-           (reversed (reverse stack))
-           (last-template
-            (let loop ((items reversed))
-              (cond
-                ((null? items) #f)
-                ((node-html-element? (car items) "template") (car items))
-                (else (loop (cdr items))))))
-           (last-table
-            (let loop ((items reversed))
-              (cond
-                ((null? items) #f)
-                ((node-html-element? (car items) "table") (car items))
-                (else (loop (cdr items)))))))
-      (cond
-        ((and last-template
-              (or (not last-table)
-                  (fx> (list-index-of stack last-template)
-                       (list-index-of stack last-table))))
-         (values (html-node-content last-template) #f))
-        ((not last-table) (values (car stack) #f))
-        ((html-node-parent last-table)
-         (values (html-node-parent last-table) last-table))
-        (else
-         (let ((index (list-index-of stack last-table)))
-           (values (list-ref stack (fx- index 1)) #f))))))
+  (define foster-parent-location
+    (lambda (parser)
+      (let* ((stack (parser-stack parser))
+             (reversed (reverse stack))
+             (last-template
+              (let loop ((items reversed))
+                (cond
+                  ((null? items) #f)
+                  ((node-html-element? (car items) "template") (car items))
+                  (else (loop (cdr items))))))
+             (last-table
+              (let loop ((items reversed))
+                (cond
+                  ((null? items) #f)
+                  ((node-html-element? (car items) "table") (car items))
+                  (else (loop (cdr items)))))))
+        (cond
+          ((and last-template
+                (or (not last-table)
+                    (fx> (list-index-of stack last-template)
+                         (list-index-of stack last-table))))
+           (values (html-node-content last-template) #f))
+          ((not last-table) (values (car stack) #f))
+          ((html-node-parent last-table)
+           (values (html-node-parent last-table) last-table))
+          (else
+           (let ((index (list-index-of stack last-table)))
+             (values (list-ref stack (fx- index 1)) #f)))))))
 
-  (define (node-insert! parser node)
-    (call-with-values
-      (lambda () (insertion-location parser #f))
-      (lambda (parent reference)
-        (when parent
-          (if reference
-            (node-insert-before! parent node reference)
-            (node-append-child! parent node))))))
-
-  (define (node-insert-at! parser node override-target)
-    (call-with-values
-      (lambda () (insertion-location parser override-target))
-      (lambda (parent reference)
-        (when parent
-          (if reference
-            (node-insert-before! parent node reference)
-            (node-append-child! parent node))))))
-
-  ;; XML coercion (justhtml's _coerce_text_for_xml): form feed becomes a
-  ;; space and the XML-invalid noncharacters become U+FFFD.  Off by default;
-  ;; the xml-coercion fixtures switch it on.
-  (define (text-coerce-for-xml text)
-    (list->string
-      (map (lambda (c)
-             (let ((code (char->integer c)))
-               (cond
-                 ((char=? c #\page) #\space)
-                 ((and (fx>= code #xFDD0) (fx<= code #xFDEF)) (integer->char #xFFFD))
-                 ((let ((low (fxand code #xFFFF)))
-                    (or (fx= low #xFFFE) (fx= low #xFFFF)))
-                  (integer->char #xFFFD))
-                 (else c))))
-           (string->list text))))
-
-  (define (characters-insert! parser raw)
-    (let ((text (if (parser-coerce? parser) (text-coerce-for-xml raw) raw)))
-      (characters-insert-plain! parser text)))
-
-  (define (characters-insert-plain! parser text)
-    (unless (fx= (string-length text) 0)
+  (define node-insert!
+    (lambda (parser node)
       (call-with-values
         (lambda () (insertion-location parser #f))
         (lambda (parent reference)
           (when parent
-            (let ((previous (if reference
-                              (node-previous-sibling parent reference)
-                              (node-last-child parent))))
-              (if (and previous (node-text? previous))
-                ;; Adjacent text nodes are merged.
-                (html-node-data-set! previous
-                                     (string-append (html-node-data previous) text))
-                (let ((node (text-node-make text)))
-                  (if reference
-                    (node-insert-before! parent node reference)
-                    (node-append-child! parent node))))))))))
+            (if reference
+              (node-insert-before! parent node reference)
+              (node-append-child! parent node)))))))
+
+  (define node-insert-at!
+    (lambda (parser node override-target)
+      (call-with-values
+        (lambda () (insertion-location parser override-target))
+        (lambda (parent reference)
+          (when parent
+            (if reference
+              (node-insert-before! parent node reference)
+              (node-append-child! parent node)))))))
+
+  ;; XML coercion (justhtml's _coerce_text_for_xml): form feed becomes a
+  ;; space and the XML-invalid noncharacters become U+FFFD.  Off by default;
+  ;; the xml-coercion fixtures switch it on.
+  (define text-coerce-for-xml
+    (lambda (text)
+      (list->string
+        (map (lambda (c)
+               (let ((code (char->integer c)))
+                 (cond
+                   ((char=? c #\page) #\space)
+                   ((and (fx>= code #xFDD0) (fx<= code #xFDEF)) (integer->char #xFFFD))
+                   ((let ((low (fxand code #xFFFF)))
+                      (or (fx= low #xFFFE) (fx= low #xFFFF)))
+                    (integer->char #xFFFD))
+                   (else c))))
+             (string->list text)))))
+
+  (define characters-insert!
+    (lambda (parser raw)
+      (let ((text (if (parser-coerce? parser) (text-coerce-for-xml raw) raw)))
+        (characters-insert-plain! parser text))))
+
+  (define characters-insert-plain!
+    (lambda (parser text)
+      (unless (fx= (string-length text) 0)
+        (call-with-values
+          (lambda () (insertion-location parser #f))
+          (lambda (parent reference)
+            (when parent
+              (let ((previous (if reference
+                                (node-previous-sibling parent reference)
+                                (node-last-child parent))))
+                (if (and previous (node-text? previous))
+                  ;; Adjacent text nodes are merged.
+                  (html-node-data-set! previous
+                                       (string-append (html-node-data previous) text))
+                  (let ((node (text-node-make text)))
+                    (if reference
+                      (node-insert-before! parent node reference)
+                      (node-append-child! parent node)))))))))))
 
   ;; ------------------------------------------------------------------
   ;; Element creation
   ;; ------------------------------------------------------------------
 
-  (define (element-insert! parser name namespace attributes)
-    (let ((node (element-node-make name namespace attributes)))
-      (node-insert! parser node)
-      (stack-push! parser node)
-      node))
+  (define element-insert!
+    (lambda (parser name namespace attributes)
+      (let ((node (element-node-make name namespace attributes)))
+        (node-insert! parser node)
+        (stack-push! parser node)
+        node)))
 
-  (define (element-insert-token! parser token)
-    (element-insert! parser (token-start-tag-name token) 'html
-                     (token-start-tag-attributes token)))
+  (define element-insert-token!
+    (lambda (parser token)
+      (element-insert! parser (token-start-tag-name token) 'html
+                       (token-start-tag-attributes token))))
 
   ;; ------------------------------------------------------------------
   ;; Implied end tags
   ;; ------------------------------------------------------------------
 
-  (define (implied-end-tags-generate! parser except)
-    (let loop ()
-      (let ((current (parser-current parser)))
-        (when (and current
-                   (node-element? current)
-                   (eq? (html-node-namespace current) 'html)
-                   (string-set-member? implied-end-tags (html-node-name current))
-                   (not (and except (string=? (html-node-name current) except))))
-          (stack-pop! parser)
-          (loop)))))
+  (define implied-end-tags-generate!
+    (lambda (parser except)
+      (let loop ()
+        (let ((current (parser-current parser)))
+          (when (and current
+                     (node-element? current)
+                     (eq? (html-node-namespace current) 'html)
+                     (string-set-member? implied-end-tags (html-node-name current))
+                     (not (and except (string=? (html-node-name current) except))))
+            (stack-pop! parser)
+            (loop))))))
 
-  (define (implied-end-tags-generate-thoroughly! parser)
-    (let loop ()
-      (let ((current (parser-current parser)))
-        (when (and current
-                   (node-element? current)
-                   (eq? (html-node-namespace current) 'html)
-                   (or (string-set-member? implied-end-tags (html-node-name current))
-                       (member (html-node-name current)
-                               '("caption" "colgroup" "tbody" "td" "tfoot" "th"
-                                 "thead" "tr"))))
-          (stack-pop! parser)
-          (loop)))))
+  (define implied-end-tags-generate-thoroughly!
+    (lambda (parser)
+      (let loop ()
+        (let ((current (parser-current parser)))
+          (when (and current
+                     (node-element? current)
+                     (eq? (html-node-namespace current) 'html)
+                     (or (string-set-member? implied-end-tags (html-node-name current))
+                         (member (html-node-name current)
+                                 '("caption" "colgroup" "tbody" "td" "tfoot" "th"
+                                   "thead" "tr"))))
+            (stack-pop! parser)
+            (loop))))))
 
-  (define (paragraph-close! parser)
-    (implied-end-tags-generate! parser "p")
-    (stack-pop-until-name! parser "p"))
+  (define paragraph-close!
+    (lambda (parser)
+      (implied-end-tags-generate! parser "p")
+      (stack-pop-until-name! parser "p")))
 
   ;; ------------------------------------------------------------------
   ;; Reset the insertion mode appropriately (13.2.6.1)
   ;; ------------------------------------------------------------------
 
-  (define (insertion-mode-reset! parser)
-    (let* ((stack (parser-stack parser))
-           (size (length stack)))
-      (let loop ((index (fx- size 1)))
-        (let* ((last? (fx= index 0))
-               (node (if (and last? (parser-fragment? parser))
-                       (parser-fragment-context parser)
-                       (list-ref stack index)))
-               (name (and (node-element? node) (html-node-name node)))
-               (html? (and (node-element? node)
-                           (eq? (html-node-namespace node) 'html))))
-          (cond
-            ((and html? (string=? name "select"))
-             (parser-mode-set! parser (select-insertion-mode parser index)))
-            ((and html? (or (string=? name "td") (string=? name "th")) (not last?))
-             (parser-mode-set! parser 'in-cell))
-            ((and html? (string=? name "tr")) (parser-mode-set! parser 'in-row))
-            ((and html? (member name '("tbody" "thead" "tfoot")))
-             (parser-mode-set! parser 'in-table-body))
-            ((and html? (string=? name "caption")) (parser-mode-set! parser 'in-caption))
-            ((and html? (string=? name "colgroup"))
-             (parser-mode-set! parser 'in-column-group))
-            ((and html? (string=? name "table")) (parser-mode-set! parser 'in-table))
-            ((and html? (string=? name "template"))
-             (parser-mode-set! parser (or (list-last (parser-template-modes parser))
-                                          'in-body)))
-            ((and html? (string=? name "head") (not last?))
-             (parser-mode-set! parser 'in-head))
-            ((and html? (string=? name "body")) (parser-mode-set! parser 'in-body))
-            ((and html? (string=? name "frameset"))
-             (parser-mode-set! parser 'in-frameset))
-            ((and html? (string=? name "html"))
-             (parser-mode-set! parser (if (parser-head parser) 'after-head 'before-head)))
-            (last? (parser-mode-set! parser 'in-body))
-            (else (loop (fx- index 1))))))))
+  (define insertion-mode-reset!
+    (lambda (parser)
+      (let* ((stack (parser-stack parser))
+             (size (length stack)))
+        (let loop ((index (fx- size 1)))
+          (let* ((last? (fx= index 0))
+                 (node (if (and last? (parser-fragment? parser))
+                         (parser-fragment-context parser)
+                         (list-ref stack index)))
+                 (name (and (node-element? node) (html-node-name node)))
+                 (html? (and (node-element? node)
+                             (eq? (html-node-namespace node) 'html))))
+            (cond
+              ((and html? (string=? name "select"))
+               (parser-mode-set! parser (select-insertion-mode parser index)))
+              ((and html? (or (string=? name "td") (string=? name "th")) (not last?))
+               (parser-mode-set! parser 'in-cell))
+              ((and html? (string=? name "tr")) (parser-mode-set! parser 'in-row))
+              ((and html? (member name '("tbody" "thead" "tfoot")))
+               (parser-mode-set! parser 'in-table-body))
+              ((and html? (string=? name "caption")) (parser-mode-set! parser 'in-caption))
+              ((and html? (string=? name "colgroup"))
+               (parser-mode-set! parser 'in-column-group))
+              ((and html? (string=? name "table")) (parser-mode-set! parser 'in-table))
+              ((and html? (string=? name "template"))
+               (parser-mode-set! parser (or (list-last (parser-template-modes parser))
+                                            'in-body)))
+              ((and html? (string=? name "head") (not last?))
+               (parser-mode-set! parser 'in-head))
+              ((and html? (string=? name "body")) (parser-mode-set! parser 'in-body))
+              ((and html? (string=? name "frameset"))
+               (parser-mode-set! parser 'in-frameset))
+              ((and html? (string=? name "html"))
+               (parser-mode-set! parser (if (parser-head parser) 'after-head 'before-head)))
+              (last? (parser-mode-set! parser 'in-body))
+              (else (loop (fx- index 1)))))))))
 
-  (define (select-insertion-mode parser index)
-    (let ((stack (parser-stack parser)))
-      (let loop ((i (fx- index 1)))
-        (cond
-          ((fx< i 0) 'in-select)
-          ((node-html-element? (list-ref stack i) "template") 'in-select)
-          ((node-html-element? (list-ref stack i) "table") 'in-select-in-table)
-          (else (loop (fx- i 1)))))))
+  (define select-insertion-mode
+    (lambda (parser index)
+      (let ((stack (parser-stack parser)))
+        (let loop ((i (fx- index 1)))
+          (cond
+            ((fx< i 0) 'in-select)
+            ((node-html-element? (list-ref stack i) "template") 'in-select)
+            ((node-html-element? (list-ref stack i) "table") 'in-select-in-table)
+            (else (loop (fx- i 1))))))))
 
   ;; ------------------------------------------------------------------
   ;; Foreign content helpers
   ;; ------------------------------------------------------------------
 
-  (define (mathml-text-integration-point? node)
-    (and node
-         (node-element? node)
-         (eq? (html-node-namespace node) 'math)
-         (string-set-member? mathml-text-integration-names (html-node-name node))))
+  (define mathml-text-integration-point?
+    (lambda (node)
+      (and node
+           (node-element? node)
+           (eq? (html-node-namespace node) 'math)
+           (string-set-member? mathml-text-integration-names (html-node-name node)))))
 
-  (define (html-integration-point? node)
-    (and node
-         (node-element? node)
-         (case (html-node-namespace node)
-           ((svg) (string-set-member? svg-html-integration-names (html-node-name node)))
-           ((math)
-            (and (string=? (html-node-name node) "annotation-xml")
-                 (let ((encoding (assoc "encoding" (html-node-attributes node))))
-                   (and encoding
-                        (let ((value (string-ascii-lowercase (cdr encoding))))
-                          (or (string=? value "text/html")
-                              (string=? value "application/xhtml+xml")))))))
-           (else #f))))
+  (define html-integration-point?
+    (lambda (node)
+      (and node
+           (node-element? node)
+           (case (html-node-namespace node)
+             ((svg) (string-set-member? svg-html-integration-names (html-node-name node)))
+             ((math)
+              (and (string=? (html-node-name node) "annotation-xml")
+                   (let ((encoding (assoc "encoding" (html-node-attributes node))))
+                     (and encoding
+                          (let ((value (string-ascii-lowercase (cdr encoding))))
+                            (or (string=? value "text/html")
+                                (string=? value "application/xhtml+xml")))))))
+             (else #f)))))
 
-  (define (attributes-adjust-mathml attributes)
-    (map (lambda (pair)
-           (let ((replacement (hashtable-ref mathml-attribute-adjustments
-                                             (car pair) #f)))
-             (if replacement (cons replacement (cdr pair)) pair)))
-         attributes))
+  (define attributes-adjust-mathml
+    (lambda (attributes)
+      (map (lambda (pair)
+             (let ((replacement (hashtable-ref mathml-attribute-adjustments
+                                               (car pair) #f)))
+               (if replacement (cons replacement (cdr pair)) pair)))
+           attributes)))
 
-  (define (attributes-adjust-svg attributes)
-    (map (lambda (pair)
-           (let ((replacement (hashtable-ref svg-attribute-adjustments
-                                             (car pair) #f)))
-             (if replacement (cons replacement (cdr pair)) pair)))
-         attributes))
+  (define attributes-adjust-svg
+    (lambda (attributes)
+      (map (lambda (pair)
+             (let ((replacement (hashtable-ref svg-attribute-adjustments
+                                               (car pair) #f)))
+               (if replacement (cons replacement (cdr pair)) pair)))
+           attributes)))
 
-  (define (attributes-adjust-foreign attributes)
-    (map (lambda (pair)
-           (let ((replacement (hashtable-ref foreign-attribute-adjustments
-                                             (string-ascii-lowercase (car pair)) #f)))
-             (if replacement (cons replacement (cdr pair)) pair)))
-         attributes))
+  (define attributes-adjust-foreign
+    (lambda (attributes)
+      (map (lambda (pair)
+             (let ((replacement (hashtable-ref foreign-attribute-adjustments
+                                               (string-ascii-lowercase (car pair)) #f)))
+               (if replacement (cons replacement (cdr pair)) pair)))
+           attributes)))
 
-  (define (svg-tag-name-adjust name)
-    (or (hashtable-ref svg-tag-name-adjustments name #f) name))
+  (define svg-tag-name-adjust
+    (lambda (name)
+      (or (hashtable-ref svg-tag-name-adjustments name #f) name)))
 
   ;; ------------------------------------------------------------------
   ;; The main loop
   ;; ------------------------------------------------------------------
 
-  (define (parser-run! parser)
-    (let loop ()
-      (unless (parser-done? parser)
-        (let ((adjusted (parser-adjusted-current parser)))
-          (html-tokenizer-foreign-set!
-            (parser-tokenizer parser)
-            (and adjusted
-                 (node-element? adjusted)
-                 (not (eq? (html-node-namespace adjusted) 'html)))))
-        (let ((token (html-tokenizer-next (parser-tokenizer parser))))
-          (cond
-            ((not token) (parser-done-set! parser #t))
-            (else
-             ;; The tokenizer guesses a content model from the tag name; tree
-             ;; construction is what really decides, so undo the guess and let
-             ;; the insertion modes set the state they need.
-             (when (token-start-tag? token)
-               (html-tokenizer-state-set! (parser-tokenizer parser) 'data))
-             (token-dispatch parser token)
-             (loop)))))))
+  (define parser-run!
+    (lambda (parser)
+      (let loop ()
+        (unless (parser-done? parser)
+          (let ((adjusted (parser-adjusted-current parser)))
+            (html-tokenizer-foreign-set!
+              (parser-tokenizer parser)
+              (and adjusted
+                   (node-element? adjusted)
+                   (not (eq? (html-node-namespace adjusted) 'html)))))
+          (let ((token (html-tokenizer-next (parser-tokenizer parser))))
+            (cond
+              ((not token) (parser-done-set! parser #t))
+              (else
+               ;; The tokenizer guesses a content model from the tag name; tree
+               ;; construction is what really decides, so undo the guess and let
+               ;; the insertion modes set the state they need.
+               (when (token-start-tag? token)
+                 (html-tokenizer-state-set! (parser-tokenizer parser) 'data))
+               (token-dispatch parser token)
+               (loop))))))))
 
-  (define (token-dispatch parser token)
-    (let* ((adjusted (parser-adjusted-current parser))
-           (html-rules?
-            (or (not adjusted)
-                (not (node-element? adjusted))
-                (eq? (html-node-namespace adjusted) 'html)
-                (token-end-of-file? token)
-                (and (mathml-text-integration-point? adjusted)
-                     (or (token-character? token)
-                         (and (token-start-tag? token)
-                              (not (member (token-start-tag-name token)
-                                           '("mglyph" "malignmark"))))))
-                (and (node-element? adjusted)
-                     (eq? (html-node-namespace adjusted) 'math)
-                     (string=? (html-node-name adjusted) "annotation-xml")
-                     (token-start-tag? token)
-                     (string=? (token-start-tag-name token) "svg"))
-                (and (html-integration-point? adjusted)
-                     (or (token-character? token) (token-start-tag? token))))))
-      (if html-rules?
-        (mode-process parser (parser-mode parser) token)
-        (foreign-content-process parser token))))
+  (define token-dispatch
+    (lambda (parser token)
+      (let* ((adjusted (parser-adjusted-current parser))
+             (html-rules?
+              (or (not adjusted)
+                  (not (node-element? adjusted))
+                  (eq? (html-node-namespace adjusted) 'html)
+                  (token-end-of-file? token)
+                  (and (mathml-text-integration-point? adjusted)
+                       (or (token-character? token)
+                           (and (token-start-tag? token)
+                                (not (member (token-start-tag-name token)
+                                             '("mglyph" "malignmark"))))))
+                  (and (node-element? adjusted)
+                       (eq? (html-node-namespace adjusted) 'math)
+                       (string=? (html-node-name adjusted) "annotation-xml")
+                       (token-start-tag? token)
+                       (string=? (token-start-tag-name token) "svg"))
+                  (and (html-integration-point? adjusted)
+                       (or (token-character? token) (token-start-tag? token))))))
+        (if html-rules?
+          (mode-process parser (parser-mode parser) token)
+          (foreign-content-process parser token)))))
 
-  (define (token-reprocess parser token)
-    (token-dispatch parser token))
+  (define token-reprocess
+    (lambda (parser token)
+      (token-dispatch parser token)))
 
   ;; Character tokens arrive as runs; these helpers split them the way the
   ;; spec's per-character rules require.
 
-  (define (string-nul-drop text)
-    (let ((port (open-output-string)))
+  (define string-nul-drop
+    (lambda (text)
+      (let ((port (open-output-string)))
+        (let loop ((i 0))
+          (cond
+            ((fx>= i (string-length text)) (get-output-string port))
+            (else
+             (let ((c (string-ref text i)))
+               (unless (char=? c #\nul) (write-char c port))
+               (loop (fx+ i 1)))))))))
+
+  (define string-all-space?
+    (lambda (text)
+      (let loop ((i 0))
+        (or (fx>= i (string-length text))
+            (and (html-space-character? (string-ref text i))
+                 (loop (fx+ i 1)))))))
+
+  (define string-leading-space-split
+    (lambda (text)
+      ;; Returns (values leading-whitespace remainder).
       (let loop ((i 0))
         (cond
-          ((fx>= i (string-length text)) (get-output-string port))
-          (else
-           (let ((c (string-ref text i)))
-             (unless (char=? c #\nul) (write-char c port))
-             (loop (fx+ i 1))))))))
+          ((fx>= i (string-length text)) (values text ""))
+          ((html-space-character? (string-ref text i)) (loop (fx+ i 1)))
+          (else (values (substring text 0 i)
+                        (substring text i (string-length text))))))))
 
-  (define (string-all-space? text)
-    (let loop ((i 0))
-      (or (fx>= i (string-length text))
-          (and (html-space-character? (string-ref text i))
-               (loop (fx+ i 1))))))
-
-  (define (string-leading-space-split text)
-    ;; Returns (values leading-whitespace remainder).
-    (let loop ((i 0))
+  (define newline-skip
+    (lambda (parser text)
       (cond
-        ((fx>= i (string-length text)) (values text ""))
-        ((html-space-character? (string-ref text i)) (loop (fx+ i 1)))
-        (else (values (substring text 0 i)
-                      (substring text i (string-length text)))))))
-
-  (define (newline-skip parser text)
-    (cond
-      ((parser-skip-newline? parser)
-       (parser-skip-newline-set! parser #f)
-       (if (and (fx> (string-length text) 0)
-                (char=? (string-ref text 0) #\newline))
-         (substring text 1 (string-length text))
-         text))
-      (else text)))
+        ((parser-skip-newline? parser)
+         (parser-skip-newline-set! parser #f)
+         (if (and (fx> (string-length text) 0)
+                  (char=? (string-ref text 0) #\newline))
+           (substring text 1 (string-length text))
+           text))
+        (else text))))
 
   ;; ------------------------------------------------------------------
   ;; Insertion mode dispatch
   ;; ------------------------------------------------------------------
 
-  (define (mode-process parser mode token)
-    ;; U+0000 never survives HTML tree construction; dropping it here keeps
-    ;; the per-mode rules from having to special-case it, and matches the way
-    ;; leading whitespace is then ignored by "initial" and friends.
-    (if (and (token-character? token)
-             (string-nul-present? (token-character-text token)))
-      (let ((text (string-nul-drop (token-character-text token))))
-        (unless (string=? text "")
-          (mode-process-dispatch parser mode (token-character-make text))))
-      (mode-process-dispatch parser mode token)))
+  (define mode-process
+    (lambda (parser mode token)
+      ;; U+0000 never survives HTML tree construction; dropping it here keeps
+      ;; the per-mode rules from having to special-case it, and matches the way
+      ;; leading whitespace is then ignored by "initial" and friends.
+      (if (and (token-character? token)
+               (string-nul-present? (token-character-text token)))
+        (let ((text (string-nul-drop (token-character-text token))))
+          (unless (string=? text "")
+            (mode-process-dispatch parser mode (token-character-make text))))
+        (mode-process-dispatch parser mode token))))
 
-  (define (string-nul-present? text)
-    (let loop ((i 0))
-      (cond
-        ((fx>= i (string-length text)) #f)
-        ((char=? (string-ref text i) #\nul) #t)
-        (else (loop (fx+ i 1))))))
+  (define string-nul-present?
+    (lambda (text)
+      (let loop ((i 0))
+        (cond
+          ((fx>= i (string-length text)) #f)
+          ((char=? (string-ref text i) #\nul) #t)
+          (else (loop (fx+ i 1)))))))
 
-  (define (mode-process-dispatch parser mode token)
-    (case mode
-      ((initial) (mode-initial parser token))
-      ((before-html) (mode-before-html parser token))
-      ((before-head) (mode-before-head parser token))
-      ((in-head) (mode-in-head parser token))
-      ((in-head-noscript) (mode-in-head-noscript parser token))
-      ((after-head) (mode-after-head parser token))
-      ((in-body) (mode-in-body parser token))
-      ((text) (mode-text parser token))
-      ((in-table) (mode-in-table parser token))
-      ((in-table-text) (mode-in-table-text parser token))
-      ((in-caption) (mode-in-caption parser token))
-      ((in-column-group) (mode-in-column-group parser token))
-      ((in-table-body) (mode-in-table-body parser token))
-      ((in-row) (mode-in-row parser token))
-      ((in-cell) (mode-in-cell parser token))
-      ((in-select) (mode-in-select parser token))
-      ((in-select-in-table) (mode-in-select-in-table parser token))
-      ((in-template) (mode-in-template parser token))
-      ((after-body) (mode-after-body parser token))
-      ((in-frameset) (mode-in-frameset parser token))
-      ((after-frameset) (mode-after-frameset parser token))
-      ((after-after-body) (mode-after-after-body parser token))
-      ((after-after-frameset) (mode-after-after-frameset parser token))
-      (else (error 'mode-process "unknown insertion mode" mode))))
+  (define mode-process-dispatch
+    (lambda (parser mode token)
+      (case mode
+        ((initial) (mode-initial parser token))
+        ((before-html) (mode-before-html parser token))
+        ((before-head) (mode-before-head parser token))
+        ((in-head) (mode-in-head parser token))
+        ((in-head-noscript) (mode-in-head-noscript parser token))
+        ((after-head) (mode-after-head parser token))
+        ((in-body) (mode-in-body parser token))
+        ((text) (mode-text parser token))
+        ((in-table) (mode-in-table parser token))
+        ((in-table-text) (mode-in-table-text parser token))
+        ((in-caption) (mode-in-caption parser token))
+        ((in-column-group) (mode-in-column-group parser token))
+        ((in-table-body) (mode-in-table-body parser token))
+        ((in-row) (mode-in-row parser token))
+        ((in-cell) (mode-in-cell parser token))
+        ((in-select) (mode-in-select parser token))
+        ((in-select-in-table) (mode-in-select-in-table parser token))
+        ((in-template) (mode-in-template parser token))
+        ((after-body) (mode-after-body parser token))
+        ((in-frameset) (mode-in-frameset parser token))
+        ((after-frameset) (mode-after-frameset parser token))
+        ((after-after-body) (mode-after-after-body parser token))
+        ((after-after-frameset) (mode-after-after-frameset parser token))
+        (else (error 'mode-process "unknown insertion mode" mode)))))
 
   ;; Comments and processing instructions travel the same paths through the
   ;; insertion modes.
-  (define (token-comment-like? token)
-    (or (token-comment? token) (token-processing-instruction? token)))
+  (define token-comment-like?
+    (lambda (token)
+      (or (token-comment? token) (token-processing-instruction? token))))
 
-  (define (comment-like-node-make token)
-    (if (token-processing-instruction? token)
-      (processing-instruction-node-make
-        (token-processing-instruction-target token)
-        (token-processing-instruction-data token))
-      (comment-node-make (token-comment-text token))))
+  (define comment-like-node-make
+    (lambda (token)
+      (if (token-processing-instruction? token)
+        (processing-instruction-node-make
+          (token-processing-instruction-target token)
+          (token-processing-instruction-data token))
+        (comment-node-make (token-comment-text token)))))
 
-  (define (comment-insert! parser token)
-    (node-insert! parser (comment-like-node-make token)))
+  (define comment-insert!
+    (lambda (parser token)
+      (node-insert! parser (comment-like-node-make token))))
 
-  (define (comment-append-to! parser token target)
-    (node-append-child! target (comment-like-node-make token)))
+  (define comment-append-to!
+    (lambda (parser token target)
+      (node-append-child! target (comment-like-node-make token))))
 
   ;; 13.2.6.4.1 "initial"
 
-  (define (mode-initial parser token)
-    (cond
-      ((token-character? token)
-       (call-with-values
-         (lambda () (string-leading-space-split (token-character-text token)))
-         (lambda (space rest)
-           (unless (string=? rest "")
-             (unless (parser-iframe-srcdoc? parser)
-               (parser-quirks-set! parser 'quirks))
-             (parser-mode-set! parser 'before-html)
-             (token-reprocess parser (token-character-make rest))))))
-      ((token-comment-like? token)
-       (comment-append-to! parser token (parser-document parser)))
-      ((token-doctype? token)
-       (let ((name (token-doctype-name token))
-             (public-id (token-doctype-public-id token))
-             (system-id (token-doctype-system-id token)))
-         (node-append-child! (parser-document parser)
-                             (doctype-node-make name public-id system-id))
-         (parser-quirks-set!
-           parser
-           (html-doctype-quirks-mode name public-id system-id
-                                     (token-doctype-force-quirks? token)
-                                     (parser-iframe-srcdoc? parser)))
-         (parser-mode-set! parser 'before-html)))
-      ((token-end-of-file? token)
-       (unless (parser-iframe-srcdoc? parser)
-         (parser-quirks-set! parser 'quirks))
-       (parser-mode-set! parser 'before-html)
-       (token-reprocess parser token))
-      (else
-       (unless (parser-iframe-srcdoc? parser)
-         (parser-quirks-set! parser 'quirks))
-       (parser-mode-set! parser 'before-html)
-       (token-reprocess parser token))))
+  (define mode-initial
+    (lambda (parser token)
+      (cond
+        ((token-character? token)
+         (call-with-values
+           (lambda () (string-leading-space-split (token-character-text token)))
+           (lambda (space rest)
+             (unless (string=? rest "")
+               (unless (parser-iframe-srcdoc? parser)
+                 (parser-quirks-set! parser 'quirks))
+               (parser-mode-set! parser 'before-html)
+               (token-reprocess parser (token-character-make rest))))))
+        ((token-comment-like? token)
+         (comment-append-to! parser token (parser-document parser)))
+        ((token-doctype? token)
+         (let ((name (token-doctype-name token))
+               (public-id (token-doctype-public-id token))
+               (system-id (token-doctype-system-id token)))
+           (node-append-child! (parser-document parser)
+                               (doctype-node-make name public-id system-id))
+           (parser-quirks-set!
+             parser
+             (html-doctype-quirks-mode name public-id system-id
+                                       (token-doctype-force-quirks? token)
+                                       (parser-iframe-srcdoc? parser)))
+           (parser-mode-set! parser 'before-html)))
+        ((token-end-of-file? token)
+         (unless (parser-iframe-srcdoc? parser)
+           (parser-quirks-set! parser 'quirks))
+         (parser-mode-set! parser 'before-html)
+         (token-reprocess parser token))
+        (else
+         (unless (parser-iframe-srcdoc? parser)
+           (parser-quirks-set! parser 'quirks))
+         (parser-mode-set! parser 'before-html)
+         (token-reprocess parser token)))))
 
   ;; 13.2.6.4.2 "before html"
 
-  (define (before-html-default parser token)
-    (let ((node (element-node-make "html" 'html '())))
-      (node-append-child! (parser-document parser) node)
-      (stack-push! parser node)
-      (parser-root-set! parser node)
-      (parser-mode-set! parser 'before-head)
-      (token-reprocess parser token)))
+  (define before-html-default
+    (lambda (parser token)
+      (let ((node (element-node-make "html" 'html '())))
+        (node-append-child! (parser-document parser) node)
+        (stack-push! parser node)
+        (parser-root-set! parser node)
+        (parser-mode-set! parser 'before-head)
+        (token-reprocess parser token))))
 
-  (define (mode-before-html parser token)
-    (cond
-      ((token-doctype? token) #f)
-      ((token-comment-like? token)
-       (comment-append-to! parser token (parser-document parser)))
-      ((token-character? token)
-       (call-with-values
-         (lambda () (string-leading-space-split (token-character-text token)))
-         (lambda (space rest)
-           (unless (string=? rest "")
-             (before-html-default parser (token-character-make rest))))))
-      ((and (token-start-tag? token) (string=? (token-start-tag-name token) "html"))
-       (let ((node (element-node-make "html" 'html
-                                      (token-start-tag-attributes token))))
-         (node-append-child! (parser-document parser) node)
-         (stack-push! parser node)
-         (parser-root-set! parser node)
-         (parser-mode-set! parser 'before-head)))
-      ((and (token-end-tag? token)
-            (not (member (token-end-tag-name token) '("head" "body" "html" "br"))))
-       #f)
-      (else (before-html-default parser token))))
+  (define mode-before-html
+    (lambda (parser token)
+      (cond
+        ((token-doctype? token) #f)
+        ((token-comment-like? token)
+         (comment-append-to! parser token (parser-document parser)))
+        ((token-character? token)
+         (call-with-values
+           (lambda () (string-leading-space-split (token-character-text token)))
+           (lambda (space rest)
+             (unless (string=? rest "")
+               (before-html-default parser (token-character-make rest))))))
+        ((and (token-start-tag? token) (string=? (token-start-tag-name token) "html"))
+         (let ((node (element-node-make "html" 'html
+                                        (token-start-tag-attributes token))))
+           (node-append-child! (parser-document parser) node)
+           (stack-push! parser node)
+           (parser-root-set! parser node)
+           (parser-mode-set! parser 'before-head)))
+        ((and (token-end-tag? token)
+              (not (member (token-end-tag-name token) '("head" "body" "html" "br"))))
+         #f)
+        (else (before-html-default parser token)))))
 
   ;; 13.2.6.4.3 "before head"
 
-  (define (mode-before-head parser token)
-    (cond
-      ((token-character? token)
-       (call-with-values
-         (lambda () (string-leading-space-split (token-character-text token)))
-         (lambda (space rest)
-           (unless (string=? rest "")
-             (before-head-default parser (token-character-make rest))))))
-      ((token-comment-like? token) (comment-insert! parser token))
-      ((token-doctype? token) #f)
-      ((and (token-start-tag? token) (string=? (token-start-tag-name token) "html"))
-       (mode-in-body parser token))
-      ((and (token-start-tag? token) (string=? (token-start-tag-name token) "head"))
-       (let ((node (element-insert-token! parser token)))
-         (parser-head-set! parser node)
-         (parser-mode-set! parser 'in-head)))
-      ((and (token-end-tag? token)
-            (not (member (token-end-tag-name token) '("head" "body" "html" "br"))))
-       #f)
-      (else (before-head-default parser token))))
+  (define mode-before-head
+    (lambda (parser token)
+      (cond
+        ((token-character? token)
+         (call-with-values
+           (lambda () (string-leading-space-split (token-character-text token)))
+           (lambda (space rest)
+             (unless (string=? rest "")
+               (before-head-default parser (token-character-make rest))))))
+        ((token-comment-like? token) (comment-insert! parser token))
+        ((token-doctype? token) #f)
+        ((and (token-start-tag? token) (string=? (token-start-tag-name token) "html"))
+         (mode-in-body parser token))
+        ((and (token-start-tag? token) (string=? (token-start-tag-name token) "head"))
+         (let ((node (element-insert-token! parser token)))
+           (parser-head-set! parser node)
+           (parser-mode-set! parser 'in-head)))
+        ((and (token-end-tag? token)
+              (not (member (token-end-tag-name token) '("head" "body" "html" "br"))))
+         #f)
+        (else (before-head-default parser token)))))
 
-  (define (before-head-default parser token)
-    (let ((node (element-insert! parser "head" 'html '())))
-      (parser-head-set! parser node)
-      (parser-mode-set! parser 'in-head)
-      (token-reprocess parser token)))
+  (define before-head-default
+    (lambda (parser token)
+      (let ((node (element-insert! parser "head" 'html '())))
+        (parser-head-set! parser node)
+        (parser-mode-set! parser 'in-head)
+        (token-reprocess parser token))))
 
   ;; 13.2.6.4.4 "in head"
 
-  (define (generic-rawtext-parse! parser token state)
-    (element-insert-token! parser token)
-    (html-tokenizer-last-start-tag-set! (parser-tokenizer parser)
-                                        (token-start-tag-name token))
-    (html-tokenizer-state-set! (parser-tokenizer parser) state)
-    (parser-original-mode-set! parser (parser-mode parser))
-    (parser-mode-set! parser 'text))
+  (define generic-rawtext-parse!
+    (lambda (parser token state)
+      (element-insert-token! parser token)
+      (html-tokenizer-last-start-tag-set! (parser-tokenizer parser)
+                                          (token-start-tag-name token))
+      (html-tokenizer-state-set! (parser-tokenizer parser) state)
+      (parser-original-mode-set! parser (parser-mode parser))
+      (parser-mode-set! parser 'text)))
 
-  (define (void-element-insert! parser token)
-    (element-insert-token! parser token)
-    (stack-pop! parser))
+  (define void-element-insert!
+    (lambda (parser token)
+      (element-insert-token! parser token)
+      (stack-pop! parser)))
 
-  (define (mode-in-head parser token)
-    (cond
-      ((token-character? token)
-       (call-with-values
-         (lambda () (string-leading-space-split (token-character-text token)))
-         (lambda (space rest)
-           (characters-insert! parser space)
-           (unless (string=? rest "")
-             (in-head-default parser (token-character-make rest))))))
-      ((token-comment-like? token) (comment-insert! parser token))
-      ((token-doctype? token) #f)
-      ((token-start-tag? token)
-       (let ((name (token-start-tag-name token)))
-         (cond
-           ((string=? name "html") (mode-in-body parser token))
-           ((member name '("base" "basefont" "bgsound" "link" "meta"))
-            (void-element-insert! parser token))
-           ((string=? name "title") (generic-rawtext-parse! parser token 'rcdata))
-           ((and (string=? name "noscript") (parser-scripting? parser))
-            (generic-rawtext-parse! parser token 'rawtext))
-           ((member name '("noframes" "style"))
-            (generic-rawtext-parse! parser token 'rawtext))
-           ((string=? name "noscript")
-            (element-insert-token! parser token)
-            (parser-mode-set! parser 'in-head-noscript))
-           ((string=? name "script")
-            (generic-rawtext-parse! parser token 'script-data))
-           ((string=? name "template")
-            (let ((node (element-insert-token! parser token)))
-              (html-node-content-set! node (fragment-node-make))
-              (formatting-marker-insert! parser)
-              (parser-frameset-ok-set! parser #f)
-              (parser-mode-set! parser 'in-template)
-              (parser-template-modes-set!
-                parser (append (parser-template-modes parser) '(in-template)))))
-           ((string=? name "head") #f)
-           (else (in-head-default parser token)))))
-      ((token-end-tag? token)
-       (let ((name (token-end-tag-name token)))
-         (cond
-           ((string=? name "head")
-            (stack-pop! parser)
-            (parser-mode-set! parser 'after-head))
-           ((string=? name "template") (template-end! parser))
-           ((member name '("body" "html" "br")) (in-head-default parser token))
-           (else #f))))
-      (else (in-head-default parser token))))
+  (define mode-in-head
+    (lambda (parser token)
+      (cond
+        ((token-character? token)
+         (call-with-values
+           (lambda () (string-leading-space-split (token-character-text token)))
+           (lambda (space rest)
+             (characters-insert! parser space)
+             (unless (string=? rest "")
+               (in-head-default parser (token-character-make rest))))))
+        ((token-comment-like? token) (comment-insert! parser token))
+        ((token-doctype? token) #f)
+        ((token-start-tag? token)
+         (let ((name (token-start-tag-name token)))
+           (cond
+             ((string=? name "html") (mode-in-body parser token))
+             ((member name '("base" "basefont" "bgsound" "link" "meta"))
+              (void-element-insert! parser token))
+             ((string=? name "title") (generic-rawtext-parse! parser token 'rcdata))
+             ((and (string=? name "noscript") (parser-scripting? parser))
+              (generic-rawtext-parse! parser token 'rawtext))
+             ((member name '("noframes" "style"))
+              (generic-rawtext-parse! parser token 'rawtext))
+             ((string=? name "noscript")
+              (element-insert-token! parser token)
+              (parser-mode-set! parser 'in-head-noscript))
+             ((string=? name "script")
+              (generic-rawtext-parse! parser token 'script-data))
+             ((string=? name "template")
+              (let ((node (element-insert-token! parser token)))
+                (html-node-content-set! node (fragment-node-make))
+                (formatting-marker-insert! parser)
+                (parser-frameset-ok-set! parser #f)
+                (parser-mode-set! parser 'in-template)
+                (parser-template-modes-set!
+                  parser (append (parser-template-modes parser) '(in-template)))))
+             ((string=? name "head") #f)
+             (else (in-head-default parser token)))))
+        ((token-end-tag? token)
+         (let ((name (token-end-tag-name token)))
+           (cond
+             ((string=? name "head")
+              (stack-pop! parser)
+              (parser-mode-set! parser 'after-head))
+             ((string=? name "template") (template-end! parser))
+             ((member name '("body" "html" "br")) (in-head-default parser token))
+             (else #f))))
+        (else (in-head-default parser token)))))
 
-  (define (in-head-default parser token)
-    (stack-pop! parser)
-    (parser-mode-set! parser 'after-head)
-    (token-reprocess parser token))
+  (define in-head-default
+    (lambda (parser token)
+      (stack-pop! parser)
+      (parser-mode-set! parser 'after-head)
+      (token-reprocess parser token)))
 
-  (define (template-end! parser)
-    (cond
-      ((not (stack-find-name parser "template")) #f)
-      (else
-       (implied-end-tags-generate-thoroughly! parser)
-       (stack-pop-until-name! parser "template")
-       (formatting-clear-to-marker! parser)
-       (let ((modes (parser-template-modes parser)))
-         (unless (null? modes)
-           (parser-template-modes-set! parser
-                                       (list-remove-at modes (fx- (length modes) 1)))))
-       (insertion-mode-reset! parser))))
+  (define template-end!
+    (lambda (parser)
+      (cond
+        ((not (stack-find-name parser "template")) #f)
+        (else
+         (implied-end-tags-generate-thoroughly! parser)
+         (stack-pop-until-name! parser "template")
+         (formatting-clear-to-marker! parser)
+         (let ((modes (parser-template-modes parser)))
+           (unless (null? modes)
+             (parser-template-modes-set! parser
+                                         (list-remove-at modes (fx- (length modes) 1)))))
+         (insertion-mode-reset! parser)))))
 
   ;; 13.2.6.4.5 "in head noscript"
 
-  (define (mode-in-head-noscript parser token)
-    (cond
-      ((token-doctype? token) #f)
-      ((and (token-start-tag? token) (string=? (token-start-tag-name token) "html"))
-       (mode-in-body parser token))
-      ((and (token-end-tag? token) (string=? (token-end-tag-name token) "noscript"))
-       (stack-pop! parser)
-       (parser-mode-set! parser 'in-head))
-      ((token-character? token)
-       (call-with-values
-         (lambda () (string-leading-space-split (token-character-text token)))
-         (lambda (space rest)
-           (characters-insert! parser space)
-           (unless (string=? rest "")
-             (in-head-noscript-default parser (token-character-make rest))))))
-      ((token-comment-like? token) (mode-in-head parser token))
-      ((and (token-start-tag? token)
-            (member (token-start-tag-name token)
-                    '("basefont" "bgsound" "link" "meta" "noframes" "style")))
-       (mode-in-head parser token))
-      ((and (token-start-tag? token)
-            (member (token-start-tag-name token) '("head" "noscript")))
-       #f)
-      ((and (token-end-tag? token) (not (string=? (token-end-tag-name token) "br")))
-       #f)
-      (else (in-head-noscript-default parser token))))
+  (define mode-in-head-noscript
+    (lambda (parser token)
+      (cond
+        ((token-doctype? token) #f)
+        ((and (token-start-tag? token) (string=? (token-start-tag-name token) "html"))
+         (mode-in-body parser token))
+        ((and (token-end-tag? token) (string=? (token-end-tag-name token) "noscript"))
+         (stack-pop! parser)
+         (parser-mode-set! parser 'in-head))
+        ((token-character? token)
+         (call-with-values
+           (lambda () (string-leading-space-split (token-character-text token)))
+           (lambda (space rest)
+             (characters-insert! parser space)
+             (unless (string=? rest "")
+               (in-head-noscript-default parser (token-character-make rest))))))
+        ((token-comment-like? token) (mode-in-head parser token))
+        ((and (token-start-tag? token)
+              (member (token-start-tag-name token)
+                      '("basefont" "bgsound" "link" "meta" "noframes" "style")))
+         (mode-in-head parser token))
+        ((and (token-start-tag? token)
+              (member (token-start-tag-name token) '("head" "noscript")))
+         #f)
+        ((and (token-end-tag? token) (not (string=? (token-end-tag-name token) "br")))
+         #f)
+        (else (in-head-noscript-default parser token)))))
 
-  (define (in-head-noscript-default parser token)
-    (stack-pop! parser)
-    (parser-mode-set! parser 'in-head)
-    (token-reprocess parser token))
+  (define in-head-noscript-default
+    (lambda (parser token)
+      (stack-pop! parser)
+      (parser-mode-set! parser 'in-head)
+      (token-reprocess parser token)))
 
   ;; 13.2.6.4.6 "after head"
 
-  (define (mode-after-head parser token)
-    (cond
-      ((token-character? token)
-       (call-with-values
-         (lambda () (string-leading-space-split (token-character-text token)))
-         (lambda (space rest)
-           (characters-insert! parser space)
-           (unless (string=? rest "")
-             (after-head-default parser (token-character-make rest))))))
-      ((token-comment-like? token) (comment-insert! parser token))
-      ((token-doctype? token) #f)
-      ((token-start-tag? token)
-       (let ((name (token-start-tag-name token)))
-         (cond
-           ((string=? name "html") (mode-in-body parser token))
-           ((string=? name "body")
-            (element-insert-token! parser token)
-            (parser-frameset-ok-set! parser #f)
-            (parser-mode-set! parser 'in-body))
-           ((string=? name "frameset")
-            (element-insert-token! parser token)
-            (parser-mode-set! parser 'in-frameset))
-           ((string-set-member? head-content-start-tags name)
-            (let ((head (parser-head parser)))
-              (stack-push! parser head)
-              (mode-in-head parser token)
-              (stack-remove! parser head)))
-           ((string=? name "head") #f)
-           (else (after-head-default parser token)))))
-      ((token-end-tag? token)
-       (let ((name (token-end-tag-name token)))
-         (cond
-           ((string=? name "template") (mode-in-head parser token))
-           ((member name '("body" "html" "br")) (after-head-default parser token))
-           (else #f))))
-      (else (after-head-default parser token))))
+  (define mode-after-head
+    (lambda (parser token)
+      (cond
+        ((token-character? token)
+         (call-with-values
+           (lambda () (string-leading-space-split (token-character-text token)))
+           (lambda (space rest)
+             (characters-insert! parser space)
+             (unless (string=? rest "")
+               (after-head-default parser (token-character-make rest))))))
+        ((token-comment-like? token) (comment-insert! parser token))
+        ((token-doctype? token) #f)
+        ((token-start-tag? token)
+         (let ((name (token-start-tag-name token)))
+           (cond
+             ((string=? name "html") (mode-in-body parser token))
+             ((string=? name "body")
+              (element-insert-token! parser token)
+              (parser-frameset-ok-set! parser #f)
+              (parser-mode-set! parser 'in-body))
+             ((string=? name "frameset")
+              (element-insert-token! parser token)
+              (parser-mode-set! parser 'in-frameset))
+             ((string-set-member? head-content-start-tags name)
+              (let ((head (parser-head parser)))
+                (stack-push! parser head)
+                (mode-in-head parser token)
+                (stack-remove! parser head)))
+             ((string=? name "head") #f)
+             (else (after-head-default parser token)))))
+        ((token-end-tag? token)
+         (let ((name (token-end-tag-name token)))
+           (cond
+             ((string=? name "template") (mode-in-head parser token))
+             ((member name '("body" "html" "br")) (after-head-default parser token))
+             (else #f))))
+        (else (after-head-default parser token)))))
 
-  (define (after-head-default parser token)
-    (element-insert! parser "body" 'html '())
-    (parser-mode-set! parser 'in-body)
-    (token-reprocess parser token))
+  (define after-head-default
+    (lambda (parser token)
+      (element-insert! parser "body" 'html '())
+      (parser-mode-set! parser 'in-body)
+      (token-reprocess parser token)))
 
   ;; 13.2.6.4.7 "in body"
 
-  (define (attributes-merge! node attributes)
-    (for-each
-      (lambda (pair)
-        (unless (assoc (car pair) (html-node-attributes node))
-          (html-node-attributes-set! node
-                                     (append (html-node-attributes node)
-                                             (list pair)))))
-      attributes))
+  (define attributes-merge!
+    (lambda (node attributes)
+      (for-each
+        (lambda (pair)
+          (unless (assoc (car pair) (html-node-attributes node))
+            (html-node-attributes-set! node
+                                       (append (html-node-attributes node)
+                                               (list pair)))))
+        attributes)))
 
-  (define (mode-in-body parser token)
-    (cond
-      ((token-character? token)
-       (let ((text (string-nul-drop (newline-skip parser (token-character-text token)))))
-         (unless (string=? text "")
-           (formatting-reconstruct! parser)
-           (characters-insert! parser text)
-           (unless (string-all-space? text)
-             (parser-frameset-ok-set! parser #f)))))
-      ((token-comment-like? token) (comment-insert! parser token))
-      ((token-doctype? token) #f)
-      ((token-start-tag? token) (in-body-start-tag parser token))
-      ((token-end-tag? token) (in-body-end-tag parser token))
-      ((token-end-of-file? token)
-       (if (null? (parser-template-modes parser))
-         (parser-done-set! parser #t)
-         (mode-in-template parser token)))
-      (else #f)))
-
-  (define (in-body-start-tag parser token)
-    (let ((name (token-start-tag-name token))
-          (attributes (token-start-tag-attributes token)))
+  (define mode-in-body
+    (lambda (parser token)
       (cond
-        ((string=? name "html")
-         (unless (stack-find-name parser "template")
-           (attributes-merge! (car (parser-stack parser)) attributes)))
-        ((string-set-member? head-content-start-tags name)
-         (mode-in-head parser token))
-        ((string=? name "body")
-         (let ((stack (parser-stack parser)))
-           (when (and (fx> (length stack) 1)
-                      (node-html-element? (list-ref stack 1) "body")
-                      (not (stack-find-name parser "template")))
-             (parser-frameset-ok-set! parser #f)
-             (attributes-merge! (list-ref stack 1) attributes))))
-        ((string=? name "frameset")
-         (let ((stack (parser-stack parser)))
-           (when (and (fx> (length stack) 1)
-                      (node-html-element? (list-ref stack 1) "body")
-                      (parser-frameset-ok? parser)
-                      (frameset-body-allowed? (list-ref stack 1)))
-             (let ((body (list-ref stack 1)))
-               (node-detach! body))
-             (let loop ()
-               (when (fx> (length (parser-stack parser)) 1)
-                 (stack-pop! parser)
-                 (loop)))
-             (element-insert-token! parser token)
-             (parser-mode-set! parser 'in-frameset))))
-        ((member name '("li" "dd" "dt")) (in-body-list-item-start parser token name))
-        ((string-set-member? heading-elements name)
-         (when (element-in-button-scope? parser "p") (paragraph-close! parser))
-         (let ((current (parser-current parser)))
-           (when (and current
-                      (node-element? current)
-                      (eq? (html-node-namespace current) 'html)
-                      (string-set-member? heading-elements (html-node-name current)))
-             (stack-pop! parser)))
-         (element-insert-token! parser token))
-        ((member name '("pre" "listing"))
-         (when (element-in-button-scope? parser "p") (paragraph-close! parser))
-         (element-insert-token! parser token)
-         (parser-skip-newline-set! parser #t)
-         (parser-frameset-ok-set! parser #f))
-        ((string=? name "form")
-         (unless (and (parser-form parser) (not (stack-find-name parser "template")))
+        ((token-character? token)
+         (let ((text (string-nul-drop (newline-skip parser (token-character-text token)))))
+           (unless (string=? text "")
+             (formatting-reconstruct! parser)
+             (characters-insert! parser text)
+             (unless (string-all-space? text)
+               (parser-frameset-ok-set! parser #f)))))
+        ((token-comment-like? token) (comment-insert! parser token))
+        ((token-doctype? token) #f)
+        ((token-start-tag? token) (in-body-start-tag parser token))
+        ((token-end-tag? token) (in-body-end-tag parser token))
+        ((token-end-of-file? token)
+         (if (null? (parser-template-modes parser))
+           (parser-done-set! parser #t)
+           (mode-in-template parser token)))
+        (else #f))))
+
+  (define in-body-start-tag
+    (lambda (parser token)
+      (let ((name (token-start-tag-name token))
+            (attributes (token-start-tag-attributes token)))
+        (cond
+          ((string=? name "html")
+           (unless (stack-find-name parser "template")
+             (attributes-merge! (car (parser-stack parser)) attributes)))
+          ((string-set-member? head-content-start-tags name)
+           (mode-in-head parser token))
+          ((string=? name "body")
+           (let ((stack (parser-stack parser)))
+             (when (and (fx> (length stack) 1)
+                        (node-html-element? (list-ref stack 1) "body")
+                        (not (stack-find-name parser "template")))
+               (parser-frameset-ok-set! parser #f)
+               (attributes-merge! (list-ref stack 1) attributes))))
+          ((string=? name "frameset")
+           (let ((stack (parser-stack parser)))
+             (when (and (fx> (length stack) 1)
+                        (node-html-element? (list-ref stack 1) "body")
+                        (parser-frameset-ok? parser)
+                        (frameset-body-allowed? (list-ref stack 1)))
+               (let ((body (list-ref stack 1)))
+                 (node-detach! body))
+               (let loop ()
+                 (when (fx> (length (parser-stack parser)) 1)
+                   (stack-pop! parser)
+                   (loop)))
+               (element-insert-token! parser token)
+               (parser-mode-set! parser 'in-frameset))))
+          ((member name '("li" "dd" "dt")) (in-body-list-item-start parser token name))
+          ((string-set-member? heading-elements name)
            (when (element-in-button-scope? parser "p") (paragraph-close! parser))
-           (let ((node (element-insert-token! parser token)))
-             (unless (stack-find-name parser "template")
-               (parser-form-set! parser node)))))
-        ((string=? name "plaintext")
-         (when (element-in-button-scope? parser "p") (paragraph-close! parser))
-         (element-insert-token! parser token)
-         (html-tokenizer-state-set! (parser-tokenizer parser) 'plaintext))
-        ((string=? name "button")
-         (when (element-in-default-scope? parser "button")
-           (implied-end-tags-generate! parser #f)
-           (stack-pop-until-name! parser "button"))
-         (formatting-reconstruct! parser)
-         (element-insert-token! parser token)
-         (parser-frameset-ok-set! parser #f))
-        ((string=? name "a")
-         (let ((existing (formatting-find-after-marker parser "a")))
-           (when existing
-             (adoption-agency parser "a")
-             (parser-formatting-set! parser (remq existing (parser-formatting parser)))
-             (stack-remove! parser existing)))
-         (formatting-reconstruct! parser)
-         (formatting-push! parser (element-insert-token! parser token)))
-        ((string-set-member? formatting-elements name)
-         (when (and (string=? name "nobr") (element-in-default-scope? parser "nobr"))
-           (adoption-agency parser "nobr"))
-         (formatting-reconstruct! parser)
-         (formatting-push! parser (element-insert-token! parser token)))
-        ((member name '("applet" "marquee" "object"))
-         (formatting-reconstruct! parser)
-         (element-insert-token! parser token)
-         (formatting-marker-insert! parser)
-         (parser-frameset-ok-set! parser #f))
-        ((string=? name "table")
-         (when (and (not (eq? (parser-quirks parser) 'quirks))
-                    (element-in-button-scope? parser "p"))
-           (paragraph-close! parser))
-         (element-insert-token! parser token)
-         (parser-frameset-ok-set! parser #f)
-         (parser-mode-set! parser 'in-table))
-        ((member name '("area" "br" "embed" "img" "keygen" "wbr"))
-         (formatting-reconstruct! parser)
-         (void-element-insert! parser token)
-         (parser-frameset-ok-set! parser #f))
-        ((string=? name "input")
-         (formatting-reconstruct! parser)
-         (void-element-insert! parser token)
-         (let ((type (assoc "type" attributes)))
-           (unless (and type (string-ascii-equal? (cdr type) "hidden"))
-             (parser-frameset-ok-set! parser #f))))
-        ((member name '("param" "source" "track")) (void-element-insert! parser token))
-        ((string=? name "hr")
-         (when (element-in-button-scope? parser "p") (paragraph-close! parser))
-         (void-element-insert! parser token)
-         (parser-frameset-ok-set! parser #f))
-        ((string=? name "image")
-         (in-body-start-tag parser (token-start-tag-make "img" attributes
-                                                         (token-start-tag-self-closing? token))))
-        ((string=? name "textarea")
-         (element-insert-token! parser token)
-         (parser-skip-newline-set! parser #t)
-         (html-tokenizer-last-start-tag-set! (parser-tokenizer parser) name)
-         (html-tokenizer-state-set! (parser-tokenizer parser) 'rcdata)
-         (parser-original-mode-set! parser (parser-mode parser))
-         (parser-frameset-ok-set! parser #f)
-         (parser-mode-set! parser 'text))
-        ((string=? name "xmp")
-         (when (element-in-button-scope? parser "p") (paragraph-close! parser))
-         (formatting-reconstruct! parser)
-         (parser-frameset-ok-set! parser #f)
-         (generic-rawtext-parse! parser token 'rawtext))
-        ((string=? name "iframe")
-         (parser-frameset-ok-set! parser #f)
-         (generic-rawtext-parse! parser token 'rawtext))
-        ((or (string=? name "noembed")
-             (and (string=? name "noscript") (parser-scripting? parser)))
-         (generic-rawtext-parse! parser token 'rawtext))
-        ((string=? name "select")
-         (formatting-reconstruct! parser)
-         (element-insert-token! parser token)
-         (parser-frameset-ok-set! parser #f)
-         (parser-mode-set!
-           parser
-           (if (memq (parser-mode parser)
-                     '(in-table in-caption in-table-body in-row in-cell))
-             'in-select-in-table
-             'in-select)))
-        ((member name '("optgroup" "option"))
-         (when (node-html-element? (parser-current parser) "option")
-           (stack-pop! parser))
-         (formatting-reconstruct! parser)
-         (element-insert-token! parser token))
-        ((member name '("rb" "rtc"))
-         (when (element-in-default-scope? parser "ruby")
-           (implied-end-tags-generate! parser #f))
-         (element-insert-token! parser token))
-        ((member name '("rp" "rt"))
-         (when (element-in-default-scope? parser "ruby")
-           (implied-end-tags-generate! parser "rtc"))
-         (element-insert-token! parser token))
-        ((string=? name "math")
-         (formatting-reconstruct! parser)
-         (let ((node (element-insert!
-                      parser "math" 'math
-                      (attributes-adjust-foreign
-                        (attributes-adjust-mathml attributes)))))
-           (html-tokenizer-state-set! (parser-tokenizer parser) 'data)
-           (when (token-start-tag-self-closing? token) (stack-pop! parser))))
-        ((string=? name "svg")
-         (formatting-reconstruct! parser)
-         (let ((node (element-insert!
-                      parser "svg" 'svg
-                      (attributes-adjust-foreign
-                        (attributes-adjust-svg attributes)))))
-           (html-tokenizer-state-set! (parser-tokenizer parser) 'data)
-           (when (token-start-tag-self-closing? token) (stack-pop! parser))))
-        ((string-set-member? paragraph-closing-start-tags name)
-         (when (element-in-button-scope? parser "p") (paragraph-close! parser))
-         (element-insert-token! parser token))
-        ((member name '("caption" "col" "colgroup" "frame" "head" "tbody" "td"
-                        "tfoot" "th" "thead" "tr"))
-         #f)
-        (else
-         (formatting-reconstruct! parser)
-         (element-insert-token! parser token)))))
+           (let ((current (parser-current parser)))
+             (when (and current
+                        (node-element? current)
+                        (eq? (html-node-namespace current) 'html)
+                        (string-set-member? heading-elements (html-node-name current)))
+               (stack-pop! parser)))
+           (element-insert-token! parser token))
+          ((member name '("pre" "listing"))
+           (when (element-in-button-scope? parser "p") (paragraph-close! parser))
+           (element-insert-token! parser token)
+           (parser-skip-newline-set! parser #t)
+           (parser-frameset-ok-set! parser #f))
+          ((string=? name "form")
+           (unless (and (parser-form parser) (not (stack-find-name parser "template")))
+             (when (element-in-button-scope? parser "p") (paragraph-close! parser))
+             (let ((node (element-insert-token! parser token)))
+               (unless (stack-find-name parser "template")
+                 (parser-form-set! parser node)))))
+          ((string=? name "plaintext")
+           (when (element-in-button-scope? parser "p") (paragraph-close! parser))
+           (element-insert-token! parser token)
+           (html-tokenizer-state-set! (parser-tokenizer parser) 'plaintext))
+          ((string=? name "button")
+           (when (element-in-default-scope? parser "button")
+             (implied-end-tags-generate! parser #f)
+             (stack-pop-until-name! parser "button"))
+           (formatting-reconstruct! parser)
+           (element-insert-token! parser token)
+           (parser-frameset-ok-set! parser #f))
+          ((string=? name "a")
+           (let ((existing (formatting-find-after-marker parser "a")))
+             (when existing
+               (adoption-agency parser "a")
+               (parser-formatting-set! parser (remq existing (parser-formatting parser)))
+               (stack-remove! parser existing)))
+           (formatting-reconstruct! parser)
+           (formatting-push! parser (element-insert-token! parser token)))
+          ((string-set-member? formatting-elements name)
+           (when (and (string=? name "nobr") (element-in-default-scope? parser "nobr"))
+             (adoption-agency parser "nobr"))
+           (formatting-reconstruct! parser)
+           (formatting-push! parser (element-insert-token! parser token)))
+          ((member name '("applet" "marquee" "object"))
+           (formatting-reconstruct! parser)
+           (element-insert-token! parser token)
+           (formatting-marker-insert! parser)
+           (parser-frameset-ok-set! parser #f))
+          ((string=? name "table")
+           (when (and (not (eq? (parser-quirks parser) 'quirks))
+                      (element-in-button-scope? parser "p"))
+             (paragraph-close! parser))
+           (element-insert-token! parser token)
+           (parser-frameset-ok-set! parser #f)
+           (parser-mode-set! parser 'in-table))
+          ((member name '("area" "br" "embed" "img" "keygen" "wbr"))
+           (formatting-reconstruct! parser)
+           (void-element-insert! parser token)
+           (parser-frameset-ok-set! parser #f))
+          ((string=? name "input")
+           (formatting-reconstruct! parser)
+           (void-element-insert! parser token)
+           (let ((type (assoc "type" attributes)))
+             (unless (and type (string-ascii-equal? (cdr type) "hidden"))
+               (parser-frameset-ok-set! parser #f))))
+          ((member name '("param" "source" "track")) (void-element-insert! parser token))
+          ((string=? name "hr")
+           (when (element-in-button-scope? parser "p") (paragraph-close! parser))
+           (void-element-insert! parser token)
+           (parser-frameset-ok-set! parser #f))
+          ((string=? name "image")
+           (in-body-start-tag parser (token-start-tag-make "img" attributes
+                                                           (token-start-tag-self-closing? token))))
+          ((string=? name "textarea")
+           (element-insert-token! parser token)
+           (parser-skip-newline-set! parser #t)
+           (html-tokenizer-last-start-tag-set! (parser-tokenizer parser) name)
+           (html-tokenizer-state-set! (parser-tokenizer parser) 'rcdata)
+           (parser-original-mode-set! parser (parser-mode parser))
+           (parser-frameset-ok-set! parser #f)
+           (parser-mode-set! parser 'text))
+          ((string=? name "xmp")
+           (when (element-in-button-scope? parser "p") (paragraph-close! parser))
+           (formatting-reconstruct! parser)
+           (parser-frameset-ok-set! parser #f)
+           (generic-rawtext-parse! parser token 'rawtext))
+          ((string=? name "iframe")
+           (parser-frameset-ok-set! parser #f)
+           (generic-rawtext-parse! parser token 'rawtext))
+          ((or (string=? name "noembed")
+               (and (string=? name "noscript") (parser-scripting? parser)))
+           (generic-rawtext-parse! parser token 'rawtext))
+          ((string=? name "select")
+           (formatting-reconstruct! parser)
+           (element-insert-token! parser token)
+           (parser-frameset-ok-set! parser #f)
+           (parser-mode-set!
+             parser
+             (if (memq (parser-mode parser)
+                       '(in-table in-caption in-table-body in-row in-cell))
+               'in-select-in-table
+               'in-select)))
+          ((member name '("optgroup" "option"))
+           (when (node-html-element? (parser-current parser) "option")
+             (stack-pop! parser))
+           (formatting-reconstruct! parser)
+           (element-insert-token! parser token))
+          ((member name '("rb" "rtc"))
+           (when (element-in-default-scope? parser "ruby")
+             (implied-end-tags-generate! parser #f))
+           (element-insert-token! parser token))
+          ((member name '("rp" "rt"))
+           (when (element-in-default-scope? parser "ruby")
+             (implied-end-tags-generate! parser "rtc"))
+           (element-insert-token! parser token))
+          ((string=? name "math")
+           (formatting-reconstruct! parser)
+           (let ((node (element-insert!
+                        parser "math" 'math
+                        (attributes-adjust-foreign
+                          (attributes-adjust-mathml attributes)))))
+             (html-tokenizer-state-set! (parser-tokenizer parser) 'data)
+             (when (token-start-tag-self-closing? token) (stack-pop! parser))))
+          ((string=? name "svg")
+           (formatting-reconstruct! parser)
+           (let ((node (element-insert!
+                        parser "svg" 'svg
+                        (attributes-adjust-foreign
+                          (attributes-adjust-svg attributes)))))
+             (html-tokenizer-state-set! (parser-tokenizer parser) 'data)
+             (when (token-start-tag-self-closing? token) (stack-pop! parser))))
+          ((string-set-member? paragraph-closing-start-tags name)
+           (when (element-in-button-scope? parser "p") (paragraph-close! parser))
+           (element-insert-token! parser token))
+          ((member name '("caption" "col" "colgroup" "frame" "head" "tbody" "td"
+                          "tfoot" "th" "thead" "tr"))
+           #f)
+          (else
+           (formatting-reconstruct! parser)
+           (element-insert-token! parser token))))))
 
   ;; justhtml accepts a <frameset> only when everything already in the body is
   ;; frameset-neutral (engine.py, _body_allows_frameset).
@@ -5876,985 +6086,1022 @@
         "a" "b" "big" "code" "em" "font" "i" "nobr" "s" "small" "strike"
         "strong" "tt" "u")))
 
-  (define (frameset-body-allowed? node)
-    (let loop ((children (html-node-children node)))
-      (cond
-        ((null? children) #t)
-        (else
-         (let ((child (car children)))
-           (cond
-             ((node-text? child)
-              (and (string-all-space? (html-node-data child)) (loop (cdr children))))
-             ((not (node-element? child)) #f)
-             ((not (eq? (html-node-namespace child) 'html))
-              (and (frameset-foreign-allowed? child) (loop (cdr children))))
-             ((string=? (html-node-name child) "input")
-              (let ((type (assoc "type" (html-node-attributes child))))
-                (and type
-                     (string-ascii-equal? (cdr type) "hidden")
-                     (loop (cdr children)))))
-             ((not (string-set-member? frameset-body-ok-names (html-node-name child)))
-              #f)
-             (else (and (frameset-body-allowed? child) (loop (cdr children))))))))))
+  (define frameset-body-allowed?
+    (lambda (node)
+      (let loop ((children (html-node-children node)))
+        (cond
+          ((null? children) #t)
+          (else
+           (let ((child (car children)))
+             (cond
+               ((node-text? child)
+                (and (string-all-space? (html-node-data child)) (loop (cdr children))))
+               ((not (node-element? child)) #f)
+               ((not (eq? (html-node-namespace child) 'html))
+                (and (frameset-foreign-allowed? child) (loop (cdr children))))
+               ((string=? (html-node-name child) "input")
+                (let ((type (assoc "type" (html-node-attributes child))))
+                  (and type
+                       (string-ascii-equal? (cdr type) "hidden")
+                       (loop (cdr children)))))
+               ((not (string-set-member? frameset-body-ok-names (html-node-name child)))
+                #f)
+               (else (and (frameset-body-allowed? child) (loop (cdr children)))))))))))
 
-  (define (frameset-foreign-allowed? node)
-    (let loop ((children (html-node-children node)))
-      (cond
-        ((null? children) #t)
-        ((node-text? children) #t)
-        (else
-         (let ((child (car children)))
-           (cond
-             ((node-text? child)
-              (and (string-all-space?
-                     (list->string
-                       (let filter ((chars (string->list (html-node-data child))))
-                         (cond
-                           ((null? chars) '())
-                           ((char=? (car chars) (integer->char #xFFFD))
-                            (filter (cdr chars)))
-                           (else (cons (car chars) (filter (cdr chars))))))))
-                   (loop (cdr children))))
-             (else (and (frameset-foreign-allowed? child) (loop (cdr children))))))))))
+  (define frameset-foreign-allowed?
+    (lambda (node)
+      (let loop ((children (html-node-children node)))
+        (cond
+          ((null? children) #t)
+          ((node-text? children) #t)
+          (else
+           (let ((child (car children)))
+             (cond
+               ((node-text? child)
+                (and (string-all-space?
+                       (list->string
+                         (let filter ((chars (string->list (html-node-data child))))
+                           (cond
+                             ((null? chars) '())
+                             ((char=? (car chars) (integer->char #xFFFD))
+                              (filter (cdr chars)))
+                             (else (cons (car chars) (filter (cdr chars))))))))
+                     (loop (cdr children))))
+               (else (and (frameset-foreign-allowed? child) (loop (cdr children)))))))))))
 
-  (define (in-body-list-item-start parser token name)
-    (let ((targets (if (string=? name "li") '("li") '("dd" "dt"))))
-      (parser-frameset-ok-set! parser #f)
+  (define in-body-list-item-start
+    (lambda (parser token name)
+      (let ((targets (if (string=? name "li") '("li") '("dd" "dt"))))
+        (parser-frameset-ok-set! parser #f)
+        (let loop ((items (reverse (parser-stack parser))))
+          (cond
+            ((null? items) #f)
+            ((and (eq? (html-node-namespace (car items)) 'html)
+                  (member (html-node-name (car items)) targets))
+             (implied-end-tags-generate! parser (html-node-name (car items)))
+             (stack-pop-until-name! parser (html-node-name (car items))))
+            ((and (eq? (html-node-namespace (car items)) 'html)
+                  (string-set-member? special-elements (html-node-name (car items)))
+                  (not (member (html-node-name (car items))
+                               '("address" "div" "p"))))
+             #f)
+            (else (loop (cdr items)))))
+        (when (element-in-button-scope? parser "p") (paragraph-close! parser))
+        (element-insert-token! parser token))))
+
+  (define in-body-end-tag
+    (lambda (parser token)
+      (let ((name (token-end-tag-name token)))
+        (cond
+          ((string=? name "template") (mode-in-head parser token))
+          ((string=? name "body")
+           (when (element-in-default-scope? parser "body")
+             (parser-mode-set! parser 'after-body)))
+          ((string=? name "html")
+           (when (element-in-default-scope? parser "body")
+             (parser-mode-set! parser 'after-body)
+             (token-reprocess parser token)))
+          ((string-set-member? block-end-tags name)
+           (when (element-in-default-scope? parser name)
+             (implied-end-tags-generate! parser #f)
+             (stack-pop-until-name! parser name)))
+          ((string=? name "form")
+           (cond
+             ((stack-find-name parser "template")
+              (when (element-in-default-scope? parser "form")
+                (implied-end-tags-generate! parser #f)
+                (stack-pop-until-name! parser "form")))
+             (else
+              (let ((form (parser-form parser)))
+                (parser-form-set! parser #f)
+                (when (and form (stack-contains? parser form)
+                           (element-in-default-scope? parser "form"))
+                  (implied-end-tags-generate! parser #f)
+                  (stack-remove! parser form))))))
+          ((string=? name "p")
+           (unless (element-in-button-scope? parser "p")
+             (element-insert! parser "p" 'html '()))
+           (paragraph-close! parser))
+          ((string=? name "li")
+           (when (element-in-list-item-scope? parser "li")
+             (implied-end-tags-generate! parser "li")
+             (stack-pop-until-name! parser "li")))
+          ((member name '("dd" "dt"))
+           (when (element-in-default-scope? parser name)
+             (implied-end-tags-generate! parser name)
+             (stack-pop-until-name! parser name)))
+          ((string-set-member? heading-elements name)
+           (when (element-in-scope? parser '("h1" "h2" "h3" "h4" "h5" "h6") #f)
+             (implied-end-tags-generate! parser #f)
+             (let loop ()
+               (let ((current (parser-current parser)))
+                 (cond
+                   ((not current) #f)
+                   ((and (eq? (html-node-namespace current) 'html)
+                         (string-set-member? heading-elements (html-node-name current)))
+                    (stack-pop! parser))
+                   (else (stack-pop! parser) (loop)))))))
+          ((string-set-member? formatting-elements name) (adoption-agency parser name))
+          ((member name '("applet" "marquee" "object"))
+           (when (element-in-default-scope? parser name)
+             (implied-end-tags-generate! parser #f)
+             (stack-pop-until-name! parser name)
+             (formatting-clear-to-marker! parser)))
+          ((string=? name "br")
+           (in-body-start-tag parser (token-start-tag-make "br" '() #f)))
+          (else (in-body-any-other-end-tag parser name))))))
+
+  (define in-body-any-other-end-tag
+    (lambda (parser name)
       (let loop ((items (reverse (parser-stack parser))))
         (cond
           ((null? items) #f)
           ((and (eq? (html-node-namespace (car items)) 'html)
-                (member (html-node-name (car items)) targets))
-           (implied-end-tags-generate! parser (html-node-name (car items)))
-           (stack-pop-until-name! parser (html-node-name (car items))))
-          ((and (eq? (html-node-namespace (car items)) 'html)
-                (string-set-member? special-elements (html-node-name (car items)))
-                (not (member (html-node-name (car items))
-                             '("address" "div" "p"))))
-           #f)
-          (else (loop (cdr items)))))
-      (when (element-in-button-scope? parser "p") (paragraph-close! parser))
-      (element-insert-token! parser token)))
-
-  (define (in-body-end-tag parser token)
-    (let ((name (token-end-tag-name token)))
-      (cond
-        ((string=? name "template") (mode-in-head parser token))
-        ((string=? name "body")
-         (when (element-in-default-scope? parser "body")
-           (parser-mode-set! parser 'after-body)))
-        ((string=? name "html")
-         (when (element-in-default-scope? parser "body")
-           (parser-mode-set! parser 'after-body)
-           (token-reprocess parser token)))
-        ((string-set-member? block-end-tags name)
-         (when (element-in-default-scope? parser name)
-           (implied-end-tags-generate! parser #f)
-           (stack-pop-until-name! parser name)))
-        ((string=? name "form")
-         (cond
-           ((stack-find-name parser "template")
-            (when (element-in-default-scope? parser "form")
-              (implied-end-tags-generate! parser #f)
-              (stack-pop-until-name! parser "form")))
-           (else
-            (let ((form (parser-form parser)))
-              (parser-form-set! parser #f)
-              (when (and form (stack-contains? parser form)
-                         (element-in-default-scope? parser "form"))
-                (implied-end-tags-generate! parser #f)
-                (stack-remove! parser form))))))
-        ((string=? name "p")
-         (unless (element-in-button-scope? parser "p")
-           (element-insert! parser "p" 'html '()))
-         (paragraph-close! parser))
-        ((string=? name "li")
-         (when (element-in-list-item-scope? parser "li")
-           (implied-end-tags-generate! parser "li")
-           (stack-pop-until-name! parser "li")))
-        ((member name '("dd" "dt"))
-         (when (element-in-default-scope? parser name)
+                (string=? (html-node-name (car items)) name))
            (implied-end-tags-generate! parser name)
-           (stack-pop-until-name! parser name)))
-        ((string-set-member? heading-elements name)
-         (when (element-in-scope? parser '("h1" "h2" "h3" "h4" "h5" "h6") #f)
-           (implied-end-tags-generate! parser #f)
-           (let loop ()
-             (let ((current (parser-current parser)))
-               (cond
-                 ((not current) #f)
-                 ((and (eq? (html-node-namespace current) 'html)
-                       (string-set-member? heading-elements (html-node-name current)))
-                  (stack-pop! parser))
-                 (else (stack-pop! parser) (loop)))))))
-        ((string-set-member? formatting-elements name) (adoption-agency parser name))
-        ((member name '("applet" "marquee" "object"))
-         (when (element-in-default-scope? parser name)
-           (implied-end-tags-generate! parser #f)
-           (stack-pop-until-name! parser name)
-           (formatting-clear-to-marker! parser)))
-        ((string=? name "br")
-         (in-body-start-tag parser (token-start-tag-make "br" '() #f)))
-        (else (in-body-any-other-end-tag parser name)))))
-
-  (define (in-body-any-other-end-tag parser name)
-    (let loop ((items (reverse (parser-stack parser))))
-      (cond
-        ((null? items) #f)
-        ((and (eq? (html-node-namespace (car items)) 'html)
-              (string=? (html-node-name (car items)) name))
-         (implied-end-tags-generate! parser name)
-         (stack-pop-until-node! parser (car items)))
-        ((and (eq? (html-node-namespace (car items)) 'html)
-              (string-set-member? special-elements (html-node-name (car items))))
-         #f)
-        (else (loop (cdr items))))))
+           (stack-pop-until-node! parser (car items)))
+          ((and (eq? (html-node-namespace (car items)) 'html)
+                (string-set-member? special-elements (html-node-name (car items))))
+           #f)
+          (else (loop (cdr items)))))))
 
   ;; 13.2.6.4.7 the adoption agency algorithm
 
-  (define (adoption-agency parser subject)
-    (let ((current (parser-current parser)))
-      (if (and current
-               (node-html-element? current subject)
-               (not (memq current (parser-formatting parser))))
-        (stack-pop! parser)
-        (adoption-agency-loop parser subject 0))))
+  (define adoption-agency
+    (lambda (parser subject)
+      (let ((current (parser-current parser)))
+        (if (and current
+                 (node-html-element? current subject)
+                 (not (memq current (parser-formatting parser))))
+          (stack-pop! parser)
+          (adoption-agency-loop parser subject 0)))))
 
-  (define (adoption-agency-loop parser subject counter)
-    (when (fx< counter 8)
-      (let ((formatting-element (formatting-find-after-marker parser subject)))
-        (cond
-          ((not formatting-element) (in-body-any-other-end-tag parser subject))
-          ((not (stack-contains? parser formatting-element))
-           (parser-formatting-set! parser
-                                   (remq formatting-element
-                                         (parser-formatting parser))))
-          ((not (element-in-default-scope? parser subject)) #f)
-          (else
-           (let* ((stack (parser-stack parser))
-                  (formatting-index (list-index-of stack formatting-element))
-                  (furthest-block
-                   (let loop ((index (fx+ formatting-index 1)))
-                     (cond
-                       ((fx>= index (length stack)) #f)
-                       ((let ((node (list-ref stack index)))
-                          (and (eq? (html-node-namespace node) 'html)
-                               (not (string=? (html-node-name node) "dialog"))
-                               (string-set-member? special-elements
-                                                   (html-node-name node))))
-                        (list-ref stack index))
-                       (else (loop (fx+ index 1)))))))
-             (cond
-               ((not furthest-block)
-                (stack-pop-until-node! parser formatting-element)
-                (parser-formatting-set! parser
-                                        (remq formatting-element
-                                              (parser-formatting parser))))
-               (else
-                (adoption-agency-step parser subject formatting-element
-                                      furthest-block formatting-index)
-                (adoption-agency-loop parser subject (fx+ counter 1))))))))))
-
-  (define (adoption-agency-step parser subject formatting-element furthest-block
-                                formatting-index)
-    (let* ((stack (parser-stack parser))
-           (common-ancestor (list-ref stack (fx- formatting-index 1)))
-           (bookmark (list-index-of (parser-formatting parser) formatting-element)))
-      (let loop ((node furthest-block)
-                 (last-node furthest-block)
-                 (bookmark bookmark)
-                 (inner 0))
-        (let* ((stack (parser-stack parser))
-               (node-index (list-index-of stack node))
-               (above (and node-index (fx> node-index 0)
-                           (list-ref stack (fx- node-index 1)))))
+  (define adoption-agency-loop
+    (lambda (parser subject counter)
+      (when (fx< counter 8)
+        (let ((formatting-element (formatting-find-after-marker parser subject)))
           (cond
-            ((not above)
-             (adoption-agency-finish parser formatting-element furthest-block
-                                     common-ancestor last-node bookmark))
-            ((eq? above formatting-element)
-             (adoption-agency-finish parser formatting-element furthest-block
-                                     common-ancestor last-node bookmark))
+            ((not formatting-element) (in-body-any-other-end-tag parser subject))
+            ((not (stack-contains? parser formatting-element))
+             (parser-formatting-set! parser
+                                     (remq formatting-element
+                                           (parser-formatting parser))))
+            ((not (element-in-default-scope? parser subject)) #f)
             (else
-             (let* ((inner (fx+ inner 1))
-                    (node above))
-               (when (and (fx> inner 3) (memq node (parser-formatting parser)))
-                 (parser-formatting-set! parser
-                                         (remq node (parser-formatting parser))))
+             (let* ((stack (parser-stack parser))
+                    (formatting-index (list-index-of stack formatting-element))
+                    (furthest-block
+                     (let loop ((index (fx+ formatting-index 1)))
+                       (cond
+                         ((fx>= index (length stack)) #f)
+                         ((let ((node (list-ref stack index)))
+                            (and (eq? (html-node-namespace node) 'html)
+                                 (not (string=? (html-node-name node) "dialog"))
+                                 (string-set-member? special-elements
+                                                     (html-node-name node))))
+                          (list-ref stack index))
+                         (else (loop (fx+ index 1)))))))
                (cond
-                 ((not (memq node (parser-formatting parser)))
-                  (stack-remove! parser node)
-                  (loop node last-node bookmark inner))
+                 ((not furthest-block)
+                  (stack-pop-until-node! parser formatting-element)
+                  (parser-formatting-set! parser
+                                          (remq formatting-element
+                                                (parser-formatting parser))))
                  (else
-                  (let* ((replacement (element-node-make (html-node-name node)
-                                                         (html-node-namespace node)
-                                                         (html-node-attributes node)))
-                         (formatting-position (list-index-of (parser-formatting parser)
-                                                             node))
-                         (stack-position (list-index-of (parser-stack parser) node)))
-                    (parser-formatting-set!
-                      parser
-                      (list-replace-at (parser-formatting parser)
-                                       formatting-position replacement))
-                    (parser-stack-set!
-                      parser
-                      (list-replace-at (parser-stack parser)
-                                       stack-position replacement))
-                    (let ((bookmark (if (eq? last-node furthest-block)
-                                      (fx+ (list-index-of (parser-formatting parser)
-                                                          replacement)
-                                           1)
-                                      bookmark)))
-                      (node-append-child! replacement last-node)
-                      (loop replacement replacement bookmark inner))))))))))))
+                  (adoption-agency-step parser subject formatting-element
+                                        furthest-block formatting-index)
+                  (adoption-agency-loop parser subject (fx+ counter 1)))))))))))
 
-  (define (adoption-agency-finish parser formatting-element furthest-block
-                                  common-ancestor last-node bookmark)
-    (node-insert-at! parser last-node common-ancestor)
-    (let ((replacement (element-node-make (html-node-name formatting-element)
-                                          (html-node-namespace formatting-element)
-                                          (html-node-attributes formatting-element))))
-      (for-each (lambda (child) (node-append-child! replacement child))
-                (html-node-children furthest-block))
-      (node-append-child! furthest-block replacement)
-      (let* ((items (parser-formatting parser))
-             (formatting-position (list-index-of items formatting-element))
-             (bookmark (if (and formatting-position (fx< formatting-position bookmark))
-                         (fx- bookmark 1)
-                         bookmark))
-             (items (if formatting-position
-                      (list-remove-at items formatting-position)
-                      items))
-             (bookmark (fxmin (fxmax bookmark 0) (length items))))
-        (parser-formatting-set! parser (list-insert-at items bookmark replacement)))
-      (let* ((stack (remq formatting-element (parser-stack parser)))
-             (block-position (list-index-of stack furthest-block)))
-        (parser-stack-set! parser
-                           (list-insert-at stack (fx+ block-position 1) replacement)))))
+  (define adoption-agency-step
+    (lambda (parser subject formatting-element furthest-block formatting-index)
+      (let* ((stack (parser-stack parser))
+             (common-ancestor (list-ref stack (fx- formatting-index 1)))
+             (bookmark (list-index-of (parser-formatting parser) formatting-element)))
+        (let loop ((node furthest-block)
+                   (last-node furthest-block)
+                   (bookmark bookmark)
+                   (inner 0))
+          (let* ((stack (parser-stack parser))
+                 (node-index (list-index-of stack node))
+                 (above (and node-index (fx> node-index 0)
+                             (list-ref stack (fx- node-index 1)))))
+            (cond
+              ((not above)
+               (adoption-agency-finish parser formatting-element furthest-block
+                                       common-ancestor last-node bookmark))
+              ((eq? above formatting-element)
+               (adoption-agency-finish parser formatting-element furthest-block
+                                       common-ancestor last-node bookmark))
+              (else
+               (let* ((inner (fx+ inner 1))
+                      (node above))
+                 (when (and (fx> inner 3) (memq node (parser-formatting parser)))
+                   (parser-formatting-set! parser
+                                           (remq node (parser-formatting parser))))
+                 (cond
+                   ((not (memq node (parser-formatting parser)))
+                    (stack-remove! parser node)
+                    (loop node last-node bookmark inner))
+                   (else
+                    (let* ((replacement (element-node-make (html-node-name node)
+                                                           (html-node-namespace node)
+                                                           (html-node-attributes node)))
+                           (formatting-position (list-index-of (parser-formatting parser)
+                                                               node))
+                           (stack-position (list-index-of (parser-stack parser) node)))
+                      (parser-formatting-set!
+                        parser
+                        (list-replace-at (parser-formatting parser)
+                                         formatting-position replacement))
+                      (parser-stack-set!
+                        parser
+                        (list-replace-at (parser-stack parser)
+                                         stack-position replacement))
+                      (let ((bookmark (if (eq? last-node furthest-block)
+                                        (fx+ (list-index-of (parser-formatting parser)
+                                                            replacement)
+                                             1)
+                                        bookmark)))
+                        (node-append-child! replacement last-node)
+                        (loop replacement replacement bookmark inner)))))))))))))
+
+  (define adoption-agency-finish
+    (lambda (parser formatting-element furthest-block common-ancestor last-node bookmark)
+      (node-insert-at! parser last-node common-ancestor)
+      (let ((replacement (element-node-make (html-node-name formatting-element)
+                                            (html-node-namespace formatting-element)
+                                            (html-node-attributes formatting-element))))
+        (for-each (lambda (child) (node-append-child! replacement child))
+                  (html-node-children furthest-block))
+        (node-append-child! furthest-block replacement)
+        (let* ((items (parser-formatting parser))
+               (formatting-position (list-index-of items formatting-element))
+               (bookmark (if (and formatting-position (fx< formatting-position bookmark))
+                           (fx- bookmark 1)
+                           bookmark))
+               (items (if formatting-position
+                        (list-remove-at items formatting-position)
+                        items))
+               (bookmark (fxmin (fxmax bookmark 0) (length items))))
+          (parser-formatting-set! parser (list-insert-at items bookmark replacement)))
+        (let* ((stack (remq formatting-element (parser-stack parser)))
+               (block-position (list-index-of stack furthest-block)))
+          (parser-stack-set! parser
+                             (list-insert-at stack (fx+ block-position 1) replacement))))))
 
   ;; 13.2.6.4.8 "text"
 
-  (define (mode-text parser token)
-    (cond
-      ((token-character? token)
-       (characters-insert! parser (newline-skip parser (token-character-text token))))
-      ((token-end-tag? token)
-       (stack-pop! parser)
-       (parser-mode-set! parser (parser-original-mode parser)))
-      ((token-end-of-file? token)
-       (stack-pop! parser)
-       (parser-mode-set! parser (parser-original-mode parser))
-       (token-reprocess parser token))
-      (else #f)))
+  (define mode-text
+    (lambda (parser token)
+      (cond
+        ((token-character? token)
+         (characters-insert! parser (newline-skip parser (token-character-text token))))
+        ((token-end-tag? token)
+         (stack-pop! parser)
+         (parser-mode-set! parser (parser-original-mode parser)))
+        ((token-end-of-file? token)
+         (stack-pop! parser)
+         (parser-mode-set! parser (parser-original-mode parser))
+         (token-reprocess parser token))
+        (else #f))))
 
   ;; 13.2.6.4.9 "in table"
 
-  (define (table-context-clear! parser names)
-    (let loop ()
-      (let ((current (parser-current parser)))
-        (when (and current
-                   (node-element? current)
-                   (not (and (eq? (html-node-namespace current) 'html)
-                             (string-set-member? names (html-node-name current)))))
-          (stack-pop! parser)
-          (loop)))))
+  (define table-context-clear!
+    (lambda (parser names)
+      (let loop ()
+        (let ((current (parser-current parser)))
+          (when (and current
+                     (node-element? current)
+                     (not (and (eq? (html-node-namespace current) 'html)
+                               (string-set-member? names (html-node-name current)))))
+            (stack-pop! parser)
+            (loop))))))
 
-  (define (mode-in-table parser token)
-    (cond
-      ((and (token-character? token)
-            (let ((current (parser-current parser)))
-              (and current
-                   (eq? (html-node-namespace current) 'html)
-                   (member (html-node-name current)
-                           '("table" "tbody" "tfoot" "thead" "tr")))))
-       (parser-table-text-set! parser '())
-       (parser-original-mode-set! parser (parser-mode parser))
-       (parser-mode-set! parser 'in-table-text)
-       (token-reprocess parser token))
-      ((token-comment-like? token) (comment-insert! parser token))
-      ((token-doctype? token) #f)
-      ((token-start-tag? token)
-       (let ((name (token-start-tag-name token)))
-         (cond
-           ((string=? name "caption")
-            (table-context-clear! parser table-context-clear-names)
-            (formatting-marker-insert! parser)
-            (element-insert-token! parser token)
-            (parser-mode-set! parser 'in-caption))
-           ((string=? name "colgroup")
-            (table-context-clear! parser table-context-clear-names)
-            (element-insert-token! parser token)
-            (parser-mode-set! parser 'in-column-group))
-           ((string=? name "col")
-            (table-context-clear! parser table-context-clear-names)
-            (element-insert! parser "colgroup" 'html '())
-            (parser-mode-set! parser 'in-column-group)
-            (token-reprocess parser token))
-           ((member name '("tbody" "tfoot" "thead"))
-            (table-context-clear! parser table-context-clear-names)
-            (element-insert-token! parser token)
-            (parser-mode-set! parser 'in-table-body))
-           ((member name '("td" "th" "tr"))
-            (table-context-clear! parser table-context-clear-names)
-            (element-insert! parser "tbody" 'html '())
-            (parser-mode-set! parser 'in-table-body)
-            (token-reprocess parser token))
-           ((string=? name "table")
-            (when (element-in-table-scope? parser '("table"))
-              (stack-pop-until-name! parser "table")
-              (insertion-mode-reset! parser)
-              (token-reprocess parser token)))
-           ((member name '("style" "script" "template")) (mode-in-head parser token))
-           ((string=? name "input")
-            (let ((type (assoc "type" (token-start-tag-attributes token))))
-              (if (and type (string-ascii-equal? (cdr type) "hidden"))
-                (void-element-insert! parser token)
-                (in-table-default parser token))))
-           ((string=? name "form")
-            ;; Inside a template that is already in a table-ish mode justhtml
-            ;; still opens (and immediately closes) the form, where the spec
-            ;; would drop it because a template is on the stack.
-            (cond
-              ((memq (list-last (parser-template-modes parser))
-                     '(in-table in-table-body in-row))
-               (element-insert-token! parser token)
-               (stack-pop! parser))
-              ((or (stack-find-name parser "template") (parser-form parser)) #f)
-              (else
-               (let ((node (element-insert-token! parser token)))
-                 (parser-form-set! parser node)
-                 (stack-pop! parser)))))
-           (else (in-table-default parser token)))))
-      ((token-end-tag? token)
-       (let ((name (token-end-tag-name token)))
-         (cond
-           ((string=? name "table")
-            (when (element-in-table-scope? parser '("table"))
-              (stack-pop-until-name! parser "table")
-              (insertion-mode-reset! parser)))
-           ((member name '("body" "caption" "col" "colgroup" "html" "tbody" "td"
-                           "tfoot" "th" "thead" "tr"))
-            #f)
-           ((string=? name "template") (mode-in-head parser token))
-           (else (in-table-default parser token)))))
-      ((token-end-of-file? token) (mode-in-body parser token))
-      (else (in-table-default parser token))))
+  (define mode-in-table
+    (lambda (parser token)
+      (cond
+        ((and (token-character? token)
+              (let ((current (parser-current parser)))
+                (and current
+                     (eq? (html-node-namespace current) 'html)
+                     (member (html-node-name current)
+                             '("table" "tbody" "tfoot" "thead" "tr")))))
+         (parser-table-text-set! parser '())
+         (parser-original-mode-set! parser (parser-mode parser))
+         (parser-mode-set! parser 'in-table-text)
+         (token-reprocess parser token))
+        ((token-comment-like? token) (comment-insert! parser token))
+        ((token-doctype? token) #f)
+        ((token-start-tag? token)
+         (let ((name (token-start-tag-name token)))
+           (cond
+             ((string=? name "caption")
+              (table-context-clear! parser table-context-clear-names)
+              (formatting-marker-insert! parser)
+              (element-insert-token! parser token)
+              (parser-mode-set! parser 'in-caption))
+             ((string=? name "colgroup")
+              (table-context-clear! parser table-context-clear-names)
+              (element-insert-token! parser token)
+              (parser-mode-set! parser 'in-column-group))
+             ((string=? name "col")
+              (table-context-clear! parser table-context-clear-names)
+              (element-insert! parser "colgroup" 'html '())
+              (parser-mode-set! parser 'in-column-group)
+              (token-reprocess parser token))
+             ((member name '("tbody" "tfoot" "thead"))
+              (table-context-clear! parser table-context-clear-names)
+              (element-insert-token! parser token)
+              (parser-mode-set! parser 'in-table-body))
+             ((member name '("td" "th" "tr"))
+              (table-context-clear! parser table-context-clear-names)
+              (element-insert! parser "tbody" 'html '())
+              (parser-mode-set! parser 'in-table-body)
+              (token-reprocess parser token))
+             ((string=? name "table")
+              (when (element-in-table-scope? parser '("table"))
+                (stack-pop-until-name! parser "table")
+                (insertion-mode-reset! parser)
+                (token-reprocess parser token)))
+             ((member name '("style" "script" "template")) (mode-in-head parser token))
+             ((string=? name "input")
+              (let ((type (assoc "type" (token-start-tag-attributes token))))
+                (if (and type (string-ascii-equal? (cdr type) "hidden"))
+                  (void-element-insert! parser token)
+                  (in-table-default parser token))))
+             ((string=? name "form")
+              ;; Inside a template that is already in a table-ish mode justhtml
+              ;; still opens (and immediately closes) the form, where the spec
+              ;; would drop it because a template is on the stack.
+              (cond
+                ((memq (list-last (parser-template-modes parser))
+                       '(in-table in-table-body in-row))
+                 (element-insert-token! parser token)
+                 (stack-pop! parser))
+                ((or (stack-find-name parser "template") (parser-form parser)) #f)
+                (else
+                 (let ((node (element-insert-token! parser token)))
+                   (parser-form-set! parser node)
+                   (stack-pop! parser)))))
+             (else (in-table-default parser token)))))
+        ((token-end-tag? token)
+         (let ((name (token-end-tag-name token)))
+           (cond
+             ((string=? name "table")
+              (when (element-in-table-scope? parser '("table"))
+                (stack-pop-until-name! parser "table")
+                (insertion-mode-reset! parser)))
+             ((member name '("body" "caption" "col" "colgroup" "html" "tbody" "td"
+                             "tfoot" "th" "thead" "tr"))
+              #f)
+             ((string=? name "template") (mode-in-head parser token))
+             (else (in-table-default parser token)))))
+        ((token-end-of-file? token) (mode-in-body parser token))
+        (else (in-table-default parser token)))))
 
-  (define (in-table-default parser token)
-    (parser-foster-set! parser #t)
-    (mode-in-body parser token)
-    (parser-foster-set! parser #f))
+  (define in-table-default
+    (lambda (parser token)
+      (parser-foster-set! parser #t)
+      (mode-in-body parser token)
+      (parser-foster-set! parser #f)))
 
   ;; 13.2.6.4.10 "in table text"
 
-  (define (mode-in-table-text parser token)
-    (cond
-      ((token-character? token)
-       (parser-table-text-set! parser
-                               (append (parser-table-text parser)
-                                       (list (string-nul-drop
-                                               (token-character-text token))))))
-      (else
-       (let ((text (apply string-append (parser-table-text parser))))
-         (parser-table-text-set! parser '())
-         (parser-mode-set! parser (parser-original-mode parser))
-         (unless (string=? text "")
-           (if (string-all-space? text)
-             (characters-insert! parser text)
-             (in-table-default parser (token-character-make text))))
-         (token-reprocess parser token)))))
+  (define mode-in-table-text
+    (lambda (parser token)
+      (cond
+        ((token-character? token)
+         (parser-table-text-set! parser
+                                 (append (parser-table-text parser)
+                                         (list (string-nul-drop
+                                                 (token-character-text token))))))
+        (else
+         (let ((text (apply string-append (parser-table-text parser))))
+           (parser-table-text-set! parser '())
+           (parser-mode-set! parser (parser-original-mode parser))
+           (unless (string=? text "")
+             (if (string-all-space? text)
+               (characters-insert! parser text)
+               (in-table-default parser (token-character-make text))))
+           (token-reprocess parser token))))))
 
   ;; 13.2.6.4.11 "in caption"
 
-  (define (caption-close! parser)
-    (implied-end-tags-generate! parser #f)
-    (stack-pop-until-name! parser "caption")
-    (formatting-clear-to-marker! parser)
-    (parser-mode-set! parser 'in-table))
+  (define caption-close!
+    (lambda (parser)
+      (implied-end-tags-generate! parser #f)
+      (stack-pop-until-name! parser "caption")
+      (formatting-clear-to-marker! parser)
+      (parser-mode-set! parser 'in-table)))
 
-  (define (mode-in-caption parser token)
-    (cond
-      ((and (token-end-tag? token) (string=? (token-end-tag-name token) "caption"))
-       (when (element-in-table-scope? parser '("caption")) (caption-close! parser)))
-      ((and (token-start-tag? token)
-            (member (token-start-tag-name token)
-                    '("caption" "col" "colgroup" "tbody" "td" "tfoot" "th"
-                      "thead" "tr")))
-       (when (element-in-table-scope? parser '("caption"))
-         (caption-close! parser)
-         (token-reprocess parser token)))
-      ((and (token-end-tag? token) (string=? (token-end-tag-name token) "table"))
-       (when (element-in-table-scope? parser '("caption"))
-         (caption-close! parser)
-         (token-reprocess parser token)))
-      ((and (token-end-tag? token)
-            (member (token-end-tag-name token)
-                    '("body" "col" "colgroup" "html" "tbody" "td" "tfoot" "th"
-                      "thead" "tr")))
-       #f)
-      (else (mode-in-body parser token))))
+  (define mode-in-caption
+    (lambda (parser token)
+      (cond
+        ((and (token-end-tag? token) (string=? (token-end-tag-name token) "caption"))
+         (when (element-in-table-scope? parser '("caption")) (caption-close! parser)))
+        ((and (token-start-tag? token)
+              (member (token-start-tag-name token)
+                      '("caption" "col" "colgroup" "tbody" "td" "tfoot" "th"
+                        "thead" "tr")))
+         (when (element-in-table-scope? parser '("caption"))
+           (caption-close! parser)
+           (token-reprocess parser token)))
+        ((and (token-end-tag? token) (string=? (token-end-tag-name token) "table"))
+         (when (element-in-table-scope? parser '("caption"))
+           (caption-close! parser)
+           (token-reprocess parser token)))
+        ((and (token-end-tag? token)
+              (member (token-end-tag-name token)
+                      '("body" "col" "colgroup" "html" "tbody" "td" "tfoot" "th"
+                        "thead" "tr")))
+         #f)
+        (else (mode-in-body parser token)))))
 
   ;; 13.2.6.4.12 "in column group"
 
-  (define (mode-in-column-group parser token)
-    (cond
-      ((token-character? token)
-       (call-with-values
-         (lambda () (string-leading-space-split (token-character-text token)))
-         (lambda (space rest)
-           (characters-insert! parser space)
-           (unless (string=? rest "")
-             (in-column-group-default parser (token-character-make rest))))))
-      ((token-comment-like? token) (comment-insert! parser token))
-      ((token-doctype? token) #f)
-      ((and (token-start-tag? token) (string=? (token-start-tag-name token) "html"))
-       (mode-in-body parser token))
-      ((and (token-start-tag? token) (string=? (token-start-tag-name token) "col"))
-       (void-element-insert! parser token))
-      ((and (token-end-tag? token) (string=? (token-end-tag-name token) "colgroup"))
-       (when (node-html-element? (parser-current parser) "colgroup")
-         (stack-pop! parser)
-         (parser-mode-set! parser 'in-table)))
-      ((and (token-end-tag? token) (string=? (token-end-tag-name token) "col")) #f)
-      ((or (and (token-start-tag? token)
-                (string=? (token-start-tag-name token) "template"))
-           (and (token-end-tag? token)
-                (string=? (token-end-tag-name token) "template")))
-       (mode-in-head parser token))
-      ((token-end-of-file? token) (mode-in-body parser token))
-      (else (in-column-group-default parser token))))
+  (define mode-in-column-group
+    (lambda (parser token)
+      (cond
+        ((token-character? token)
+         (call-with-values
+           (lambda () (string-leading-space-split (token-character-text token)))
+           (lambda (space rest)
+             (characters-insert! parser space)
+             (unless (string=? rest "")
+               (in-column-group-default parser (token-character-make rest))))))
+        ((token-comment-like? token) (comment-insert! parser token))
+        ((token-doctype? token) #f)
+        ((and (token-start-tag? token) (string=? (token-start-tag-name token) "html"))
+         (mode-in-body parser token))
+        ((and (token-start-tag? token) (string=? (token-start-tag-name token) "col"))
+         (void-element-insert! parser token))
+        ((and (token-end-tag? token) (string=? (token-end-tag-name token) "colgroup"))
+         (when (node-html-element? (parser-current parser) "colgroup")
+           (stack-pop! parser)
+           (parser-mode-set! parser 'in-table)))
+        ((and (token-end-tag? token) (string=? (token-end-tag-name token) "col")) #f)
+        ((or (and (token-start-tag? token)
+                  (string=? (token-start-tag-name token) "template"))
+             (and (token-end-tag? token)
+                  (string=? (token-end-tag-name token) "template")))
+         (mode-in-head parser token))
+        ((token-end-of-file? token) (mode-in-body parser token))
+        (else (in-column-group-default parser token)))))
 
-  (define (in-column-group-default parser token)
-    (when (node-html-element? (parser-current parser) "colgroup")
-      (stack-pop! parser)
-      (parser-mode-set! parser 'in-table)
-      (token-reprocess parser token)))
+  (define in-column-group-default
+    (lambda (parser token)
+      (when (node-html-element? (parser-current parser) "colgroup")
+        (stack-pop! parser)
+        (parser-mode-set! parser 'in-table)
+        (token-reprocess parser token))))
 
   ;; 13.2.6.4.13 "in table body"
 
-  (define (mode-in-table-body parser token)
-    (cond
-      ((and (token-start-tag? token) (string=? (token-start-tag-name token) "tr"))
-       (table-context-clear! parser table-body-context-clear-names)
-       (element-insert-token! parser token)
-       (parser-mode-set! parser 'in-row))
-      ((and (token-start-tag? token)
-            (member (token-start-tag-name token) '("th" "td")))
-       (table-context-clear! parser table-body-context-clear-names)
-       (element-insert! parser "tr" 'html '())
-       (parser-mode-set! parser 'in-row)
-       (token-reprocess parser token))
-      ((and (token-end-tag? token)
-            (member (token-end-tag-name token) '("tbody" "tfoot" "thead")))
-       (when (element-in-table-scope? parser (list (token-end-tag-name token)))
+  (define mode-in-table-body
+    (lambda (parser token)
+      (cond
+        ((and (token-start-tag? token) (string=? (token-start-tag-name token) "tr"))
          (table-context-clear! parser table-body-context-clear-names)
-         (stack-pop! parser)
-         (parser-mode-set! parser 'in-table)))
-      ((or (and (token-start-tag? token)
-                (member (token-start-tag-name token)
-                        '("caption" "col" "colgroup" "tbody" "tfoot" "thead")))
-           (and (token-end-tag? token)
-                (string=? (token-end-tag-name token) "table")))
-       (when (element-in-table-scope? parser '("tbody" "thead" "tfoot"))
+         (element-insert-token! parser token)
+         (parser-mode-set! parser 'in-row))
+        ((and (token-start-tag? token)
+              (member (token-start-tag-name token) '("th" "td")))
          (table-context-clear! parser table-body-context-clear-names)
-         (stack-pop! parser)
-         (parser-mode-set! parser 'in-table)
-         (token-reprocess parser token)))
-      ((and (token-end-tag? token)
-            (member (token-end-tag-name token)
-                    '("body" "caption" "col" "colgroup" "html" "td" "th" "tr")))
-       #f)
-      (else (mode-in-table parser token))))
+         (element-insert! parser "tr" 'html '())
+         (parser-mode-set! parser 'in-row)
+         (token-reprocess parser token))
+        ((and (token-end-tag? token)
+              (member (token-end-tag-name token) '("tbody" "tfoot" "thead")))
+         (when (element-in-table-scope? parser (list (token-end-tag-name token)))
+           (table-context-clear! parser table-body-context-clear-names)
+           (stack-pop! parser)
+           (parser-mode-set! parser 'in-table)))
+        ((or (and (token-start-tag? token)
+                  (member (token-start-tag-name token)
+                          '("caption" "col" "colgroup" "tbody" "tfoot" "thead")))
+             (and (token-end-tag? token)
+                  (string=? (token-end-tag-name token) "table")))
+         (when (element-in-table-scope? parser '("tbody" "thead" "tfoot"))
+           (table-context-clear! parser table-body-context-clear-names)
+           (stack-pop! parser)
+           (parser-mode-set! parser 'in-table)
+           (token-reprocess parser token)))
+        ((and (token-end-tag? token)
+              (member (token-end-tag-name token)
+                      '("body" "caption" "col" "colgroup" "html" "td" "th" "tr")))
+         #f)
+        (else (mode-in-table parser token)))))
 
   ;; 13.2.6.4.14 "in row"
 
-  (define (mode-in-row parser token)
-    (cond
-      ((and (token-start-tag? token)
-            (member (token-start-tag-name token) '("th" "td")))
-       (table-context-clear! parser table-row-context-clear-names)
-       (element-insert-token! parser token)
-       (parser-mode-set! parser 'in-cell)
-       (formatting-marker-insert! parser))
-      ((and (token-end-tag? token) (string=? (token-end-tag-name token) "tr"))
-       (when (element-in-table-scope? parser '("tr"))
+  (define mode-in-row
+    (lambda (parser token)
+      (cond
+        ((and (token-start-tag? token)
+              (member (token-start-tag-name token) '("th" "td")))
          (table-context-clear! parser table-row-context-clear-names)
-         (stack-pop! parser)
-         (parser-mode-set! parser 'in-table-body)))
-      ((or (and (token-start-tag? token)
-                (member (token-start-tag-name token)
-                        '("caption" "col" "colgroup" "tbody" "tfoot" "thead" "tr")))
-           (and (token-end-tag? token)
-                (string=? (token-end-tag-name token) "table")))
-       (when (element-in-table-scope? parser '("tr"))
-         (table-context-clear! parser table-row-context-clear-names)
-         (stack-pop! parser)
-         (parser-mode-set! parser 'in-table-body)
-         (token-reprocess parser token)))
-      ((and (token-end-tag? token)
-            (member (token-end-tag-name token) '("tbody" "tfoot" "thead")))
-       (when (and (element-in-table-scope? parser (list (token-end-tag-name token)))
-                  (element-in-table-scope? parser '("tr")))
-         (table-context-clear! parser table-row-context-clear-names)
-         (stack-pop! parser)
-         (parser-mode-set! parser 'in-table-body)
-         (token-reprocess parser token)))
-      ((and (token-end-tag? token)
-            (member (token-end-tag-name token)
-                    '("body" "caption" "col" "colgroup" "html" "td" "th")))
-       #f)
-      (else (mode-in-table parser token))))
+         (element-insert-token! parser token)
+         (parser-mode-set! parser 'in-cell)
+         (formatting-marker-insert! parser))
+        ((and (token-end-tag? token) (string=? (token-end-tag-name token) "tr"))
+         (when (element-in-table-scope? parser '("tr"))
+           (table-context-clear! parser table-row-context-clear-names)
+           (stack-pop! parser)
+           (parser-mode-set! parser 'in-table-body)))
+        ((or (and (token-start-tag? token)
+                  (member (token-start-tag-name token)
+                          '("caption" "col" "colgroup" "tbody" "tfoot" "thead" "tr")))
+             (and (token-end-tag? token)
+                  (string=? (token-end-tag-name token) "table")))
+         (when (element-in-table-scope? parser '("tr"))
+           (table-context-clear! parser table-row-context-clear-names)
+           (stack-pop! parser)
+           (parser-mode-set! parser 'in-table-body)
+           (token-reprocess parser token)))
+        ((and (token-end-tag? token)
+              (member (token-end-tag-name token) '("tbody" "tfoot" "thead")))
+         (when (and (element-in-table-scope? parser (list (token-end-tag-name token)))
+                    (element-in-table-scope? parser '("tr")))
+           (table-context-clear! parser table-row-context-clear-names)
+           (stack-pop! parser)
+           (parser-mode-set! parser 'in-table-body)
+           (token-reprocess parser token)))
+        ((and (token-end-tag? token)
+              (member (token-end-tag-name token)
+                      '("body" "caption" "col" "colgroup" "html" "td" "th")))
+         #f)
+        (else (mode-in-table parser token)))))
 
   ;; 13.2.6.4.15 "in cell"
 
-  (define (cell-close! parser)
-    (let ((name (let loop ((items (reverse (parser-stack parser))))
-                  (cond
-                    ((null? items) #f)
-                    ((and (eq? (html-node-namespace (car items)) 'html)
-                          (member (html-node-name (car items)) '("td" "th")))
-                     (html-node-name (car items)))
-                    (else (loop (cdr items)))))))
-      (when name
-        (implied-end-tags-generate! parser #f)
-        (stack-pop-until-name! parser name)
-        (formatting-clear-to-marker! parser)
-        (parser-mode-set! parser 'in-row))))
+  (define cell-close!
+    (lambda (parser)
+      (let ((name (let loop ((items (reverse (parser-stack parser))))
+                    (cond
+                      ((null? items) #f)
+                      ((and (eq? (html-node-namespace (car items)) 'html)
+                            (member (html-node-name (car items)) '("td" "th")))
+                       (html-node-name (car items)))
+                      (else (loop (cdr items)))))))
+        (when name
+          (implied-end-tags-generate! parser #f)
+          (stack-pop-until-name! parser name)
+          (formatting-clear-to-marker! parser)
+          (parser-mode-set! parser 'in-row)))))
 
-  (define (mode-in-cell parser token)
-    (cond
-      ((and (token-end-tag? token)
-            (member (token-end-tag-name token) '("td" "th")))
-       (when (element-in-table-scope? parser (list (token-end-tag-name token)))
-         (implied-end-tags-generate! parser #f)
-         (stack-pop-until-name! parser (token-end-tag-name token))
-         (formatting-clear-to-marker! parser)
-         (parser-mode-set! parser 'in-row)))
-      ((and (token-start-tag? token)
-            (member (token-start-tag-name token)
-                    '("caption" "col" "colgroup" "tbody" "td" "tfoot" "th"
-                      "thead" "tr")))
-       (when (element-in-table-scope? parser '("td" "th"))
-         (cell-close! parser)
-         (token-reprocess parser token)))
-      ((and (token-end-tag? token)
-            (member (token-end-tag-name token) '("body" "caption" "col" "colgroup"
-                                                 "html")))
-       #f)
-      ((and (token-end-tag? token)
-            (member (token-end-tag-name token)
-                    '("table" "tbody" "tfoot" "thead" "tr")))
-       (when (element-in-table-scope? parser (list (token-end-tag-name token)))
-         (cell-close! parser)
-         (token-reprocess parser token)))
-      (else (mode-in-body parser token))))
+  (define mode-in-cell
+    (lambda (parser token)
+      (cond
+        ((and (token-end-tag? token)
+              (member (token-end-tag-name token) '("td" "th")))
+         (when (element-in-table-scope? parser (list (token-end-tag-name token)))
+           (implied-end-tags-generate! parser #f)
+           (stack-pop-until-name! parser (token-end-tag-name token))
+           (formatting-clear-to-marker! parser)
+           (parser-mode-set! parser 'in-row)))
+        ((and (token-start-tag? token)
+              (member (token-start-tag-name token)
+                      '("caption" "col" "colgroup" "tbody" "td" "tfoot" "th"
+                        "thead" "tr")))
+         (when (element-in-table-scope? parser '("td" "th"))
+           (cell-close! parser)
+           (token-reprocess parser token)))
+        ((and (token-end-tag? token)
+              (member (token-end-tag-name token) '("body" "caption" "col" "colgroup"
+                                                   "html")))
+         #f)
+        ((and (token-end-tag? token)
+              (member (token-end-tag-name token)
+                      '("table" "tbody" "tfoot" "thead" "tr")))
+         (when (element-in-table-scope? parser (list (token-end-tag-name token)))
+           (cell-close! parser)
+           (token-reprocess parser token)))
+        (else (mode-in-body parser token)))))
 
   ;; 13.2.6.4.16 "in select"
 
-  (define (select-close! parser)
-    (stack-pop-until-name! parser "select")
-    (insertion-mode-reset! parser))
+  (define select-close!
+    (lambda (parser)
+      (stack-pop-until-name! parser "select")
+      (insertion-mode-reset! parser)))
 
-  (define (mode-in-select parser token)
-    (cond
-      ((token-character? token)
-       (let ((text (string-nul-drop (token-character-text token))))
-         (characters-insert! parser text)))
-      ((token-comment-like? token) (comment-insert! parser token))
-      ((token-doctype? token) #f)
-      ((token-start-tag? token)
-       (let ((name (token-start-tag-name token)))
-         (cond
-           ((string=? name "html") (mode-in-body parser token))
-           ((string=? name "option")
-            (when (node-html-element? (parser-current parser) "option")
-              (stack-pop! parser))
-            (element-insert-token! parser token))
-           ((string=? name "optgroup")
-            (when (node-html-element? (parser-current parser) "option")
-              (stack-pop! parser))
-            (when (node-html-element? (parser-current parser) "optgroup")
-              (stack-pop! parser))
-            (element-insert-token! parser token))
-           ((string=? name "hr")
-            (when (node-html-element? (parser-current parser) "option")
-              (stack-pop! parser))
-            (when (node-html-element? (parser-current parser) "optgroup")
-              (stack-pop! parser))
-            (void-element-insert! parser token))
-           ((string=? name "select")
-            (when (element-in-select-scope? parser "select") (select-close! parser)))
-           ((member name '("input" "keygen" "textarea"))
-            (when (element-in-select-scope? parser "select")
-              (select-close! parser)
-              (token-reprocess parser token)))
-           ((member name '("script" "template")) (mode-in-head parser token))
-           ;; justhtml keeps arbitrary content inside <select> rather than
-           ;; dropping it, matching the customizable-select shape of the
-           ;; fixtures in select_recovery.dat and selectedcontent.dat.
-           (else (mode-in-body parser token)))))
-      ((token-end-tag? token)
-       (let ((name (token-end-tag-name token)))
-         (cond
-           ((string=? name "optgroup")
-            (let* ((stack (parser-stack parser))
-                   (size (length stack)))
-              (when (and (fx>= size 2)
-                         (node-html-element? (list-ref stack (fx- size 1)) "option")
-                         (node-html-element? (list-ref stack (fx- size 2)) "optgroup"))
+  (define mode-in-select
+    (lambda (parser token)
+      (cond
+        ((token-character? token)
+         (let ((text (string-nul-drop (token-character-text token))))
+           (characters-insert! parser text)))
+        ((token-comment-like? token) (comment-insert! parser token))
+        ((token-doctype? token) #f)
+        ((token-start-tag? token)
+         (let ((name (token-start-tag-name token)))
+           (cond
+             ((string=? name "html") (mode-in-body parser token))
+             ((string=? name "option")
+              (when (node-html-element? (parser-current parser) "option")
+                (stack-pop! parser))
+              (element-insert-token! parser token))
+             ((string=? name "optgroup")
+              (when (node-html-element? (parser-current parser) "option")
+                (stack-pop! parser))
+              (when (node-html-element? (parser-current parser) "optgroup")
+                (stack-pop! parser))
+              (element-insert-token! parser token))
+             ((string=? name "hr")
+              (when (node-html-element? (parser-current parser) "option")
+                (stack-pop! parser))
+              (when (node-html-element? (parser-current parser) "optgroup")
+                (stack-pop! parser))
+              (void-element-insert! parser token))
+             ((string=? name "select")
+              (when (element-in-select-scope? parser "select") (select-close! parser)))
+             ((member name '("input" "keygen" "textarea"))
+              (when (element-in-select-scope? parser "select")
+                (select-close! parser)
+                (token-reprocess parser token)))
+             ((member name '("script" "template")) (mode-in-head parser token))
+             ;; justhtml keeps arbitrary content inside <select> rather than
+             ;; dropping it, matching the customizable-select shape of the
+             ;; fixtures in select_recovery.dat and selectedcontent.dat.
+             (else (mode-in-body parser token)))))
+        ((token-end-tag? token)
+         (let ((name (token-end-tag-name token)))
+           (cond
+             ((string=? name "optgroup")
+              (let* ((stack (parser-stack parser))
+                     (size (length stack)))
+                (when (and (fx>= size 2)
+                           (node-html-element? (list-ref stack (fx- size 1)) "option")
+                           (node-html-element? (list-ref stack (fx- size 2)) "optgroup"))
+                  (stack-pop! parser)))
+              (when (node-html-element? (parser-current parser) "optgroup")
                 (stack-pop! parser)))
-            (when (node-html-element? (parser-current parser) "optgroup")
-              (stack-pop! parser)))
-           ((string=? name "option")
-            (when (node-html-element? (parser-current parser) "option")
-              (stack-pop! parser)))
-           ((string=? name "select")
-            (when (element-in-select-scope? parser "select") (select-close! parser)))
-           ((string=? name "template") (mode-in-head parser token))
-           ;; An end tag for an element opened before the <select> is dropped;
-           ;; anything opened inside it closes normally (justhtml engine.py
-           ;; line 2901).
-           ((select-encloses-name? parser name) #f)
-           (else (mode-in-body parser token)))))
-      ((token-end-of-file? token) (mode-in-body parser token))
-      (else #f)))
+             ((string=? name "option")
+              (when (node-html-element? (parser-current parser) "option")
+                (stack-pop! parser)))
+             ((string=? name "select")
+              (when (element-in-select-scope? parser "select") (select-close! parser)))
+             ((string=? name "template") (mode-in-head parser token))
+             ;; An end tag for an element opened before the <select> is dropped;
+             ;; anything opened inside it closes normally (justhtml engine.py
+             ;; line 2901).
+             ((select-encloses-name? parser name) #f)
+             (else (mode-in-body parser token)))))
+        ((token-end-of-file? token) (mode-in-body parser token))
+        (else #f))))
 
-  (define (select-encloses-name? parser name)
-    (let* ((stack (parser-stack parser))
-           (select-index
-            (let loop ((index (fx- (length stack) 1)))
-              (cond
-                ((fx< index 0) #f)
-                ((node-html-element? (list-ref stack index) "select") index)
-                (else (loop (fx- index 1))))))
-           (target-index
-            (let loop ((index (fx- (length stack) 1)))
-              (cond
-                ((fx< index 0) #f)
-                ((let ((node (list-ref stack index)))
-                   (and (node-element? node) (string=? (html-node-name node) name)))
-                 index)
-                (else (loop (fx- index 1)))))))
-      (and select-index target-index (fx< target-index select-index))))
+  (define select-encloses-name?
+    (lambda (parser name)
+      (let* ((stack (parser-stack parser))
+             (select-index
+              (let loop ((index (fx- (length stack) 1)))
+                (cond
+                  ((fx< index 0) #f)
+                  ((node-html-element? (list-ref stack index) "select") index)
+                  (else (loop (fx- index 1))))))
+             (target-index
+              (let loop ((index (fx- (length stack) 1)))
+                (cond
+                  ((fx< index 0) #f)
+                  ((let ((node (list-ref stack index)))
+                     (and (node-element? node) (string=? (html-node-name node) name)))
+                   index)
+                  (else (loop (fx- index 1)))))))
+        (and select-index target-index (fx< target-index select-index)))))
 
   ;; 13.2.6.4.17 "in select in table"
 
-  (define (mode-in-select-in-table parser token)
-    (cond
-      ((and (token-start-tag? token)
-            (member (token-start-tag-name token)
-                    '("caption" "table" "tbody" "tfoot" "thead" "tr" "td" "th")))
-       (select-close! parser)
-       (token-reprocess parser token))
-      ((and (token-end-tag? token)
-            (member (token-end-tag-name token)
-                    '("caption" "table" "tbody" "tfoot" "thead" "tr" "td" "th")))
-       (when (element-in-table-scope? parser (list (token-end-tag-name token)))
+  (define mode-in-select-in-table
+    (lambda (parser token)
+      (cond
+        ((and (token-start-tag? token)
+              (member (token-start-tag-name token)
+                      '("caption" "table" "tbody" "tfoot" "thead" "tr" "td" "th")))
          (select-close! parser)
-         (token-reprocess parser token)))
-      (else (mode-in-select parser token))))
+         (token-reprocess parser token))
+        ((and (token-end-tag? token)
+              (member (token-end-tag-name token)
+                      '("caption" "table" "tbody" "tfoot" "thead" "tr" "td" "th")))
+         (when (element-in-table-scope? parser (list (token-end-tag-name token)))
+           (select-close! parser)
+           (token-reprocess parser token)))
+        (else (mode-in-select parser token)))))
 
   ;; 13.2.6.4.18 "in template"
 
-  (define (template-mode-switch! parser mode)
-    (let ((modes (parser-template-modes parser)))
-      (unless (null? modes)
-        (parser-template-modes-set! parser
-                                    (list-remove-at modes (fx- (length modes) 1)))))
-    (parser-template-modes-set! parser
-                                (append (parser-template-modes parser) (list mode)))
-    (parser-mode-set! parser mode))
+  (define template-mode-switch!
+    (lambda (parser mode)
+      (let ((modes (parser-template-modes parser)))
+        (unless (null? modes)
+          (parser-template-modes-set! parser
+                                      (list-remove-at modes (fx- (length modes) 1)))))
+      (parser-template-modes-set! parser
+                                  (append (parser-template-modes parser) (list mode)))
+      (parser-mode-set! parser mode)))
 
-  (define (mode-in-template parser token)
-    (cond
-      ((or (token-character? token) (token-comment-like? token) (token-doctype? token))
-       (mode-in-body parser token))
-      ((token-start-tag? token)
-       (let ((name (token-start-tag-name token)))
-         (cond
-           ((string=? name "template") (mode-in-head parser token))
-           ;; Head content and the raw-text/RCDATA elements move the template
-           ;; out of its initial mode, so later table structure is ignored
-           ;; instead of opened.
-           ((or (string-set-member? head-content-start-tags name)
-                (member name '("iframe" "noembed" "noscript" "xmp" "textarea")))
-            (template-mode-switch! parser 'in-body)
-            (token-reprocess parser token))
-           ((member name '("caption" "colgroup" "tbody" "tfoot" "thead"))
-            (template-mode-switch! parser 'in-table)
-            (token-reprocess parser token))
-           ((string=? name "col")
-            (template-mode-switch! parser 'in-column-group)
-            (token-reprocess parser token))
-           ((string=? name "tr")
-            (template-mode-switch! parser 'in-table-body)
-            (token-reprocess parser token))
-           ((member name '("td" "th"))
-            (template-mode-switch! parser 'in-row)
-            (token-reprocess parser token))
-           (else
-            (template-mode-switch! parser 'in-body)
-            (token-reprocess parser token)))))
-      ((token-end-tag? token)
-       (if (string=? (token-end-tag-name token) "template")
-         (mode-in-head parser token)
-         #f))
-      ((token-end-of-file? token)
-       (if (not (stack-find-name parser "template"))
-         (parser-done-set! parser #t)
-         (begin
-           (stack-pop-until-name! parser "template")
-           (formatting-clear-to-marker! parser)
-           (let ((modes (parser-template-modes parser)))
-             (unless (null? modes)
-               (parser-template-modes-set!
-                 parser (list-remove-at modes (fx- (length modes) 1)))))
-           (insertion-mode-reset! parser)
-           (token-reprocess parser token))))
-      (else #f)))
+  (define mode-in-template
+    (lambda (parser token)
+      (cond
+        ((or (token-character? token) (token-comment-like? token) (token-doctype? token))
+         (mode-in-body parser token))
+        ((token-start-tag? token)
+         (let ((name (token-start-tag-name token)))
+           (cond
+             ((string=? name "template") (mode-in-head parser token))
+             ;; Head content and the raw-text/RCDATA elements move the template
+             ;; out of its initial mode, so later table structure is ignored
+             ;; instead of opened.
+             ((or (string-set-member? head-content-start-tags name)
+                  (member name '("iframe" "noembed" "noscript" "xmp" "textarea")))
+              (template-mode-switch! parser 'in-body)
+              (token-reprocess parser token))
+             ((member name '("caption" "colgroup" "tbody" "tfoot" "thead"))
+              (template-mode-switch! parser 'in-table)
+              (token-reprocess parser token))
+             ((string=? name "col")
+              (template-mode-switch! parser 'in-column-group)
+              (token-reprocess parser token))
+             ((string=? name "tr")
+              (template-mode-switch! parser 'in-table-body)
+              (token-reprocess parser token))
+             ((member name '("td" "th"))
+              (template-mode-switch! parser 'in-row)
+              (token-reprocess parser token))
+             (else
+              (template-mode-switch! parser 'in-body)
+              (token-reprocess parser token)))))
+        ((token-end-tag? token)
+         (if (string=? (token-end-tag-name token) "template")
+           (mode-in-head parser token)
+           #f))
+        ((token-end-of-file? token)
+         (if (not (stack-find-name parser "template"))
+           (parser-done-set! parser #t)
+           (begin
+             (stack-pop-until-name! parser "template")
+             (formatting-clear-to-marker! parser)
+             (let ((modes (parser-template-modes parser)))
+               (unless (null? modes)
+                 (parser-template-modes-set!
+                   parser (list-remove-at modes (fx- (length modes) 1)))))
+             (insertion-mode-reset! parser)
+             (token-reprocess parser token))))
+        (else #f))))
 
   ;; 13.2.6.4.19 "after body"
 
-  (define (mode-after-body parser token)
-    (cond
-      ((token-character? token)
-       (call-with-values
-         (lambda () (string-leading-space-split (token-character-text token)))
-         (lambda (space rest)
-           (unless (string=? space "")
-             (mode-in-body parser (token-character-make space)))
-           (unless (string=? rest "")
-             (parser-mode-set! parser 'in-body)
-             (token-reprocess parser (token-character-make rest))))))
-      ((token-comment-like? token)
-       (comment-append-to! parser token (car (parser-stack parser))))
-      ((token-doctype? token) #f)
-      ((and (token-start-tag? token) (string=? (token-start-tag-name token) "html"))
-       (mode-in-body parser token))
-      ((and (token-end-tag? token) (string=? (token-end-tag-name token) "html"))
-       (if (parser-fragment? parser)
-         #f
-         (parser-mode-set! parser 'after-after-body)))
-      ((token-end-of-file? token) (parser-done-set! parser #t))
-      (else
-       (parser-mode-set! parser 'in-body)
-       (token-reprocess parser token))))
+  (define mode-after-body
+    (lambda (parser token)
+      (cond
+        ((token-character? token)
+         (call-with-values
+           (lambda () (string-leading-space-split (token-character-text token)))
+           (lambda (space rest)
+             (unless (string=? space "")
+               (mode-in-body parser (token-character-make space)))
+             (unless (string=? rest "")
+               (parser-mode-set! parser 'in-body)
+               (token-reprocess parser (token-character-make rest))))))
+        ((token-comment-like? token)
+         (comment-append-to! parser token (car (parser-stack parser))))
+        ((token-doctype? token) #f)
+        ((and (token-start-tag? token) (string=? (token-start-tag-name token) "html"))
+         (mode-in-body parser token))
+        ((and (token-end-tag? token) (string=? (token-end-tag-name token) "html"))
+         (if (parser-fragment? parser)
+           #f
+           (parser-mode-set! parser 'after-after-body)))
+        ((token-end-of-file? token) (parser-done-set! parser #t))
+        (else
+         (parser-mode-set! parser 'in-body)
+         (token-reprocess parser token)))))
 
   ;; 13.2.6.4.20 "in frameset"
 
-  (define (mode-in-frameset parser token)
-    (cond
-      ((token-character? token)
-       (call-with-values
-         (lambda () (string-leading-space-split (token-character-text token)))
-         (lambda (space rest) (characters-insert! parser space))))
-      ((token-comment-like? token) (comment-insert! parser token))
-      ((token-doctype? token) #f)
-      ((and (token-start-tag? token) (string=? (token-start-tag-name token) "html"))
-       (mode-in-body parser token))
-      ((and (token-start-tag? token) (string=? (token-start-tag-name token) "frameset"))
-       (element-insert-token! parser token))
-      ((and (token-end-tag? token) (string=? (token-end-tag-name token) "frameset"))
-       (unless (node-html-element? (parser-current parser) "html")
-         (stack-pop! parser)
-         (when (and (not (parser-fragment? parser))
-                    (not (node-html-element? (parser-current parser) "frameset")))
-           (parser-mode-set! parser 'after-frameset))))
-      ((and (token-start-tag? token) (string=? (token-start-tag-name token) "frame"))
-       (void-element-insert! parser token))
-      ((and (token-start-tag? token) (string=? (token-start-tag-name token) "noframes"))
-       (mode-in-head parser token))
-      ((token-end-of-file? token) (parser-done-set! parser #t))
-      (else #f)))
+  (define mode-in-frameset
+    (lambda (parser token)
+      (cond
+        ((token-character? token)
+         (call-with-values
+           (lambda () (string-leading-space-split (token-character-text token)))
+           (lambda (space rest) (characters-insert! parser space))))
+        ((token-comment-like? token) (comment-insert! parser token))
+        ((token-doctype? token) #f)
+        ((and (token-start-tag? token) (string=? (token-start-tag-name token) "html"))
+         (mode-in-body parser token))
+        ((and (token-start-tag? token) (string=? (token-start-tag-name token) "frameset"))
+         (element-insert-token! parser token))
+        ((and (token-end-tag? token) (string=? (token-end-tag-name token) "frameset"))
+         (unless (node-html-element? (parser-current parser) "html")
+           (stack-pop! parser)
+           (when (and (not (parser-fragment? parser))
+                      (not (node-html-element? (parser-current parser) "frameset")))
+             (parser-mode-set! parser 'after-frameset))))
+        ((and (token-start-tag? token) (string=? (token-start-tag-name token) "frame"))
+         (void-element-insert! parser token))
+        ((and (token-start-tag? token) (string=? (token-start-tag-name token) "noframes"))
+         (mode-in-head parser token))
+        ((token-end-of-file? token) (parser-done-set! parser #t))
+        (else #f))))
 
   ;; 13.2.6.4.21 "after frameset"
 
-  (define (mode-after-frameset parser token)
-    (cond
-      ((token-character? token)
-       (call-with-values
-         (lambda () (string-leading-space-split (token-character-text token)))
-         (lambda (space rest) (characters-insert! parser space))))
-      ((token-comment-like? token) (comment-insert! parser token))
-      ((token-doctype? token) #f)
-      ((and (token-start-tag? token) (string=? (token-start-tag-name token) "html"))
-       (mode-in-body parser token))
-      ((and (token-end-tag? token) (string=? (token-end-tag-name token) "html"))
-       (parser-mode-set! parser 'after-after-frameset))
-      ((and (token-start-tag? token) (string=? (token-start-tag-name token) "noframes"))
-       (mode-in-head parser token))
-      ((token-end-of-file? token) (parser-done-set! parser #t))
-      (else #f)))
+  (define mode-after-frameset
+    (lambda (parser token)
+      (cond
+        ((token-character? token)
+         (call-with-values
+           (lambda () (string-leading-space-split (token-character-text token)))
+           (lambda (space rest) (characters-insert! parser space))))
+        ((token-comment-like? token) (comment-insert! parser token))
+        ((token-doctype? token) #f)
+        ((and (token-start-tag? token) (string=? (token-start-tag-name token) "html"))
+         (mode-in-body parser token))
+        ((and (token-end-tag? token) (string=? (token-end-tag-name token) "html"))
+         (parser-mode-set! parser 'after-after-frameset))
+        ((and (token-start-tag? token) (string=? (token-start-tag-name token) "noframes"))
+         (mode-in-head parser token))
+        ((token-end-of-file? token) (parser-done-set! parser #t))
+        (else #f))))
 
   ;; 13.2.6.4.22 "after after body"
 
-  (define (mode-after-after-body parser token)
-    (cond
-      ((token-comment-like? token)
-       (comment-append-to! parser token (parser-document parser)))
-      ((token-doctype? token) (mode-in-body parser token))
-      ((token-character? token)
-       (call-with-values
-         (lambda () (string-leading-space-split (token-character-text token)))
-         (lambda (space rest)
-           (unless (string=? space "")
-             (mode-in-body parser (token-character-make space)))
-           (unless (string=? rest "")
-             (parser-mode-set! parser 'in-body)
-             (token-reprocess parser (token-character-make rest))))))
-      ((and (token-start-tag? token) (string=? (token-start-tag-name token) "html"))
-       (mode-in-body parser token))
-      ((token-end-of-file? token) (parser-done-set! parser #t))
-      (else
-       (parser-mode-set! parser 'in-body)
-       (token-reprocess parser token))))
+  (define mode-after-after-body
+    (lambda (parser token)
+      (cond
+        ((token-comment-like? token)
+         (comment-append-to! parser token (parser-document parser)))
+        ((token-doctype? token) (mode-in-body parser token))
+        ((token-character? token)
+         (call-with-values
+           (lambda () (string-leading-space-split (token-character-text token)))
+           (lambda (space rest)
+             (unless (string=? space "")
+               (mode-in-body parser (token-character-make space)))
+             (unless (string=? rest "")
+               (parser-mode-set! parser 'in-body)
+               (token-reprocess parser (token-character-make rest))))))
+        ((and (token-start-tag? token) (string=? (token-start-tag-name token) "html"))
+         (mode-in-body parser token))
+        ((token-end-of-file? token) (parser-done-set! parser #t))
+        (else
+         (parser-mode-set! parser 'in-body)
+         (token-reprocess parser token)))))
 
   ;; 13.2.6.4.23 "after after frameset"
 
-  (define (mode-after-after-frameset parser token)
-    (cond
-      ((token-comment-like? token)
-       (comment-append-to! parser token (parser-document parser)))
-      ((token-doctype? token) (mode-in-body parser token))
-      ((token-character? token)
-       (call-with-values
-         (lambda () (string-leading-space-split (token-character-text token)))
-         (lambda (space rest)
-           (unless (string=? space "")
-             (mode-in-body parser (token-character-make space))))))
-      ((and (token-start-tag? token) (string=? (token-start-tag-name token) "html"))
-       (mode-in-body parser token))
-      ((token-end-of-file? token) (parser-done-set! parser #t))
-      ((and (token-start-tag? token) (string=? (token-start-tag-name token) "noframes"))
-       (mode-in-head parser token))
-      (else #f)))
+  (define mode-after-after-frameset
+    (lambda (parser token)
+      (cond
+        ((token-comment-like? token)
+         (comment-append-to! parser token (parser-document parser)))
+        ((token-doctype? token) (mode-in-body parser token))
+        ((token-character? token)
+         (call-with-values
+           (lambda () (string-leading-space-split (token-character-text token)))
+           (lambda (space rest)
+             (unless (string=? space "")
+               (mode-in-body parser (token-character-make space))))))
+        ((and (token-start-tag? token) (string=? (token-start-tag-name token) "html"))
+         (mode-in-body parser token))
+        ((token-end-of-file? token) (parser-done-set! parser #t))
+        ((and (token-start-tag? token) (string=? (token-start-tag-name token) "noframes"))
+         (mode-in-head parser token))
+        (else #f))))
 
   ;; ------------------------------------------------------------------
   ;; 13.2.6.5 foreign content
   ;; ------------------------------------------------------------------
 
-  (define (foreign-breakout? token)
-    (and (token-start-tag? token)
-         (let ((name (token-start-tag-name token)))
-           (or (string-set-member? foreign-breakout-elements name)
-               (and (string=? name "font")
-                    (let ((attributes (token-start-tag-attributes token)))
-                      (or (assoc "color" attributes)
-                          (assoc "face" attributes)
-                          (assoc "size" attributes))
-                      ))))))
+  (define foreign-breakout?
+    (lambda (token)
+      (and (token-start-tag? token)
+           (let ((name (token-start-tag-name token)))
+             (or (string-set-member? foreign-breakout-elements name)
+                 (and (string=? name "font")
+                      (let ((attributes (token-start-tag-attributes token)))
+                        (or (assoc "color" attributes)
+                            (assoc "face" attributes)
+                            (assoc "size" attributes))
+                        )))))))
 
-  (define (foreign-content-process parser token)
-    (cond
-      ((token-character? token)
-       (let* ((raw (token-character-text token))
-              (text (list->string
-                     (map (lambda (c)
-                            (if (char=? c #\nul) (integer->char #xFFFD) c))
-                          (string->list raw)))))
-         (characters-insert! parser text)
-         (unless (string-all-space? text)
-           (parser-frameset-ok-set! parser #f))))
-      ((token-comment-like? token) (comment-insert! parser token))
-      ((token-doctype? token) #f)
-      ((and (token-start-tag? token) (foreign-breakout? token))
-       (cond
-         ((parser-fragment? parser) (foreign-start-tag parser token))
-         (else
-          (let loop ()
-            (let ((current (parser-current parser)))
-              (when (and current
-                         (not (and (node-element? current)
-                                   (eq? (html-node-namespace current) 'html)))
-                         (not (mathml-text-integration-point? current))
-                         (not (html-integration-point? current)))
-                (stack-pop! parser)
-                (loop))))
-          (token-reprocess parser token))))
-      ((token-start-tag? token) (foreign-start-tag parser token))
-      ((token-end-tag? token) (foreign-end-tag parser token))
-      (else #f)))
+  (define foreign-content-process
+    (lambda (parser token)
+      (cond
+        ((token-character? token)
+         (let* ((raw (token-character-text token))
+                (text (list->string
+                       (map (lambda (c)
+                              (if (char=? c #\nul) (integer->char #xFFFD) c))
+                            (string->list raw)))))
+           (characters-insert! parser text)
+           (unless (string-all-space? text)
+             (parser-frameset-ok-set! parser #f))))
+        ((token-comment-like? token) (comment-insert! parser token))
+        ((token-doctype? token) #f)
+        ((and (token-start-tag? token) (foreign-breakout? token))
+         (cond
+           ((parser-fragment? parser) (foreign-start-tag parser token))
+           (else
+            (let loop ()
+              (let ((current (parser-current parser)))
+                (when (and current
+                           (not (and (node-element? current)
+                                     (eq? (html-node-namespace current) 'html)))
+                           (not (mathml-text-integration-point? current))
+                           (not (html-integration-point? current)))
+                  (stack-pop! parser)
+                  (loop))))
+            (token-reprocess parser token))))
+        ((token-start-tag? token) (foreign-start-tag parser token))
+        ((token-end-tag? token) (foreign-end-tag parser token))
+        (else #f))))
 
-  (define (foreign-start-tag parser token)
-    (let* ((adjusted (parser-adjusted-current parser))
-           (namespace (if (and adjusted (node-element? adjusted))
-                        (html-node-namespace adjusted)
-                        'html))
-           (name (token-start-tag-name token))
-           (attributes (token-start-tag-attributes token)))
-      (let-values (((name attributes)
-                    (case namespace
-                      ((math) (values name (attributes-adjust-mathml attributes)))
-                      ((svg) (values (svg-tag-name-adjust name)
-                                     (attributes-adjust-svg attributes)))
-                      (else (values name attributes)))))
-        (element-insert! parser name namespace (attributes-adjust-foreign attributes))
-        (html-tokenizer-state-set! (parser-tokenizer parser) 'data)
-        (when (token-start-tag-self-closing? token)
-          (stack-pop! parser)))))
+  (define foreign-start-tag
+    (lambda (parser token)
+      (let* ((adjusted (parser-adjusted-current parser))
+             (namespace (if (and adjusted (node-element? adjusted))
+                          (html-node-namespace adjusted)
+                          'html))
+             (name (token-start-tag-name token))
+             (attributes (token-start-tag-attributes token)))
+        (let-values (((name attributes)
+                      (case namespace
+                        ((math) (values name (attributes-adjust-mathml attributes)))
+                        ((svg) (values (svg-tag-name-adjust name)
+                                       (attributes-adjust-svg attributes)))
+                        (else (values name attributes)))))
+          (element-insert! parser name namespace (attributes-adjust-foreign attributes))
+          (html-tokenizer-state-set! (parser-tokenizer parser) 'data)
+          (when (token-start-tag-self-closing? token)
+            (stack-pop! parser))))))
 
-  (define (foreign-end-tag parser token)
-    (let ((name (string-ascii-lowercase (token-end-tag-name token)))
-          (stack (parser-stack parser)))
-      (let loop ((index (fx- (length stack) 1)))
-        (cond
-          ((fx< index 0) #f)
-          (else
-           (let ((node (list-ref stack index)))
-             (cond
-               ((fx= index 0) #f)
-               ((string=? (string-ascii-lowercase (html-node-name node)) name)
-                (stack-pop-until-node! parser node))
-               (else
-                (let ((next (list-ref stack (fx- index 1))))
-                  (if (and (node-element? next)
-                           (eq? (html-node-namespace next) 'html))
-                    (mode-process parser (parser-mode parser) token)
-                    (loop (fx- index 1))))))))))))
+  (define foreign-end-tag
+    (lambda (parser token)
+      (let ((name (string-ascii-lowercase (token-end-tag-name token)))
+            (stack (parser-stack parser)))
+        (let loop ((index (fx- (length stack) 1)))
+          (cond
+            ((fx< index 0) #f)
+            (else
+             (let ((node (list-ref stack index)))
+               (cond
+                 ((fx= index 0) #f)
+                 ((string=? (string-ascii-lowercase (html-node-name node)) name)
+                  (stack-pop-until-node! parser node))
+                 (else
+                  (let ((next (list-ref stack (fx- index 1))))
+                    (if (and (node-element? next)
+                             (eq? (html-node-namespace next) 'html))
+                      (mode-process parser (parser-mode parser) token)
+                      (loop (fx- index 1)))))))))))))
 
   ;; ------------------------------------------------------------------
   ;; Fragment parsing
   ;; ------------------------------------------------------------------
 
-  (define (fragment-context-parse context)
-    ;; A fragment context is either "name" or "namespace name".
-    (let ((space (let loop ((i 0))
-                   (cond
-                     ((fx>= i (string-length context)) #f)
-                     ((char=? (string-ref context i) #\space) i)
-                     (else (loop (fx+ i 1)))))))
-      (if space
-        (let ((namespace (substring context 0 space))
-              (name (substring context (fx+ space 1) (string-length context))))
-          (cons (cond
-                  ((string=? namespace "svg") 'svg)
-                  ((string=? namespace "math") 'math)
-                  (else 'html))
-                name))
-        (cons 'html context))))
+  (define fragment-context-parse
+    (lambda (context)
+      ;; A fragment context is either "name" or "namespace name".
+      (let ((space (let loop ((i 0))
+                     (cond
+                       ((fx>= i (string-length context)) #f)
+                       ((char=? (string-ref context i) #\space) i)
+                       (else (loop (fx+ i 1)))))))
+        (if space
+          (let ((namespace (substring context 0 space))
+                (name (substring context (fx+ space 1) (string-length context))))
+            (cons (cond
+                    ((string=? namespace "svg") 'svg)
+                    ((string=? namespace "math") 'math)
+                    (else 'html))
+                  name))
+          (cons 'html context)))))
 
-  (define (fragment-setup! parser context)
-    (let* ((parsed (fragment-context-parse context))
-           (namespace (car parsed))
-           (name (cdr parsed))
-           (context-node (element-node-make name namespace '()))
-           (root (element-node-make "html" 'html '())))
-      (parser-fragment-context-set! parser context-node)
-      (node-append-child! (parser-document parser) root)
-      (stack-push! parser root)
-      (parser-root-set! parser root)
-      (when (and (eq? namespace 'html) (string=? name "template"))
-        (parser-template-modes-set! parser '(in-template)))
-      (insertion-mode-reset! parser)
-      (when (eq? namespace 'html)
-        (when (member name '("pre" "listing" "textarea"))
-          (parser-skip-newline-set! parser #t))
-        (let ((state (html-tokenizer-content-state-for-tag
-                      name (parser-scripting? parser))))
-          (unless (eq? state 'data)
-            ;; No last start tag: in a fragment nothing closes the context
-            ;; element, so the whole input stays text.
-            (html-tokenizer-state-set! (parser-tokenizer parser) state))))))
+  (define fragment-setup!
+    (lambda (parser context)
+      (let* ((parsed (fragment-context-parse context))
+             (namespace (car parsed))
+             (name (cdr parsed))
+             (context-node (element-node-make name namespace '()))
+             (root (element-node-make "html" 'html '())))
+        (parser-fragment-context-set! parser context-node)
+        (node-append-child! (parser-document parser) root)
+        (stack-push! parser root)
+        (parser-root-set! parser root)
+        (when (and (eq? namespace 'html) (string=? name "template"))
+          (parser-template-modes-set! parser '(in-template)))
+        (insertion-mode-reset! parser)
+        (when (eq? namespace 'html)
+          (when (member name '("pre" "listing" "textarea"))
+            (parser-skip-newline-set! parser #t))
+          (let ((state (html-tokenizer-content-state-for-tag
+                        name (parser-scripting? parser))))
+            (unless (eq? state 'data)
+              ;; No last start tag: in a fragment nothing closes the context
+              ;; element, so the whole input stays text.
+              (html-tokenizer-state-set! (parser-tokenizer parser) state)))))))
 
   ;; ------------------------------------------------------------------
   ;; <selectedcontent> projection
@@ -6864,86 +7111,90 @@
   ;; selected option (justhtml engine.py, _project_select_selectedcontent).
   ;; This runs once over the finished tree.
 
-  (define (node-clone node)
-    (let ((copy (html-node-new (html-node-kind node)
-                               (html-node-name node)
-                               (html-node-namespace node)
-                               (html-node-attributes node)
-                               '() #f (html-node-data node) #f)))
-      (for-each (lambda (child) (node-append-child! copy (node-clone child)))
-                (html-node-children node))
-      copy))
+  (define node-clone
+    (lambda (node)
+      (let ((copy (html-node-new (html-node-kind node)
+                                 (html-node-name node)
+                                 (html-node-namespace node)
+                                 (html-node-attributes node)
+                                 '() #f (html-node-data node) #f)))
+        (for-each (lambda (child) (node-append-child! copy (node-clone child)))
+                  (html-node-children node))
+        copy)))
 
-  (define (selectedcontent-project! root)
-    (let loop ((node root))
-      (when (node-element? node)
-        (when (node-html-element? node "select")
-          (select-selectedcontent-project! node)))
-      (for-each loop (html-node-children node))))
+  (define selectedcontent-project!
+    (lambda (root)
+      (let loop ((node root))
+        (when (node-element? node)
+          (when (node-html-element? node "select")
+            (select-selectedcontent-project! node)))
+        (for-each loop (html-node-children node)))))
 
-  (define (select-selectedcontent-project! select)
-    (let ((markers '())
-          (spans '())
-          (selected #f)
-          (first #f)
-          (multiple? (and (assoc "multiple" (html-node-attributes select)) #t))
-          (position 0))
-      (let walk ((node select) (disabled-optgroup? #f) (datalist? #f))
-        (set! position (fx+ position 1))
-        (let* ((element? (node-element? node))
-               (name (and element? (html-node-name node)))
-               (attributes (if element? (html-node-attributes node) '()))
-               (option? (and element? (not (eq? node select))
-                             (string=? name "option") (not datalist?)))
-               (enter position))
-          (when (and element? (not (eq? node select)))
-            (when (string=? name "selectedcontent")
-              (set! markers (append markers (list (cons node position)))))
+  (define select-selectedcontent-project!
+    (lambda (select)
+      (let ((markers '())
+            (spans '())
+            (selected #f)
+            (first #f)
+            (multiple? (and (assoc "multiple" (html-node-attributes select)) #t))
+            (position 0))
+        (let walk ((node select) (disabled-optgroup? #f) (datalist? #f))
+          (set! position (fx+ position 1))
+          (let* ((element? (node-element? node))
+                 (name (and element? (html-node-name node)))
+                 (attributes (if element? (html-node-attributes node) '()))
+                 (option? (and element? (not (eq? node select))
+                               (string=? name "option") (not datalist?)))
+                 (enter position))
+            (when (and element? (not (eq? node select)))
+              (when (string=? name "selectedcontent")
+                (set! markers (append markers (list (cons node position)))))
+              (when option?
+                (when (and (not first)
+                           (not disabled-optgroup?)
+                           (not (assoc "disabled" attributes)))
+                  (set! first node))
+                (when (assoc "selected" attributes)
+                  (if multiple?
+                    (unless selected (set! selected node))
+                    (set! selected node)))))
+            (for-each (lambda (child)
+                        (walk child
+                              (or disabled-optgroup?
+                                  (and element?
+                                       (string=? name "optgroup")
+                                       (and (assoc "disabled" attributes) #t)))
+                              (or datalist? (and element? (string=? name "datalist")))))
+                      (html-node-children node))
             (when option?
-              (when (and (not first)
-                         (not disabled-optgroup?)
-                         (not (assoc "disabled" attributes)))
-                (set! first node))
-              (when (assoc "selected" attributes)
-                (if multiple?
-                  (unless selected (set! selected node))
-                  (set! selected node)))))
-          (for-each (lambda (child)
-                      (walk child
-                            (or disabled-optgroup?
-                                (and element?
-                                     (string=? name "optgroup")
-                                     (and (assoc "disabled" attributes) #t)))
-                            (or datalist? (and element? (string=? name "datalist")))))
-                    (html-node-children node))
-          (when option?
-            (set! spans (cons (list node enter position) spans)))))
-      (let* ((option (or selected first))
-             (span (and option (assoc option spans))))
-        (unless (null? markers)
-          (for-each
-            (lambda (marker)
-              (let ((node (car marker))
-                    (marker-position (cdr marker)))
-                (unless (and span
-                             (fx< (cadr span) marker-position)
-                             (fx<= marker-position (caddr span)))
-                  (for-each (lambda (child) (html-node-parent-set! child #f))
-                            (html-node-children node))
-                  (html-node-children-set! node '())
-                  (when option
-                    (for-each (lambda (child)
-                                (node-append-child! node (node-clone child)))
-                              (html-node-children option))))))
-            markers)))))
+              (set! spans (cons (list node enter position) spans)))))
+        (let* ((option (or selected first))
+               (span (and option (assoc option spans))))
+          (unless (null? markers)
+            (for-each
+              (lambda (marker)
+                (let ((node (car marker))
+                      (marker-position (cdr marker)))
+                  (unless (and span
+                               (fx< (cadr span) marker-position)
+                               (fx<= marker-position (caddr span)))
+                    (for-each (lambda (child) (html-node-parent-set! child #f))
+                              (html-node-children node))
+                    (html-node-children-set! node '())
+                    (when option
+                      (for-each (lambda (child)
+                                  (node-append-child! node (node-clone child)))
+                                (html-node-children option))))))
+              markers))))))
 
   ;; ------------------------------------------------------------------
   ;; Layer 6 -- entry points
   ;; ------------------------------------------------------------------
 
-  (define (option-ref options key default)
-    (let ((pair (assq key options)))
-      (if pair (cdr pair) default)))
+  (define option-ref
+    (lambda (options key default)
+      (let ((pair (assq key options)))
+        (if pair (cdr pair) default))))
 
   ;; Parse and return the internal node tree (a document or, for fragment
   ;; parsing, the synthetic root element whose children are the fragment).
@@ -6967,31 +7218,32 @@
   ;; Layer 5 -- SXML assembly
   ;; ------------------------------------------------------------------
 
-  (define (html-node->sxml node)
-    (case (html-node-kind node)
-      ((document) (cons '*TOP* (map html-node->sxml (html-node-children node))))
-      ((fragment) (cons '*CONTENT* (map html-node->sxml (html-node-children node))))
-      ((text) (html-node-data node))
-      ((comment) (list '*COMMENT* (html-node-data node)))
-      ((processing-instruction)
-       (list '*PI* (string->symbol (html-node-name node)) (html-node-data node)))
-      ((doctype)
-       (let ((data (html-node-data node)))
-         (list '*DOCTYPE* (car data) (cadr data) (caddr data))))
-      ((element)
-       (let* ((attributes (html-node-attributes node))
-              (children (if (html-node-content node)
-                          (list (html-node->sxml (html-node-content node)))
-                          (map html-node->sxml (html-node-children node))))
-              (name (string->symbol (html-node-name node))))
-         (if (null? attributes)
-           (cons name children)
-           (cons name
-                 (cons (cons sxml-attribute-mark (map (lambda (pair)
-                                       (list (string->symbol (car pair)) (cdr pair)))
-                                     attributes))
-                       children)))))
-      (else (error 'html-node->sxml "unknown node kind" (html-node-kind node)))))
+  (define html-node->sxml
+    (lambda (node)
+      (case (html-node-kind node)
+        ((document) (cons '*TOP* (map html-node->sxml (html-node-children node))))
+        ((fragment) (cons '*CONTENT* (map html-node->sxml (html-node-children node))))
+        ((text) (html-node-data node))
+        ((comment) (list '*COMMENT* (html-node-data node)))
+        ((processing-instruction)
+         (list '*PI* (string->symbol (html-node-name node)) (html-node-data node)))
+        ((doctype)
+         (let ((data (html-node-data node)))
+           (list '*DOCTYPE* (car data) (cadr data) (caddr data))))
+        ((element)
+         (let* ((attributes (html-node-attributes node))
+                (children (if (html-node-content node)
+                            (list (html-node->sxml (html-node-content node)))
+                            (map html-node->sxml (html-node-children node))))
+                (name (string->symbol (html-node-name node))))
+           (if (null? attributes)
+             (cons name children)
+             (cons name
+                   (cons (cons sxml-attribute-mark (map (lambda (pair)
+                                         (list (string->symbol (car pair)) (cdr pair)))
+                                       attributes))
+                         children)))))
+        (else (error 'html-node->sxml "unknown node kind" (html-node-kind node))))))
 
   ;; The layer 6 entry point.
   (define html->sxml
@@ -7012,143 +7264,155 @@
   ;; literal.
   (define sxml-attribute-mark (string->symbol "@"))
 
-  (define (sxml-element? form)
-    (and (pair? form) (symbol? (car form))))
+  (define sxml-element?
+    (lambda (form)
+      (and (pair? form) (symbol? (car form)))))
 
-  (define (sxml-attributes form)
-    (let ((rest (cdr form)))
-      (if (and (pair? rest) (pair? (car rest)) (eq? (car (car rest)) sxml-attribute-mark))
-        (cdr (car rest))
-        '())))
+  (define sxml-attributes
+    (lambda (form)
+      (let ((rest (cdr form)))
+        (if (and (pair? rest) (pair? (car rest)) (eq? (car (car rest)) sxml-attribute-mark))
+          (cdr (car rest))
+          '()))))
 
-  (define (sxml-children form)
-    (let ((rest (cdr form)))
-      (if (and (pair? rest) (pair? (car rest)) (eq? (car (car rest)) sxml-attribute-mark))
-        (cdr rest)
-        rest)))
+  (define sxml-children
+    (lambda (form)
+      (let ((rest (cdr form)))
+        (if (and (pair? rest) (pair? (car rest)) (eq? (car (car rest)) sxml-attribute-mark))
+          (cdr rest)
+          rest))))
 
-  (define (sxml-attribute-ref form name)
-    (let loop ((attributes (sxml-attributes form)))
-      (cond
-        ((null? attributes) #f)
-        ((string-ascii-equal? (symbol->string (car (car attributes))) name)
-         (car (cdr (car attributes))))
-        (else (loop (cdr attributes))))))
-
-  (define (element-own-namespace name parent-namespace)
-    (if (eq? parent-namespace 'html)
-      (cond
-        ((string=? name "svg") 'svg)
-        ((string=? name "math") 'math)
-        (else 'html))
-      parent-namespace))
-
-  (define (element-children-namespace form name namespace)
-    (case namespace
-      ((svg) (if (string-set-member? svg-html-integration-names name) 'html 'svg))
-      ((math)
-       (cond
-         ((string-set-member? mathml-text-integration-names name) 'html)
-         ((and (string=? name "annotation-xml")
-               (let ((encoding (sxml-attribute-ref form "encoding")))
-                 (and encoding
-                      (let ((value (string-ascii-lowercase encoding)))
-                        (or (string=? value "text/html")
-                            (string=? value "application/xhtml+xml"))))))
-          'html)
-         (else 'math)))
-      (else 'html)))
-
-  (define (indentation size)
-    (make-string size #\space))
-
-  (define (attribute-display-name name namespace)
-    (if (and (not (eq? namespace 'html))
-             (hashtable-ref foreign-attribute-adjustments
-                            (string-ascii-lowercase name) #f))
-      (list->string (map (lambda (c) (if (char=? c #\:) #\space c))
-                         (string->list name)))
-      name))
-
-  (define (attribute-lines form namespace indent)
-    (let* ((names (map (lambda (attribute)
-                         (cons (attribute-display-name
-                                 (symbol->string (car attribute)) namespace)
-                               (car (cdr attribute))))
-                       (sxml-attributes form)))
-           (sorted (list-sort (lambda (a b) (string<? (car a) (car b))) names)))
-      (map (lambda (pair)
-             (string-append "| " (indentation indent) (car pair)
-                            "=\"" (cdr pair) "\""))
-           sorted)))
-
-  (define (doctype-line form)
-    (let ((name (car (cdr form)))
-          (public-id (car (cddr form)))
-          (system-id (car (cdddr form))))
-      (string-append
-        "| <!DOCTYPE"
-        (if (and name (not (string=? name ""))) (string-append " " name) " ")
-        (if (or public-id system-id)
-          (string-append " \"" (or public-id "") "\" \"" (or system-id "") "\"")
-          "")
-        ">")))
-
-  (define (node-lines form namespace indent)
-    (cond
-      ((string? form) (list (string-append "| " (indentation indent) "\"" form "\"")))
-      ((not (pair? form)) '())
-      ((eq? (car form) '*COMMENT*)
-       (list (string-append "| " (indentation indent) "<!-- " (cadr form) " -->")))
-      ((eq? (car form) '*PI*)
-       (list (string-append "| " (indentation indent) "<?"
-                            (symbol->string (cadr form)) " " (caddr form) "?>")))
-      ((eq? (car form) '*DOCTYPE*) (list (doctype-line form)))
-      (else
-       (let* ((name (symbol->string (car form)))
-              (own (element-own-namespace name namespace))
-              (children-namespace (element-children-namespace form name own))
-              (qualified (if (eq? own 'html)
-                           name
-                           (string-append (symbol->string own) " " name)))
-              (line (string-append "| " (indentation indent) "<" qualified ">"))
-              (attributes (attribute-lines form own (fx+ indent 2)))
-              (children (sxml-children form)))
-         (cond
-           ;; Template content is a separate fragment; it prints as a
-           ;; "content" line with the fragment's children below it.
-           ((and (string=? name "template")
-                 (eq? own 'html)
-                 (fx= (length children) 1)
-                 (pair? (car children))
-                 (eq? (car (car children)) '*CONTENT*))
-            (append (list line)
-                    attributes
-                    (list (string-append "| " (indentation (fx+ indent 2)) "content"))
-                    (apply append
-                           (map (lambda (child)
-                                  (node-lines child children-namespace (fx+ indent 4)))
-                                (cdr (car children))))))
-           (else
-            (append (list line)
-                    attributes
-                    (apply append
-                           (map (lambda (child)
-                                  (node-lines child children-namespace (fx+ indent 2)))
-                                children)))))))))
-
-  (define (html-sxml->test-format form)
-    (let ((lines (if (and (pair? form) (eq? (car form) '*TOP*))
-                   (apply append (map (lambda (child) (node-lines child 'html 0))
-                                      (cdr form)))
-                   (node-lines form 'html 0))))
-      (let loop ((lines lines) (port (open-output-string)) (first? #t))
+  (define sxml-attribute-ref
+    (lambda (form name)
+      (let loop ((attributes (sxml-attributes form)))
         (cond
-          ((null? lines) (get-output-string port))
-          (else
-           (unless first? (write-char #\newline port))
-           (put-string port (car lines))
-           (loop (cdr lines) port #f))))))
+          ((null? attributes) #f)
+          ((string-ascii-equal? (symbol->string (car (car attributes))) name)
+           (car (cdr (car attributes))))
+          (else (loop (cdr attributes)))))))
+
+  (define element-own-namespace
+    (lambda (name parent-namespace)
+      (if (eq? parent-namespace 'html)
+        (cond
+          ((string=? name "svg") 'svg)
+          ((string=? name "math") 'math)
+          (else 'html))
+        parent-namespace)))
+
+  (define element-children-namespace
+    (lambda (form name namespace)
+      (case namespace
+        ((svg) (if (string-set-member? svg-html-integration-names name) 'html 'svg))
+        ((math)
+         (cond
+           ((string-set-member? mathml-text-integration-names name) 'html)
+           ((and (string=? name "annotation-xml")
+                 (let ((encoding (sxml-attribute-ref form "encoding")))
+                   (and encoding
+                        (let ((value (string-ascii-lowercase encoding)))
+                          (or (string=? value "text/html")
+                              (string=? value "application/xhtml+xml"))))))
+            'html)
+           (else 'math)))
+        (else 'html))))
+
+  (define indentation
+    (lambda (size)
+      (make-string size #\space)))
+
+  (define attribute-display-name
+    (lambda (name namespace)
+      (if (and (not (eq? namespace 'html))
+               (hashtable-ref foreign-attribute-adjustments
+                              (string-ascii-lowercase name) #f))
+        (list->string (map (lambda (c) (if (char=? c #\:) #\space c))
+                           (string->list name)))
+        name)))
+
+  (define attribute-lines
+    (lambda (form namespace indent)
+      (let* ((names (map (lambda (attribute)
+                           (cons (attribute-display-name
+                                   (symbol->string (car attribute)) namespace)
+                                 (car (cdr attribute))))
+                         (sxml-attributes form)))
+             (sorted (list-sort (lambda (a b) (string<? (car a) (car b))) names)))
+        (map (lambda (pair)
+               (string-append "| " (indentation indent) (car pair)
+                              "=\"" (cdr pair) "\""))
+             sorted))))
+
+  (define doctype-line
+    (lambda (form)
+      (let ((name (car (cdr form)))
+            (public-id (car (cddr form)))
+            (system-id (car (cdddr form))))
+        (string-append
+          "| <!DOCTYPE"
+          (if (and name (not (string=? name ""))) (string-append " " name) " ")
+          (if (or public-id system-id)
+            (string-append " \"" (or public-id "") "\" \"" (or system-id "") "\"")
+            "")
+          ">"))))
+
+  (define node-lines
+    (lambda (form namespace indent)
+      (cond
+        ((string? form) (list (string-append "| " (indentation indent) "\"" form "\"")))
+        ((not (pair? form)) '())
+        ((eq? (car form) '*COMMENT*)
+         (list (string-append "| " (indentation indent) "<!-- " (cadr form) " -->")))
+        ((eq? (car form) '*PI*)
+         (list (string-append "| " (indentation indent) "<?"
+                              (symbol->string (cadr form)) " " (caddr form) "?>")))
+        ((eq? (car form) '*DOCTYPE*) (list (doctype-line form)))
+        (else
+         (let* ((name (symbol->string (car form)))
+                (own (element-own-namespace name namespace))
+                (children-namespace (element-children-namespace form name own))
+                (qualified (if (eq? own 'html)
+                             name
+                             (string-append (symbol->string own) " " name)))
+                (line (string-append "| " (indentation indent) "<" qualified ">"))
+                (attributes (attribute-lines form own (fx+ indent 2)))
+                (children (sxml-children form)))
+           (cond
+             ;; Template content is a separate fragment; it prints as a
+             ;; "content" line with the fragment's children below it.
+             ((and (string=? name "template")
+                   (eq? own 'html)
+                   (fx= (length children) 1)
+                   (pair? (car children))
+                   (eq? (car (car children)) '*CONTENT*))
+              (append (list line)
+                      attributes
+                      (list (string-append "| " (indentation (fx+ indent 2)) "content"))
+                      (apply append
+                             (map (lambda (child)
+                                    (node-lines child children-namespace (fx+ indent 4)))
+                                  (cdr (car children))))))
+             (else
+              (append (list line)
+                      attributes
+                      (apply append
+                             (map (lambda (child)
+                                    (node-lines child children-namespace (fx+ indent 2)))
+                                  children))))))))))
+
+  (define html-sxml->test-format
+    (lambda (form)
+      (let ((lines (if (and (pair? form) (eq? (car form) '*TOP*))
+                     (apply append (map (lambda (child) (node-lines child 'html 0))
+                                        (cdr form)))
+                     (node-lines form 'html 0))))
+        (let loop ((lines lines) (port (open-output-string)) (first? #t))
+          (cond
+            ((null? lines) (get-output-string port))
+            (else
+             (unless first? (write-char #\newline port))
+             (put-string port (car lines))
+             (loop (cdr lines) port #f)))))))
 
   ;; ------------------------------------------------------------------
   ;; General purpose SXML -> HTML serialization
@@ -7161,9 +7425,26 @@
     (names->hashtable
       '("script" "style" "xmp" "iframe" "noembed" "noframes" "plaintext")))
 
-  (define (html-text-escape text raw?)
-    (if raw?
-      text
+  (define html-text-escape
+    (lambda (text raw?)
+      (if raw?
+        text
+        (let ((port (open-output-string)))
+          (let loop ((i 0))
+            (cond
+              ((fx>= i (string-length text)) (get-output-string port))
+              (else
+               (let ((c (string-ref text i)))
+                 (cond
+                   ((char=? c #\&) (put-string port "&amp;"))
+                   ((char=? c #\<) (put-string port "&lt;"))
+                   ((char=? c #\>) (put-string port "&gt;"))
+                   ((char=? c (integer->char #xA0)) (put-string port "&nbsp;"))
+                   (else (write-char c port)))
+                 (loop (fx+ i 1))))))))))
+
+  (define html-attribute-escape
+    (lambda (text)
       (let ((port (open-output-string)))
         (let loop ((i 0))
           (cond
@@ -7172,85 +7453,72 @@
              (let ((c (string-ref text i)))
                (cond
                  ((char=? c #\&) (put-string port "&amp;"))
-                 ((char=? c #\<) (put-string port "&lt;"))
-                 ((char=? c #\>) (put-string port "&gt;"))
+                 ((char=? c #\") (put-string port "&quot;"))
                  ((char=? c (integer->char #xA0)) (put-string port "&nbsp;"))
                  (else (write-char c port)))
                (loop (fx+ i 1)))))))))
 
-  (define (html-attribute-escape text)
-    (let ((port (open-output-string)))
-      (let loop ((i 0))
-        (cond
-          ((fx>= i (string-length text)) (get-output-string port))
-          (else
-           (let ((c (string-ref text i)))
-             (cond
-               ((char=? c #\&) (put-string port "&amp;"))
-               ((char=? c #\") (put-string port "&quot;"))
-               ((char=? c (integer->char #xA0)) (put-string port "&nbsp;"))
-               (else (write-char c port)))
-             (loop (fx+ i 1))))))))
+  (define html-sxml->html
+    (lambda (form)
+      (let ((port (open-output-string)))
+        (sxml-html-write form port #f)
+        (get-output-string port))))
 
-  (define (html-sxml->html form)
-    (let ((port (open-output-string)))
-      (sxml-html-write form port #f)
-      (get-output-string port)))
-
-  (define (sxml-html-write form port raw?)
-    (cond
-      ((string? form) (put-string port (html-text-escape form raw?)))
-      ((not (pair? form)) #f)
-      ((eq? (car form) '*TOP*)
-       (for-each (lambda (child) (sxml-html-write child port #f)) (cdr form)))
-      ((eq? (car form) '*CONTENT*)
-       (for-each (lambda (child) (sxml-html-write child port #f)) (cdr form)))
-      ((eq? (car form) '*COMMENT*)
-       (put-string port "<!--")
-       (put-string port (cadr form))
-       (put-string port "-->"))
-      ((eq? (car form) '*PI*)
-       (put-string port "<?")
-       (put-string port (symbol->string (cadr form)))
-       (put-string port " ")
-       (put-string port (caddr form))
-       (put-string port ">"))
-      ((eq? (car form) '*DOCTYPE*)
-       (let ((name (cadr form))
-             (public-id (caddr form))
-             (system-id (car (cdddr form))))
-         (put-string port "<!DOCTYPE")
-         (when (and name (not (string=? name ""))) (put-string port " ")
-               (put-string port name))
-         (when public-id
-           (put-string port " PUBLIC \"")
-           (put-string port public-id)
-           (put-string port "\""))
-         (when system-id
-           (put-string port (if public-id " \"" " SYSTEM \""))
-           (put-string port system-id)
-           (put-string port "\""))
-         (put-string port ">")))
-      (else
-       (let* ((name (symbol->string (car form)))
-              (children (sxml-children form))
-              (raw-child? (string-set-member? raw-text-element-names name)))
-         (put-string port "<")
-         (put-string port name)
-         (for-each
-           (lambda (attribute)
-             (put-string port " ")
-             (put-string port (symbol->string (car attribute)))
-             (put-string port "=\"")
-             (put-string port (html-attribute-escape (car (cdr attribute))))
+  (define sxml-html-write
+    (lambda (form port raw?)
+      (cond
+        ((string? form) (put-string port (html-text-escape form raw?)))
+        ((not (pair? form)) #f)
+        ((eq? (car form) '*TOP*)
+         (for-each (lambda (child) (sxml-html-write child port #f)) (cdr form)))
+        ((eq? (car form) '*CONTENT*)
+         (for-each (lambda (child) (sxml-html-write child port #f)) (cdr form)))
+        ((eq? (car form) '*COMMENT*)
+         (put-string port "<!--")
+         (put-string port (cadr form))
+         (put-string port "-->"))
+        ((eq? (car form) '*PI*)
+         (put-string port "<?")
+         (put-string port (symbol->string (cadr form)))
+         (put-string port " ")
+         (put-string port (caddr form))
+         (put-string port ">"))
+        ((eq? (car form) '*DOCTYPE*)
+         (let ((name (cadr form))
+               (public-id (caddr form))
+               (system-id (car (cdddr form))))
+           (put-string port "<!DOCTYPE")
+           (when (and name (not (string=? name ""))) (put-string port " ")
+                 (put-string port name))
+           (when public-id
+             (put-string port " PUBLIC \"")
+             (put-string port public-id)
              (put-string port "\""))
-           (sxml-attributes form))
-         (put-string port ">")
-         (unless (string-set-member? void-elements name)
-           (for-each (lambda (child) (sxml-html-write child port raw-child?))
-                     children)
-           (put-string port "</")
+           (when system-id
+             (put-string port (if public-id " \"" " SYSTEM \""))
+             (put-string port system-id)
+             (put-string port "\""))
+           (put-string port ">")))
+        (else
+         (let* ((name (symbol->string (car form)))
+                (children (sxml-children form))
+                (raw-child? (string-set-member? raw-text-element-names name)))
+           (put-string port "<")
            (put-string port name)
-           (put-string port ">"))))))
+           (for-each
+             (lambda (attribute)
+               (put-string port " ")
+               (put-string port (symbol->string (car attribute)))
+               (put-string port "=\"")
+               (put-string port (html-attribute-escape (car (cdr attribute))))
+               (put-string port "\""))
+             (sxml-attributes form))
+           (put-string port ">")
+           (unless (string-set-member? void-elements name)
+             (for-each (lambda (child) (sxml-html-write child port raw-child?))
+                       children)
+             (put-string port "</")
+             (put-string port name)
+             (put-string port ">")))))))
 
   (include "letloop/html/justhtml.check.scm"))

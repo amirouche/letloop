@@ -10,173 +10,203 @@
 ;; submodules/justhtml/tests/justhtml-tests/entities.test plus a few
 ;; direct checks of the numeric edge cases.
 
-(define (check-decode input expected)
-  (let ((actual (html-entity-text-decode input #f)))
-    (unless (string=? actual expected)
-      (error 'html-entity-text-decode "mismatch" input expected actual))
-    #t))
+(define check-decode
+  (lambda (input expected)
+    (let ((actual (html-entity-text-decode input #f)))
+      (unless (string=? actual expected)
+        (error 'html-entity-text-decode "mismatch" input expected actual))
+      #t)))
 
-(define (check-decode-attribute input expected)
-  (let ((actual (html-entity-text-decode input #t)))
-    (unless (string=? actual expected)
-      (error 'html-entity-text-decode "mismatch in attribute" input expected actual))
-    #t))
+(define check-decode-attribute
+  (lambda (input expected)
+    (let ((actual (html-entity-text-decode input #t)))
+      (unless (string=? actual expected)
+        (error 'html-entity-text-decode "mismatch in attribute" input expected actual))
+      #t)))
 
-(define (~check-entities-numeric-missing-semicolon)
-  (check-decode "&#65" "A"))
+(define ~check-entities-numeric-missing-semicolon
+  (lambda ()
+    (check-decode "&#65" "A")))
 
-(define (~check-entities-numeric-hexadecimal-c1)
-  (check-decode "&#x80" (string (integer->char #x20AC))))
+(define ~check-entities-numeric-hexadecimal-c1
+  (lambda ()
+    (check-decode "&#x80" (string (integer->char #x20AC)))))
 
-(define (~check-entities-numeric-noncharacter)
-  (check-decode "&#xFDD0;" (string (integer->char #xFDD0))))
+(define ~check-entities-numeric-noncharacter
+  (lambda ()
+    (check-decode "&#xFDD0;" (string (integer->char #xFDD0)))))
 
-(define (~check-entities-legacy-prefix-with-semicolon)
-  (check-decode "&notit;" (string-append (string (integer->char #xAC)) "it;")))
+(define ~check-entities-legacy-prefix-with-semicolon
+  (lambda ()
+    (check-decode "&notit;" (string-append (string (integer->char #xAC)) "it;"))))
 
-(define (~check-entities-legacy-without-semicolon)
-  (check-decode "&not" (string (integer->char #xAC))))
+(define ~check-entities-legacy-without-semicolon
+  (lambda ()
+    (check-decode "&not" (string (integer->char #xAC)))))
 
-(define (~check-entities-legacy-prefix-without-semicolon)
-  (check-decode "&notit" (string-append (string (integer->char #xAC)) "it")))
+(define ~check-entities-legacy-prefix-without-semicolon
+  (lambda ()
+    (check-decode "&notit" (string-append (string (integer->char #xAC)) "it"))))
 
-(define (~check-entities-named-basic)
-  (check-decode "&amp;" "&")
-  (check-decode "&lt;&gt;" "<>")
-  (check-decode "a&nbsp;b" (string-append "a" (string (integer->char #xA0)) "b"))
-  (check-decode "&notin;" (string (integer->char #x2209))))
+(define ~check-entities-named-basic
+  (lambda ()
+    (check-decode "&amp;" "&")
+    (check-decode "&lt;&gt;" "<>")
+    (check-decode "a&nbsp;b" (string-append "a" (string (integer->char #xA0)) "b"))
+    (check-decode "&notin;" (string (integer->char #x2209)))))
 
-(define (~check-entities-numeric-out-of-range)
-  (check-decode "&#x110000;" replacement-character-string))
+(define ~check-entities-numeric-out-of-range
+  (lambda ()
+    (check-decode "&#x110000;" replacement-character-string)))
 
-(define (~check-entities-numeric-surrogate)
-  (check-decode "&#xD800;" replacement-character-string))
+(define ~check-entities-numeric-surrogate
+  (lambda ()
+    (check-decode "&#xD800;" replacement-character-string)))
 
-(define (~check-entities-numeric-null)
-  (check-decode "&#0;" replacement-character-string))
+(define ~check-entities-numeric-null
+  (lambda ()
+    (check-decode "&#0;" replacement-character-string)))
 
-(define (~check-entities-attribute-ambiguous-ampersand)
-  (check-decode-attribute "&notit" "&notit")
-  (check-decode-attribute "&not=x" "&not=x"))
+(define ~check-entities-attribute-ambiguous-ampersand
+  (lambda ()
+    (check-decode-attribute "&notit" "&notit")
+    (check-decode-attribute "&not=x" "&not=x")))
 
-(define (~check-entities-attribute-semicolon-terminated)
-  (check-decode-attribute "&amp;" "&")
-  (check-decode-attribute "&notit;" "&notit;"))
+(define ~check-entities-attribute-semicolon-terminated
+  (lambda ()
+    (check-decode-attribute "&amp;" "&")
+    (check-decode-attribute "&notit;" "&notit;")))
 
-(define (~check-entities-bare-ampersand)
-  (check-decode "&" "&")
-  (check-decode "a & b" "a & b")
-  (check-decode "&#" "&#")
-  (check-decode "&#x" "&#x"))
+(define ~check-entities-bare-ampersand
+  (lambda ()
+    (check-decode "&" "&")
+    (check-decode "a & b" "a & b")
+    (check-decode "&#" "&#")
+    (check-decode "&#x" "&#x")))
 
-(define (~check-entities-multi-character-value)
-  ;; "NotEqualTilde;" decodes to two code points.
-  (check-decode "&NotEqualTilde;"
-                (string (integer->char #x2242) (integer->char #x338))))
+(define ~check-entities-multi-character-value
+  (lambda ()
+    ;; "NotEqualTilde;" decodes to two code points.
+    (check-decode "&NotEqualTilde;"
+                  (string (integer->char #x2242) (integer->char #x338)))))
 
 ;; Tests
 
-(define (check-scanner-equal name actual expected)
-  (unless (equal? actual expected)
-    (error name "mismatch" expected actual))
-  #t)
+(define check-scanner-equal
+  (lambda (name actual expected)
+    (unless (equal? actual expected)
+      (error name "mismatch" expected actual))
+    #t))
 
-(define (~check-scanner-ascii-find)
-  (check-scanner-equal 'html-scanner-ascii-find
-               (html-scanner-ascii-find "abc</SCRIPT>" "</script" 0 12) 3)
-  (check-scanner-equal 'html-scanner-ascii-find
-               (html-scanner-ascii-find "abc</SCRIPT>" "</style" 0 12) #f)
-  ;; The needle must fit inside the bound.
-  (check-scanner-equal 'html-scanner-ascii-find
-               (html-scanner-ascii-find "abc</SCRIPT>" "</script" 0 8) #f))
+(define ~check-scanner-ascii-find
+  (lambda ()
+    (check-scanner-equal 'html-scanner-ascii-find
+                 (html-scanner-ascii-find "abc</SCRIPT>" "</script" 0 12) 3)
+    (check-scanner-equal 'html-scanner-ascii-find
+                 (html-scanner-ascii-find "abc</SCRIPT>" "</style" 0 12) #f)
+    ;; The needle must fit inside the bound.
+    (check-scanner-equal 'html-scanner-ascii-find
+                 (html-scanner-ascii-find "abc</SCRIPT>" "</script" 0 8) #f)))
 
-(define (~check-scanner-ascii-startswith)
-  (check-scanner-equal 'html-scanner-ascii-startswith?
-               (html-scanner-ascii-startswith? "<!DOCTYPE html>" "<!doctype" 0 15) #t)
-  (check-scanner-equal 'html-scanner-ascii-startswith?
-               (html-scanner-ascii-startswith? "<!DOCTYPE html>" "<!doctype" 0 5) #f))
+(define ~check-scanner-ascii-startswith
+  (lambda ()
+    (check-scanner-equal 'html-scanner-ascii-startswith?
+                 (html-scanner-ascii-startswith? "<!DOCTYPE html>" "<!doctype" 0 15) #t)
+    (check-scanner-equal 'html-scanner-ascii-startswith?
+                 (html-scanner-ascii-startswith? "<!DOCTYPE html>" "<!doctype" 0 5) #f)))
 
-(define (~check-scanner-ascii-rfind)
-  (check-scanner-equal 'html-scanner-ascii-rfind
-               (html-scanner-ascii-rfind "aXaXa" "x" 0 5) 3)
-  (check-scanner-equal 'html-scanner-ascii-rfind
-               (html-scanner-ascii-rfind "aXaXa" "x" 0 3) 1))
+(define ~check-scanner-ascii-rfind
+  (lambda ()
+    (check-scanner-equal 'html-scanner-ascii-rfind
+                 (html-scanner-ascii-rfind "aXaXa" "x" 0 5) 3)
+    (check-scanner-equal 'html-scanner-ascii-rfind
+                 (html-scanner-ascii-rfind "aXaXa" "x" 0 3) 1)))
 
-(define (~check-scanner-tag-end-unquoted)
-  (check-scanner-equal 'html-scanner-tag-end-find
-               (html-scanner-tag-end-find "<div class=a>rest" 4 17) 12))
+(define ~check-scanner-tag-end-unquoted
+  (lambda ()
+    (check-scanner-equal 'html-scanner-tag-end-find
+                 (html-scanner-tag-end-find "<div class=a>rest" 4 17) 12)))
 
-(define (~check-scanner-tag-end-quoted)
-  ;; The ">" inside the quoted attribute value must be skipped.
-  (check-scanner-equal 'html-scanner-tag-end-find
-               (html-scanner-tag-end-find "<div title=\"a>b\">x" 4 18) 16)
-  (check-scanner-equal 'html-scanner-tag-end-find
-               (html-scanner-tag-end-find "<div title='a>b'>x" 4 18) 16))
+(define ~check-scanner-tag-end-quoted
+  (lambda ()
+    ;; The ">" inside the quoted attribute value must be skipped.
+    (check-scanner-equal 'html-scanner-tag-end-find
+                 (html-scanner-tag-end-find "<div title=\"a>b\">x" 4 18) 16)
+    (check-scanner-equal 'html-scanner-tag-end-find
+                 (html-scanner-tag-end-find "<div title='a>b'>x" 4 18) 16)))
 
-(define (~check-scanner-tag-end-missing)
-  (check-scanner-equal 'html-scanner-tag-end-find
-               (html-scanner-tag-end-find "<div title=\"a>b" 4 15) #f))
+(define ~check-scanner-tag-end-missing
+  (lambda ()
+    (check-scanner-equal 'html-scanner-tag-end-find
+                 (html-scanner-tag-end-find "<div title=\"a>b" 4 15) #f)))
 
-(define (~check-scanner-rawtext-end-tag)
-  (call-with-values
-    (lambda ()
-      (html-scanner-rawtext-end-tag-find "abc</STYLE>d" "style" 0 12))
-    (lambda (close next)
-      (check-scanner-equal 'html-scanner-rawtext-end-tag-find (list close next)
-                   (list 3 11)))))
-
-(define (~check-scanner-rawtext-end-tag-prefix)
-  ;; "</styles" is not an end tag for "style"; the real one follows.
-  (call-with-values
-    (lambda ()
-      (html-scanner-rawtext-end-tag-find "a</styles></style>" "style" 0 18))
-    (lambda (close next)
-      (check-scanner-equal 'html-scanner-rawtext-end-tag-find (list close next)
-                   (list 10 18)))))
-
-(define (~check-scanner-rawtext-end-tag-missing)
-  (call-with-values
-    (lambda ()
-      (html-scanner-rawtext-end-tag-find "abc" "style" 0 3))
-    (lambda (close next)
-      (check-scanner-equal 'html-scanner-rawtext-end-tag-find (list close next)
-                   (list #f 3)))))
-
-(define (~check-scanner-script-end-tag-plain)
-  (let ((text "var a = 1;</script>tail"))
+(define ~check-scanner-rawtext-end-tag
+  (lambda ()
     (call-with-values
-      (lambda () (html-scanner-script-end-tag-find text 0 (string-length text)))
+      (lambda ()
+        (html-scanner-rawtext-end-tag-find "abc</STYLE>d" "style" 0 12))
       (lambda (close next)
-        (check-scanner-equal 'html-scanner-script-end-tag-find (list close next)
-                     (list 10 19))))))
+        (check-scanner-equal 'html-scanner-rawtext-end-tag-find (list close next)
+                     (list 3 11))))))
 
-(define (~check-scanner-script-end-tag-escaped)
-  ;; Inside "<!-- ... -->" a "</script" still terminates script data, but
-  ;; the escaped state must be entered and left across the "--" boundary.
-  (let ((text "<!--a--></script>"))
+(define ~check-scanner-rawtext-end-tag-prefix
+  (lambda ()
+    ;; "</styles" is not an end tag for "style"; the real one follows.
     (call-with-values
-      (lambda () (html-scanner-script-end-tag-find text 0 (string-length text)))
+      (lambda ()
+        (html-scanner-rawtext-end-tag-find "a</styles></style>" "style" 0 18))
       (lambda (close next)
-        (check-scanner-equal 'html-scanner-script-end-tag-find (list close next)
-                     (list 8 17))))))
+        (check-scanner-equal 'html-scanner-rawtext-end-tag-find (list close next)
+                     (list 10 18))))))
 
-(define (~check-scanner-script-end-tag-double-escaped)
-  ;; In script-data-double-escaped state the first "</script" only leaves
-  ;; the double escape; the second one ends the script data.
-  (let ((text "<!--<script></script>--></script>"))
+(define ~check-scanner-rawtext-end-tag-missing
+  (lambda ()
     (call-with-values
-      (lambda () (html-scanner-script-end-tag-find text 0 (string-length text)))
+      (lambda ()
+        (html-scanner-rawtext-end-tag-find "abc" "style" 0 3))
       (lambda (close next)
-        (check-scanner-equal 'html-scanner-script-end-tag-find (list close next)
-                     (list 24 33))))))
+        (check-scanner-equal 'html-scanner-rawtext-end-tag-find (list close next)
+                     (list #f 3))))))
 
-(define (~check-scanner-script-start-marker)
-  (let ((text "a<script>b"))
-    (check-scanner-equal 'html-scanner-script-start-marker-find
-                 (html-scanner-script-start-marker-find text 0 10 10) 1))
-  (let ((text "a<scriptx>b"))
-    (check-scanner-equal 'html-scanner-script-start-marker-find
-                 (html-scanner-script-start-marker-find text 0 11 11) #f)))
+(define ~check-scanner-script-end-tag-plain
+  (lambda ()
+    (let ((text "var a = 1;</script>tail"))
+      (call-with-values
+        (lambda () (html-scanner-script-end-tag-find text 0 (string-length text)))
+        (lambda (close next)
+          (check-scanner-equal 'html-scanner-script-end-tag-find (list close next)
+                       (list 10 19)))))))
+
+(define ~check-scanner-script-end-tag-escaped
+  (lambda ()
+    ;; Inside "<!-- ... -->" a "</script" still terminates script data, but
+    ;; the escaped state must be entered and left across the "--" boundary.
+    (let ((text "<!--a--></script>"))
+      (call-with-values
+        (lambda () (html-scanner-script-end-tag-find text 0 (string-length text)))
+        (lambda (close next)
+          (check-scanner-equal 'html-scanner-script-end-tag-find (list close next)
+                       (list 8 17)))))))
+
+(define ~check-scanner-script-end-tag-double-escaped
+  (lambda ()
+    ;; In script-data-double-escaped state the first "</script" only leaves
+    ;; the double escape; the second one ends the script data.
+    (let ((text "<!--<script></script>--></script>"))
+      (call-with-values
+        (lambda () (html-scanner-script-end-tag-find text 0 (string-length text)))
+        (lambda (close next)
+          (check-scanner-equal 'html-scanner-script-end-tag-find (list close next)
+                       (list 24 33)))))))
+
+(define ~check-scanner-script-start-marker
+  (lambda ()
+    (let ((text "a<script>b"))
+      (check-scanner-equal 'html-scanner-script-start-marker-find
+                   (html-scanner-script-start-marker-find text 0 10 10) 1))
+    (let ((text "a<scriptx>b"))
+      (check-scanner-equal 'html-scanner-script-start-marker-find
+                   (html-scanner-script-start-marker-find text 0 11 11) #f))))
 
 ;; Tests
 ;;
@@ -187,361 +217,390 @@
 ;; actually produces (checked against the library) rather than the value in
 ;; the file; see the comments at those cases.
 
-(define (token->list token)
-  (cond
-    ((token-start-tag? token)
-     (list 'start (token-start-tag-name token)
-           (token-start-tag-attributes token)
-           (token-start-tag-self-closing? token)))
-    ((token-end-tag? token) (list 'end (token-end-tag-name token)))
-    ((token-character? token) (list 'char (token-character-text token)))
-    ((token-comment? token) (list 'comment (token-comment-text token)))
-    ((token-processing-instruction? token)
-     (list 'processing-instruction
-           (token-processing-instruction-target token)
-           (token-processing-instruction-data token)))
-    ((token-doctype? token)
-     (list 'doctype (token-doctype-name token)
-           (token-doctype-public-id token)
-           (token-doctype-system-id token)
-           (token-doctype-force-quirks? token)))
-    (else (list 'eof))))
+(define token->list
+  (lambda (token)
+    (cond
+      ((token-start-tag? token)
+       (list 'start (token-start-tag-name token)
+             (token-start-tag-attributes token)
+             (token-start-tag-self-closing? token)))
+      ((token-end-tag? token) (list 'end (token-end-tag-name token)))
+      ((token-character? token) (list 'char (token-character-text token)))
+      ((token-comment? token) (list 'comment (token-comment-text token)))
+      ((token-processing-instruction? token)
+       (list 'processing-instruction
+             (token-processing-instruction-target token)
+             (token-processing-instruction-data token)))
+      ((token-doctype? token)
+       (list 'doctype (token-doctype-name token)
+             (token-doctype-public-id token)
+             (token-doctype-system-id token)
+             (token-doctype-force-quirks? token)))
+      (else (list 'eof)))))
 
 ;; Adjacent character tokens are merged so expectations can be written the
 ;; way the html5lib fixtures write them.
-(define (tokens->lists tokens)
-  (let loop ((tokens tokens) (result '()))
-    (cond
-      ((null? tokens) (reverse result))
-      ((and (token-character? (car tokens))
-            (pair? result)
-            (eq? (car (car result)) 'char))
-       (loop (cdr tokens)
-             (cons (list 'char (string-append (cadr (car result))
-                                              (token-character-text (car tokens))))
-                   (cdr result))))
-      (else (loop (cdr tokens) (cons (token->list (car tokens)) result))))))
+(define tokens->lists
+  (lambda (tokens)
+    (let loop ((tokens tokens) (result '()))
+      (cond
+        ((null? tokens) (reverse result))
+        ((and (token-character? (car tokens))
+              (pair? result)
+              (eq? (car (car result)) 'char))
+         (loop (cdr tokens)
+               (cons (list 'char (string-append (cadr (car result))
+                                                (token-character-text (car tokens))))
+                     (cdr result))))
+        (else (loop (cdr tokens) (cons (token->list (car tokens)) result)))))))
 
-(define (check-tokens input expected)
-  (let ((actual (tokens->lists (html-tokenize input))))
-    (unless (equal? actual expected)
-      (error 'html-tokenize "mismatch" input expected actual))
+(define check-tokens
+  (lambda (input expected)
+    (let ((actual (tokens->lists (html-tokenize input))))
+      (unless (equal? actual expected)
+        (error 'html-tokenize "mismatch" input expected actual))
+      #t)))
+
+(define ~check-tokenizer-preprocessing
+  (lambda ()
+    ;; BOM removal, CR and CRLF normalization.
+    (check-tokens (string-append (string (integer->char #xFEFF)) "<div>")
+                  '((start "div" () #f)))
+    (check-tokens "abc\rdef" '((char "abc\ndef")))
+    (check-tokens "\r\n" '((char "\n")))
+    ;; U+0000 passes through the data state unchanged.
+    (check-tokens (string #\a #\nul #\b)
+                  (list (list 'char (string #\a #\nul #\b))))))
+
+(define ~check-tokenizer-basic-tags
+  (lambda ()
+    (check-tokens "<div>" '((start "div" () #f)))
+    (check-tokens "<DIV>" '((start "div" () #f)))
+    (check-tokens "</div>" '((end "div")))
+    (check-tokens "<br/>" '((start "br" () #t)))
+    (check-tokens "</>" '())
+    (check-tokens "</?" '((comment "?")))
+    (check-tokens "<?foo>" '((processing-instruction "foo" "")))
+    (check-tokens "<?foo bar>" '((processing-instruction "foo" "bar")))
+    ;; An unterminated processing instruction emits nothing, unless it looks
+    ;; like an XML declaration or does not start with a name.
+    (check-tokens "<?foo" '())
+    (check-tokens "<?xml" '((comment "?xml")))
+    (check-tokens "<?#abc" '((comment "?#abc")))
+    (check-tokens "<?\t" '((comment "?\t")))
+    (check-tokens "<?xml version=\"1.0\"?>" '((comment "?xml version=\"1.0\"?")))
+    (check-tokens "<" '((char "<")))
+    (check-tokens "</" '((char "</")))
+    (check-tokens (string #\< #\nul #\d #\i #\v #\>)
+                  (list (list 'char (string-append
+                                      (string #\< (integer->char #xFFFD))
+                                      "div>"))))
+    (check-tokens "<div\r>" '((start "div" () #f)))
+    (check-tokens "<div\n>" '((start "div" () #f)))
+    (check-tokens (string #\< (integer->char #xFDD0))
+                  (list (list 'char (string #\< (integer->char #xFDD0)))))
+    (check-tokens (string #\a #\b (integer->char #xFDD0) #\c #\d)
+                  (list (list 'char (string #\a #\b (integer->char #xFDD0) #\c #\d))))))
+
+(define ~check-tokenizer-attributes
+  (lambda ()
+    (check-tokens "<div attr>" '((start "div" (("attr" . "")) #f)))
+    (check-tokens "<div\r\nattr>" '((start "div" (("attr" . "")) #f)))
+    (check-tokens "<div attr\r>" '((start "div" (("attr" . "")) #f)))
+    (check-tokens "<div attr\r >" '((start "div" (("attr" . "")) #f)))
+    (check-tokens "<div attr\r\n>" '((start "div" (("attr" . "")) #f)))
+    (check-tokens "<div attr\r\t>" '((start "div" (("attr" . "")) #f)))
+    (check-tokens "<div attr\n>" '((start "div" (("attr" . "")) #f)))
+    (check-tokens "<div \r\n attr>" '((start "div" (("attr" . "")) #f)))
+    (check-tokens "<div attr=\"a\rb\">" '((start "div" (("attr" . "a\nb")) #f)))
+    (check-tokens "<div attr='a\rb'>" '((start "div" (("attr" . "a\nb")) #f)))
+    (check-tokens "<div attr=\"a\nb\">" '((start "div" (("attr" . "a\nb")) #f)))
+    (check-tokens "<div attr='a\nb'>" '((start "div" (("attr" . "a\nb")) #f)))
+    (check-tokens "<div attr=abc>" '((start "div" (("attr" . "abc")) #f)))
+    (check-tokens "<div /a>" '((start "div" (("a" . "")) #f)))
+    (check-tokens "<div a<b>" '((start "div" (("a<b" . "")) #f)))
+    (check-tokens "<div\r=abc>" '((start "div" (("=abc" . "")) #f)))
+    (check-tokens "<div foo=\"" '())
+    (check-tokens "<div foo='" '())
+    (check-tokens "<div a=>" '((start "div" (("a" . "")) #f)))
+    ;; U+0000 becomes U+FFFD in attribute names and values.
+    (let ((r (string (integer->char #xFFFD))))
+      (check-tokens (string-append "<div foo=\"a" (string #\nul) "b\">")
+                    (list (list 'start "div" (list (cons "foo" (string-append "a" r "b"))) #f)))
+      (check-tokens (string-append "<div foo='a" (string #\nul) "b'>")
+                    (list (list 'start "div" (list (cons "foo" (string-append "a" r "b"))) #f)))
+      (check-tokens (string-append "<div a" (string #\nul) "b='c'>")
+                    (list (list 'start "div" (list (cons (string-append "a" r "b") "c")) #f))))
+    ;; First attribute wins on duplicates.
+    (check-tokens "<div a=1 a=2>" '((start "div" (("a" . "1")) #f)))
+    ;; Attribute values are entity decoded in attribute context.
+    (check-tokens "<div a=\"&amp;\">" '((start "div" (("a" . "&")) #f)))
+    (check-tokens "<div a=\"&notit\">" '((start "div" (("a" . "&notit")) #f)))))
+
+(define ~check-tokenizer-comments
+  (lambda ()
+    (check-tokens "<!--x-->" '((comment "x")))
+    (check-tokens "<!---->" '((comment "")))
+    (check-tokens "<!-->" '((comment "")))
+    (check-tokens "<!-- test\rcomment -->" '((comment " test\ncomment ")))
+    (check-tokens "<!----!\r\n" '((comment "--!\n")))
+    (check-tokens "<!--a--!>" '((comment "a")))
+    (check-tokens "<!x>" '((comment "x")))))
+
+(define ~check-tokenizer-doctype
+  (lambda ()
+    (check-tokens "<!DOCTYPE html>" '((doctype "html" #f #f #f)))
+    (check-tokens "<!doctype HTML>" '((doctype "html" #f #f #f)))
+    (check-tokens "<!DOCTYPE>" '((doctype #f #f #f #t)))
+    (check-tokens "<!DOCTYPE html PUBLIC \"a\" \"b\">"
+                  '((doctype "html" "a" "b" #f)))
+    (check-tokens "<!DOCTYPE html SYSTEM 'b'>" '((doctype "html" #f "b" #f)))
+    (check-tokens "<!DOCTYPE html junk>" '((doctype "html" #f #f #t)))))
+
+(define ~check-tokenizer-rawtext
+  (lambda ()
+    (check-tokens "<style>a<b</style>"
+                  '((start "style" () #f) (char "a<b") (end "style")))
+    (check-tokens "<style>a</styles></style>"
+                  '((start "style" () #f) (char "a</styles>") (end "style")))
+    (check-tokens "<xmp>&amp;</xmp>"
+                  '((start "xmp" () #f) (char "&amp;") (end "xmp")))
+    (check-tokens "<plaintext>a</plaintext>b"
+                  '((start "plaintext" () #f) (char "a</plaintext>b")))))
+
+(define ~check-tokenizer-script-data
+  (lambda ()
+    (check-tokens "<script>var a = 1;</script>"
+                  '((start "script" () #f) (char "var a = 1;") (end "script")))
+    ;; tokenizer_states.test records "<!--a--<<b" for this input; the value
+    ;; below is what justhtml actually produces and what the spec requires.
+    (check-tokens "<script><!--a--<b</script>"
+                  '((start "script" () #f) (char "<!--a--<b") (end "script")))
+    (check-tokens (string-append "<script><!---" (string #\nul))
+                  (list '(start "script" () #f)
+                        (list 'char (string-append "<!---"
+                                                   (string (integer->char #xFFFD))))))
+    (check-tokens "<script><!--<script></script>--></script>"
+                  '((start "script" () #f)
+                    (char "<!--<script></script>-->")
+                    (end "script")))
+    ;; U+0000 in a tag name is replaced, and the RAWTEXT switch keys off the
+    ;; original tag name.
+    (check-tokens (string-append "<script" (string #\nul) ">x</script>")
+                  (list (list 'start (string-append "script"
+                                                    (string (integer->char #xFFFD)))
+                              '() #f)
+                        '(char "x")
+                        '(end "script")))))
+
+(define ~check-tokenizer-rcdata
+  (lambda ()
+    (check-tokens "<title>a&amp;b</title>"
+                  '((start "title" () #f) (char "a&b") (end "title")))
+    (check-tokens "<textarea><b></textarea>"
+                  '((start "textarea" () #f) (char "<b>") (end "textarea")))))
+
+(define ~check-tokenizer-cdata
+  (lambda ()
+    ;; CDATA sections are only recognised when the adjusted current node is a
+    ;; foreign element; otherwise they become bogus comments.
+    (check-tokens "<![CDATA[x]]>" '((comment "[CDATA[x]]")))
+    (let ((tokenizer (html-tokenizer-make "<![CDATA[x]]>y")))
+      (html-tokenizer-foreign-set! tokenizer #t)
+      (let loop ((tokens '()))
+        (let ((token (html-tokenizer-next tokenizer)))
+          (if (or (not token) (token-end-of-file? token))
+            (let ((actual (tokens->lists (reverse tokens))))
+              (unless (equal? actual '((char "xy")))
+                (error 'html-tokenize "cdata mismatch" actual))
+              #t)
+            (loop (cons token tokens))))))))
+
+(define ~check-tokenizer-state-transitions
+  (lambda ()
+    ;; tokenizer_state_transitions.test
+    (check-tokens "<title >" '((start "title" () #f)))
+    (check-tokens "<title id>" '((start "title" (("id" . "")) #f)))
+    (check-tokens "<title id\\\">" '((start "title" (("id\\\"" . "")) #f)))
+    (check-tokens "<title id >" '((start "title" (("id" . "")) #f)))
+    (check-tokens "<title id=>" '((start "title" (("id" . "")) #f)))))
+
+(define ~check-tokenizer-fixture-states
+  (lambda ()
+    ;; The remaining tokenizer_states.test cases not covered above.
+    (check-tokens "abc\rdef" '((char "abc\ndef")))
+    (check-tokens (string #\a #\newline #\b (integer->char #xFDD0) #\c)
+                  (list (list 'char (string #\a #\newline #\b
+                                            (integer->char #xFDD0) #\c))))
     #t))
-
-(define (~check-tokenizer-preprocessing)
-  ;; BOM removal, CR and CRLF normalization.
-  (check-tokens (string-append (string (integer->char #xFEFF)) "<div>")
-                '((start "div" () #f)))
-  (check-tokens "abc\rdef" '((char "abc\ndef")))
-  (check-tokens "\r\n" '((char "\n")))
-  ;; U+0000 passes through the data state unchanged.
-  (check-tokens (string #\a #\nul #\b)
-                (list (list 'char (string #\a #\nul #\b)))))
-
-(define (~check-tokenizer-basic-tags)
-  (check-tokens "<div>" '((start "div" () #f)))
-  (check-tokens "<DIV>" '((start "div" () #f)))
-  (check-tokens "</div>" '((end "div")))
-  (check-tokens "<br/>" '((start "br" () #t)))
-  (check-tokens "</>" '())
-  (check-tokens "</?" '((comment "?")))
-  (check-tokens "<?foo>" '((processing-instruction "foo" "")))
-  (check-tokens "<?foo bar>" '((processing-instruction "foo" "bar")))
-  ;; An unterminated processing instruction emits nothing, unless it looks
-  ;; like an XML declaration or does not start with a name.
-  (check-tokens "<?foo" '())
-  (check-tokens "<?xml" '((comment "?xml")))
-  (check-tokens "<?#abc" '((comment "?#abc")))
-  (check-tokens "<?\t" '((comment "?\t")))
-  (check-tokens "<?xml version=\"1.0\"?>" '((comment "?xml version=\"1.0\"?")))
-  (check-tokens "<" '((char "<")))
-  (check-tokens "</" '((char "</")))
-  (check-tokens (string #\< #\nul #\d #\i #\v #\>)
-                (list (list 'char (string-append
-                                    (string #\< (integer->char #xFFFD))
-                                    "div>"))))
-  (check-tokens "<div\r>" '((start "div" () #f)))
-  (check-tokens "<div\n>" '((start "div" () #f)))
-  (check-tokens (string #\< (integer->char #xFDD0))
-                (list (list 'char (string #\< (integer->char #xFDD0)))))
-  (check-tokens (string #\a #\b (integer->char #xFDD0) #\c #\d)
-                (list (list 'char (string #\a #\b (integer->char #xFDD0) #\c #\d)))))
-
-(define (~check-tokenizer-attributes)
-  (check-tokens "<div attr>" '((start "div" (("attr" . "")) #f)))
-  (check-tokens "<div\r\nattr>" '((start "div" (("attr" . "")) #f)))
-  (check-tokens "<div attr\r>" '((start "div" (("attr" . "")) #f)))
-  (check-tokens "<div attr\r >" '((start "div" (("attr" . "")) #f)))
-  (check-tokens "<div attr\r\n>" '((start "div" (("attr" . "")) #f)))
-  (check-tokens "<div attr\r\t>" '((start "div" (("attr" . "")) #f)))
-  (check-tokens "<div attr\n>" '((start "div" (("attr" . "")) #f)))
-  (check-tokens "<div \r\n attr>" '((start "div" (("attr" . "")) #f)))
-  (check-tokens "<div attr=\"a\rb\">" '((start "div" (("attr" . "a\nb")) #f)))
-  (check-tokens "<div attr='a\rb'>" '((start "div" (("attr" . "a\nb")) #f)))
-  (check-tokens "<div attr=\"a\nb\">" '((start "div" (("attr" . "a\nb")) #f)))
-  (check-tokens "<div attr='a\nb'>" '((start "div" (("attr" . "a\nb")) #f)))
-  (check-tokens "<div attr=abc>" '((start "div" (("attr" . "abc")) #f)))
-  (check-tokens "<div /a>" '((start "div" (("a" . "")) #f)))
-  (check-tokens "<div a<b>" '((start "div" (("a<b" . "")) #f)))
-  (check-tokens "<div\r=abc>" '((start "div" (("=abc" . "")) #f)))
-  (check-tokens "<div foo=\"" '())
-  (check-tokens "<div foo='" '())
-  (check-tokens "<div a=>" '((start "div" (("a" . "")) #f)))
-  ;; U+0000 becomes U+FFFD in attribute names and values.
-  (let ((r (string (integer->char #xFFFD))))
-    (check-tokens (string-append "<div foo=\"a" (string #\nul) "b\">")
-                  (list (list 'start "div" (list (cons "foo" (string-append "a" r "b"))) #f)))
-    (check-tokens (string-append "<div foo='a" (string #\nul) "b'>")
-                  (list (list 'start "div" (list (cons "foo" (string-append "a" r "b"))) #f)))
-    (check-tokens (string-append "<div a" (string #\nul) "b='c'>")
-                  (list (list 'start "div" (list (cons (string-append "a" r "b") "c")) #f))))
-  ;; First attribute wins on duplicates.
-  (check-tokens "<div a=1 a=2>" '((start "div" (("a" . "1")) #f)))
-  ;; Attribute values are entity decoded in attribute context.
-  (check-tokens "<div a=\"&amp;\">" '((start "div" (("a" . "&")) #f)))
-  (check-tokens "<div a=\"&notit\">" '((start "div" (("a" . "&notit")) #f))))
-
-(define (~check-tokenizer-comments)
-  (check-tokens "<!--x-->" '((comment "x")))
-  (check-tokens "<!---->" '((comment "")))
-  (check-tokens "<!-->" '((comment "")))
-  (check-tokens "<!-- test\rcomment -->" '((comment " test\ncomment ")))
-  (check-tokens "<!----!\r\n" '((comment "--!\n")))
-  (check-tokens "<!--a--!>" '((comment "a")))
-  (check-tokens "<!x>" '((comment "x"))))
-
-(define (~check-tokenizer-doctype)
-  (check-tokens "<!DOCTYPE html>" '((doctype "html" #f #f #f)))
-  (check-tokens "<!doctype HTML>" '((doctype "html" #f #f #f)))
-  (check-tokens "<!DOCTYPE>" '((doctype #f #f #f #t)))
-  (check-tokens "<!DOCTYPE html PUBLIC \"a\" \"b\">"
-                '((doctype "html" "a" "b" #f)))
-  (check-tokens "<!DOCTYPE html SYSTEM 'b'>" '((doctype "html" #f "b" #f)))
-  (check-tokens "<!DOCTYPE html junk>" '((doctype "html" #f #f #t))))
-
-(define (~check-tokenizer-rawtext)
-  (check-tokens "<style>a<b</style>"
-                '((start "style" () #f) (char "a<b") (end "style")))
-  (check-tokens "<style>a</styles></style>"
-                '((start "style" () #f) (char "a</styles>") (end "style")))
-  (check-tokens "<xmp>&amp;</xmp>"
-                '((start "xmp" () #f) (char "&amp;") (end "xmp")))
-  (check-tokens "<plaintext>a</plaintext>b"
-                '((start "plaintext" () #f) (char "a</plaintext>b"))))
-
-(define (~check-tokenizer-script-data)
-  (check-tokens "<script>var a = 1;</script>"
-                '((start "script" () #f) (char "var a = 1;") (end "script")))
-  ;; tokenizer_states.test records "<!--a--<<b" for this input; the value
-  ;; below is what justhtml actually produces and what the spec requires.
-  (check-tokens "<script><!--a--<b</script>"
-                '((start "script" () #f) (char "<!--a--<b") (end "script")))
-  (check-tokens (string-append "<script><!---" (string #\nul))
-                (list '(start "script" () #f)
-                      (list 'char (string-append "<!---"
-                                                 (string (integer->char #xFFFD))))))
-  (check-tokens "<script><!--<script></script>--></script>"
-                '((start "script" () #f)
-                  (char "<!--<script></script>-->")
-                  (end "script")))
-  ;; U+0000 in a tag name is replaced, and the RAWTEXT switch keys off the
-  ;; original tag name.
-  (check-tokens (string-append "<script" (string #\nul) ">x</script>")
-                (list (list 'start (string-append "script"
-                                                  (string (integer->char #xFFFD)))
-                            '() #f)
-                      '(char "x")
-                      '(end "script"))))
-
-(define (~check-tokenizer-rcdata)
-  (check-tokens "<title>a&amp;b</title>"
-                '((start "title" () #f) (char "a&b") (end "title")))
-  (check-tokens "<textarea><b></textarea>"
-                '((start "textarea" () #f) (char "<b>") (end "textarea"))))
-
-(define (~check-tokenizer-cdata)
-  ;; CDATA sections are only recognised when the adjusted current node is a
-  ;; foreign element; otherwise they become bogus comments.
-  (check-tokens "<![CDATA[x]]>" '((comment "[CDATA[x]]")))
-  (let ((tokenizer (html-tokenizer-make "<![CDATA[x]]>y")))
-    (html-tokenizer-foreign-set! tokenizer #t)
-    (let loop ((tokens '()))
-      (let ((token (html-tokenizer-next tokenizer)))
-        (if (or (not token) (token-end-of-file? token))
-          (let ((actual (tokens->lists (reverse tokens))))
-            (unless (equal? actual '((char "xy")))
-              (error 'html-tokenize "cdata mismatch" actual))
-            #t)
-          (loop (cons token tokens)))))))
-
-(define (~check-tokenizer-state-transitions)
-  ;; tokenizer_state_transitions.test
-  (check-tokens "<title >" '((start "title" () #f)))
-  (check-tokens "<title id>" '((start "title" (("id" . "")) #f)))
-  (check-tokens "<title id\\\">" '((start "title" (("id\\\"" . "")) #f)))
-  (check-tokens "<title id >" '((start "title" (("id" . "")) #f)))
-  (check-tokens "<title id=>" '((start "title" (("id" . "")) #f))))
-
-(define (~check-tokenizer-fixture-states)
-  ;; The remaining tokenizer_states.test cases not covered above.
-  (check-tokens "abc\rdef" '((char "abc\ndef")))
-  (check-tokens (string #\a #\newline #\b (integer->char #xFDD0) #\c)
-                (list (list 'char (string #\a #\newline #\b
-                                          (integer->char #xFDD0) #\c))))
-  #t)
 
 ;; ------------------------------------------------------------------
 ;; Tests
 ;; ------------------------------------------------------------------
 
-(define (check-equal name actual expected)
-  (unless (equal? actual expected)
-    (error name "mismatch" expected actual))
-  #t)
+(define check-equal
+  (lambda (name actual expected)
+    (unless (equal? actual expected)
+      (error name "mismatch" expected actual))
+    #t))
 
-(define (~check-parser-minimal-document)
-  (check-equal 'html->sxml
-               (html->sxml "<html><head></head><body>x</body></html>")
-               '(*TOP* (html (head) (body "x")))))
+(define ~check-parser-minimal-document
+  (lambda ()
+    (check-equal 'html->sxml
+                 (html->sxml "<html><head></head><body>x</body></html>")
+                 '(*TOP* (html (head) (body "x"))))))
 
-(define (~check-parser-implied-elements)
-  ;; No html/head/body in the source at all.
-  (check-equal 'html->sxml
-               (html->sxml "<p>hello")
-               '(*TOP* (html (head) (body (p "hello")))))
-  (check-equal 'html->sxml
-               (html->sxml "<title>t</title>x")
-               '(*TOP* (html (head (title "t")) (body "x")))))
+(define ~check-parser-implied-elements
+  (lambda ()
+    ;; No html/head/body in the source at all.
+    (check-equal 'html->sxml
+                 (html->sxml "<p>hello")
+                 '(*TOP* (html (head) (body (p "hello")))))
+    (check-equal 'html->sxml
+                 (html->sxml "<title>t</title>x")
+                 '(*TOP* (html (head (title "t")) (body "x"))))))
 
-(define (~check-parser-doctype)
-  (check-equal 'html->sxml
-               (html->sxml "<!DOCTYPE html><p>x")
-               '(*TOP* (*DOCTYPE* "html" #f #f)
-                       (html (head) (body (p "x")))))
-  (check-equal 'html-sxml->test-format
-               (html-sxml->test-format (html->sxml "<!DOCTYPE html>"))
-               (string-append "| <!DOCTYPE html>\n"
-                              "| <html>\n"
-                              "|   <head>\n"
-                              "|   <body>")))
+(define ~check-parser-doctype
+  (lambda ()
+    (check-equal 'html->sxml
+                 (html->sxml "<!DOCTYPE html><p>x")
+                 '(*TOP* (*DOCTYPE* "html" #f #f)
+                         (html (head) (body (p "x")))))
+    (check-equal 'html-sxml->test-format
+                 (html-sxml->test-format (html->sxml "<!DOCTYPE html>"))
+                 (string-append "| <!DOCTYPE html>\n"
+                                "| <html>\n"
+                                "|   <head>\n"
+                                "|   <body>"))))
 
-(define (~check-parser-text-merge)
-  ;; Adjacent character tokens must collapse into a single text node.
-  (check-equal 'html->sxml
-               (html->sxml "<p>a&amp;b<!--c-->d")
-               '(*TOP* (html (head) (body (p "a&b" (*COMMENT* "c") "d"))))))
+(define ~check-parser-text-merge
+  (lambda ()
+    ;; Adjacent character tokens must collapse into a single text node.
+    (check-equal 'html->sxml
+                 (html->sxml "<p>a&amp;b<!--c-->d")
+                 '(*TOP* (html (head) (body (p "a&b" (*COMMENT* "c") "d")))))))
 
-(define (~check-sxml-boolean-attribute)
-  (check-equal 'html->sxml
-               (html->sxml "<input disabled>")
-               '(*TOP* (html (head) (body (input (\x40; (disabled "")))))))
-  (check-equal 'html-sxml->test-format
-               (html-sxml->test-format '(*TOP* (input (\x40; (disabled "")))))
-               (string-append "| <input>\n"
-                              "|   disabled=\"\"")))
+(define ~check-sxml-boolean-attribute
+  (lambda ()
+    (check-equal 'html->sxml
+                 (html->sxml "<input disabled>")
+                 '(*TOP* (html (head) (body (input (\x40; (disabled "")))))))
+    (check-equal 'html-sxml->test-format
+                 (html-sxml->test-format '(*TOP* (input (\x40; (disabled "")))))
+                 (string-append "| <input>\n"
+                                "|   disabled=\"\""))))
 
-(define (~check-sxml-comment)
-  (check-equal 'html->sxml
-               (html->sxml "<!-- hi --><p>")
-               '(*TOP* (*COMMENT* " hi ") (html (head) (body (p)))))
-  (check-equal 'html-sxml->test-format
-               (html-sxml->test-format '(*TOP* (*COMMENT* " hi ")))
-               "| <!--  hi  -->"))
+(define ~check-sxml-comment
+  (lambda ()
+    (check-equal 'html->sxml
+                 (html->sxml "<!-- hi --><p>")
+                 '(*TOP* (*COMMENT* " hi ") (html (head) (body (p)))))
+    (check-equal 'html-sxml->test-format
+                 (html-sxml->test-format '(*TOP* (*COMMENT* " hi ")))
+                 "| <!--  hi  -->")))
 
-(define (~check-sxml-doctype-public-only)
-  (check-equal 'html-sxml->test-format
-               (html-sxml->test-format '(*TOP* (*DOCTYPE* "html" "public-id" #f)))
-               "| <!DOCTYPE html \"public-id\" \"\">")
-  (check-equal 'html-sxml->test-format
-               (html-sxml->test-format '(*TOP* (*DOCTYPE* "html" #f #f)))
-               "| <!DOCTYPE html>"))
+(define ~check-sxml-doctype-public-only
+  (lambda ()
+    (check-equal 'html-sxml->test-format
+                 (html-sxml->test-format '(*TOP* (*DOCTYPE* "html" "public-id" #f)))
+                 "| <!DOCTYPE html \"public-id\" \"\">")
+    (check-equal 'html-sxml->test-format
+                 (html-sxml->test-format '(*TOP* (*DOCTYPE* "html" #f #f)))
+                 "| <!DOCTYPE html>")))
 
-(define (~check-sxml-template)
-  ;; Template content is a separate fragment, never a direct child.
-  (check-equal 'html->sxml
-               (html->sxml "<template><div>x</div></template>")
-               '(*TOP* (html (head (template (*CONTENT* (div "x")))) (body))))
-  (check-equal 'html-sxml->test-format
-               (html-sxml->test-format '(*TOP* (template (*CONTENT* (div "x")))))
-               (string-append "| <template>\n"
-                              "|   content\n"
-                              "|     <div>\n"
-                              "|       \"x\"")))
+(define ~check-sxml-template
+  (lambda ()
+    ;; Template content is a separate fragment, never a direct child.
+    (check-equal 'html->sxml
+                 (html->sxml "<template><div>x</div></template>")
+                 '(*TOP* (html (head (template (*CONTENT* (div "x")))) (body))))
+    (check-equal 'html-sxml->test-format
+                 (html-sxml->test-format '(*TOP* (template (*CONTENT* (div "x")))))
+                 (string-append "| <template>\n"
+                                "|   content\n"
+                                "|     <div>\n"
+                                "|       \"x\""))))
 
-(define (~check-sxml-foreign-content)
-  (check-equal 'html->sxml
-               (html->sxml "<svg viewBox='0 0 1 1'><g/></svg>")
-               '(*TOP* (html (head)
-                             (body (svg (\x40; (viewBox "0 0 1 1")) (g))))))
-  (check-equal 'html-sxml->test-format
-               (html-sxml->test-format
-                 (html->sxml "<math><annotation-xml><div>"))
-               (string-append "| <html>\n"
-                              "|   <head>\n"
-                              "|   <body>\n"
-                              "|     <math math>\n"
-                              "|       <math annotation-xml>\n"
-                              "|     <div>")))
+(define ~check-sxml-foreign-content
+  (lambda ()
+    (check-equal 'html->sxml
+                 (html->sxml "<svg viewBox='0 0 1 1'><g/></svg>")
+                 '(*TOP* (html (head)
+                               (body (svg (\x40; (viewBox "0 0 1 1")) (g))))))
+    (check-equal 'html-sxml->test-format
+                 (html-sxml->test-format
+                   (html->sxml "<math><annotation-xml><div>"))
+                 (string-append "| <html>\n"
+                                "|   <head>\n"
+                                "|   <body>\n"
+                                "|     <math math>\n"
+                                "|       <math annotation-xml>\n"
+                                "|     <div>"))))
 
-(define (~check-serializer-attribute-order)
-  ;; Attributes print sorted by display name, not in source order.
-  (check-equal 'html-sxml->test-format
-               (html-sxml->test-format '(*TOP* (div (\x40; (zebra "1") (alpha "2")))))
-               (string-append "| <div>\n"
-                              "|   alpha=\"2\"\n"
-                              "|   zebra=\"1\"")))
+(define ~check-serializer-attribute-order
+  (lambda ()
+    ;; Attributes print sorted by display name, not in source order.
+    (check-equal 'html-sxml->test-format
+                 (html-sxml->test-format '(*TOP* (div (\x40; (zebra "1") (alpha "2")))))
+                 (string-append "| <div>\n"
+                                "|   alpha=\"2\"\n"
+                                "|   zebra=\"1\""))))
 
-(define (~check-html-serializer)
-  (check-equal 'html-sxml->html
-               (html-sxml->html '(*TOP* (*DOCTYPE* "html" #f #f)
-                                        (html (head (title "t"))
-                                              (body (p "a < b & c")
-                                                    (br)))))
-               (string-append "<!DOCTYPE html><html><head><title>t</title>"
-                              "</head><body><p>a &lt; b &amp; c</p><br>"
-                              "</body></html>"))
-  ;; Raw text elements keep their content unescaped.
-  (check-equal 'html-sxml->html
-               (html-sxml->html '(script "if (a < b) {}"))
-               "<script>if (a < b) {}</script>")
-  (check-equal 'html-sxml->html
-               (html-sxml->html '(*COMMENT* " hi "))
-               "<!-- hi -->"))
+(define ~check-html-serializer
+  (lambda ()
+    (check-equal 'html-sxml->html
+                 (html-sxml->html '(*TOP* (*DOCTYPE* "html" #f #f)
+                                          (html (head (title "t"))
+                                                (body (p "a < b & c")
+                                                      (br)))))
+                 (string-append "<!DOCTYPE html><html><head><title>t</title>"
+                                "</head><body><p>a &lt; b &amp; c</p><br>"
+                                "</body></html>"))
+    ;; Raw text elements keep their content unescaped.
+    (check-equal 'html-sxml->html
+                 (html-sxml->html '(script "if (a < b) {}"))
+                 "<script>if (a < b) {}</script>")
+    (check-equal 'html-sxml->html
+                 (html-sxml->html '(*COMMENT* " hi "))
+                 "<!-- hi -->")))
 
-(define (~check-html-serializer-round-trip)
-  ;; Serializing and reparsing must reach the same tree.
-  (let* ((source "<!DOCTYPE html><p>a&amp;b<em>c</em></p><ul><li>x<li>y</ul>")
-         (once (html->sxml source))
-         (twice (html->sxml (html-sxml->html once))))
-    (check-equal 'html-sxml->html twice once)))
+(define ~check-html-serializer-round-trip
+  (lambda ()
+    ;; Serializing and reparsing must reach the same tree.
+    (let* ((source "<!DOCTYPE html><p>a&amp;b<em>c</em></p><ul><li>x<li>y</ul>")
+           (once (html->sxml source))
+           (twice (html->sxml (html-sxml->html once))))
+      (check-equal 'html-sxml->html twice once))))
 
-(define (~check-quirks-mode-detection)
-  (check-equal 'html-doctype-quirks-mode
-               (html-doctype-quirks-mode "html" #f #f #f #f) 'no-quirks)
-  (check-equal 'html-doctype-quirks-mode
-               (html-doctype-quirks-mode "html" #f #f #t #f) 'quirks)
-  (check-equal 'html-doctype-quirks-mode
-               (html-doctype-quirks-mode "xml" #f #f #f #f) 'quirks)
-  (check-equal 'html-doctype-quirks-mode
-               (html-doctype-quirks-mode "html" "-//W3C//DTD HTML 4.01 Frameset//EN"
-                                         #f #f #f)
-               'quirks)
-  (check-equal 'html-doctype-quirks-mode
-               (html-doctype-quirks-mode "html" "-//W3C//DTD HTML 4.01 Frameset//EN"
-                                         "x" #f #f)
-               'limited-quirks)
-  (check-equal 'html-doctype-quirks-mode
-               (html-doctype-quirks-mode "html" "-//W3C//DTD XHTML 1.0 Frameset//EN"
-                                         #f #f #f)
-               'limited-quirks))
+(define ~check-quirks-mode-detection
+  (lambda ()
+    (check-equal 'html-doctype-quirks-mode
+                 (html-doctype-quirks-mode "html" #f #f #f #f) 'no-quirks)
+    (check-equal 'html-doctype-quirks-mode
+                 (html-doctype-quirks-mode "html" #f #f #t #f) 'quirks)
+    (check-equal 'html-doctype-quirks-mode
+                 (html-doctype-quirks-mode "xml" #f #f #f #f) 'quirks)
+    (check-equal 'html-doctype-quirks-mode
+                 (html-doctype-quirks-mode "html" "-//W3C//DTD HTML 4.01 Frameset//EN"
+                                           #f #f #f)
+                 'quirks)
+    (check-equal 'html-doctype-quirks-mode
+                 (html-doctype-quirks-mode "html" "-//W3C//DTD HTML 4.01 Frameset//EN"
+                                           "x" #f #f)
+                 'limited-quirks)
+    (check-equal 'html-doctype-quirks-mode
+                 (html-doctype-quirks-mode "html" "-//W3C//DTD XHTML 1.0 Frameset//EN"
+                                           #f #f #f)
+                 'limited-quirks)))
 
-(define (~check-parser-fragment)
-  (check-equal 'html->sxml
-               (html->sxml "<td>x" '((fragment-context . "tr")))
-               '(*TOP* (td "x")))
-  (check-equal 'html->sxml
-               (html->sxml "a<b>c" '((fragment-context . "div")))
-               '(*TOP* "a" (b "c"))))
+(define ~check-parser-fragment
+  (lambda ()
+    (check-equal 'html->sxml
+                 (html->sxml "<td>x" '((fragment-context . "tr")))
+                 '(*TOP* (td "x")))
+    (check-equal 'html->sxml
+                 (html->sxml "a<b>c" '((fragment-context . "div")))
+                 '(*TOP* "a" (b "c")))))
 
 ;; ====================================================================
 ;; Section 6 -- tree-construction fixtures (generated)
@@ -556,100 +615,108 @@
 ;; the expected document, the fragment context (or #false), the scripting
 ;; flag, the iframe-srcdoc flag and the XML-coercion flag.
 
-(define (string-trim text)
-  (let* ((size (string-length text))
-         (start (let loop ((i 0))
+(define string-trim
+  (lambda (text)
+    (let* ((size (string-length text))
+           (start (let loop ((i 0))
+                    (cond
+                      ((fx>= i size) size)
+                      ((char-whitespace? (string-ref text i)) (loop (fx+ i 1)))
+                      (else i))))
+           (end (let loop ((i size))
                   (cond
-                    ((fx>= i size) size)
-                    ((char-whitespace? (string-ref text i)) (loop (fx+ i 1)))
-                    (else i))))
-         (end (let loop ((i size))
-                (cond
-                  ((fx<= i start) start)
-                  ((char-whitespace? (string-ref text (fx- i 1))) (loop (fx- i 1)))
-                  (else i)))))
-    (substring text start end)))
+                    ((fx<= i start) start)
+                    ((char-whitespace? (string-ref text (fx- i 1))) (loop (fx- i 1)))
+                    (else i)))))
+      (substring text start end))))
 
-(define (string-right-trim text)
-  (let loop ((i (string-length text)))
-    (cond
-      ((fx= i 0) "")
-      ((char-whitespace? (string-ref text (fx- i 1))) (loop (fx- i 1)))
-      (else (substring text 0 i)))))
+(define string-right-trim
+  (lambda (text)
+    (let loop ((i (string-length text)))
+      (cond
+        ((fx= i 0) "")
+        ((char-whitespace? (string-ref text (fx- i 1))) (loop (fx- i 1)))
+        (else (substring text 0 i))))))
 
 ;; Python's str.splitlines, which the justhtml harness relies on: line
 ;; breaks include U+000B, U+000C, U+000D, U+001C-U+001E and U+0085 as well
 ;; as U+000A, and CR LF counts as one break.
-(define (line-break-character? c)
-  (let ((code (char->integer c)))
-    (or (fx= code #x0A) (fx= code #x0B) (fx= code #x0C) (fx= code #x0D)
-        (fx= code #x1C) (fx= code #x1D) (fx= code #x1E) (fx= code #x85)
-        (fx= code #x2028) (fx= code #x2029))))
+(define line-break-character?
+  (lambda (c)
+    (let ((code (char->integer c)))
+      (or (fx= code #x0A) (fx= code #x0B) (fx= code #x0C) (fx= code #x0D)
+          (fx= code #x1C) (fx= code #x1D) (fx= code #x1E) (fx= code #x85)
+          (fx= code #x2028) (fx= code #x2029)))))
 
-(define (string-lines text)
-  (let ((size (string-length text)))
-    (let loop ((start 0) (i 0) (result '()))
-      (cond
-        ((fx>= i size) (reverse (cons (substring text start size) result)))
-        ((line-break-character? (string-ref text i))
-         (let ((next (if (and (char=? (string-ref text i) #\return)
-                              (fx< (fx+ i 1) size)
-                              (char=? (string-ref text (fx+ i 1)) #\newline))
-                       (fx+ i 2)
-                       (fx+ i 1))))
-           (loop next next (cons (substring text start i) result))))
-        (else (loop start (fx+ i 1) result))))))
+(define string-lines
+  (lambda (text)
+    (let ((size (string-length text)))
+      (let loop ((start 0) (i 0) (result '()))
+        (cond
+          ((fx>= i size) (reverse (cons (substring text start size) result)))
+          ((line-break-character? (string-ref text i))
+           (let ((next (if (and (char=? (string-ref text i) #\return)
+                                (fx< (fx+ i 1) size)
+                                (char=? (string-ref text (fx+ i 1)) #\newline))
+                         (fx+ i 2)
+                         (fx+ i 1))))
+             (loop next next (cons (substring text start i) result))))
+          (else (loop start (fx+ i 1) result)))))))
 
 ;; Mirrors the compare_outputs helper of justhtml's own test harness.
-(define (test-format-normalize text)
-  (let ((lines (map string-right-trim (string-lines (string-trim text)))))
-    (let loop ((lines lines) (port (open-output-string)) (first? #t))
-      (cond
-        ((null? lines) (get-output-string port))
-        (else
-         (unless first? (write-char #\newline port))
-         (put-string port (car lines))
-         (loop (cdr lines) port #f))))))
+(define test-format-normalize
+  (lambda (text)
+    (let ((lines (map string-right-trim (string-lines (string-trim text)))))
+      (let loop ((lines lines) (port (open-output-string)) (first? #t))
+        (cond
+          ((null? lines) (get-output-string port))
+          (else
+           (unless first? (write-char #\newline port))
+           (put-string port (car lines))
+           (loop (cdr lines) port #f)))))))
 
-(define (fixture-actual entry)
-  (let* ((data (vector-ref entry 2))
-         (fragment (vector-ref entry 4))
-         (options (append (if fragment (list (cons 'fragment-context fragment)) '())
-                          (list (cons 'scripting (vector-ref entry 5))
-                                (cons 'iframe-srcdoc (vector-ref entry 6))
-                                (cons 'xml-coercion (vector-ref entry 7))))))
-    (html-sxml->test-format (html->sxml data options))))
+(define fixture-actual
+  (lambda (entry)
+    (let* ((data (vector-ref entry 2))
+           (fragment (vector-ref entry 4))
+           (options (append (if fragment (list (cons 'fragment-context fragment)) '())
+                            (list (cons 'scripting (vector-ref entry 5))
+                                  (cons 'iframe-srcdoc (vector-ref entry 6))
+                                  (cons 'xml-coercion (vector-ref entry 7))))))
+      (html-sxml->test-format (html->sxml data options)))))
 
-(define (html-fixture-check position)
-  (let* ((entry (vector-ref html-fixture-entries position))
-         (expected (test-format-normalize (vector-ref entry 3)))
-         (actual (test-format-normalize (fixture-actual entry))))
-    (unless (string=? expected actual)
-      (error 'html-fixture-check "tree mismatch"
-             (vector-ref entry 0) (vector-ref entry 1) (vector-ref entry 2)
-             expected actual))
-    #t))
+(define html-fixture-check
+  (lambda (position)
+    (let* ((entry (vector-ref html-fixture-entries position))
+           (expected (test-format-normalize (vector-ref entry 3)))
+           (actual (test-format-normalize (fixture-actual entry))))
+      (unless (string=? expected actual)
+        (error 'html-fixture-check "tree mismatch"
+               (vector-ref entry 0) (vector-ref entry 1) (vector-ref entry 2)
+               expected actual))
+      #t)))
 
 ;; Convenience driver: prints a per-file pass/fail summary.
-(define (html-fixtures-report)
-  (let ((failures 0) (total 0))
-    (let loop ((position 0))
-      (when (fx< position (vector-length html-fixture-entries))
-        (let ((entry (vector-ref html-fixture-entries position)))
-          (set! total (fx+ total 1))
-          (guard (ex (else
-                      (set! failures (fx+ failures 1))
-                      (format #t "FAIL ~a[~a] ~s\n"
-                              (vector-ref entry 0) (vector-ref entry 1)
-                              (vector-ref entry 2))
-                      (format #t "--- expected ---\n~a\n--- actual ---\n~a\n"
-                              (test-format-normalize (vector-ref entry 3))
-                              (guard (ex2 (else "<error>"))
-                                (test-format-normalize (fixture-actual entry))))))
-            (html-fixture-check position)))
-        (loop (fx+ position 1))))
-    (format #t "~a/~a fixtures passed\n" (fx- total failures) total)
-    (fx= failures 0)))
+(define html-fixtures-report
+  (lambda ()
+    (let ((failures 0) (total 0))
+      (let loop ((position 0))
+        (when (fx< position (vector-length html-fixture-entries))
+          (let ((entry (vector-ref html-fixture-entries position)))
+            (set! total (fx+ total 1))
+            (guard (ex (else
+                        (set! failures (fx+ failures 1))
+                        (format #t "FAIL ~a[~a] ~s\n"
+                                (vector-ref entry 0) (vector-ref entry 1)
+                                (vector-ref entry 2))
+                        (format #t "--- expected ---\n~a\n--- actual ---\n~a\n"
+                                (test-format-normalize (vector-ref entry 3))
+                                (guard (ex2 (else "<error>"))
+                                  (test-format-normalize (fixture-actual entry))))))
+              (html-fixture-check position)))
+          (loop (fx+ position 1))))
+      (format #t "~a/~a fixtures passed\n" (fx- total failures) total)
+      (fx= failures 0))))
 
 (define html-fixture-entries
   '#(
@@ -926,268 +993,268 @@
     #("xml_coercion.dat" 5 "<plaintext>a\xD;\xA;b\xC;c\x0;" "| <html>\xA;|   <head>\xA;|   <body>\xA;|     <plaintext>\xA;|       \"a\xA;b c\xFFFD;\"\xA;" #f #t #f #t)
     ))
 
-(define (~check-character-preprocessing-0) (html-fixture-check 0))
-(define (~check-character-preprocessing-1) (html-fixture-check 1))
-(define (~check-character-preprocessing-2) (html-fixture-check 2))
-(define (~check-character-preprocessing-3) (html-fixture-check 3))
-(define (~check-character-preprocessing-4) (html-fixture-check 4))
-(define (~check-character-preprocessing-5) (html-fixture-check 5))
-(define (~check-character-preprocessing-6) (html-fixture-check 6))
-(define (~check-character-preprocessing-7) (html-fixture-check 7))
-(define (~check-character-preprocessing-8) (html-fixture-check 8))
-(define (~check-character-preprocessing-9) (html-fixture-check 9))
-(define (~check-character-preprocessing-10) (html-fixture-check 10))
-(define (~check-character-preprocessing-11) (html-fixture-check 11))
-(define (~check-character-preprocessing-12) (html-fixture-check 12))
-(define (~check-character-preprocessing-13) (html-fixture-check 13))
-(define (~check-character-preprocessing-14) (html-fixture-check 14))
-(define (~check-character-preprocessing-15) (html-fixture-check 15))
-(define (~check-character-preprocessing-16) (html-fixture-check 16))
-(define (~check-character-preprocessing-17) (html-fixture-check 17))
-(define (~check-character-preprocessing-18) (html-fixture-check 18))
-(define (~check-character-preprocessing-19) (html-fixture-check 19))
-(define (~check-character-preprocessing-20) (html-fixture-check 20))
-(define (~check-character-preprocessing-21) (html-fixture-check 21))
-(define (~check-document-shell-recovery-0) (html-fixture-check 22))
-(define (~check-document-shell-recovery-1) (html-fixture-check 23))
-(define (~check-document-shell-recovery-2) (html-fixture-check 24))
-(define (~check-document-shell-recovery-3) (html-fixture-check 25))
-(define (~check-document-shell-recovery-4) (html-fixture-check 26))
-(define (~check-document-shell-recovery-5) (html-fixture-check 27))
-(define (~check-document-shell-recovery-6) (html-fixture-check 28))
-(define (~check-document-shell-recovery-7) (html-fixture-check 29))
-(define (~check-document-shell-recovery-8) (html-fixture-check 30))
-(define (~check-document-shell-recovery-9) (html-fixture-check 31))
-(define (~check-document-shell-recovery-10) (html-fixture-check 32))
-(define (~check-document-shell-recovery-11) (html-fixture-check 33))
-(define (~check-document-shell-recovery-12) (html-fixture-check 34))
-(define (~check-document-shell-recovery-13) (html-fixture-check 35))
-(define (~check-document-shell-recovery-14) (html-fixture-check 36))
-(define (~check-document-shell-recovery-15) (html-fixture-check 37))
-(define (~check-document-shell-recovery-16) (html-fixture-check 38))
-(define (~check-document-shell-recovery-17) (html-fixture-check 39))
-(define (~check-document-shell-recovery-18) (html-fixture-check 40))
-(define (~check-document-shell-recovery-19) (html-fixture-check 41))
-(define (~check-document-shell-recovery-20) (html-fixture-check 42))
-(define (~check-document-shell-recovery-21) (html-fixture-check 43))
-(define (~check-document-shell-recovery-22) (html-fixture-check 44))
-(define (~check-document-shell-recovery-23) (html-fixture-check 45))
-(define (~check-document-shell-recovery-24) (html-fixture-check 46))
-(define (~check-document-shell-recovery-25) (html-fixture-check 47))
-(define (~check-document-shell-recovery-26) (html-fixture-check 48))
-(define (~check-document-shell-recovery-27) (html-fixture-check 49))
-(define (~check-document-shell-recovery-28) (html-fixture-check 50))
-(define (~check-document-shell-recovery-29) (html-fixture-check 51))
-(define (~check-document-shell-recovery-30) (html-fixture-check 52))
-(define (~check-document-shell-recovery-31) (html-fixture-check 53))
-(define (~check-foreign-content-0) (html-fixture-check 54))
-(define (~check-foreign-content-1) (html-fixture-check 55))
-(define (~check-foreign-content-2) (html-fixture-check 56))
-(define (~check-foreign-content-3) (html-fixture-check 57))
-(define (~check-foreign-content-4) (html-fixture-check 58))
-(define (~check-foreign-content-5) (html-fixture-check 59))
-(define (~check-foreign-content-6) (html-fixture-check 60))
-(define (~check-foreign-content-7) (html-fixture-check 61))
-(define (~check-foreign-content-8) (html-fixture-check 62))
-(define (~check-foreign-content-9) (html-fixture-check 63))
-(define (~check-foreign-content-10) (html-fixture-check 64))
-(define (~check-foreign-content-11) (html-fixture-check 65))
-(define (~check-foreign-content-12) (html-fixture-check 66))
-(define (~check-foreign-content-13) (html-fixture-check 67))
-(define (~check-foreign-content-14) (html-fixture-check 68))
-(define (~check-foreign-content-15) (html-fixture-check 69))
-(define (~check-foreign-content-16) (html-fixture-check 70))
-(define (~check-foreign-content-17) (html-fixture-check 71))
-(define (~check-foreign-content-18) (html-fixture-check 72))
-(define (~check-foreign-content-19) (html-fixture-check 73))
-(define (~check-foreign-content-20) (html-fixture-check 74))
-(define (~check-foreign-content-21) (html-fixture-check 75))
-(define (~check-foreign-content-22) (html-fixture-check 76))
-(define (~check-foreign-content-23) (html-fixture-check 77))
-(define (~check-foreign-content-24) (html-fixture-check 78))
-(define (~check-foreign-content-25) (html-fixture-check 79))
-(define (~check-foreign-content-26) (html-fixture-check 80))
-(define (~check-foreign-content-27) (html-fixture-check 81))
+(define ~check-character-preprocessing-0 (lambda () (html-fixture-check 0)))
+(define ~check-character-preprocessing-1 (lambda () (html-fixture-check 1)))
+(define ~check-character-preprocessing-2 (lambda () (html-fixture-check 2)))
+(define ~check-character-preprocessing-3 (lambda () (html-fixture-check 3)))
+(define ~check-character-preprocessing-4 (lambda () (html-fixture-check 4)))
+(define ~check-character-preprocessing-5 (lambda () (html-fixture-check 5)))
+(define ~check-character-preprocessing-6 (lambda () (html-fixture-check 6)))
+(define ~check-character-preprocessing-7 (lambda () (html-fixture-check 7)))
+(define ~check-character-preprocessing-8 (lambda () (html-fixture-check 8)))
+(define ~check-character-preprocessing-9 (lambda () (html-fixture-check 9)))
+(define ~check-character-preprocessing-10 (lambda () (html-fixture-check 10)))
+(define ~check-character-preprocessing-11 (lambda () (html-fixture-check 11)))
+(define ~check-character-preprocessing-12 (lambda () (html-fixture-check 12)))
+(define ~check-character-preprocessing-13 (lambda () (html-fixture-check 13)))
+(define ~check-character-preprocessing-14 (lambda () (html-fixture-check 14)))
+(define ~check-character-preprocessing-15 (lambda () (html-fixture-check 15)))
+(define ~check-character-preprocessing-16 (lambda () (html-fixture-check 16)))
+(define ~check-character-preprocessing-17 (lambda () (html-fixture-check 17)))
+(define ~check-character-preprocessing-18 (lambda () (html-fixture-check 18)))
+(define ~check-character-preprocessing-19 (lambda () (html-fixture-check 19)))
+(define ~check-character-preprocessing-20 (lambda () (html-fixture-check 20)))
+(define ~check-character-preprocessing-21 (lambda () (html-fixture-check 21)))
+(define ~check-document-shell-recovery-0 (lambda () (html-fixture-check 22)))
+(define ~check-document-shell-recovery-1 (lambda () (html-fixture-check 23)))
+(define ~check-document-shell-recovery-2 (lambda () (html-fixture-check 24)))
+(define ~check-document-shell-recovery-3 (lambda () (html-fixture-check 25)))
+(define ~check-document-shell-recovery-4 (lambda () (html-fixture-check 26)))
+(define ~check-document-shell-recovery-5 (lambda () (html-fixture-check 27)))
+(define ~check-document-shell-recovery-6 (lambda () (html-fixture-check 28)))
+(define ~check-document-shell-recovery-7 (lambda () (html-fixture-check 29)))
+(define ~check-document-shell-recovery-8 (lambda () (html-fixture-check 30)))
+(define ~check-document-shell-recovery-9 (lambda () (html-fixture-check 31)))
+(define ~check-document-shell-recovery-10 (lambda () (html-fixture-check 32)))
+(define ~check-document-shell-recovery-11 (lambda () (html-fixture-check 33)))
+(define ~check-document-shell-recovery-12 (lambda () (html-fixture-check 34)))
+(define ~check-document-shell-recovery-13 (lambda () (html-fixture-check 35)))
+(define ~check-document-shell-recovery-14 (lambda () (html-fixture-check 36)))
+(define ~check-document-shell-recovery-15 (lambda () (html-fixture-check 37)))
+(define ~check-document-shell-recovery-16 (lambda () (html-fixture-check 38)))
+(define ~check-document-shell-recovery-17 (lambda () (html-fixture-check 39)))
+(define ~check-document-shell-recovery-18 (lambda () (html-fixture-check 40)))
+(define ~check-document-shell-recovery-19 (lambda () (html-fixture-check 41)))
+(define ~check-document-shell-recovery-20 (lambda () (html-fixture-check 42)))
+(define ~check-document-shell-recovery-21 (lambda () (html-fixture-check 43)))
+(define ~check-document-shell-recovery-22 (lambda () (html-fixture-check 44)))
+(define ~check-document-shell-recovery-23 (lambda () (html-fixture-check 45)))
+(define ~check-document-shell-recovery-24 (lambda () (html-fixture-check 46)))
+(define ~check-document-shell-recovery-25 (lambda () (html-fixture-check 47)))
+(define ~check-document-shell-recovery-26 (lambda () (html-fixture-check 48)))
+(define ~check-document-shell-recovery-27 (lambda () (html-fixture-check 49)))
+(define ~check-document-shell-recovery-28 (lambda () (html-fixture-check 50)))
+(define ~check-document-shell-recovery-29 (lambda () (html-fixture-check 51)))
+(define ~check-document-shell-recovery-30 (lambda () (html-fixture-check 52)))
+(define ~check-document-shell-recovery-31 (lambda () (html-fixture-check 53)))
+(define ~check-foreign-content-0 (lambda () (html-fixture-check 54)))
+(define ~check-foreign-content-1 (lambda () (html-fixture-check 55)))
+(define ~check-foreign-content-2 (lambda () (html-fixture-check 56)))
+(define ~check-foreign-content-3 (lambda () (html-fixture-check 57)))
+(define ~check-foreign-content-4 (lambda () (html-fixture-check 58)))
+(define ~check-foreign-content-5 (lambda () (html-fixture-check 59)))
+(define ~check-foreign-content-6 (lambda () (html-fixture-check 60)))
+(define ~check-foreign-content-7 (lambda () (html-fixture-check 61)))
+(define ~check-foreign-content-8 (lambda () (html-fixture-check 62)))
+(define ~check-foreign-content-9 (lambda () (html-fixture-check 63)))
+(define ~check-foreign-content-10 (lambda () (html-fixture-check 64)))
+(define ~check-foreign-content-11 (lambda () (html-fixture-check 65)))
+(define ~check-foreign-content-12 (lambda () (html-fixture-check 66)))
+(define ~check-foreign-content-13 (lambda () (html-fixture-check 67)))
+(define ~check-foreign-content-14 (lambda () (html-fixture-check 68)))
+(define ~check-foreign-content-15 (lambda () (html-fixture-check 69)))
+(define ~check-foreign-content-16 (lambda () (html-fixture-check 70)))
+(define ~check-foreign-content-17 (lambda () (html-fixture-check 71)))
+(define ~check-foreign-content-18 (lambda () (html-fixture-check 72)))
+(define ~check-foreign-content-19 (lambda () (html-fixture-check 73)))
+(define ~check-foreign-content-20 (lambda () (html-fixture-check 74)))
+(define ~check-foreign-content-21 (lambda () (html-fixture-check 75)))
+(define ~check-foreign-content-22 (lambda () (html-fixture-check 76)))
+(define ~check-foreign-content-23 (lambda () (html-fixture-check 77)))
+(define ~check-foreign-content-24 (lambda () (html-fixture-check 78)))
+(define ~check-foreign-content-25 (lambda () (html-fixture-check 79)))
+(define ~check-foreign-content-26 (lambda () (html-fixture-check 80)))
+(define ~check-foreign-content-27 (lambda () (html-fixture-check 81)))
 ;; Asserts the spec-correct tree, not justhtml's fixture (see spec/justhtml-sxml-prompt.md).
-(define (~check-foreign-stack-recovery-0) (html-fixture-check 82))
-(define (~check-foreign-stack-recovery-1) (html-fixture-check 83))
+(define ~check-foreign-stack-recovery-0 (lambda () (html-fixture-check 82)))
+(define ~check-foreign-stack-recovery-1 (lambda () (html-fixture-check 83)))
 ;; Asserts the spec-correct tree, not justhtml's fixture (see spec/justhtml-sxml-prompt.md).
-(define (~check-foreign-stack-recovery-2) (html-fixture-check 84))
-(define (~check-frameset-recovery-0) (html-fixture-check 85))
-(define (~check-frameset-recovery-1) (html-fixture-check 86))
-(define (~check-frameset-recovery-2) (html-fixture-check 87))
+(define ~check-foreign-stack-recovery-2 (lambda () (html-fixture-check 84)))
+(define ~check-frameset-recovery-0 (lambda () (html-fixture-check 85)))
+(define ~check-frameset-recovery-1 (lambda () (html-fixture-check 86)))
+(define ~check-frameset-recovery-2 (lambda () (html-fixture-check 87)))
 ;; Asserts the spec-correct tree, not justhtml's fixture (see spec/justhtml-sxml-prompt.md).
-(define (~check-frameset-recovery-3) (html-fixture-check 88))
-(define (~check-frameset-recovery-4) (html-fixture-check 89))
-(define (~check-frameset-recovery-5) (html-fixture-check 90))
-(define (~check-frameset-recovery-6) (html-fixture-check 91))
-(define (~check-frameset-recovery-7) (html-fixture-check 92))
-(define (~check-frameset-recovery-8) (html-fixture-check 93))
-(define (~check-frameset-recovery-9) (html-fixture-check 94))
-(define (~check-frameset-recovery-10) (html-fixture-check 95))
-(define (~check-frameset-recovery-11) (html-fixture-check 96))
-(define (~check-frameset-recovery-12) (html-fixture-check 97))
-(define (~check-frameset-recovery-13) (html-fixture-check 98))
-(define (~check-frameset-recovery-14) (html-fixture-check 99))
-(define (~check-frameset-recovery-15) (html-fixture-check 100))
-(define (~check-frameset-recovery-16) (html-fixture-check 101))
-(define (~check-frameset-recovery-17) (html-fixture-check 102))
-(define (~check-frameset-recovery-18) (html-fixture-check 103))
-(define (~check-frameset-recovery-19) (html-fixture-check 104))
-(define (~check-frameset-recovery-20) (html-fixture-check 105))
-(define (~check-frameset-recovery-21) (html-fixture-check 106))
-(define (~check-frameset-recovery-22) (html-fixture-check 107))
-(define (~check-head-noscript-recovery-0) (html-fixture-check 108))
-(define (~check-head-noscript-recovery-1) (html-fixture-check 109))
-(define (~check-head-noscript-recovery-2) (html-fixture-check 110))
-(define (~check-head-noscript-recovery-3) (html-fixture-check 111))
-(define (~check-head-noscript-recovery-4) (html-fixture-check 112))
-(define (~check-iframe-srcdoc-0) (html-fixture-check 113))
-(define (~check-in-body-recovery-0) (html-fixture-check 114))
-(define (~check-in-body-recovery-1) (html-fixture-check 115))
-(define (~check-in-body-recovery-2) (html-fixture-check 116))
-(define (~check-in-body-recovery-3) (html-fixture-check 117))
-(define (~check-in-body-recovery-4) (html-fixture-check 118))
-(define (~check-in-body-recovery-5) (html-fixture-check 119))
-(define (~check-in-body-recovery-6) (html-fixture-check 120))
-(define (~check-in-body-recovery-7) (html-fixture-check 121))
-(define (~check-in-body-recovery-8) (html-fixture-check 122))
-(define (~check-in-body-recovery-9) (html-fixture-check 123))
-(define (~check-in-body-recovery-10) (html-fixture-check 124))
-(define (~check-in-body-recovery-11) (html-fixture-check 125))
-(define (~check-in-body-recovery-12) (html-fixture-check 126))
-(define (~check-in-body-recovery-13) (html-fixture-check 127))
-(define (~check-raw-text-recovery-0) (html-fixture-check 128))
-(define (~check-raw-text-recovery-1) (html-fixture-check 129))
-(define (~check-raw-text-recovery-2) (html-fixture-check 130))
-(define (~check-raw-text-recovery-3) (html-fixture-check 131))
-(define (~check-raw-text-recovery-4) (html-fixture-check 132))
-(define (~check-raw-text-recovery-5) (html-fixture-check 133))
-(define (~check-raw-text-recovery-6) (html-fixture-check 134))
-(define (~check-raw-text-recovery-7) (html-fixture-check 135))
-(define (~check-raw-text-recovery-8) (html-fixture-check 136))
-(define (~check-raw-text-recovery-9) (html-fixture-check 137))
-(define (~check-raw-text-recovery-10) (html-fixture-check 138))
-(define (~check-raw-text-recovery-11) (html-fixture-check 139))
-(define (~check-raw-text-recovery-12) (html-fixture-check 140))
-(define (~check-raw-text-recovery-13) (html-fixture-check 141))
-(define (~check-raw-text-recovery-14) (html-fixture-check 142))
-(define (~check-raw-text-recovery-15) (html-fixture-check 143))
-(define (~check-raw-text-recovery-16) (html-fixture-check 144))
-(define (~check-raw-text-recovery-17) (html-fixture-check 145))
-(define (~check-select-recovery-0) (html-fixture-check 146))
-(define (~check-select-recovery-1) (html-fixture-check 147))
-(define (~check-select-recovery-2) (html-fixture-check 148))
-(define (~check-select-recovery-3) (html-fixture-check 149))
-(define (~check-select-recovery-4) (html-fixture-check 150))
-(define (~check-select-recovery-5) (html-fixture-check 151))
-(define (~check-select-recovery-6) (html-fixture-check 152))
-(define (~check-select-recovery-7) (html-fixture-check 153))
-(define (~check-select-recovery-8) (html-fixture-check 154))
-(define (~check-select-recovery-9) (html-fixture-check 155))
-(define (~check-select-recovery-10) (html-fixture-check 156))
-(define (~check-select-recovery-11) (html-fixture-check 157))
-(define (~check-select-recovery-12) (html-fixture-check 158))
-(define (~check-select-recovery-13) (html-fixture-check 159))
-(define (~check-select-recovery-14) (html-fixture-check 160))
-(define (~check-select-recovery-15) (html-fixture-check 161))
-(define (~check-select-recovery-16) (html-fixture-check 162))
-(define (~check-select-recovery-17) (html-fixture-check 163))
-(define (~check-select-recovery-18) (html-fixture-check 164))
-(define (~check-select-recovery-19) (html-fixture-check 165))
-(define (~check-selectedcontent-0) (html-fixture-check 166))
-(define (~check-selectedcontent-1) (html-fixture-check 167))
-(define (~check-selectedcontent-2) (html-fixture-check 168))
-(define (~check-selectedcontent-3) (html-fixture-check 169))
-(define (~check-selectedcontent-4) (html-fixture-check 170))
-(define (~check-table-recovery-0) (html-fixture-check 171))
-(define (~check-table-recovery-1) (html-fixture-check 172))
-(define (~check-table-recovery-2) (html-fixture-check 173))
-(define (~check-table-recovery-3) (html-fixture-check 174))
-(define (~check-table-recovery-4) (html-fixture-check 175))
-(define (~check-table-recovery-5) (html-fixture-check 176))
-(define (~check-table-recovery-6) (html-fixture-check 177))
-(define (~check-table-recovery-7) (html-fixture-check 178))
-(define (~check-table-recovery-8) (html-fixture-check 179))
-(define (~check-table-recovery-9) (html-fixture-check 180))
-(define (~check-table-recovery-10) (html-fixture-check 181))
-(define (~check-table-recovery-11) (html-fixture-check 182))
-(define (~check-table-recovery-12) (html-fixture-check 183))
-(define (~check-table-recovery-13) (html-fixture-check 184))
-(define (~check-template-recovery-0) (html-fixture-check 185))
-(define (~check-template-recovery-1) (html-fixture-check 186))
-(define (~check-template-recovery-2) (html-fixture-check 187))
-(define (~check-template-recovery-3) (html-fixture-check 188))
-(define (~check-template-recovery-4) (html-fixture-check 189))
-(define (~check-template-recovery-5) (html-fixture-check 190))
-(define (~check-template-recovery-6) (html-fixture-check 191))
-(define (~check-template-recovery-7) (html-fixture-check 192))
-(define (~check-template-recovery-8) (html-fixture-check 193))
-(define (~check-template-recovery-9) (html-fixture-check 194))
-(define (~check-template-recovery-10) (html-fixture-check 195))
-(define (~check-template-recovery-11) (html-fixture-check 196))
-(define (~check-template-recovery-12) (html-fixture-check 197))
-(define (~check-template-recovery-13) (html-fixture-check 198))
-(define (~check-template-recovery-14) (html-fixture-check 199))
-(define (~check-template-recovery-15) (html-fixture-check 200))
-(define (~check-template-recovery-16) (html-fixture-check 201))
-(define (~check-template-recovery-17) (html-fixture-check 202))
-(define (~check-template-recovery-18) (html-fixture-check 203))
-(define (~check-template-recovery-19) (html-fixture-check 204))
-(define (~check-template-recovery-20) (html-fixture-check 205))
-(define (~check-template-recovery-21) (html-fixture-check 206))
-(define (~check-template-recovery-22) (html-fixture-check 207))
-(define (~check-template-recovery-23) (html-fixture-check 208))
-(define (~check-template-recovery-24) (html-fixture-check 209))
-(define (~check-template-recovery-25) (html-fixture-check 210))
-(define (~check-template-recovery-26) (html-fixture-check 211))
-(define (~check-template-recovery-27) (html-fixture-check 212))
-(define (~check-template-recovery-28) (html-fixture-check 213))
-(define (~check-template-recovery-29) (html-fixture-check 214))
-(define (~check-template-recovery-30) (html-fixture-check 215))
-(define (~check-template-recovery-31) (html-fixture-check 216))
-(define (~check-template-recovery-32) (html-fixture-check 217))
-(define (~check-template-recovery-33) (html-fixture-check 218))
-(define (~check-template-recovery-34) (html-fixture-check 219))
-(define (~check-template-recovery-35) (html-fixture-check 220))
-(define (~check-template-recovery-36) (html-fixture-check 221))
-(define (~check-template-recovery-37) (html-fixture-check 222))
-(define (~check-template-recovery-38) (html-fixture-check 223))
-(define (~check-template-recovery-39) (html-fixture-check 224))
-(define (~check-template-recovery-40) (html-fixture-check 225))
-(define (~check-template-recovery-41) (html-fixture-check 226))
-(define (~check-template-recovery-42) (html-fixture-check 227))
-(define (~check-template-recovery-43) (html-fixture-check 228))
-(define (~check-template-recovery-44) (html-fixture-check 229))
-(define (~check-template-recovery-45) (html-fixture-check 230))
-(define (~check-template-recovery-46) (html-fixture-check 231))
-(define (~check-tokenizer-recovery-0) (html-fixture-check 232))
-(define (~check-tokenizer-recovery-1) (html-fixture-check 233))
-(define (~check-tokenizer-recovery-2) (html-fixture-check 234))
-(define (~check-tokenizer-recovery-3) (html-fixture-check 235))
-(define (~check-tokenizer-recovery-4) (html-fixture-check 236))
-(define (~check-tokenizer-recovery-5) (html-fixture-check 237))
-(define (~check-tokenizer-recovery-6) (html-fixture-check 238))
-(define (~check-tokenizer-recovery-7) (html-fixture-check 239))
-(define (~check-tokenizer-recovery-8) (html-fixture-check 240))
-(define (~check-tokenizer-recovery-9) (html-fixture-check 241))
-(define (~check-tokenizer-recovery-10) (html-fixture-check 242))
-(define (~check-tokenizer-recovery-11) (html-fixture-check 243))
-(define (~check-tokenizer-recovery-12) (html-fixture-check 244))
-(define (~check-tokenizer-recovery-13) (html-fixture-check 245))
-(define (~check-tokenizer-recovery-14) (html-fixture-check 246))
-(define (~check-tokenizer-recovery-15) (html-fixture-check 247))
-(define (~check-tokenizer-recovery-16) (html-fixture-check 248))
-(define (~check-tokenizer-recovery-17) (html-fixture-check 249))
-(define (~check-tokenizer-recovery-18) (html-fixture-check 250))
-(define (~check-tokenizer-recovery-19) (html-fixture-check 251))
-(define (~check-tokenizer-recovery-20) (html-fixture-check 252))
-(define (~check-tokenizer-recovery-21) (html-fixture-check 253))
-(define (~check-tokenizer-recovery-22) (html-fixture-check 254))
-(define (~check-tokenizer-recovery-23) (html-fixture-check 255))
-(define (~check-xml-coercion-0) (html-fixture-check 256))
-(define (~check-xml-coercion-1) (html-fixture-check 257))
-(define (~check-xml-coercion-2) (html-fixture-check 258))
-(define (~check-xml-coercion-3) (html-fixture-check 259))
-(define (~check-xml-coercion-4) (html-fixture-check 260))
-(define (~check-xml-coercion-5) (html-fixture-check 261))
+(define ~check-frameset-recovery-3 (lambda () (html-fixture-check 88)))
+(define ~check-frameset-recovery-4 (lambda () (html-fixture-check 89)))
+(define ~check-frameset-recovery-5 (lambda () (html-fixture-check 90)))
+(define ~check-frameset-recovery-6 (lambda () (html-fixture-check 91)))
+(define ~check-frameset-recovery-7 (lambda () (html-fixture-check 92)))
+(define ~check-frameset-recovery-8 (lambda () (html-fixture-check 93)))
+(define ~check-frameset-recovery-9 (lambda () (html-fixture-check 94)))
+(define ~check-frameset-recovery-10 (lambda () (html-fixture-check 95)))
+(define ~check-frameset-recovery-11 (lambda () (html-fixture-check 96)))
+(define ~check-frameset-recovery-12 (lambda () (html-fixture-check 97)))
+(define ~check-frameset-recovery-13 (lambda () (html-fixture-check 98)))
+(define ~check-frameset-recovery-14 (lambda () (html-fixture-check 99)))
+(define ~check-frameset-recovery-15 (lambda () (html-fixture-check 100)))
+(define ~check-frameset-recovery-16 (lambda () (html-fixture-check 101)))
+(define ~check-frameset-recovery-17 (lambda () (html-fixture-check 102)))
+(define ~check-frameset-recovery-18 (lambda () (html-fixture-check 103)))
+(define ~check-frameset-recovery-19 (lambda () (html-fixture-check 104)))
+(define ~check-frameset-recovery-20 (lambda () (html-fixture-check 105)))
+(define ~check-frameset-recovery-21 (lambda () (html-fixture-check 106)))
+(define ~check-frameset-recovery-22 (lambda () (html-fixture-check 107)))
+(define ~check-head-noscript-recovery-0 (lambda () (html-fixture-check 108)))
+(define ~check-head-noscript-recovery-1 (lambda () (html-fixture-check 109)))
+(define ~check-head-noscript-recovery-2 (lambda () (html-fixture-check 110)))
+(define ~check-head-noscript-recovery-3 (lambda () (html-fixture-check 111)))
+(define ~check-head-noscript-recovery-4 (lambda () (html-fixture-check 112)))
+(define ~check-iframe-srcdoc-0 (lambda () (html-fixture-check 113)))
+(define ~check-in-body-recovery-0 (lambda () (html-fixture-check 114)))
+(define ~check-in-body-recovery-1 (lambda () (html-fixture-check 115)))
+(define ~check-in-body-recovery-2 (lambda () (html-fixture-check 116)))
+(define ~check-in-body-recovery-3 (lambda () (html-fixture-check 117)))
+(define ~check-in-body-recovery-4 (lambda () (html-fixture-check 118)))
+(define ~check-in-body-recovery-5 (lambda () (html-fixture-check 119)))
+(define ~check-in-body-recovery-6 (lambda () (html-fixture-check 120)))
+(define ~check-in-body-recovery-7 (lambda () (html-fixture-check 121)))
+(define ~check-in-body-recovery-8 (lambda () (html-fixture-check 122)))
+(define ~check-in-body-recovery-9 (lambda () (html-fixture-check 123)))
+(define ~check-in-body-recovery-10 (lambda () (html-fixture-check 124)))
+(define ~check-in-body-recovery-11 (lambda () (html-fixture-check 125)))
+(define ~check-in-body-recovery-12 (lambda () (html-fixture-check 126)))
+(define ~check-in-body-recovery-13 (lambda () (html-fixture-check 127)))
+(define ~check-raw-text-recovery-0 (lambda () (html-fixture-check 128)))
+(define ~check-raw-text-recovery-1 (lambda () (html-fixture-check 129)))
+(define ~check-raw-text-recovery-2 (lambda () (html-fixture-check 130)))
+(define ~check-raw-text-recovery-3 (lambda () (html-fixture-check 131)))
+(define ~check-raw-text-recovery-4 (lambda () (html-fixture-check 132)))
+(define ~check-raw-text-recovery-5 (lambda () (html-fixture-check 133)))
+(define ~check-raw-text-recovery-6 (lambda () (html-fixture-check 134)))
+(define ~check-raw-text-recovery-7 (lambda () (html-fixture-check 135)))
+(define ~check-raw-text-recovery-8 (lambda () (html-fixture-check 136)))
+(define ~check-raw-text-recovery-9 (lambda () (html-fixture-check 137)))
+(define ~check-raw-text-recovery-10 (lambda () (html-fixture-check 138)))
+(define ~check-raw-text-recovery-11 (lambda () (html-fixture-check 139)))
+(define ~check-raw-text-recovery-12 (lambda () (html-fixture-check 140)))
+(define ~check-raw-text-recovery-13 (lambda () (html-fixture-check 141)))
+(define ~check-raw-text-recovery-14 (lambda () (html-fixture-check 142)))
+(define ~check-raw-text-recovery-15 (lambda () (html-fixture-check 143)))
+(define ~check-raw-text-recovery-16 (lambda () (html-fixture-check 144)))
+(define ~check-raw-text-recovery-17 (lambda () (html-fixture-check 145)))
+(define ~check-select-recovery-0 (lambda () (html-fixture-check 146)))
+(define ~check-select-recovery-1 (lambda () (html-fixture-check 147)))
+(define ~check-select-recovery-2 (lambda () (html-fixture-check 148)))
+(define ~check-select-recovery-3 (lambda () (html-fixture-check 149)))
+(define ~check-select-recovery-4 (lambda () (html-fixture-check 150)))
+(define ~check-select-recovery-5 (lambda () (html-fixture-check 151)))
+(define ~check-select-recovery-6 (lambda () (html-fixture-check 152)))
+(define ~check-select-recovery-7 (lambda () (html-fixture-check 153)))
+(define ~check-select-recovery-8 (lambda () (html-fixture-check 154)))
+(define ~check-select-recovery-9 (lambda () (html-fixture-check 155)))
+(define ~check-select-recovery-10 (lambda () (html-fixture-check 156)))
+(define ~check-select-recovery-11 (lambda () (html-fixture-check 157)))
+(define ~check-select-recovery-12 (lambda () (html-fixture-check 158)))
+(define ~check-select-recovery-13 (lambda () (html-fixture-check 159)))
+(define ~check-select-recovery-14 (lambda () (html-fixture-check 160)))
+(define ~check-select-recovery-15 (lambda () (html-fixture-check 161)))
+(define ~check-select-recovery-16 (lambda () (html-fixture-check 162)))
+(define ~check-select-recovery-17 (lambda () (html-fixture-check 163)))
+(define ~check-select-recovery-18 (lambda () (html-fixture-check 164)))
+(define ~check-select-recovery-19 (lambda () (html-fixture-check 165)))
+(define ~check-selectedcontent-0 (lambda () (html-fixture-check 166)))
+(define ~check-selectedcontent-1 (lambda () (html-fixture-check 167)))
+(define ~check-selectedcontent-2 (lambda () (html-fixture-check 168)))
+(define ~check-selectedcontent-3 (lambda () (html-fixture-check 169)))
+(define ~check-selectedcontent-4 (lambda () (html-fixture-check 170)))
+(define ~check-table-recovery-0 (lambda () (html-fixture-check 171)))
+(define ~check-table-recovery-1 (lambda () (html-fixture-check 172)))
+(define ~check-table-recovery-2 (lambda () (html-fixture-check 173)))
+(define ~check-table-recovery-3 (lambda () (html-fixture-check 174)))
+(define ~check-table-recovery-4 (lambda () (html-fixture-check 175)))
+(define ~check-table-recovery-5 (lambda () (html-fixture-check 176)))
+(define ~check-table-recovery-6 (lambda () (html-fixture-check 177)))
+(define ~check-table-recovery-7 (lambda () (html-fixture-check 178)))
+(define ~check-table-recovery-8 (lambda () (html-fixture-check 179)))
+(define ~check-table-recovery-9 (lambda () (html-fixture-check 180)))
+(define ~check-table-recovery-10 (lambda () (html-fixture-check 181)))
+(define ~check-table-recovery-11 (lambda () (html-fixture-check 182)))
+(define ~check-table-recovery-12 (lambda () (html-fixture-check 183)))
+(define ~check-table-recovery-13 (lambda () (html-fixture-check 184)))
+(define ~check-template-recovery-0 (lambda () (html-fixture-check 185)))
+(define ~check-template-recovery-1 (lambda () (html-fixture-check 186)))
+(define ~check-template-recovery-2 (lambda () (html-fixture-check 187)))
+(define ~check-template-recovery-3 (lambda () (html-fixture-check 188)))
+(define ~check-template-recovery-4 (lambda () (html-fixture-check 189)))
+(define ~check-template-recovery-5 (lambda () (html-fixture-check 190)))
+(define ~check-template-recovery-6 (lambda () (html-fixture-check 191)))
+(define ~check-template-recovery-7 (lambda () (html-fixture-check 192)))
+(define ~check-template-recovery-8 (lambda () (html-fixture-check 193)))
+(define ~check-template-recovery-9 (lambda () (html-fixture-check 194)))
+(define ~check-template-recovery-10 (lambda () (html-fixture-check 195)))
+(define ~check-template-recovery-11 (lambda () (html-fixture-check 196)))
+(define ~check-template-recovery-12 (lambda () (html-fixture-check 197)))
+(define ~check-template-recovery-13 (lambda () (html-fixture-check 198)))
+(define ~check-template-recovery-14 (lambda () (html-fixture-check 199)))
+(define ~check-template-recovery-15 (lambda () (html-fixture-check 200)))
+(define ~check-template-recovery-16 (lambda () (html-fixture-check 201)))
+(define ~check-template-recovery-17 (lambda () (html-fixture-check 202)))
+(define ~check-template-recovery-18 (lambda () (html-fixture-check 203)))
+(define ~check-template-recovery-19 (lambda () (html-fixture-check 204)))
+(define ~check-template-recovery-20 (lambda () (html-fixture-check 205)))
+(define ~check-template-recovery-21 (lambda () (html-fixture-check 206)))
+(define ~check-template-recovery-22 (lambda () (html-fixture-check 207)))
+(define ~check-template-recovery-23 (lambda () (html-fixture-check 208)))
+(define ~check-template-recovery-24 (lambda () (html-fixture-check 209)))
+(define ~check-template-recovery-25 (lambda () (html-fixture-check 210)))
+(define ~check-template-recovery-26 (lambda () (html-fixture-check 211)))
+(define ~check-template-recovery-27 (lambda () (html-fixture-check 212)))
+(define ~check-template-recovery-28 (lambda () (html-fixture-check 213)))
+(define ~check-template-recovery-29 (lambda () (html-fixture-check 214)))
+(define ~check-template-recovery-30 (lambda () (html-fixture-check 215)))
+(define ~check-template-recovery-31 (lambda () (html-fixture-check 216)))
+(define ~check-template-recovery-32 (lambda () (html-fixture-check 217)))
+(define ~check-template-recovery-33 (lambda () (html-fixture-check 218)))
+(define ~check-template-recovery-34 (lambda () (html-fixture-check 219)))
+(define ~check-template-recovery-35 (lambda () (html-fixture-check 220)))
+(define ~check-template-recovery-36 (lambda () (html-fixture-check 221)))
+(define ~check-template-recovery-37 (lambda () (html-fixture-check 222)))
+(define ~check-template-recovery-38 (lambda () (html-fixture-check 223)))
+(define ~check-template-recovery-39 (lambda () (html-fixture-check 224)))
+(define ~check-template-recovery-40 (lambda () (html-fixture-check 225)))
+(define ~check-template-recovery-41 (lambda () (html-fixture-check 226)))
+(define ~check-template-recovery-42 (lambda () (html-fixture-check 227)))
+(define ~check-template-recovery-43 (lambda () (html-fixture-check 228)))
+(define ~check-template-recovery-44 (lambda () (html-fixture-check 229)))
+(define ~check-template-recovery-45 (lambda () (html-fixture-check 230)))
+(define ~check-template-recovery-46 (lambda () (html-fixture-check 231)))
+(define ~check-tokenizer-recovery-0 (lambda () (html-fixture-check 232)))
+(define ~check-tokenizer-recovery-1 (lambda () (html-fixture-check 233)))
+(define ~check-tokenizer-recovery-2 (lambda () (html-fixture-check 234)))
+(define ~check-tokenizer-recovery-3 (lambda () (html-fixture-check 235)))
+(define ~check-tokenizer-recovery-4 (lambda () (html-fixture-check 236)))
+(define ~check-tokenizer-recovery-5 (lambda () (html-fixture-check 237)))
+(define ~check-tokenizer-recovery-6 (lambda () (html-fixture-check 238)))
+(define ~check-tokenizer-recovery-7 (lambda () (html-fixture-check 239)))
+(define ~check-tokenizer-recovery-8 (lambda () (html-fixture-check 240)))
+(define ~check-tokenizer-recovery-9 (lambda () (html-fixture-check 241)))
+(define ~check-tokenizer-recovery-10 (lambda () (html-fixture-check 242)))
+(define ~check-tokenizer-recovery-11 (lambda () (html-fixture-check 243)))
+(define ~check-tokenizer-recovery-12 (lambda () (html-fixture-check 244)))
+(define ~check-tokenizer-recovery-13 (lambda () (html-fixture-check 245)))
+(define ~check-tokenizer-recovery-14 (lambda () (html-fixture-check 246)))
+(define ~check-tokenizer-recovery-15 (lambda () (html-fixture-check 247)))
+(define ~check-tokenizer-recovery-16 (lambda () (html-fixture-check 248)))
+(define ~check-tokenizer-recovery-17 (lambda () (html-fixture-check 249)))
+(define ~check-tokenizer-recovery-18 (lambda () (html-fixture-check 250)))
+(define ~check-tokenizer-recovery-19 (lambda () (html-fixture-check 251)))
+(define ~check-tokenizer-recovery-20 (lambda () (html-fixture-check 252)))
+(define ~check-tokenizer-recovery-21 (lambda () (html-fixture-check 253)))
+(define ~check-tokenizer-recovery-22 (lambda () (html-fixture-check 254)))
+(define ~check-tokenizer-recovery-23 (lambda () (html-fixture-check 255)))
+(define ~check-xml-coercion-0 (lambda () (html-fixture-check 256)))
+(define ~check-xml-coercion-1 (lambda () (html-fixture-check 257)))
+(define ~check-xml-coercion-2 (lambda () (html-fixture-check 258)))
+(define ~check-xml-coercion-3 (lambda () (html-fixture-check 259)))
+(define ~check-xml-coercion-4 (lambda () (html-fixture-check 260)))
+(define ~check-xml-coercion-5 (lambda () (html-fixture-check 261)))
