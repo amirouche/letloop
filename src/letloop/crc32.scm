@@ -25,16 +25,18 @@
                                #xEDB88320))
               (set! crc (fxarithmetic-shift-right crc 1))))))))
 
-  (define (crc32-update crc byte)
-    (fxxor (fxarithmetic-shift-right crc 8)
-           (vector-ref crc32-table (fxand (fxxor crc byte) #xFF))))
+  (define crc32-update
+    (lambda (crc byte)
+      (fxxor (fxarithmetic-shift-right crc 8)
+             (vector-ref crc32-table (fxand (fxxor crc byte) #xFF)))))
 
-  (define (crc32-bytevector-scheme bytevector start end)
-    (let loop ((i start) (crc #xFFFFFFFF))
-      (if (fx>= i end)
-        (fxand (fxxor crc #xFFFFFFFF) #xFFFFFFFF)
-        (loop (fx+ i 1)
-              (crc32-update crc (bytevector-u8-ref bytevector i))))))
+  (define crc32-bytevector-scheme
+    (lambda (bytevector start end)
+      (let loop ((i start) (crc #xFFFFFFFF))
+        (if (fx>= i end)
+          (fxand (fxxor crc #xFFFFFFFF) #xFFFFFFFF)
+          (loop (fx+ i 1)
+                (crc32-update crc (bytevector-u8-ref bytevector i)))))))
 
   ;; ---- JIT-assembled slicing-by-8 ----
   ;;
@@ -118,17 +120,19 @@
       (assembly->procedure (sexp->assembly _crc32-assembly-program)
                            (u8* u8* size_t unsigned-32) unsigned-32)))
 
-  (define (crc32-bytevector-compute bytevector start end)
-    ;; The kernel path only serves START = 0 -- u8* passes the
-    ;; bytevector's base address and the kernel has no offset
-    ;; argument. Every production caller checksums whole bytevectors
-    ;; (crc32 below); ranged callers take the Scheme loop.
-    (if (and _crc32-native (fx= start 0) (fx> end start))
-      (fxxor (_crc32-native crc32-slicing-tables bytevector end #xFFFFFFFF)
-             #xFFFFFFFF)
-      (crc32-bytevector-scheme bytevector start end)))
+  (define crc32-bytevector-compute
+    (lambda (bytevector start end)
+      ;; The kernel path only serves START = 0 -- u8* passes the
+      ;; bytevector's base address and the kernel has no offset
+      ;; argument. Every production caller checksums whole bytevectors
+      ;; (crc32 below); ranged callers take the Scheme loop.
+      (if (and _crc32-native (fx= start 0) (fx> end start))
+        (fxxor (_crc32-native crc32-slicing-tables bytevector end #xFFFFFFFF)
+               #xFFFFFFFF)
+        (crc32-bytevector-scheme bytevector start end))))
 
-  (define (crc32 bytevector)
-    (crc32-bytevector-compute bytevector 0 (bytevector-length bytevector)))
+  (define crc32
+    (lambda (bytevector)
+      (crc32-bytevector-compute bytevector 0 (bytevector-length bytevector))))
 
   (include "letloop/crc32.check.scm"))
