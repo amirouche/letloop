@@ -121,7 +121,7 @@ src/letloop/r999.scm         define-record-type* macro (extended record types)
 src/letloop/sq.scm           Priority queue (sq-new, sq-add!, sq-min, sq-split)
 src/letloop/match.scm        Pattern matching (SRFI 241)
 src/letloop/http.scm         HTTP request/response handling
-src/letloop/html/            HTML parsing (htmlprag + utilities)
+src/letloop/html/            HTML parsing (justhtml port) and html-read / html-write
 src/letloop/generator.scm    Generators/coroutines
 src/letloop/sxpath.scm       XML/XPath queries (SXPath)
 src/letloop/environment.scm  Environment variables (SRFI-98)
