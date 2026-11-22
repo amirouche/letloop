@@ -3,7 +3,8 @@
   (export letloop-root
           root-available-print
           root-create
-          root-exec)
+          root-exec
+          ~check-root-index-page-hrefs)
 
   (import (chezscheme)
           (letloop cffi)
@@ -134,13 +135,18 @@
    (define sxpath-index-distributions
      (sxpath '(// a @ href *text*)))
 
+   ;; The href of every link of a directory-index page, in page order.
+   (define root-index-page-hrefs
+     (lambda (page)
+       (sxpath-index-distributions (html-read page))))
+
    (define root-index-hrefs
      (lambda (url)
        (call-with-values (lambda () (www-request 'GET url '() (bytevector)))
          (lambda (code headers body)
            (if (= code 200)
                ;; cdr will remove parent directory aka. ../
-               (cdr (sxpath-index-distributions (html-read (utf8->string body))))
+               (cdr (root-index-page-hrefs (utf8->string body)))
                (begin
                  (format #t "There is a typo or upstream rootfs server is not responding?\n")
                  (exit 1)))))))
@@ -286,5 +292,18 @@
              ((exec) (root-exec (cadr args) (caddr args) (cddr (cddr args))))
              (else (display "A typo? Almost, try again...!\n")
                    (exit 1))))))
+
+   (define ~check-root-index-page-hrefs
+     (lambda ()
+       ;; The shape of the index pages `letloop root available` reads.
+       (define page
+         (string-append
+          "<html>\n<head><title>Index of /images/</title></head>\n<body>\n"
+          "<h1>Index of /images/</h1><hr><pre><a href=\"../\">../</a>\n"
+          "<a href=\"alpine/\">alpine/</a>   02-Nov-2026 10:00   -\n"
+          "<a href=\"debian/\">debian/</a>   02-Nov-2026 10:00   -\n"
+          "</pre><hr></body>\n</html>\n"))
+       (assert (equal? '("../" "alpine/" "debian/")
+                       (root-index-page-hrefs page)))))
 
    )

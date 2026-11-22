@@ -9,8 +9,15 @@
    ~check-letloop-html-write-2
    ~check-letloop-html-write-3
    ~check-letloop-html-write-4
+   ~check-letloop-html-read-0
+   ~check-letloop-html-read-1
+   ~check-letloop-html-read-2
+   ~check-letloop-html-read-3
   )
-  (import (chezscheme) (letloop match) (letloop html htmlprag))
+  ;; Only html->sxml: (letloop html justhtml) also exports its tables,
+  ;; tokenizer and generic helpers such as char-ascii-digit?.
+  (import (chezscheme) (letloop match)
+          (only (letloop html justhtml) html->sxml))
 
   ;; ref: https://html.spec.whatwg.org/
 
@@ -113,7 +120,18 @@
       (html-write object out)
       (out (eof-object)))))
 
-  (define html-read html->sxml)
+  ;; Parse an HTML document, given as a string or a textual input port,
+  ;; into one SXML tree rooted at *TOP*. The parser is the WHATWG
+  ;; algorithm of (letloop html justhtml): the html, head and body
+  ;; elements are always there, implied when the source omits them, and
+  ;; malformed markup is recovered, never raised.
+  (define html-read
+    (lambda (object)
+      (html->sxml
+       (if (string? object)
+           object
+           (let ((string (get-string-all object)))
+             (if (eof-object? string) "" string))))))
 
   (define make-accumulator
     (lambda ()
@@ -162,5 +180,39 @@
       (assert
        (string=? "<input value=\"say &quot;hi&quot; &amp; &lt;bye&gt;\" size=\"10\"/>"
                  (html-write html)))))
+
+  (define ~check-letloop-html-read-0
+    (lambda ()
+      ;; html, head and body are implied, as a browser builds them.
+      (assert
+       (equal? '(*TOP* (html (head) (body (p "a" (br) "b"))))
+               (html-read "<p>a<br>b")))))
+
+  (define ~check-letloop-html-read-1
+    (lambda ()
+      ;; A character reference is decoded in text and in an attribute
+      ;; value alike.
+      (assert
+       (equal? '(*TOP* (html (head)
+                             (body (a (@ (href "?a=1&b=2")) "x & y"))))
+               (html-read "<a href=\"?a=1&amp;b=2\">x &amp; y</a>")))))
+
+  (define ~check-letloop-html-read-2
+    (lambda ()
+      ;; A textual port reads the same as its content; an empty one is
+      ;; an empty document.
+      (assert
+       (equal? (html-read "<title>t</title><p>x")
+               (html-read (open-input-string "<title>t</title><p>x"))))
+      (assert
+       (equal? '(*TOP* (html (head) (body)))
+               (html-read (open-input-string ""))))))
+
+  (define ~check-letloop-html-read-3
+    (lambda ()
+      ;; What html-read returns for a page, html-write accepts.
+      (assert
+       (string=? "<html><head></head><body><p>a<br/>b</p></body></html>"
+                 (html-write (cadr (html-read "<p>a<br>b</p>")))))))
 
   )
