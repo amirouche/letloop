@@ -1,0 +1,6 @@
+[submodule "submodules/justhtml"]
+	path = submodules/justhtml
+	url = https://github.com/EmilStenstrom/justhtml
+[submodule "submodules/yxml"]
+	path = submodules/yxml
+	url = https://g.blicky.net/yxml.git

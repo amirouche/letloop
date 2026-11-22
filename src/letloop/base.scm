@@ -1231,8 +1231,10 @@
     ;; LIBRARY.SCM must export three procedures:
     ;;   (application) → app state, called once
     ;;   (context app client req) → per-connection state
-    ;;   (dispatch app state method path params req)
+    ;;   (dispatch app state method path params req [rctx])
     ;;     → (values status (body . content-type) extra-headers)
+    ;;   RCTX, the per-request context, is passed only to a seven-
+    ;;   argument dispatch; see (letloop http server).
 
     (define extensions '())
     (define directories '())

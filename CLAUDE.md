@@ -8,6 +8,43 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Main branch for PRs: `dev`
 
+## Commits
+
+Use [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/):
+`<type>(<scope>): <description>`, lowercase, imperative, no trailing period.
+
+- **Types:** `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`.
+- **Scope** is the library or subsystem, matching its source path — `flow`,
+  `flow2`, `liburing`, `http`, `aql`, `kernel`, `checks`. Omit it only for
+  changes that genuinely span the tree.
+- **Breaking changes** take a `!` before the colon (`feat(flow)!: ...`) and a
+  `BREAKING CHANGE:` footer saying what callers must do.
+- The body is where the reasoning goes: what was wrong, why the fix is shaped
+  the way it is, and what a reader would otherwise have to rediscover. A
+  `fix:` for a defect that was observed in practice should say how it
+  presented — this repository's history is one of the main debugging tools.
+
+Keep commits small and focused, one architectural change each. Do not push
+unless explicitly asked.
+
+## Scheme Style
+
+Define a procedure with an explicit `lambda`, never with the
+`(define (f ...) ...)` shorthand:
+
+```scheme
+(define flow-put!
+  (lambda (channel obj)
+    ...))
+```
+
+This holds for top-level and internal defines alike, and for
+`case-lambda` in the same position. `(letloop flow2)` — `flow2.scm` and
+`flow2.check.scm` — is fully converted. Other files still mix the two
+forms: write new code in the explicit form, and convert a file's
+remaining shorthand in a commit of its own, never mixed with a
+behaviour change.
+
 ## System Dependencies
 
 ### Optional shared objects (dlopen'd lazily, on first use)
@@ -31,7 +68,7 @@ FFI binding libraries (`tls`, `liburing`, `vulkan`, `sodium`, `argon2`, `blake3`
 **First-time setup** (builds ChezScheme from source, ~5–15 min):
 ```bash
 ./venv               # enters a shell with SCHEME, LETLOOP_ROOT, LD_LIBRARY_PATH set
-make chezscheme      # ChezScheme $(CHEZ_REF), currently main = 10.5.0-pre-release.1
+make chezscheme      # ChezScheme $(CHEZ_REF), currently v10.4.1
 make letloop         # installs itself, no `mv a.out` step
 make check
 ```
@@ -84,7 +121,7 @@ src/letloop/r999.scm         define-record-type* macro (extended record types)
 src/letloop/sq.scm           Priority queue (sq-new, sq-add!, sq-min, sq-split)
 src/letloop/match.scm        Pattern matching (SRFI 241)
 src/letloop/http.scm         HTTP request/response handling
-src/letloop/html/            HTML parsing (htmlprag + utilities)
+src/letloop/html/            HTML parsing (justhtml port) and html-read / html-write
 src/letloop/generator.scm    Generators/coroutines
 src/letloop/sxpath.scm       XML/XPath queries (SXPath)
 src/letloop/environment.scm  Environment variables (SRFI-98)
@@ -105,6 +142,8 @@ $PREFIX/lib/letloop/obj/<optimize-level>/**       their .so and .wpo, per level
 ```
 
 **Building letloop now requires a Chez installation**, for `scheme.h` and `kernel.o`. Compiling a *user* program still requires no C compiler — `letloop compile` copies its own host and appends a different boot — but it does require a real `scheme` binary for its child process.
+
+**`letloop compile` output is self-contained: `a.out` alone is the deliverable.** The boot image is appended to the executable itself (same host+boot+trailer shape as the letloop binary above), so the `a.out.boot` sibling it also writes is NOT needed at run time — deploy just the executable; do not copy the `.boot` file alongside it.
 
 **`(letloop base)` imports nothing from letloop, on purpose.** It resolves `cli-read`, `transparent`, `letloop-root` and `letloop-review` at first use through `lazy` / `letloop-library-path!`, against the sources installed at `$PREFIX/lib/letloop`. Two reasons, and both bite hard if someone adds an import back:
 
@@ -140,7 +179,9 @@ Three things about that host are load-bearing:
 
 ## Testing Framework
 
-Test files use the `letloop check` subcommand. Procedures prefixed `~check-` are test cases; `~benchmark-` are benchmarks. The test runner validates output via MD5 hash comparison.
+Test files use the `letloop check` subcommand. Procedures prefixed `~check-` are test cases; `~benchmark-` are benchmarks.
+
+**Pass/fail is the check procedure's own return value, not output comparison.** Confirmed directly from the generated driver (`LETLOOP_DEBUG=1`): `(let ((out ((car thunks)))) (if (and (not (eq? out (void))) out) SUCCESS FAILED))` — a `~check-*` procedure passes only if its return value is neither `(void)` nor `#f`. `(assert expr)` itself returns `#t` on success (not void), so a check whose *last* expression is directly an `assert` is always safe. The trap: any check whose last expression is something else — most commonly a cleanup helper (`(foo-test-directory-remove dir)`) — inherits *that* call's return value instead, and filesystem cleanup helpers built from `delete-file`/`delete-directory` commonly return `#f` on a partial failure rather than raising (e.g. `delete-file` on a path that turns out to be a directory just returns `#f`; it doesn't error). That turns a check whose every `assert` actually passed into a reported `** FAILED`, with no exception, no detail — genuinely confusing to debug, and easy to reintroduce silently (e.g. a test starts producing a nested `sstables/` subdirectory for the first time, as soon as it starts calling something that flushes, and a previously-fine cleanup helper written for flat file lists suddenly starts failing on it). **The robust idiom: always make the last expression of a `~check-*` procedure an explicit `#t`** (or otherwise something guaranteed truthy/non-void), rather than relying on whatever a trailing side-effecting call happens to return.
 
 **Library checks live with their library** under `src/`: the library exports its `~check-*` procedures and `include`s a sibling `NAME.check.scm` fragment (see `src/letloop/aql/morton.scm` or `src/letloop/tea/cell.scm` for the pattern). `make check` discovers them by scanning `./src/`. Checks that want a live service (e.g. PostgreSQL) print a SKIP note and pass when the service is absent.
 

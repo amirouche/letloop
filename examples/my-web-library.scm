@@ -26,7 +26,7 @@
   ;; the peer IP, REQ the parsed request.
   (define (context application client req) client)
 
-  (define (dispatch application request-state method path params req)
+  (define (dispatch application request-state method path params req request-context)
     (match (cons method path)
       ((GET)
        (values 200

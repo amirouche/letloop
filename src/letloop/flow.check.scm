@@ -348,6 +348,56 @@
   (and (equal? (reverse echoed) (list (string->utf8 "one") (string->utf8 "two")))
        closed-on-timeout))
 
+;; A cancelled/losing flow-accept must leave the listener usable. Its
+;; block registers a handler against the multishot's id, and
+;; loop-accept-block refuses a second waiter on that id -- so an accept
+;; that lost a choice and left its handler behind poisoned the fd, and
+;; every later flow-accept on it raised "concurrent accept on fd" for
+;; as long as no client arrived to clear the slot, i.e. exactly while
+;; the server was idle. The whole server fiber is guarded so a
+;; regression FAILS this check rather than hanging the suite on a
+;; loop-stop that never runs.
+(define (~check-flow-006/accept-cancel-leaves-listener-usable)
+  (define PORT 18237)
+  (define listen-fd (loop-socket-new AF-INET SOCK-STREAM 0))
+  (define timed-out #f)
+  (define accepted #f)
+  (define received #f)
+  (loop-new)
+  (loop-bind listen-fd "127.0.0.1" PORT)
+  (loop-listen listen-fd 128)
+  (loop-spawn
+   (lambda ()
+     (guard (ex (#t (set! accepted 'raised)))
+       ;; nothing is connecting yet, so the timeout wins and the
+       ;; accept is cancelled
+       (set! timed-out
+             (eq? (flow-perform
+                   (flow-choice (flow-accept listen-fd) (flow-timeout 0.05)))
+                  (void)))
+       ;; the listener must still accept
+       (let ((client (flow-perform (flow-accept listen-fd))))
+         (set! accepted (fixnum? client))
+         (set! received (flow-perform (flow-read client)))
+         (loop-close client)))
+     (loop-close listen-fd)
+     (loop-stop)))
+  (loop-spawn
+   (lambda ()
+     ;; connect only after the first accept has been cancelled
+     (flow-sleep 0.15)
+     (call-with-values (lambda () (make-sockaddr-in 127 0 0 1 PORT))
+       (lambda (addr addrlen)
+         (let ((fd (loop-connect addr addrlen)))
+           (foreign-free addr)
+           (flow-perform (flow-write fd (string->utf8 "after-cancel")))
+           (flow-sleep 0.05)
+           (loop-close fd))))))
+  (loop-run)
+  (and timed-out
+       (eq? accepted #t)
+       (equal? received (string->utf8 "after-cancel"))))
+
 ;;------------------------------------------------------------
 ;; File I/O (flow-open / flow-read-at / flow-write-at / flow-close)
 ;;------------------------------------------------------------
@@ -854,3 +904,380 @@
   (and (eq? result 'won)
        loser-cancelled
        (not winner-cancelled)))
+
+;; A raise from a base event's BLOCK procedure must reach the fiber
+;; that performed it. Registration runs inside loop-abort's thunk, on
+;; the scheduler's stack with the prompt unwound, so before the fix the
+;; raise went to loop-apply's catch-all and took k with it: the fiber
+;; was gone, silently, and anything waiting on it waited forever.
+;; loop-get-sqe ("submission queue full") and loop-accept-block
+;; ("concurrent accept on fd") both raise from block procs in real
+;; code. Bounded ticks so the buggy case fails instead of hanging.
+(define (~check-flow-011/block-raise-reaches-the-caller)
+  (define seen 'not-set)
+  (define bad (make-flow (lambda (x) x)
+                         (lambda () #f)          ;; never ready -> must block
+                         (lambda (state resume register-cancel!)
+                           (error 'bad-block "boom"))))
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (guard (ex (#t (set! seen 'raised)))
+       (flow-perform bad)
+       (set! seen 'returned))))
+  (let tick ((n 0))
+    (when (fx<? n 6)
+      (loop-run-once)
+      (tick (fx+ n 1))))
+  (eq? seen 'raised))
+
+;; The same raise, from a compute worker -- the worse half. Off-loop
+;; registration is marshalled ONTO the loop (that is the fix for
+;; preparing SQEs from the wrong thread), so a raising block proc runs
+;; on the loop while the worker sleeps on its condition variable: the
+;; raise is swallowed by loop-apply, nobody ever broadcasts, and that
+;; worker is lost for the life of the process. The pool shrinks by one
+;; with no other symptom.
+(define (~check-flow-011/block-raise-does-not-strand-a-worker)
+  (define outcome 'not-set)
+  (define done #f)
+  (define bad (make-flow (lambda (x) x)
+                         (lambda () #f)
+                         (lambda (state resume register-cancel!)
+                           (error 'bad-block "boom"))))
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-worker-start! 1)
+     (set! outcome
+           (flow-worker-call
+            (lambda ()
+              (guard (ex (#t 'raised))
+                (flow-perform bad)
+                'returned))))
+     (set! done #t)
+     (flow-worker-stop!)))
+  (flow-worker-tick-until (lambda () done) 400)
+  (eq? outcome 'raised))
+
+;; flow-get-block resumes the PUTTER first -- its #f is handled, inside
+;; the `and` -- and then called its own resume in tail position and
+;; discarded the result. That result is #f whenever an earlier base of
+;; the same perform won during registration, and by then the putter is
+;; committed: its flow-put! has returned, so the handoff happened while
+;; the value reached nobody. One side of a rendezvous succeeded and the
+;; other never did.
+;;
+;; Not reachable from well-behaved code as flow stands: channels are
+;; single-loop-thread by contract (see <flow-channel>), workers never
+;; touch them, and nothing yields between flow-perform's poll pass and
+;; its block pass, so a putter cannot appear in the gap. This drives the
+;; block proc directly, with a state box already 'synched, because that
+;; is the only way to reach the path -- the same reasoning flow already
+;; applies to the claim!/rescan discipline it keeps "regardless", so
+;; that re-introducing concurrency cannot silently re-open the hole.
+(define (~check-flow-011/lost-get-does-not-eat-a-value)
+  (define ch (make-flow-channel))
+  (define put-returned #f)
+  (define got 'not-set)
+  (loop-new)
+  (loop-spawn (lambda ()
+                (flow-put! ch 'the-value)
+                (set! put-returned #t)))
+  ;; let the putter register and park
+  (flow-worker-tick-until (lambda () #f) 3)
+  (assert (fx=? 1 (flow-channel-puts-length ch)))
+  (assert (not put-returned))
+  ;; A perform that has already synched on another base, reaching
+  ;; flow-get's block: its resume reports #f, as the real one would.
+  ((flow-block-proc (flow-get ch))
+   (box 'synched)
+   (lambda (value) #f)
+   (lambda (thunk) (void)))
+  (flow-worker-tick-until (lambda () put-returned) 20)
+  ;; The putter is committed either way -- that is not the bug, and
+  ;; un-committing it is not on the table.
+  (assert put-returned)
+  ;; The bug is what happened to the value. It must still be there.
+  (loop-spawn (lambda () (set! got (flow-get! ch))))
+  (flow-worker-tick-until (lambda () (not (eq? got 'not-set))) 20)
+  (assert (eq? got 'the-value))
+  ;; ... and exactly once: the redeposited entry is single-use, so a
+  ;; second getter must find nothing rather than the same value again.
+  (assert (not ((flow-try-proc (flow-get ch)))))
+  #t)
+
+;; The dual, on the put side. flow-put-block resumed the GETTER first
+;; and then discarded its own resume's return value -- so when an
+;; earlier base of the same perform had already won, the peer received
+;; a value from a put that, as far as its own caller could tell, never
+;; happened: the caller returns through the other base and may well
+;; retry or discard the value it believes was not sent.
+;;
+;; Nothing is lost here, unlike the get side -- this is an EXTRA
+;; delivery, not a dropped one -- which is why it is the milder half.
+;; The fix is the ordering, not a redeposit: commit our own side first,
+;; and if it reports #f release the peer's claim untouched, because a
+;; put that did not happen must not be observable by anyone.
+;;
+;; Latent for the same reason as its dual; driven directly for the same
+;; reason.
+(define (~check-flow-011/lost-put-does-not-deliver)
+  (define ch (make-flow-channel))
+  (define got 'not-set)
+  (loop-new)
+  (loop-spawn (lambda () (set! got (flow-get! ch))))
+  ;; let the getter register and park
+  (flow-worker-tick-until (lambda () #f) 3)
+  (assert (fx=? 1 (flow-channel-pops-length ch)))
+  (assert (eq? got 'not-set))
+  ;; A perform that has already synched on another base, reaching
+  ;; flow-put's block: its resume reports #f, as the real one would.
+  ((flow-block-proc (flow-put ch 'never-sent))
+   (box 'synched)
+   (lambda (value) #f)
+   (lambda (thunk) (void)))
+  (flow-worker-tick-until (lambda () (not (eq? got 'not-set))) 20)
+  ;; The put did not happen, so nobody may have received its value.
+  (assert (eq? got 'not-set))
+  ;; The getter must still be parked and still usable -- releasing the
+  ;; peer's claim is what keeps it discoverable by a real put.
+  (assert (fx=? 1 (flow-channel-pops-length ch)))
+  (loop-spawn (lambda () (flow-put! ch 'really-sent)))
+  (flow-worker-tick-until (lambda () (not (eq? got 'not-set))) 20)
+  (assert (eq? got 'really-sent))
+  #t)
+
+;; ---- flow-worker (CPU offload to OS threads) ----
+;;
+;; Ticking rather than loop-run: these checks must drive the loop
+;; themselves and still terminate if something never completes, so a
+;; bounded tick loop with a done-counter is used throughout, exactly
+;; like the flow-011 checks above.
+
+(define (flow-worker-tick-until done? limit)
+  (let tick ((n 0))
+    (cond
+      ((done?) #t)
+      ((fx>=? n limit) #f)
+      (else (loop-run-once) (tick (fx+ n 1))))))
+
+;; A worker's value comes back to the fiber that asked for it.
+(define (~check-flow-worker-runs-off-loop)
+  (define result #f)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-worker-start! 2)
+     (set! result (flow-worker-call (lambda () (fx* 6 7))))
+     (flow-worker-stop!)))
+  (flow-worker-tick-until (lambda () result) 200)
+  (assert (eqv? result 42))
+  #t)
+
+;; A worker performing a RING-TOUCHING event -- anything whose block-proc
+;; preps an SQE, as flow-timeout does -- must work. It did not: the
+;; off-loop path called block-procs inline on the worker thread, so the
+;; SQE was prepared and (loop-handlers (loop-current)) mutated from the
+;; wrong thread.
+;;
+;; This has to CONTEND to be worth anything. A single quiet timeout on
+;; one worker passes with or without the fix -- verified -- because
+;; nothing else is competing for the ring at that moment. The corruption
+;; is a race between a worker preparing an SQE and the loop preparing
+;; its own, and it took roughly twenty simultaneous requests to bring a
+;; production server down. So: several workers, each performing many
+;; timeouts, while the loop keeps its own timeout traffic going.
+(define flow-worker-ring-stress-workers 8)
+(define flow-worker-ring-stress-rounds 40)
+
+(define (~check-flow-worker-ring-event-off-loop)
+  (define done 0)
+  (define failures 0)
+  (define loop-side 0)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-worker-start! flow-worker-ring-stress-workers)
+     ;; Loop-side timeout traffic, so the ring is never idle while the
+     ;; workers are arming theirs.
+     (let noise ((n 0))
+       (when (fx<? n (fx* flow-worker-ring-stress-rounds 4))
+         (loop-spawn (lambda () (flow-sleep 0.001) (set! loop-side (fx+ loop-side 1))))
+         (noise (fx+ n 1))))
+     (let each ((w 0))
+       (when (fx<? w flow-worker-ring-stress-workers)
+         (loop-spawn
+          (lambda ()
+            (let ((outcome
+                   (guard (exception (#t 'raised))
+                     (flow-worker-call
+                      (lambda ()
+                        (let round ((r 0))
+                          (if (fx=? r flow-worker-ring-stress-rounds)
+                              'ok
+                              (begin (flow-sleep 0.001) (round (fx+ r 1))))))))))
+              (unless (eq? outcome 'ok) (set! failures (fx+ failures 1)))
+              (set! done (fx+ done 1))
+              ;; The pool is process-global: leaving it running makes
+              ;; every later check fail with "worker pool already
+              ;; running". Stopped by the last worker to finish, on the
+              ;; loop thread, as flow-worker-stop! requires.
+              (when (fx=? done flow-worker-ring-stress-workers)
+                (flow-worker-stop!)))))
+         (each (fx+ w 1))))))
+  ;; Generous tick budget: 8 workers x 40 x 1ms of real sleeping, plus
+  ;; the loop's own noise.
+  (flow-worker-tick-until
+   (lambda () (fx=? done flow-worker-ring-stress-workers)) 200000)
+  (assert (fx=? done flow-worker-ring-stress-workers))
+  (assert (fx=? failures 0))
+  ;; The loop's own timeouts must also have completed -- a corrupted
+  ;; ring shows up here as loop-side work that silently never finishes.
+  (assert (fx>? loop-side 0))
+  #t)
+
+;; A thunk that raises must re-raise in the CALLING fiber, not vanish
+;; into the worker thread leaving the fiber parked forever.
+(define (~check-flow-worker-propagates-raise)
+  (define outcome #f)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-worker-start! 2)
+     (set! outcome
+           (guard (exception (#t (list 'caught (condition-message exception))))
+             (flow-worker-call (lambda () (error 'worker-thunk "boom")))))
+     (flow-worker-stop!)))
+  (flow-worker-tick-until (lambda () outcome) 200)
+  (assert (pair? outcome))
+  (assert (eq? (car outcome) 'caught))
+  (assert (string=? (cadr outcome) "boom"))
+  #t)
+
+;; The point of the whole exercise: several calls in flight at once
+;; must overlap instead of serialising. Four 150ms thunks across four
+;; workers finish in well under the 600ms they would take one after
+;; another. The threshold is deliberately loose (400ms) so a loaded
+;; machine does not make this flaky -- it still cannot pass if the
+;; calls ran sequentially.
+(define (~check-flow-worker-overlaps)
+  (define done 0)
+  (define started #f)
+  (define elapsed #f)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-worker-start! 4)
+     (set! started (current-time 'time-monotonic))
+     (do ((i 0 (fx+ i 1))) ((fx=? i 4))
+       (loop-spawn
+        (lambda ()
+          (flow-worker-call
+           (lambda () (sleep (make-time 'time-duration 150000000 0))))
+          (set! done (fx+ done 1))
+          (when (fx=? done 4)
+            (let ((now (current-time 'time-monotonic)))
+              (set! elapsed
+                    (+ (* 1000 (- (time-second now) (time-second started)))
+                       (/ (- (time-nanosecond now) (time-nanosecond started))
+                          1000000)))))))))) 
+  (flow-worker-tick-until (lambda () (fx=? done 4)) 400)
+  ;; Stop the pool before returning -- a check that leaves it running
+  ;; makes the NEXT check fail on "worker pool already running", which
+  ;; is a confusing way to learn about a missing cleanup.
+  (flow-worker-stop!)
+  (assert (fx=? done 4))
+  (assert elapsed)
+  (assert (< elapsed 400))
+  #t)
+
+;; flow-worker-io: a thunk submitted from a worker must run on the LOOP
+;; thread (so it may use the ring), and its value must come back to the
+;; worker. Identity is checked with flow-worker-current? rather than a
+;; thread id: that is the predicate the storage layer itself branches
+;; on, so this checks the thing that actually matters.
+(define (~check-flow-worker-io-runs-on-loop)
+  (define where-thunk-ran #f)
+  (define where-caller-was #f)
+  (define value #f)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-worker-start! 2)
+     (set! value
+           (flow-worker-call
+            (lambda ()
+              (set! where-caller-was (flow-worker-current?))
+              (flow-worker-io
+               (lambda ()
+                 (set! where-thunk-ran (flow-worker-current?))
+                 'from-loop)))))
+     (flow-worker-stop!)))
+  (flow-worker-tick-until (lambda () value) 400)
+  (assert (eq? value 'from-loop))
+  ;; the caller really was a worker...
+  (assert (eq? where-caller-was #t))
+  ;; ...and the thunk really was not
+  (assert (eq? where-thunk-ran #f))
+  #t)
+
+;; Both hand-offs must be multiple-value transparent. This is not
+;; hypothetical: marshalling that kept only the first value made every
+;; S3 read in h9p3r return garbage, and the symptom was not an error
+;; but queries quietly returning zero results -- www-request returns
+;; five values, and only the first survived the trip.
+(define (~check-flow-worker-multiple-values)
+  (define call-result #f)
+  (define io-result #f)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-worker-start! 2)
+     (set! call-result
+           (call-with-values
+             (lambda () (flow-worker-call (lambda () (values 1 2 3))))
+             list))
+     (set! io-result
+           (call-with-values
+             (lambda ()
+               (flow-worker-call
+                (lambda ()
+                  (flow-worker-io (lambda () (values 'a 'b 'c 'd 'e))))))
+             list))
+     (flow-worker-stop!)))
+  (flow-worker-tick-until (lambda () (and call-result io-result)) 400)
+  (assert (equal? call-result '(1 2 3)))
+  (assert (equal? io-result '(a b c d e)))
+  #t)
+
+;; The consolidation this was all heading toward: an ORDINARY channel,
+;; used with flow-put!/flow-get!, rendezvousing between a fiber on the
+;; loop and a compute worker -- in both directions, with no
+;; worker-specific API in sight. Before the resume step was made
+;; thread-aware this could not work: completing a rendezvous conses
+;; onto the loop's unsynchronized thunk list, so doing it from a
+;; foreign thread corrupted loop state.
+(define (~check-flow-channel-crosses-threads)
+  (define to-worker (make-flow-channel))
+  (define from-worker (make-flow-channel))
+  (define got #f)
+  (loop-new)
+  (loop-spawn
+   (lambda ()
+     (flow-worker-start! 2)
+     ;; a fiber feeds the worker and reads its answer back
+     (loop-spawn
+      (lambda ()
+        (flow-put! to-worker 20)
+        (set! got (flow-get! from-worker))))
+     ;; the worker blocks on the channel from OFF the loop, computes,
+     ;; and answers over another channel
+     (flow-worker-call
+      (lambda ()
+        (let ((n (flow-get! to-worker)))
+          (flow-put! from-worker (* n 2)))))))
+  (flow-worker-tick-until (lambda () got) 600)
+  (flow-worker-stop!)
+  (assert (eqv? got 40))
+  #t)

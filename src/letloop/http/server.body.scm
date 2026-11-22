@@ -11,6 +11,25 @@
               (bytevector-copy! bv 0 out offset (bytevector-length bv))
               (loop (cdr bvs) (fx+ offset (bytevector-length bv)))))))))
 
+;; The bytevectors of the list BVS joined, TOTAL bytes in all. A list
+;; and a known length, where bytevector-append takes its pieces as
+;; arguments: a large body arrives as thousands of them.
+(define bytevector-concatenate
+  (lambda (bvs total)
+    (let ((out (make-bytevector total)))
+      (let loop ((bvs bvs) (offset 0))
+        (if (null? bvs)
+            out
+            (let ((n (bytevector-length (car bvs))))
+              (bytevector-copy! (car bvs) 0 out offset n)
+              (loop (cdr bvs) (fx+ offset n))))))))
+
+;; The bytes of BV from START to END, as a fresh bytevector.
+(define (subbytevector bv start end)
+  (let ((out (make-bytevector (fx- end start))))
+    (bytevector-copy! bv start out 0 (fx- end start))
+    out))
+
 (define status-code->reason
   (lambda (code)
     (case code
@@ -47,6 +66,20 @@
 (define %hdr-connection (string->utf8 "connection"))
 (define %hdr-content-length (string->utf8 "content-length"))
 (define %val-close (string->utf8 "close"))
+(define %hdr-transfer-encoding (string->utf8 "transfer-encoding"))
+
+;; How many of REQ's headers are named NAME, a lowercase string.
+(define %header-occurrences
+  (lambda (req name)
+    (let ((count (phr-request-header-count req)))
+      (let loop ((i 0) (found 0))
+        (if (fx=? i count)
+            found
+            (let ((header (phr-request-header-name req i)))
+              (loop (fx+ i 1)
+                    (if (and header (string-ci=? header name))
+                        (fx+ found 1)
+                        found))))))))
 
 ;; RFC 9110 IMF-fixdate for the Date header every response carries
 ;; (§6.6.1 says a server with a clock MUST send it, and the reference
@@ -90,6 +123,59 @@
 (define %response-400
   (string->utf8
    "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"))
+
+;; Canned response for a request whose DISPATCH raised. No body: what
+;; went wrong is the operator's to read, in the log, and not the
+;; client's.
+(define %response-500
+  (string->utf8
+   "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"))
+
+;; What was raised, as something a log line can hold: a condition
+;; writes as #<condition> and says nothing.
+(define %raised->datum
+  (lambda (ex)
+    (if (condition? ex)
+        (call-with-string-output-port
+         (lambda (port) (display-condition ex port)))
+        ex)))
+
+;; Canned response for a request DISPATCH did not finish within
+;; %dispatch-timeout-seconds. See the request-context/handle-connection
+;; comments below for the full mechanism.
+(define %response-504
+  (string->utf8
+   "HTTP/1.1 504 Gateway Timeout\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"))
+
+;; A request that takes longer than this to answer gets a real 504,
+;; not a bare connection reset from the idle reaper's unrelated
+;; %idle-timeout-seconds sweep (the bug this replaces: a handler doing
+;; genuine upstream work -- e.g. multiple S3 fetches -- produces no
+;; read/write activity on ITS OWN fd while it runs, so the reaper's
+;; per-fd timestamp goes stale and eventually kills the connection out
+;; from under an in-flight, healthy request, silently, with no log
+;; line anywhere).
+(define %dispatch-timeout-seconds 28)
+
+;; Cooperative cancellation handed to DISPATCH alongside REQ. NEEDED?
+;; starts #t; the server flips it to #f once it has given up on this
+;; request (timeout, or the connection dying mid-dispatch) so a
+;; handler fanning work out over multiple fibers can stop starting new
+;; work and stop waiting on stragglers instead of running to
+;; completion for a response nobody will ever receive.
+;;
+;; Backed by a box (box-cas!), not a plain mutable field: a DISPATCH
+;; implementation is free to run its fan-out on another OS thread (a
+;; downstream search handler's query dispatch does exactly this), so
+;; NEEDED? is genuinely read and written across threads -- matching the
+;; box/box-cas! discipline this codebase uses everywhere else two
+;; threads touch shared state.
+(define-record-type request-context
+  (fields needed-box))
+
+(define (request-context-make) (make-request-context (box #t)))
+(define (request-context-needed? rctx) (unbox (request-context-needed-box rctx)))
+(define (request-context-cancel! rctx) (box-cas! (request-context-needed-box rctx) #t #f))
 
 ;; ---- Bytevector-range URI parsing ----
 
@@ -161,34 +247,57 @@
 ;; (values req remainder) once the head and the whole content-length
 ;; body are buffered, (values #f #f) when more bytes are needed, and
 ;; (values 'bad-request #f) on a definite parse error.
+;;
+;; A request whose body length could be read two ways is a parse error
+;; too: any Transfer-Encoding, which this server does not implement,
+;; and more than one Content-Length. Taking one reading and carrying on
+;; is how a server ends up disagreeing with the proxy in front of it
+;; about where a request ends, and the bytes in between are then a
+;; request the proxy never saw (RFC 9112, 6.3).
 (define try-parse-http-request
   (lambda (buf out . rest)
-    (let ((req-vec (if (pair? rest) (car rest) #f)))
-      (if (fxzero? (bytevector-length buf))
-          (values #f #f)
-          (let ((req (if req-vec
-                         (phr-parse-request buf out req-vec)
-                         (phr-parse-request buf out))))
-            (cond
-              ((eq? req 'incomplete) (values #f #f))
-              ((not req) (values 'bad-request #f))
-              (else
-               (let* ((consumed (phr-request-bytes-consumed req))
-                      (content-length (phr-request-header-ref-as-integer req %hdr-content-length))
-                      (body-len (or content-length 0)))
-                 ;; Content-length header present but unparsable
-                 ;; (non-digit, or fixnum overflow): bad request.
-                 (if (and (not content-length)
-                          (phr-request-header-ref/bv req %hdr-content-length))
-                     (values 'bad-request #f)
-                     (let ((total (fx+ consumed body-len))
-                           (have (bytevector-length buf)))
-                       (if (fx<? have total)
-                           (values #f #f)
-                           (let ((remainder (if (fx>=? total have)
-                                                (bytevector)
-                                                (subbytevector buf total have))))
-                             (values req remainder)))))))))))))
+    (let-values (((req remainder need)
+                  (%try-parse-http-request buf out
+                                           (if (pair? rest) (car rest) #f))))
+      (values req remainder))))
+
+;; The same, with a third value: when more bytes are needed and the
+;; head is already in, how long BUF has to be before the request is
+;; whole; #f otherwise. The caller can then read that many bytes and
+;; parse once, where parsing after every read copies and re-reads
+;; everything received so far.
+(define %try-parse-http-request
+  (lambda (buf out req-vec)
+    (if (fxzero? (bytevector-length buf))
+        (values #f #f #f)
+        (let ((req (if req-vec
+                       (phr-parse-request buf out req-vec)
+                       (phr-parse-request buf out))))
+          (cond
+            ((eq? req 'incomplete) (values #f #f #f))
+            ((not req) (values 'bad-request #f #f))
+            (else
+             (let* ((consumed (phr-request-bytes-consumed req))
+                    (content-length (phr-request-header-ref-as-integer req %hdr-content-length))
+                    (body-len (or content-length 0)))
+               ;; Content-length header present but unparsable
+               ;; (non-digit, or fixnum overflow): bad request. The
+               ;; count is taken only when there is a Content-Length
+               ;; at all, so a request without a body pays nothing.
+               (if (or (and (not content-length)
+                            (phr-request-header-ref/bv req %hdr-content-length))
+                       (phr-request-header-ref/bv req %hdr-transfer-encoding)
+                       (and content-length
+                            (fx>? (%header-occurrences req "content-length") 1)))
+                   (values 'bad-request #f #f)
+                   (let ((total (fx+ consumed body-len))
+                         (have (bytevector-length buf)))
+                     (if (fx<? have total)
+                         (values #f #f total)
+                         (let ((remainder (if (fx>=? total have)
+                                              (bytevector)
+                                              (subbytevector buf total have))))
+                           (values req remainder #f))))))))))))
 
 (define http-response-write*
   (lambda (write-proc status reason headers body-bv)
@@ -198,13 +307,63 @@
        (lambda ()
          (if done (eof-object) (begin (set! done #t) body-bv)))))))
 
+;; The server's own record of its open connections, for the idle
+;; reaper: fd -> a connection vector, #(MARK CLOSED?). MARK is the
+;; reaper's sweep count when the connection last read or wrote, so
+;; noting activity costs a vector-set! and no clock read. CLOSED? is
+;; set by whoever closes the fd first -- the connection's own cleanup
+;; or the reaper -- and the other then leaves it alone: the number may
+;; already belong to a new connection.
+(define-record-type %server
+  (fields (immutable connections) (mutable sweeps))
+  (protocol (lambda (new) (lambda () (new (make-eqv-hashtable) 0)))))
+
+(define (%connection-new server) (vector (%server-sweeps server) #f))
+(define (%connection-touch! server connection)
+  (vector-set! connection 0 (%server-sweeps server)))
+(define (%connection-closed? connection) (vector-ref connection 1))
+
 (define handle-connection
-  (lambda (application context dispatch peer-ip read write close)
+  (lambda (server application context dispatch peer-ip fd)
     (define request-state #f)
     (define out (make-phr-out))
     (define req-vec (vector 'phr-request #f #f 0))
+    (define connection (%connection-new server))
 
     (define done? #f)
+
+    (define (note-activity! data)
+      (when (bytevector? data)
+        (%connection-touch! server connection))
+      data)
+
+    ;; A bytevector, #t for EOF, or #f when the read failed -- which
+    ;; includes the reaper closing the fd under it.
+    (define (connection-read)
+      (note-activity! (flow-perform (flow-read fd))))
+
+    ;; #f when the write failed or the reaper already closed the fd: a
+    ;; closed number may have been reissued to another connection.
+    ;;
+    ;; One send at a time rather than flow-write-all!, so that every
+    ;; send the kernel takes counts as activity. Noted only once the
+    ;; whole response had gone, a body that takes longer than the idle
+    ;; timeout to deliver looked idle throughout, and the reaper cut it
+    ;; off with the client still reading: a 48 MB response read at
+    ;; 1 MB/s ended after 33 s and 31 MB. A client that stops reading
+    ;; completes no send, and is still reaped.
+    (define (write bv)
+      (let ((size (bytevector-length bv)))
+        (let loop ((start 0))
+          (cond
+           ((%connection-closed? connection) #f)
+           ((fx=? start size) #t)
+           (else
+            (let ((n (flow-perform (flow-write fd bv start))))
+              (and n
+                   (begin
+                     (%connection-touch! server connection)
+                     (loop (fx+ start n))))))))))
 
     ;; Idempotent: also called from the guard below when the request
     ;; path raises after the normal-path cleanup already ran.
@@ -212,28 +371,45 @@
       (unless done?
         (set! done? #t)
         (unlock-object out)
-        (close)))
+        (let ((connections (%server-connections server)))
+          (when (eq? (hashtable-ref connections fd #f) connection)
+            (hashtable-delete! connections fd)))
+        (unless (%connection-closed? connection)
+          (vector-set! connection 1 #t)
+          (flow-perform (flow-close fd)))))
+
+    ;; BUF holds a request's head and the start of its body, and the
+    ;; whole request is NEED bytes long: read until that many are in
+    ;; hand, keeping the pieces, and join them once. Joined and parsed
+    ;; again after every read, a body cost its length squared: 16 MB
+    ;; took 6.9 s, twice that four times as long.
+    (define (read-body buf need)
+      (let fill ((pieces (list buf)) (have (bytevector-length buf)))
+        (if (fx>=? have need)
+            (handle-loop (bytevector-concatenate (reverse pieces) have))
+            (let ((data (connection-read)))
+              (if (bytevector? data)
+                  (fill (cons data pieces)
+                        (fx+ have (bytevector-length data)))
+                  ;; read error, or the peer gave up mid-body
+                  (cleanup))))))
 
     (define (handle-loop buf)
-      (let-values (((req remainder) (try-parse-http-request buf out req-vec)))
+      (let-values (((req remainder need)
+                    (%try-parse-http-request buf out req-vec)))
         (cond
           ((eq? req 'bad-request)
            ;; Definite parse error: best-effort 400, then close, so
            ;; garbage is not buffered and re-parsed forever.
            (write %response-400)
            (cleanup))
+          ((and (not req) need)
+           (read-body buf need))
           ((not req)
-            ;; Unbounded per-request read: no per-read timeout race
-            ;; here (that was tried in ec70498 via flow-choice/flow-
-            ;; timeout and reverted — see the commit message: it cost
-            ;; ~45% throughput to CML bookkeeping overhead for a
-            ;; precision gain the coarse sweep below already covers
-            ;; within %idle-sweep-interval seconds, same as flow-write
-            ;; already accepts on the write side per §4.5). A
-            ;; connection idle here relies on the sweep's loop-close
-            ;; to eventually unblock this read, exactly as it always
-            ;; has for writes.
-            (let ((data (read)))
+            ;; No per-read deadline: racing every read against a timer
+            ;; cost ~45% of throughput (ec70498). An idle connection is
+            ;; closed by the reaper instead, which fails this read.
+            (let ((data (connection-read)))
               (cond
                 ((not data) (cleanup))            ;; read error
                 ((eq? data #t) (cleanup))          ;; peer EOF
@@ -244,44 +420,138 @@
               (let ((method (phr-request-method-symbol req)))
                 (let-values (((path-offset path-len) (phr-request-path-range req)))
                   (let-values (((path params) (uri-parse/range (phr-request-buffer req) path-offset path-len)))
-                    (let ((params (or params '())))
-                      (let-values (((status response-pair extra-headers)
-                                    (dispatch application request-state method path params req)))
-                        (let* ((reason (status-code->reason status))
-                               (body-bv (car response-pair))
-                               (content-type (cdr response-pair))
-                               (all-headers (cons (cons 'content-type content-type)
-                                                  (cons (cons 'date (http-date-bytes))
-                                                        extra-headers)))
-                               (response-bv
-                                (let ((chunks '()))
-                                  (http-response-write
-                                   (lambda (bv) (set! chunks (cons bv chunks)) #t)
-                                   "HTTP/1.1" status reason all-headers
-                                   (let ((done #f))
-                                     (lambda ()
-                                       (if done (eof-object) (begin (set! done #t) body-bv)))))
-                                  ;; http-response-write hands back the
-                                  ;; whole response in one piece, so the
-                                  ;; common case is a single chunk and
-                                  ;; re-appending it would copy every
-                                  ;; response a second time for nothing.
-                                  (if (and (pair? chunks) (null? (cdr chunks)))
-                                      (car chunks)
-                                      (apply bytevector-append (reverse chunks))))))
-                          (write response-bv)))))))
-              (if (phr-request-header-value-ci=? req %hdr-connection %val-close)
-                  (cleanup)
-                  (handle-loop remainder))))))
+                    (let ((params (or params '()))
+                          (rctx (request-context-make))
+                          (result (make-flow-latch)))
+                      ;; DISPATCH runs as its own fiber so it can be
+                      ;; raced against a timeout and against the
+                      ;; connection dying, rather than blocking this
+                      ;; fiber unconditionally until it returns. Its one
+                      ;; outcome fires RESULT; if the race below has
+                      ;; already given up, nobody waits on it and both
+                      ;; are garbage.
+                      (flow-spawn
+                        (lambda ()
+                          (flow-latch-fire!
+                           result
+                           (guard (exception (#t (cons 'dispatch-raised exception)))
+                             (call-with-values
+                               (lambda ()
+                                 (dispatch application request-state method
+                                           path params req rctx))
+                               (lambda (status response-pair extra-headers)
+                                 (cons 'dispatch-ok
+                                       (vector status response-pair extra-headers))))))))
+                      ;; Raced against the deadline and the connection.
+                      ;; A read only ends the race when it says the
+                      ;; connection is gone. Bytes are the next
+                      ;; pipelined request, and EOF is a peer that
+                      ;; half-closed after sending this one -- both
+                      ;; legal, and both used to abandon a response the
+                      ;; client was owed. Bytes are kept for after the
+                      ;; response, and the read is not raced again
+                      ;; either way: the rest waits in the socket.
+                      (let race ((extra #f) (reading? #t)
+                                 (deadline (+ (real-time)
+                                              (* 1000 %dispatch-timeout-seconds))))
+                       (let ((outcome
+                              (flow-perform
+                                (apply flow-choice
+                                       (flow-latch-wait result)
+                                       (flow-timeout
+                                        (max 0 (/ (- deadline (real-time)) 1000.0)))
+                                       (if reading?
+                                           (list (flow-wrap (flow-read fd)
+                                                            (lambda (x)
+                                                              (cons 'read (note-activity! x)))))
+                                           '())))))
+                        (cond
+                          ((and (pair? outcome) (eq? (car outcome) 'read)
+                                (bytevector? (cdr outcome)))
+                           (race (cdr outcome) #f deadline))
+                          ((and (pair? outcome) (eq? (car outcome) 'read)
+                                (eq? (cdr outcome) #t))
+                           (race extra #f deadline))
+                          ((and (pair? outcome) (eq? (car outcome) 'dispatch-ok))
+                           (let* ((v (cdr outcome))
+                                  (status (vector-ref v 0))
+                                  (response-pair (vector-ref v 1))
+                                  (extra-headers (vector-ref v 2))
+                                  (reason (status-code->reason status))
+                                  (body-bv (car response-pair))
+                                  (content-type (cdr response-pair))
+                                  (all-headers (cons (cons 'content-type content-type)
+                                                     (cons (cons 'date (http-date-bytes))
+                                                           extra-headers)))
+                                  (response-bv
+                                   (let ((chunks '()))
+                                     (http-response-write
+                                      (lambda (bv) (set! chunks (cons bv chunks)) #t)
+                                      "HTTP/1.1" status reason all-headers
+                                      (let ((done #f))
+                                        (lambda ()
+                                          (if done (eof-object) (begin (set! done #t) body-bv)))))
+                                     ;; http-response-write hands back the
+                                     ;; whole response in one piece, so the
+                                     ;; common case is a single chunk and
+                                     ;; re-appending it would copy every
+                                     ;; response a second time for nothing.
+                                     (if (and (pair? chunks) (null? (cdr chunks)))
+                                         (car chunks)
+                                         (apply bytevector-append (reverse chunks))))))
+                             ;; A HEAD response is the head of the GET's,
+                             ;; Content-Length included, and stops there
+                             ;; (RFC 9110, 9.3.2). The body is the tail of
+                             ;; RESPONSE-BV, so it is cut rather than never
+                             ;; rendered: the headers must not differ.
+                             (if (and (write (if (eq? method 'HEAD)
+                                                 (subbytevector
+                                                  response-bv 0
+                                                  (fx- (bytevector-length response-bv)
+                                                       (bytevector-length body-bv)))
+                                                 response-bv))
+                                      (not (phr-request-header-value-ci=? req %hdr-connection %val-close)))
+                                 (handle-loop (if extra
+                                                  (bytevector-append remainder extra)
+                                                  remainder))
+                                 (cleanup))))
+                          ((and (pair? outcome) (eq? (car outcome) 'dispatch-raised))
+                           ;; A real 500, and a log entry that says
+                           ;; which request: the client used to get an
+                           ;; empty reply and the operator nothing. PATH
+                           ;; is the segments DISPATCH was given, so a
+                           ;; query string is not copied into the log.
+                           (request-context-cancel! rctx)
+                           (flow-log (list 'http 'dispatch-raised method path
+                                           (%raised->datum (cdr outcome))))
+                           (write %response-500)
+                           (cleanup))
+                          ((eq? outcome (void))
+                           ;; flow-timeout won: DISPATCH is taking too
+                           ;; long. A real 504, not a bare reset.
+                           (request-context-cancel! rctx)
+                           (write %response-504)
+                           (cleanup))
+                          (else
+                           ;; the read failed: the connection is gone
+                           ;; (reset, or closed under us) -- abandon
+                           ;; the response, don't write to it
+                           (request-context-cancel! rctx)
+                           (cleanup)))))))))))))
 
-    ;; No dynamic-wind here: coroutine suspensions (loop-read /
-    ;; loop-write) are non-local exits through the wind and would run
-    ;; the after-thunk mid-suspension, unpinning OUT while the kernel
-    ;; still references it. GUARD only fires on raise, so suspending
-    ;; and resuming across it is safe; the loop swallows coroutine
-    ;; exceptions, so without this the connection would leak the
-    ;; GC-pinned OUT and the fd.
-    (guard (ex (else (cleanup)))
+    (hashtable-set! (%server-connections server) fd connection)
+    ;; No dynamic-wind here: a fiber's suspensions are non-local exits
+    ;; through the wind and would run the after-thunk mid-suspension,
+    ;; unpinning OUT while it is still in use. GUARD only fires on
+    ;; raise, so suspending and resuming across it is safe; without it
+    ;; a raise would leak the GC-pinned OUT and the fd.
+    ;;
+    ;; The raise goes on once the connection is cleaned up, to end the
+    ;; fiber and be logged by flow2 as (flow2 uncaught fiber ...).
+    ;; Stopped here, as it used to be, a raising CONTEXT or a DISPATCH
+    ;; that returned the wrong shape closed its connection and left no
+    ;; trace anywhere.
+    (guard (ex (else (cleanup) (raise ex)))
       (handle-loop (bytevector)))))
 
 ;; Idle connection reaping
@@ -295,75 +565,158 @@
     ((port-number bind-address application context dispatch)
      (transparent* port-number bind-address application context dispatch))))
 
+
+;; DISPATCH takes (app state method path params req rctx) since the
+;; request context was added, and used to take the first six. The
+;; server passed seven unconditionally, so a six-argument dispatch --
+;; benchmarks/scheme/bench-handler.scm, and any library written to the
+;; documented contract -- raised an arity error on every request, which
+;; the dispatch guard turned into a closed connection with no response
+;; and nothing logged. Decided once, at startup, from the procedure's
+;; arity: seven gets the context, six does not need it, anything else
+;; is refused before the server takes a connection.
+(define (%dispatch-adapt dispatch)
+  (let ((mask (procedure-arity-mask dispatch)))
+    (cond
+     ((logbit? 7 mask) dispatch)
+     ((logbit? 6 mask)
+      (lambda (application state method path params req rctx)
+        (dispatch application state method path params req)))
+     (else
+      (error 'transparent
+             "DISPATCH must take (app state method path params req [request-context])"
+             dispatch)))))
+
 (define transparent*
   (lambda (port-number bind-address application context dispatch)
-    (loop-new)
-    ;; SIGINT/SIGTERM → graceful shutdown
-    (register-signal-handler 2  ;; SIGINT
-      (lambda (sig)
-        (when (and (loop-current) (loop-running? (loop-current)))
-          (format #t "\nReceived SIGINT, shutting down...\n")
-          (flush-output-port)
-          (loop-stop))))
-    (register-signal-handler 15 ;; SIGTERM
-      (lambda (sig)
-        (when (and (loop-current) (loop-running? (loop-current)))
-          (format #t "\nReceived SIGTERM, shutting down...\n")
-          (flush-output-port)
-          (loop-stop))))
-    ;; Idle connection reaper — closes connections with no activity
-    (loop-spawn
-      (lambda ()
-        (let reap ()
-          (when (loop-running? (loop-current))
-            (loop-sleep %idle-sweep-interval)
-            (let ((now (jiffy-current))
-                  (timeout-ns (* %idle-timeout-seconds (expt 10 9))))
-              (let-values (((fds jiffies) (hashtable-entries (loop-active-connections))))
-                (vector-for-each
-                  (lambda (fd last-active)
-                    (when (> (- now last-active) timeout-ns)
-                      (loop-close fd)))
-                  fds jiffies)))
-            (reap)))))
-    (loop-spawn
-      (lambda ()
-        ;; APPLICATION failing here must end the PROCESS, not just
-        ;; this fiber: the loop's own generic fiber-failure handler
-        ;; prints "fiber died" and moves on, and every other fiber
-        ;; already spawned above (the idle reaper, in particular)
-        ;; keeps loop-running? true forever -- a process supervisor
-        ;; (systemd's Restart=on-failure, for instance) only acts on
-        ;; an actual exit, so an application that never finishes
-        ;; building would otherwise sit there indefinitely, reporting
-        ;; healthy while nothing is listening on PORT-NUMBER at all.
-        ;; Found live: a transient DNS failure right at boot (systemd
-        ;; started this before resolution was actually usable, despite
-        ;; ordering after network-online.target) killed application-
-        ;; build, and the process then "ran" for 18 minutes doing
-        ;; nothing before anyone noticed.
-        (define app-state
-          (guard (ex (else
-                       (let ((port (current-error-port)))
-                         (display "transparent: application failed to build, exiting: " port)
-                         (if (condition? ex) (display-condition ex port) (display ex port))
-                         (newline port)
-                         (flush-output-port port))
-                       (exit 1)))
-            (application)))
-        (call-with-values (lambda () (loop-tcp-serve bind-address port-number))
-          (lambda (accept close)
-            (format #t "transparent server at http://~a:~a/\n" bind-address port-number)
+    (let ((dispatch (%dispatch-adapt dispatch)))
+      (transparent** port-number bind-address application context dispatch))))
+
+
+;; Idle connection reaper: every %idle-sweep-interval seconds, closes
+;; the connections that have neither read nor written for more than
+;; %idle-timeout-seconds. A connection's fiber parked in flow-read
+;; sees the read fail and cleans up; the closed? mark keeps it from
+;; closing the number a second time.
+;;
+;; The sweep walks a snapshot and parks on every close, so by the time
+;; it reaches a connection that one may have closed itself, and the
+;; kernel may have given its number to a new connection. The closed?
+;; mark is read again after each park for that reason, and the table
+;; entry is deleted only while it is still this connection's.
+(define (%idle-reaper server)
+  (let ((idle-sweeps (quotient %idle-timeout-seconds %idle-sweep-interval))
+        (connections (%server-connections server)))
+    (let reap ()
+      (flow-sleep %idle-sweep-interval)
+      (%server-sweeps-set! server (+ 1 (%server-sweeps server)))
+      (let-values (((fds entries) (hashtable-entries connections)))
+        (vector-for-each
+          (lambda (fd connection)
+            (when (and (not (%connection-closed? connection))
+                       (> (- (%server-sweeps server) (vector-ref connection 0))
+                          idle-sweeps))
+              (when (eq? (hashtable-ref connections fd #f) connection)
+                (hashtable-delete! connections fd))
+              (vector-set! connection 1 #t)
+              (flow-perform (flow-close fd))))
+          fds entries))
+      (reap))))
+
+;; APPLICATION failing must end the PROCESS, not just the fiber that
+;; called it: a fiber that dies is logged and the loop moves on, and the
+;; idle reaper keeps the run going forever -- a process supervisor
+;; (systemd's Restart=on-failure, for instance) only acts on an actual
+;; exit, so an application that never finishes building would otherwise
+;; sit there indefinitely, reporting healthy while nothing is listening
+;; on PORT-NUMBER at all. Found live: a transient DNS failure right at
+;; boot (systemd started this before resolution was actually usable,
+;; despite ordering after network-online.target) killed application-
+;; build, and the process then "ran" for 18 minutes doing nothing before
+;; anyone noticed.
+(define (%build-application application)
+  (guard (ex (else
+               (let ((port (current-error-port)))
+                 (display "transparent: application failed to build, exiting: " port)
+                 (if (condition? ex) (display-condition ex port) (display ex port))
+                 (newline port)
+                 (flush-output-port port))
+               (exit 1)))
+    (application)))
+
+
+;; How long the accept loop waits after an accept that failed.
+(define %accept-retry-seconds 0.1)
+
+;; Accept until STOP fires, one fiber per connection. Then close the
+;; listener, so a later server on the same port (SO_REUSEPORT) does
+;; not share it with a socket nobody accepts on, and end the run.
+;;
+;; An accept fails when the process is out of file descriptors, and
+;; goes on failing until a connection closes: the kernel refuses the
+;; client at the head of the queue again as soon as the accept is
+;; re-armed. So a failure waits before the next try -- retried at once
+;; it took a whole core to do nothing -- and is logged, once for each
+;; run of failures, as (http accept-failed). The wait is raced against
+;; STOP, so a shutdown is not kept waiting.
+(define (%accept-loop server listen-fd stop app-state context dispatch)
+  (let loop ((failing? #f))
+    (let ((client (guard (ex (else #f))
+                    (flow-perform
+                     (flow-choice (flow-accept listen-fd)
+                                  (flow-wrap (flow-latch-wait stop)
+                                             (lambda (_) 'stop)))))))
+      (cond
+       ((eq? client 'stop)
+        (flow-perform (flow-close listen-fd))
+        (flow-stop))
+       (client
+        (let ((peer-ip (flow-peer-address client)))
+          (flow-spawn
+           (lambda ()
+             (handle-connection server app-state context dispatch
+                                peer-ip client))))
+        (loop #f))
+       (else
+        (unless failing?
+          (flow-log '(http accept-failed)))
+        (flow-perform
+         (flow-choice (flow-latch-wait stop)
+                      (flow-timeout %accept-retry-seconds)))
+        (loop #t))))))
+
+(define transparent**
+  (lambda (port-number bind-address application context dispatch)
+    ;; Bound before the run starts, so a port that cannot be had fails
+    ;; here, with the reason, instead of inside a fiber.
+    (let ((listen-fd (flow-listen bind-address port-number))
+          (stop (make-flow-latch))
+          (running? (box #f)))
+      ;; SIGINT/SIGTERM fire STOP. Chez runs the handler on the main
+      ;; thread, which is the loop thread for the whole run; RUNNING?
+      ;; keeps a signal that lands before the run or after it from
+      ;; touching a latch nobody waits on.
+      (define (on-signal name)
+        (lambda (sig)
+          (when (unbox running?)
+            (format #t "\nReceived ~a, shutting down...\n" name)
             (flush-output-port)
-            (let loop ()
-              (when (loop-running? (loop-current))
-                (guard (ex (else (void)))
-                  (call-with-values accept
-                    (lambda (read write close peer-ip fd)
-                      (when (and read write close)
-                        (loop-spawn
-                          (lambda () (handle-connection app-state context dispatch peer-ip read write close)))))))
-                (loop)))))))
-    (loop-run)
-    ;; Cleanup after loop exits
-    (io-uring-queue-exit (loop-ring (loop-current)))))
+            (flow-latch-fire! stop #t))))
+      (register-signal-handler 2 (on-signal "SIGINT"))
+      (register-signal-handler 15 (on-signal "SIGTERM"))
+      ;; flow-run owns the loop: it runs fiber zero -- the application
+      ;; build, the reaper's spawn, then the accept loop -- and returns
+      ;; once the accept loop calls flow-stop. Every fiber here is a
+      ;; flow2 fiber, so one that dies on an error nothing else caught
+      ;; is a (flow2 uncaught fiber ...) log entry, printed to stderr
+      ;; unless the program took the log over.
+      (flow-run
+       (lambda (workers)
+         (set-box! running? #t)
+         (let ((server (make-%server))
+               (app-state (%build-application application)))
+           (format #t "transparent server at http://~a:~a/\n" bind-address port-number)
+           (flush-output-port)
+           (flow-spawn (lambda () (%idle-reaper server)))
+           (%accept-loop server listen-fd stop app-state context dispatch))))
+      (set-box! running? #f))))

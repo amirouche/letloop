@@ -109,6 +109,9 @@ Key flags: `--dev` (debug, profile, instruction counts),
 | `(letloop sq)` | Priority queue |
 | `(letloop heap)` | Binary min-heap |
 | `(letloop byter)` / `(letloop bytevector)` | Bytevector utilities, ordered-key encoding |
+| `(letloop crc32)` | CRC-32, with a slicing-by-8 kernel assembled at load time |
+| `(letloop xxhash64)` | xxHash64, with a native kernel assembled at load time |
+| `(letloop bloom)` | Bloom filter over bytevector keys, serializable |
 | `(letloop hook)` | Hooks (SRFI 173) |
 | `(letloop environment)` | Environment variables (SRFI 98) |
 
@@ -119,8 +122,10 @@ Key flags: `--dev` (debug, profile, instruction counts),
 | `(letloop http)` | HTTP request/response reading and writing |
 | `(letloop http server)` | HTTP server on the io_uring event loop |
 | `(letloop www)` | Web client utilities, URL and form handling |
-| `(letloop html)` | HTML parsing (htmlprag) |
+| `(letloop html base)` | `html-read` (HTML to SXML) and `html-write` (SXML to HTML, with escaping) |
+| `(letloop html justhtml)` | HTML5 parser following the WHATWG algorithm, a port of justhtml: tokenizer, tree construction, SXML output, serializer |
 | `(letloop xml)` | XML generation with escaping |
+| `(letloop xml yxml)` | XML parser, a port of yxml: a byte-at-a-time push parser and `xml->sxml` |
 | `(letloop sxpath)` | XML/SXML queries (SXPath) |
 | `(letloop json)` | JSON reading and writing |
 | `(letloop dns)` | DNS resolution over UDP |
@@ -151,6 +156,7 @@ Key flags: `--dev` (debug, profile, instruction counts),
 | `(letloop sodium)` | libsodium: XChaCha20-Poly1305 AEAD, hashing, random |
 | `(letloop argon2)` | Argon2id password hashing |
 | `(letloop blake3)` | BLAKE3 hashing |
+| `(letloop sha256)` | SHA-256 and HMAC-SHA256 in pure Scheme, no shared object |
 | `(letloop opaque)` | OPAQUE asymmetric password-authenticated key exchange |
 | `(letloop srp)` | Secure Remote Password — hand-rolled, unaudited, experimental |
 
