@@ -52,103 +52,113 @@
   (define bloom-header-size 16)
   (define bloom-magic #vu8(66 76 77 49)) ;; "BLM1"
 
-  (define (bloom-key-hash key)
-    ;; The one place a key is hashed; writer and reader both go
-    ;; through this so the filter and its queries can never disagree
-    ;; on the hash. Exact integer in [0, 2^64).
-    (xxhash64 key))
+  (define bloom-key-hash
+    (lambda (key)
+      ;; The one place a key is hashed; writer and reader both go
+      ;; through this so the filter and its queries can never disagree
+      ;; on the hash. Exact integer in [0, 2^64).
+      (xxhash64 key)))
 
-  (define (bloom-hash-split h)
-    ;; h1 (high 32) and h2 (low 32, forced odd) as fixnums. The input
-    ;; may be a bignum (xxhash64 spans the full 64-bit range); the
-    ;; outputs never are.
-    (values (bitwise-arithmetic-shift-right h 32)
-            (bitwise-ior (bitwise-and h #xFFFFFFFF) 1)))
+  (define bloom-hash-split
+    (lambda (h)
+      ;; h1 (high 32) and h2 (low 32, forced odd) as fixnums. The input
+      ;; may be a bignum (xxhash64 spans the full 64-bit range); the
+      ;; outputs never are.
+      (values (bitwise-arithmetic-shift-right h 32)
+              (bitwise-ior (bitwise-and h #xFFFFFFFF) 1))))
 
-  (define (bloom-size-for count)
-    ;; m in bits: bits-per-key per key, rounded up to a whole number
-    ;; of bytes, floored at 64 bits so the degenerate tiny-count case
-    ;; still has room to spread probes.
-    (fxmax 64 (fx* 8 (fxdiv (fx+ (fx* count bloom-bits-per-key) 7) 8))))
+  (define bloom-size-for
+    (lambda (count)
+      ;; m in bits: bits-per-key per key, rounded up to a whole number
+      ;; of bytes, floored at 64 bits so the degenerate tiny-count case
+      ;; still has room to spread probes.
+      (fxmax 64 (fx* 8 (fxdiv (fx+ (fx* count bloom-bits-per-key) 7) 8)))))
 
-  (define (bloom-serialize-start bit-count)
-    (let ((out (make-bytevector (fx+ bloom-header-size (fxdiv bit-count 8)) 0)))
-      (bytevector-copy! bloom-magic 0 out 0 4)
-      (bytevector-u32-set! out 4 bloom-hash-count (endianness big))
-      (bytevector-u64-set! out 8 bit-count (endianness big))
-      out))
+  (define bloom-serialize-start
+    (lambda (bit-count)
+      (let ((out (make-bytevector (fx+ bloom-header-size (fxdiv bit-count 8)) 0)))
+        (bytevector-copy! bloom-magic 0 out 0 4)
+        (bytevector-u32-set! out 4 bloom-hash-count (endianness big))
+        (bytevector-u64-set! out 8 bit-count (endianness big))
+        out)))
 
-  (define (bloom-bit-add! out bit-count h)
-    (let-values (((h1 h2) (bloom-hash-split h)))
-      (let loop ((i 0))
-        (when (fx< i bloom-hash-count)
-          (let* ((position (fxmod (fx+ h1 (fx* i h2)) bit-count))
-                 (byte-index (fx+ bloom-header-size (fxsrl position 3)))
-                 (mask (fxsll 1 (fxand position 7))))
-            (bytevector-u8-set! out byte-index
-                                (fxior (bytevector-u8-ref out byte-index) mask)))
-          (loop (fx+ i 1))))))
-
-  (define (bloom-hashes-build buffer count)
-    ;; BUFFER holds COUNT native-endian u64 hashes back to back (the
-    ;; writer accumulates hashes this way -- 8 flat bytes per key --
-    ;; rather than as a list, so a 25M-key compaction does not retain
-    ;; 25M heap-allocated integers while the sstable is written).
-    ;; Returns the serialized filter.
-    (let* ((bit-count (bloom-size-for count))
-           (out (bloom-serialize-start bit-count)))
-      (let loop ((i 0))
-        (if (fx= i count)
-          out
-          (begin
-            (bloom-bit-add! out bit-count
-                            (bytevector-u64-native-ref buffer (fx* i 8)))
+  (define bloom-bit-add!
+    (lambda (out bit-count h)
+      (let-values (((h1 h2) (bloom-hash-split h)))
+        (let loop ((i 0))
+          (when (fx< i bloom-hash-count)
+            (let* ((position (fxmod (fx+ h1 (fx* i h2)) bit-count))
+                   (byte-index (fx+ bloom-header-size (fxsrl position 3)))
+                   (mask (fxsll 1 (fxand position 7))))
+              (bytevector-u8-set! out byte-index
+                                  (fxior (bytevector-u8-ref out byte-index) mask)))
             (loop (fx+ i 1)))))))
 
-  (define (bloom-build keys)
-    ;; Convenience over a key list (checks, small callers). The
-    ;; production writer uses bloom-hashes-build.
-    (let* ((count (length keys))
-           (bit-count (bloom-size-for count))
-           (out (bloom-serialize-start bit-count)))
-      (for-each (lambda (key) (bloom-bit-add! out bit-count (bloom-key-hash key)))
-                keys)
-      out))
+  (define bloom-hashes-build
+    (lambda (buffer count)
+      ;; BUFFER holds COUNT native-endian u64 hashes back to back (the
+      ;; writer accumulates hashes this way -- 8 flat bytes per key --
+      ;; rather than as a list, so a 25M-key compaction does not retain
+      ;; 25M heap-allocated integers while the sstable is written).
+      ;; Returns the serialized filter.
+      (let* ((bit-count (bloom-size-for count))
+             (out (bloom-serialize-start bit-count)))
+        (let loop ((i 0))
+          (if (fx= i count)
+            out
+            (begin
+              (bloom-bit-add! out bit-count
+                              (bytevector-u64-native-ref buffer (fx* i 8)))
+              (loop (fx+ i 1))))))))
+
+  (define bloom-build
+    (lambda (keys)
+      ;; Convenience over a key list (checks, small callers). The
+      ;; production writer uses bloom-hashes-build.
+      (let* ((count (length keys))
+             (bit-count (bloom-size-for count))
+             (out (bloom-serialize-start bit-count)))
+        (for-each (lambda (key) (bloom-bit-add! out bit-count (bloom-key-hash key)))
+                  keys)
+        out)))
 
   (define-record-type (bloom bloom-make bloom?)
     (fields bytes bit-count probe-count))
 
-  (define (bloom-open bytes)
-    (unless (and (fx>= (bytevector-length bytes) bloom-header-size)
-                 (bytevector=? (let ((magic (make-bytevector 4)))
-                                 (bytevector-copy! bytes 0 magic 0 4)
-                                 magic)
-                               bloom-magic))
-      (error 'bloom-open "not a bloom filter (bad magic or truncated)"))
-    (let ((probe-count (bytevector-u32-ref bytes 4 (endianness big)))
-          (bit-count (bytevector-u64-ref bytes 8 (endianness big))))
-      (unless (fx= (bytevector-length bytes)
-                   (fx+ bloom-header-size (fxdiv bit-count 8)))
-        (error 'bloom-open "bloom filter size disagrees with its header"))
-      (bloom-make bytes bit-count probe-count)))
+  (define bloom-open
+    (lambda (bytes)
+      (unless (and (fx>= (bytevector-length bytes) bloom-header-size)
+                   (bytevector=? (let ((magic (make-bytevector 4)))
+                                   (bytevector-copy! bytes 0 magic 0 4)
+                                   magic)
+                                 bloom-magic))
+        (error 'bloom-open "not a bloom filter (bad magic or truncated)"))
+      (let ((probe-count (bytevector-u32-ref bytes 4 (endianness big)))
+            (bit-count (bytevector-u64-ref bytes 8 (endianness big))))
+        (unless (fx= (bytevector-length bytes)
+                     (fx+ bloom-header-size (fxdiv bit-count 8)))
+          (error 'bloom-open "bloom filter size disagrees with its header"))
+        (bloom-make bytes bit-count probe-count))))
 
-  (define (bloom-hash-possible? filter h)
-    ;; #f: the key is DEFINITELY absent (the guarantee callers act
-    ;; on). #t: the key may be present -- proceed to the real lookup.
-    (let ((bytes (bloom-bytes filter))
-          (bit-count (bloom-bit-count filter))
-          (probe-count (bloom-probe-count filter)))
-      (let-values (((h1 h2) (bloom-hash-split h)))
-        (let loop ((i 0))
-          (or (fx= i probe-count)
-              (let* ((position (fxmod (fx+ h1 (fx* i h2)) bit-count))
-                     (byte (bytevector-u8-ref
-                             bytes (fx+ bloom-header-size (fxsrl position 3)))))
-                (and (fx= (fxand byte (fxsll 1 (fxand position 7)))
-                          (fxsll 1 (fxand position 7)))
-                     (loop (fx+ i 1)))))))))
+  (define bloom-hash-possible?
+    (lambda (filter h)
+      ;; #f: the key is DEFINITELY absent (the guarantee callers act
+      ;; on). #t: the key may be present -- proceed to the real lookup.
+      (let ((bytes (bloom-bytes filter))
+            (bit-count (bloom-bit-count filter))
+            (probe-count (bloom-probe-count filter)))
+        (let-values (((h1 h2) (bloom-hash-split h)))
+          (let loop ((i 0))
+            (or (fx= i probe-count)
+                (let* ((position (fxmod (fx+ h1 (fx* i h2)) bit-count))
+                       (byte (bytevector-u8-ref
+                               bytes (fx+ bloom-header-size (fxsrl position 3)))))
+                  (and (fx= (fxand byte (fxsll 1 (fxand position 7)))
+                            (fxsll 1 (fxand position 7)))
+                       (loop (fx+ i 1))))))))))
 
-  (define (bloom-key-possible? filter key)
-    (bloom-hash-possible? filter (bloom-key-hash key)))
+  (define bloom-key-possible?
+    (lambda (filter key)
+      (bloom-hash-possible? filter (bloom-key-hash key))))
 
   (include "letloop/bloom.check.scm"))
