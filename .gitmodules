@@ -1,0 +1,3 @@
+[submodule "submodules/justhtml"]
+	path = submodules/justhtml
+	url = https://github.com/EmilStenstrom/justhtml
