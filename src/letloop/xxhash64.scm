@@ -24,104 +24,114 @@
   (define prime64-5 #x27D4EB2F165667C5)
   (define word64-mask #xFFFFFFFFFFFFFFFF)
 
-  (define (word64-truncate x)
-    (bitwise-and x word64-mask))
+  (define word64-truncate
+    (lambda (x)
+      (bitwise-and x word64-mask)))
 
-  (define (word64-rotate-left x n)
-    (word64-truncate
-      (bitwise-ior (bitwise-arithmetic-shift x n) (bitwise-arithmetic-shift x (- n 64)))))
+  (define word64-rotate-left
+    (lambda (x n)
+      (word64-truncate
+        (bitwise-ior (bitwise-arithmetic-shift x n) (bitwise-arithmetic-shift x (- n 64))))))
 
-  (define (bytevector-u64-ref-le bv offset)
-    (let loop ((i 7) (value 0))
-      (if (< i 0)
-        value
-        (loop (- i 1) (+ (bitwise-arithmetic-shift value 8)
-                         (bytevector-u8-ref bv (+ offset i)))))))
+  (define bytevector-u64-ref-le
+    (lambda (bv offset)
+      (let loop ((i 7) (value 0))
+        (if (< i 0)
+          value
+          (loop (- i 1) (+ (bitwise-arithmetic-shift value 8)
+                           (bytevector-u8-ref bv (+ offset i))))))))
 
-  (define (bytevector-u32-ref-le bv offset)
-    (let loop ((i 3) (value 0))
-      (if (< i 0)
-        value
-        (loop (- i 1) (+ (bitwise-arithmetic-shift value 8)
-                         (bytevector-u8-ref bv (+ offset i)))))))
+  (define bytevector-u32-ref-le
+    (lambda (bv offset)
+      (let loop ((i 3) (value 0))
+        (if (< i 0)
+          value
+          (loop (- i 1) (+ (bitwise-arithmetic-shift value 8)
+                           (bytevector-u8-ref bv (+ offset i))))))))
 
-  (define (xxhash64-round accumulator input)
-    (word64-truncate
-      (* (word64-rotate-left
-           (word64-truncate (+ accumulator (word64-truncate (* input prime64-2))))
-           31)
-         prime64-1)))
+  (define xxhash64-round
+    (lambda (accumulator input)
+      (word64-truncate
+        (* (word64-rotate-left
+             (word64-truncate (+ accumulator (word64-truncate (* input prime64-2))))
+             31)
+           prime64-1))))
 
-  (define (xxhash64-merge-round accumulator value)
-    (let* ((value (xxhash64-round 0 value))
-           (accumulator (bitwise-xor accumulator value)))
-      (word64-truncate (+ (word64-truncate (* accumulator prime64-1)) prime64-4))))
+  (define xxhash64-merge-round
+    (lambda (accumulator value)
+      (let* ((value (xxhash64-round 0 value))
+             (accumulator (bitwise-xor accumulator value)))
+        (word64-truncate (+ (word64-truncate (* accumulator prime64-1)) prime64-4)))))
 
-  (define (xxhash64-avalanche h64)
-    (let* ((h64 (bitwise-xor h64 (bitwise-arithmetic-shift h64 -33)))
-           (h64 (word64-truncate (* h64 prime64-2)))
-           (h64 (bitwise-xor h64 (bitwise-arithmetic-shift h64 -29)))
-           (h64 (word64-truncate (* h64 prime64-3)))
-           (h64 (bitwise-xor h64 (bitwise-arithmetic-shift h64 -32))))
-      h64))
+  (define xxhash64-avalanche
+    (lambda (h64)
+      (let* ((h64 (bitwise-xor h64 (bitwise-arithmetic-shift h64 -33)))
+             (h64 (word64-truncate (* h64 prime64-2)))
+             (h64 (bitwise-xor h64 (bitwise-arithmetic-shift h64 -29)))
+             (h64 (word64-truncate (* h64 prime64-3)))
+             (h64 (bitwise-xor h64 (bitwise-arithmetic-shift h64 -32))))
+        h64)))
 
-  (define (xxhash64-block-loop data length)
-    ;; Consume 32-byte blocks; returns (values h64 position) with
-    ;; position at the first unconsumed byte.
-    (let loop ((v1 (word64-truncate (+ prime64-1 prime64-2)))
-               (v2 prime64-2)
-               (v3 0)
-               (v4 (word64-truncate (- prime64-1)))
-               (position 0))
-      (if (<= (+ position 32) length)
-        (loop (xxhash64-round v1 (bytevector-u64-ref-le data position))
-              (xxhash64-round v2 (bytevector-u64-ref-le data (+ position 8)))
-              (xxhash64-round v3 (bytevector-u64-ref-le data (+ position 16)))
-              (xxhash64-round v4 (bytevector-u64-ref-le data (+ position 24)))
-              (+ position 32))
-        (let* ((h64 (word64-truncate
-                      (+ (word64-rotate-left v1 1)
-                         (word64-rotate-left v2 7)
-                         (word64-rotate-left v3 12)
-                         (word64-rotate-left v4 18))))
-               (h64 (xxhash64-merge-round h64 v1))
-               (h64 (xxhash64-merge-round h64 v2))
-               (h64 (xxhash64-merge-round h64 v3))
-               (h64 (xxhash64-merge-round h64 v4)))
-          (values h64 position)))))
+  (define xxhash64-block-loop
+    (lambda (data length)
+      ;; Consume 32-byte blocks; returns (values h64 position) with
+      ;; position at the first unconsumed byte.
+      (let loop ((v1 (word64-truncate (+ prime64-1 prime64-2)))
+                 (v2 prime64-2)
+                 (v3 0)
+                 (v4 (word64-truncate (- prime64-1)))
+                 (position 0))
+        (if (<= (+ position 32) length)
+          (loop (xxhash64-round v1 (bytevector-u64-ref-le data position))
+                (xxhash64-round v2 (bytevector-u64-ref-le data (+ position 8)))
+                (xxhash64-round v3 (bytevector-u64-ref-le data (+ position 16)))
+                (xxhash64-round v4 (bytevector-u64-ref-le data (+ position 24)))
+                (+ position 32))
+          (let* ((h64 (word64-truncate
+                        (+ (word64-rotate-left v1 1)
+                           (word64-rotate-left v2 7)
+                           (word64-rotate-left v3 12)
+                           (word64-rotate-left v4 18))))
+                 (h64 (xxhash64-merge-round h64 v1))
+                 (h64 (xxhash64-merge-round h64 v2))
+                 (h64 (xxhash64-merge-round h64 v3))
+                 (h64 (xxhash64-merge-round h64 v4)))
+            (values h64 position))))))
 
-  (define (xxhash64-tail h64 data length position)
-    (cond
-      ((<= (+ position 8) length)
-       (let* ((k1 (xxhash64-round 0 (bytevector-u64-ref-le data position)))
-              (h64 (bitwise-xor h64 k1))
-              (h64 (word64-truncate
-                     (+ (word64-truncate (* (word64-rotate-left h64 27) prime64-1))
-                        prime64-4))))
-         (xxhash64-tail h64 data length (+ position 8))))
-      ((<= (+ position 4) length)
-       (let* ((h64 (bitwise-xor
-                     h64 (word64-truncate
-                           (* (bytevector-u32-ref-le data position) prime64-1))))
-              (h64 (word64-truncate
-                     (+ (word64-truncate (* (word64-rotate-left h64 23) prime64-2))
-                        prime64-3))))
-         (xxhash64-tail h64 data length (+ position 4))))
-      ((< position length)
-       (let* ((h64 (bitwise-xor
-                     h64 (word64-truncate
-                           (* (bytevector-u8-ref data position) prime64-5))))
-              (h64 (word64-truncate (* (word64-rotate-left h64 11) prime64-1))))
-         (xxhash64-tail h64 data length (+ position 1))))
-      (else (xxhash64-avalanche h64))))
+  (define xxhash64-tail
+    (lambda (h64 data length position)
+      (cond
+        ((<= (+ position 8) length)
+         (let* ((k1 (xxhash64-round 0 (bytevector-u64-ref-le data position)))
+                (h64 (bitwise-xor h64 k1))
+                (h64 (word64-truncate
+                       (+ (word64-truncate (* (word64-rotate-left h64 27) prime64-1))
+                          prime64-4))))
+           (xxhash64-tail h64 data length (+ position 8))))
+        ((<= (+ position 4) length)
+         (let* ((h64 (bitwise-xor
+                       h64 (word64-truncate
+                             (* (bytevector-u32-ref-le data position) prime64-1))))
+                (h64 (word64-truncate
+                       (+ (word64-truncate (* (word64-rotate-left h64 23) prime64-2))
+                          prime64-3))))
+           (xxhash64-tail h64 data length (+ position 4))))
+        ((< position length)
+         (let* ((h64 (bitwise-xor
+                       h64 (word64-truncate
+                             (* (bytevector-u8-ref data position) prime64-5))))
+                (h64 (word64-truncate (* (word64-rotate-left h64 11) prime64-1))))
+           (xxhash64-tail h64 data length (+ position 1))))
+        (else (xxhash64-avalanche h64)))))
 
-  (define (xxhash64-scheme data)
-    (let ((length (bytevector-length data)))
-      (let-values (((h64 position)
-                    (if (>= length 32)
-                      (xxhash64-block-loop data length)
-                      (values (word64-truncate prime64-5) 0))))
-        (xxhash64-tail (word64-truncate (+ h64 length)) data length position))))
+  (define xxhash64-scheme
+    (lambda (data)
+      (let ((length (bytevector-length data)))
+        (let-values (((h64 position)
+                      (if (>= length 32)
+                        (xxhash64-block-loop data length)
+                        (values (word64-truncate prime64-5) 0))))
+          (xxhash64-tail (word64-truncate (+ h64 length)) data length position)))))
 
   ;; JIT-assembled accelerator via (letloop asm) -- no C toolchain, no
   ;; shared object to build or ship: the sexp assembler maps the
@@ -224,14 +234,16 @@
       (assembly->procedure (sexp->assembly _xxhash64-assembly-program)
                            (u8* size_t) unsigned-64)))
 
-  (define (xxhash64 data)
-    ;; DATA is a bytevector; seed is fixed at 0. Returns an exact
-    ;; non-negative integer in [0, 2^64).
-    (if _xxhash64-native
-      (_xxhash64-native data (bytevector-length data))
-      (xxhash64-scheme data)))
+  (define xxhash64
+    (lambda (data)
+      ;; DATA is a bytevector; seed is fixed at 0. Returns an exact
+      ;; non-negative integer in [0, 2^64).
+      (if _xxhash64-native
+        (_xxhash64-native data (bytevector-length data))
+        (xxhash64-scheme data))))
 
-  (define (xxhash64-hex data)
-    (number->string (xxhash64 data) 16))
+  (define xxhash64-hex
+    (lambda (data)
+      (number->string (xxhash64 data) 16)))
 
   (include "letloop/xxhash64.check.scm"))
