@@ -99,7 +99,7 @@
 - ecosystem: cryptography: symmetric/asymmetric encryption beyond hashing.
 - ecosystem: data structures: standard collections beyond arrays and maps.
 - ecosystem: error handling: structured errors, result types, stack enrichment.
-- ecosystem: html parser: with SXPath and CSS selector support, based on justhtml (https://github.com/EmilStenstrom/justhtml/).
+- ecosystem: html parser: CSS selector support for `(letloop html justhtml)`. The parser itself is in, a port of justhtml (https://github.com/EmilStenstrom/justhtml/) pinned at `submodules/justhtml`, and `(letloop sxpath)` already queries its output; selectors, a sanitizer and encoding sniffing were not ported.
 - ecosystem: regexes: extended regex support or a dedicated library.
 - ecosystem: serialization: formats beyond JSON/YAML (MessagePack, CBOR, Protobuf, etc.).
 - ecosystem: tls / http client: openssl/libtls bindings for Chez Scheme, or libcurl bindings.
